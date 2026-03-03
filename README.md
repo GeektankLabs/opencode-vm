@@ -1,6 +1,6 @@
 # opencode-vm
 
-<sub><em>Run OpenCode inside an isolated Lima VM on macOS while keeping your normal host workflow (VS Code, Git, project files) fast and local. Maximum freedom for the AI agent — minimal risk for your personal development environment.</em></sub>
+<sub><em>Run OpenCode inside an isolated Lima VM on macOS while keeping your normal host workflow (VS Code, Git, project files) fast and local. Maximum freedom for the AI agent (YOLO mode) — minimal risk for your personal development environment.</em></sub>
 
 ![Placeholder: add screenshot of OpenCode running in VM](opencode-vm.png)
 
