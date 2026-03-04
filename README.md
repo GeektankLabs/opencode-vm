@@ -18,8 +18,8 @@ OpenCode runs in a VM, not directly on host.
     - Not your host or local network (except for chosen ports).
 
 - Familiar workflow
-    - Start Opencode-VM in a terminal in VisualStudio Code.
-    - Start up docker containers for development or integration testing.
+    - Start Opencode-VM in a terminal in VisualStudio Code with `opencode-vm start`
+    - Let the AI start up docker containers in the VM on host ports (localhost:port)
 
 ## Requirements
 
