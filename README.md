@@ -7,12 +7,19 @@
 
 ## Why this project?
 
-- Isolation: OpenCode runs in a VM, not directly on host.
-- Security: AI can only read & change your project files and opencode config - not the rest of your computer. Access the internet - not your local network except for chosen ports.
-- Familiar workflow: edit/commit from host as usual.
-- Fast startup: clone from a prepared base VM.
-- Session hygiene: disposable session VMs.
-- Practical defaults: host LLM ports and network policy support.
+OpenCode runs in a VM, not directly on host.
+
+- System Isolation 
+    - You share just project files, not your personal system & user space.
+    - OpenCode cannot commit to git, so you have final control over your project files.
+
+- Network Isolation
+    - The AI can access the internet to load rescources and research.
+    - Not your host or local network (except for chosen ports).
+
+- Familiar workflow
+    - Start Opencode-VM in a terminal in VisualStudio Code.
+    - Start up docker containers for development or integration testing.
 
 ## Requirements
 
