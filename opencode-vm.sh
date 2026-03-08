@@ -37,7 +37,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.1.1"
+OCVM_VERSION="0.1.2"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -732,11 +732,13 @@ update_cmd() {
   echo "Updated opencode-vm from version $current_version to $remote_version."
 
   if OCVM_DISABLE_UPDATE_CHECK=1 "$script_path" --post-update-migrate "$current_version" "$remote_version"; then
-    echo "Update complete. Run opencode-vm again to use the new version."
+    echo "Update complete."
   else
     echo "Updated script, but post-update migration hook reported an issue." >&2
     echo "Run opencode-vm again and inspect your state before continuing." >&2
   fi
+  echo ""
+  echo "Recommended: run 'opencode-vm init' to rebuild the base VM with any new changes."
 }
 
 install_cmd() {

@@ -66,6 +66,10 @@ opencode-vm create-patch [topic]         # generate patch submission for upstrea
 opencode-vm export-patch [topic]         # alias for create-patch
 ```
 
+## Version Bumping
+
+Every change to `opencode-vm.sh` **must** increment the patch version in `OCVM_VERSION` (line ~40). The format is `MAJOR.MINOR.PATCH` — only bump the patch (rightmost) number. It can exceed 9 (e.g., `0.1.9` → `0.1.10` → `0.1.11` → ... → `0.1.100`). Example: if current version is `0.1.1`, change it to `0.1.2`.
+
 ## Conventions
 
 - The script uses `set -euo pipefail` — all errors are fatal
