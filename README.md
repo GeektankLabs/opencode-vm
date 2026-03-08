@@ -79,6 +79,34 @@ opencode-vm shell
 opencode-vm prune
 ```
 
+## Web Mode
+
+Instead of running OpenCode as a terminal TUI inside the VM, you can start it as a web server. This gives you browser-based access — including from your phone or tablet on the same network.
+
+```bash
+opencode-vm web
+```
+
+This starts OpenCode's web server inside the VM and prints connection URLs using your host's local IP address. By default it uses port 4096.
+
+What you get from a single command:
+
+- **Web UI** — full OpenCode interface in your browser
+- **REST API** — programmatic access with OpenAPI docs at `/doc`
+- **TUI attach** — connect a terminal TUI from the host via `opencode attach http://<ip>:4096`
+
+All clients share the same sessions and state, so you can switch between browser and terminal seamlessly.
+
+Options:
+
+```bash
+opencode-vm web --port 3000         # use a custom port
+opencode-vm web --password secret   # set a server password
+opencode-vm web --tui               # also start TUI in terminal (experimental)
+```
+
+The `--tui` flag starts the web server in the background, then lets you press Enter to launch a terminal TUI that connects to the same server — giving you both interfaces at once.
+
 ## Config & State Sync (important)
 
 This project syncs OpenCode user data between local host and VM sessions, including:
@@ -150,7 +178,8 @@ To suppress the automatic update-available hint on every command, set `OCVM_DISA
 ```bash
 opencode-vm install      # install/update script to ~/bin
 opencode-vm init         # create/recreate base VM
-opencode-vm              # start session (same as opencode-vm run)
+opencode-vm start        # start TUI session (same as opencode-vm run)
+opencode-vm web          # start web server session (browser, API, TUI attach)
 opencode-vm shell        # shell into running project session
 opencode-vm base         # shell into base VM
 opencode-vm prune        # cleanup sessions, keep base

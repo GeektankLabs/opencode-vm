@@ -33,6 +33,7 @@ DATA_RSYNC_EXCLUDES=(--exclude='bin/' --exclude='log/' --exclude='tool-output/')
 DEFAULT_HOST_TCP_PORTS="1234 11434"   # LM Studio + Ollama
 DEFAULT_LAN_ALLOW_TCP=""              # z.B. "192.168.178.10:443 10.0.0.5:22"
 DEFAULT_LAN_ALLOW_UDP=""              # z.B. "192.168.178.20:53"
+DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
@@ -43,6 +44,12 @@ OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
 
 cmd="${1:-help}"
 shift || true
+
+# Session mode variables (set by web command handler before start_session)
+SESSION_MODE="tui"
+SESSION_PORT=""
+SESSION_PASSWORD=""
+OC_WEB_TUI=false
 
 need() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -85,6 +92,44 @@ run_with_spinner() {
   cat "$tmp_out" >&2
   rm -f "$tmp_out"
   return "$status"
+}
+
+check_port_available() {
+  local port="$1"
+  if lsof -i :"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "Port $port is already in use on the host." >&2
+    echo "Use --port <PORT> to specify a different port." >&2
+    exit 1
+  fi
+}
+
+parse_web_flags() {
+  SESSION_PORT="$DEFAULT_OC_PORT"
+  SESSION_PASSWORD=""
+  OC_WEB_TUI=false
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      --port)   shift; SESSION_PORT="${1:?Missing port value}" ;;
+      --port=*) SESSION_PORT="${1#*=}" ;;
+      --password)   shift; SESSION_PASSWORD="${1:?Missing password value}" ;;
+      --password=*) SESSION_PASSWORD="${1#*=}" ;;
+      --tui) OC_WEB_TUI=true ;;
+      *) echo "Unknown option: $1" >&2; exit 2 ;;
+    esac
+    shift
+  done
+}
+
+get_host_ip() {
+  local ip
+  ip="$(ipconfig getifaddr en0 2>/dev/null || true)"
+  if [[ -z "$ip" ]]; then
+    ip="$(ipconfig getifaddr en1 2>/dev/null || true)"
+  fi
+  if [[ -z "$ip" ]]; then
+    ip="$(route get default 2>/dev/null | awk '/interface:/{print $2}' | head -1 | xargs ipconfig getifaddr 2>/dev/null || true)"
+  fi
+  echo "${ip:-localhost}"
 }
 
 ensure_dirs() {
@@ -991,6 +1036,20 @@ provision_base() {
   done
   echo "[init] VM shell ready"
 
+  # Expose auto-forwarded ports on all interfaces (LAN access for web mode)
+  local lima_yaml="$HOME/.lima/$BASE_NAME/lima.yaml"
+  if ! grep -q 'hostIP:' "$lima_yaml" 2>/dev/null; then
+    echo "[init] Configuring LAN port forwarding..."
+    limactl stop "$BASE_NAME" 2>/dev/null || true
+    # Insert catch-all rule: forward guest 0.0.0.0 ports to host 0.0.0.0
+    sed -i '' '/^portForwards:/a\
+- guestIPMustBeZero: true\
+  hostIP: 0.0.0.0
+' "$lima_yaml"
+    limactl start "$BASE_NAME" --tty=false
+    echo "[init] LAN port forwarding configured"
+  fi
+
   echo "[init] Installing OpenCode + nftables policy in base"
   limactl shell "$BASE_NAME" -- bash -l <<'PROVISION'
 set -euo pipefail
@@ -1585,7 +1644,7 @@ start_session() {
   fi
   cp -p "$sess_share/config/opencode/opencode.json" "$sess_share/config/opencode/.opencode.json"
 
-  # Inject session overrides: Playwright MCP, allow-all permissions, deny git commit/push
+  # Inject session overrides: Playwright MCP, allow-all permissions, ask for git commit, deny git push
   local sess_cfg_file="$sess_share/config/opencode/opencode.json"
   if command -v jq >/dev/null 2>&1 && [[ -f "$sess_cfg_file" ]]; then
     local tmp_cfg
@@ -1595,8 +1654,8 @@ start_session() {
         "*": "allow",
         "bash": {
           "*": "allow",
-          "git commit": "deny",
-          "git commit *": "deny",
+          "git commit": "ask",
+          "git commit *": "ask",
           "git push": "deny",
           "git push *": "deny"
         }
@@ -1695,7 +1754,8 @@ start_session() {
   echo "[run] Clone complete, lock released $(_ts)"
 
   # Track session (printf '%q' safely escapes paths with spaces/special chars)
-  printf 'SESS_NAME=%q\nSESS_PROJ=%q\nCFG_HASH_AT_START=%q\n' "$sess" "$proj" "$cfg_hash" > "$senv"
+  printf 'SESS_NAME=%q\nSESS_PROJ=%q\nCFG_HASH_AT_START=%q\nSESS_MODE=%q\nSESS_PORT=%q\n' \
+    "$sess" "$proj" "$cfg_hash" "$SESSION_MODE" "${SESSION_PORT:-}" > "$senv"
 
   cleanup() {
     echo "[cleanup] Starting cleanup... $(_ts)"
@@ -1813,6 +1873,7 @@ start_session() {
   fi
 
   echo "[run] Launching OpenCode inside VM (project: $proj) $(_ts)"
+
   limactl shell --workdir / "$sess" -- bash -lc '
     set -euo pipefail
     PROJ_DIR="$1"
@@ -1886,14 +1947,73 @@ start_session() {
     # Enable Exa-powered web search inside OpenCode (no API key needed)
     export OPENCODE_ENABLE_EXA=1
 
+    # Set default git identity for commits inside VM
+    git config --global user.name "robot"
+    git config --global user.email "robot@geektank.de"
+
     echo "[$(date +%T)] Build caches redirected to VM-local /tmp/ for performance."
     echo "Host LLM endpoints from VM:"
     echo "  LM Studio: http://host.lima.internal:1234"
     echo "  Ollama:    http://host.lima.internal:11434"
     echo
 
+    OC_MODE="$3"
+    OC_PORT="$4"
+    OC_PASSWORD="$5"
+    OC_WEB_TUI="$6"
+    OC_HOST_IP="$7"
+
     cd "$PROJ_DIR"
-    aa-exec -p opencode-sandbox -- opencode || true
+
+    case "$OC_MODE" in
+      web)
+        echo ""
+        echo "=============================================="
+        echo "  OpenCode Web Server (port $OC_PORT)"
+        echo "=============================================="
+        echo ""
+        echo "Connect via:"
+        echo ""
+        echo "  Browser/Web UI:  http://${OC_HOST_IP}:${OC_PORT}"
+        echo "  API docs:        http://${OC_HOST_IP}:${OC_PORT}/doc"
+        echo "  TUI attach:      opencode attach http://${OC_HOST_IP}:${OC_PORT}"
+        echo ""
+        if [ -n "$OC_PASSWORD" ]; then
+          echo "  Password:        $OC_PASSWORD"
+          echo ""
+          echo "The REST API can be used for custom integrations,"
+          echo "IDE extensions, or programmatic access to OpenCode."
+          echo "See: https://opencode.ai/docs/server/"
+          echo ""
+          export OPENCODE_SERVER_PASSWORD="$OC_PASSWORD"
+        else
+          echo "The REST API can be used for custom integrations,"
+          echo "IDE extensions, or programmatic access to OpenCode."
+          echo "See: https://opencode.ai/docs/server/"
+          echo ""
+          echo "Tip: To secure the server with a password, start with:"
+          echo "  opencode-vm web --password <your-password>"
+          echo ""
+        fi
+        if [ "$OC_WEB_TUI" = "true" ]; then
+          aa-exec -p opencode-sandbox -- opencode web --hostname 0.0.0.0 --port "$OC_PORT" &
+          OC_WEB_PID=$!
+          sleep 2
+          echo ""
+          echo "Press Enter to start TUI (web server continues running)..."
+          read -r
+          aa-exec -p opencode-sandbox -- opencode attach "http://localhost:$OC_PORT" || true
+          kill "$OC_WEB_PID" 2>/dev/null || true
+          wait "$OC_WEB_PID" 2>/dev/null || true
+        else
+          echo "Press Ctrl+C to stop the session."
+          aa-exec -p opencode-sandbox -- opencode web --hostname 0.0.0.0 --port "$OC_PORT" || true
+        fi
+        ;;
+      *)
+        aa-exec -p opencode-sandbox -- opencode || true
+        ;;
+    esac
 
     # After opencode exits: integrity check + sync back to mount
     echo "[$(date +%T)] Syncing session data back to host..."
@@ -1903,7 +2023,7 @@ start_session() {
     rsync -a --exclude="bin/" --exclude="log/" --exclude="tool-output/" "$VM_DATA/opencode/" "$SESS_SHARE/xdg-data/opencode/"
     rsync -a "$VM_STATE/opencode/" "$SESS_SHARE/xdg-state/opencode/"
     echo "[$(date +%T)] In-VM sync complete"
-  ' _ "$proj" "$sess_share"
+  ' _ "$proj" "$sess_share" "$SESSION_MODE" "${SESSION_PORT:-0}" "${SESSION_PASSWORD:-}" "${OC_WEB_TUI:-false}" "$(get_host_ip)"
 }
 
 ocvm_notify_if_new_version_available "$cmd"
@@ -1928,6 +2048,13 @@ case "$cmd" in
     ;;
 
   start|run)
+    start_session
+    ;;
+
+  web)
+    SESSION_MODE="web"
+    parse_web_flags "$@"
+    check_port_available "$SESSION_PORT"
     start_session
     ;;
 
@@ -1990,6 +2117,10 @@ opencode-vm v$OCVM_VERSION
 Usage:
   opencode-vm install                      # install script to ~/bin and configure PATH
   opencode-vm start                        # start fresh session VM in current directory
+  opencode-vm web [--port PORT] [--password PW] [--tui]
+                                           # start web server session (default port 4096)
+                                           # provides: web UI, REST API, TUI attach
+                                           # --tui: also start TUI in terminal (experimental)
   opencode-vm shell                        # open additional shell into running session VM
   opencode-vm init                         # create/provision base VM (one-time setup)
   opencode-vm ports show                   # show current firewall policy
