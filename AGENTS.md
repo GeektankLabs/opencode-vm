@@ -51,6 +51,9 @@ opencode-vm init
 # Start a session (run from project directory)
 opencode-vm              # or: opencode-vm run
 
+# Reconnect to a running session after terminal crash
+opencode-vm attach
+
 # Manage firewall policy
 opencode-vm ports show
 opencode-vm ports host add 8080

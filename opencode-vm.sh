@@ -37,7 +37,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.1.2"
+OCVM_VERSION="0.1.3"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -150,6 +150,11 @@ session_share_dir() {
 
 project_state_dir() {
   echo "$PROJECT_STATE_DIR/$(proj_hash "$1")"
+}
+
+is_vm_running() {
+  local vm_name="$1"
+  limactl list -q --status Running 2>/dev/null | grep -qx "$vm_name"
 }
 
 ensure_host_opencode_dirs() {
@@ -1534,6 +1539,67 @@ enter_session_shell() {
   ' _ "$proj_dir"
 }
 
+attach_session() {
+  need limactl
+  local proj senv
+  proj="$(pwd)"
+  senv="$(session_env "$proj")"
+
+  if [[ ! -f "$senv" ]]; then
+    echo "No running session for this project directory." >&2
+    echo "Start one with: opencode-vm start" >&2
+    exit 1
+  fi
+
+  # shellcheck disable=SC1090
+  source "$senv"
+
+  if ! is_vm_running "$SESS_NAME"; then
+    echo "Session VM '$SESS_NAME' is no longer running." >&2
+    echo "Start a new session with: opencode-vm start" >&2
+    rm -f "$senv"
+    exit 1
+  fi
+
+  echo "[attach] Reconnecting to session: $SESS_NAME"
+  echo "[attach] Project: $proj"
+
+  local sess_mode="${SESS_MODE:-tui}"
+  local sess_port="${SESS_PORT:-$DEFAULT_OC_PORT}"
+
+  limactl shell --workdir / "$SESS_NAME" -- bash -lc '
+    set -euo pipefail
+    export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/.config/composer/vendor/bin:/tmp/go/bin:/tmp/pnpm-store:$PATH"
+    export CARGO_TARGET_DIR=/tmp/cargo-target
+    export npm_config_cache=/tmp/npm-cache
+    export PNPM_HOME=/tmp/pnpm-store
+    export YARN_CACHE_FOLDER=/tmp/yarn-cache
+    export PIP_CACHE_DIR=/tmp/pip-cache
+    export GOPATH=/tmp/go
+    export GOCACHE=/tmp/go-cache
+    export MAVEN_OPTS="${MAVEN_OPTS:-} -Dmaven.repo.local=/tmp/m2-repo"
+    export GRADLE_USER_HOME=/tmp/gradle
+    export CCACHE_DIR=/tmp/ccache
+    export ZIG_LOCAL_CACHE_DIR=/tmp/zig-cache
+    export ZIG_GLOBAL_CACHE_DIR=/tmp/zig-global-cache
+    export XDG_DATA_HOME=/tmp/oc-xdg-data
+    export XDG_STATE_HOME=/tmp/oc-xdg-state
+    export OPENCODE_ENABLE_EXA=1
+
+    SESS_SHARE="$2"
+    export XDG_CONFIG_HOME="$SESS_SHARE/config"
+
+    cd "$1"
+
+    if [ "$3" = "web" ]; then
+      echo "[attach] Starting OpenCode web server on port $4..."
+      aa-exec -p opencode-sandbox -- opencode web --hostname 0.0.0.0 --port "$4" || true
+    else
+      aa-exec -p opencode-sandbox -- opencode || true
+    fi
+  ' _ "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$sess_port"
+}
+
 start_session() {
   need limactl
   need rsync
@@ -1824,13 +1890,18 @@ start_session() {
     echo "[cleanup] SQLite integrity checks done $(_ts)"
 
     if [[ -n "${sess:-}" ]]; then
-      echo "[cleanup] Stopping session VM: $sess $(_ts)"
-      rm -f "$senv"
-      rm -rf "$sess_share"
-      limactl stop "$sess" 2>/dev/null || true
-      echo "[cleanup] Session VM stopped $(_ts)"
-      limactl delete -f "$sess" >/dev/null 2>&1 || true
-      echo "[cleanup] Session VM deleted $(_ts)"
+      if [[ "${OC_SHELL_OK:-}" == "1" ]]; then
+        echo "[cleanup] Stopping session VM: $sess $(_ts)"
+        rm -f "$senv"
+        rm -rf "$sess_share"
+        limactl stop "$sess" 2>/dev/null || true
+        echo "[cleanup] Session VM stopped $(_ts)"
+        limactl delete -f "$sess" >/dev/null 2>&1 || true
+        echo "[cleanup] Session VM deleted $(_ts)"
+      else
+        echo "[cleanup] Session VM '$sess' kept running for re-attach. $(_ts)"
+        echo "[cleanup] Use 'opencode-vm attach' to reconnect, or 'opencode-vm start' for a fresh session."
+      fi
     fi
     # Remove clean mount symlink if created
     [[ -n "${clean_link:-}" ]] && rm -f "$clean_link"
@@ -2025,7 +2096,7 @@ start_session() {
     rsync -a --exclude="bin/" --exclude="log/" --exclude="tool-output/" "$VM_DATA/opencode/" "$SESS_SHARE/xdg-data/opencode/"
     rsync -a "$VM_STATE/opencode/" "$SESS_SHARE/xdg-state/opencode/"
     echo "[$(date +%T)] In-VM sync complete"
-  ' _ "$proj" "$sess_share" "$SESSION_MODE" "${SESSION_PORT:-0}" "${SESSION_PASSWORD:-}" "${OC_WEB_TUI:-false}" "$(get_host_ip)"
+  ' _ "$proj" "$sess_share" "$SESSION_MODE" "${SESSION_PORT:-0}" "${SESSION_PASSWORD:-}" "${OC_WEB_TUI:-false}" "$(get_host_ip)" && OC_SHELL_OK=1 || true
 }
 
 ocvm_notify_if_new_version_available "$cmd"
@@ -2080,6 +2151,10 @@ case "$cmd" in
     enter_session_shell "$SESS_NAME" "$proj"
     ;;
 
+  attach)
+    attach_session
+    ;;
+
   base)
     need limactl
     base_exists || provision_base
@@ -2123,6 +2198,7 @@ Usage:
                                            # start web server session (default port 4096)
                                            # provides: web UI, REST API, TUI attach
                                            # --tui: also start TUI in terminal (experimental)
+  opencode-vm attach                       # reconnect to a running session VM
   opencode-vm shell                        # open additional shell into running session VM
   opencode-vm init                         # create/provision base VM (one-time setup)
   opencode-vm ports show                   # show current firewall policy
