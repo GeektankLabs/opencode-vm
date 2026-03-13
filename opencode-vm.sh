@@ -37,7 +37,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.1.3"
+OCVM_VERSION="0.1.4"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -1140,6 +1140,13 @@ eval "$(pyenv init -)"
 pyenv install 3.13
 pyenv global 3.13
 
+# Install RepoMapper MCP for AI-friendly codebase structure maps (PageRank-ranked)
+# Pinned to commit 3ef8914 (2025-12-08) — security-reviewed, no network calls / no shell exec
+git clone https://github.com/pdavis68/RepoMapper.git ~/.local/share/repomapper
+git -C ~/.local/share/repomapper checkout 3ef8914b3a2271695ac9e4b07ce1e8bf5a4c9be6
+pip3 install -r ~/.local/share/repomapper/requirements.txt
+ln -sf ~/.local/share/repomapper/repomap_server.py ~/.local/bin/repomap-server
+
 # Write nftables rules (defaults: 1234 + 11434)
 sudo tee /etc/nftables.conf >/dev/null <<'NFT'
 flush ruleset
@@ -1450,6 +1457,19 @@ Pre-installed paths (do not change):
 
 There is no Chrome at \`/opt/google/chrome/\` — ignore that path. The bundled Chromium above is used automatically by the MCP tools (\`browser_navigate\`, \`browser_click\`, \`browser_screenshot\`, etc.).
 
+## Codebase Structure Maps (RepoMapper)
+
+RepoMapper MCP is available for generating ranked structural overviews of codebases. Use it when:
+- First exploring a large or unfamiliar codebase to understand its architecture
+- You need to identify the most important/interconnected files before diving in
+- You want symbol-aware code search (definitions vs references)
+
+**Tools:**
+- \`repo_map\` — generates a PageRank-ranked map of the codebase, showing the most important files and their key symbols. Pass \`project_root\` (absolute path) and optionally \`token_limit\` (default 8192).
+- \`search_identifiers\` — searches for code identifiers across the codebase with context. Returns definitions and references with file locations and line numbers.
+
+Pre-installed at: \`~/.local/share/repomapper/\`
+
 ## Important Notes
 
 - The project directory is shared with the host. File changes are immediately visible on both sides.
@@ -1712,7 +1732,7 @@ start_session() {
   fi
   cp -p "$sess_share/config/opencode/opencode.json" "$sess_share/config/opencode/.opencode.json"
 
-  # Inject session overrides: Playwright MCP, allow-all permissions, ask for git commit, deny git push
+  # Inject session overrides: Playwright + RepoMapper MCP, allow-all permissions, ask for git commit, deny git push
   local sess_cfg_file="$sess_share/config/opencode/opencode.json"
   if command -v jq >/dev/null 2>&1 && [[ -f "$sess_cfg_file" ]]; then
     local tmp_cfg
@@ -1732,6 +1752,10 @@ start_session() {
         "playwright": {
           "type": "local",
           "command": ["playwright-mcp", "--headless", "--browser", "chromium"]
+        },
+        "repomapper": {
+          "type": "local",
+          "command": ["python3", "/home/user.linux/.local/share/repomapper/repomap_server.py"]
         }
       }
     }' "$sess_cfg_file" > "$tmp_cfg" \

@@ -34,7 +34,7 @@ The entire tool is one file: `opencode-vm.sh` (~1800 lines of Bash).
 6. Self-update helpers: version parsing, remote fetch, resolve script path, passive update check
 7. `ports_cmd` — CLI subcommand for managing firewall policy
 8. Self-update commands: `update_cmd`, `export_patch_cmd`, `ocvm_post_update_migrate`
-9. `provision_base` — creates base VM, installs OpenCode + nftables + Playwright
+9. `provision_base` — creates base VM, installs OpenCode + nftables + Playwright + RepoMapper
 10. `apply_policy_in_vm` — translates `policy.env` into nft commands
 11. `start_session` — main workflow: backup config → host/project sync → clone → mount → apply policy → run opencode → cleanup+sync-back
 12. Top-level `case` dispatch
