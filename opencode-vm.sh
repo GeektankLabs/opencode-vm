@@ -6,7 +6,6 @@ _T0=$(date +%s)
 _ts() { echo "+$(($(date +%s) - _T0))s"; }
 
 BASE_NAME="oc-base"
-TEMPLATE="template:docker-rootful"
 
 # Host config: OpenCode empfiehlt ~/.config/opencode/opencode.json
 HOST_CFG_DIR="$HOME/.config/opencode"
@@ -37,7 +36,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.1.4"
+OCVM_VERSION="0.1.5"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -1018,19 +1017,26 @@ base_exists() {
 
 provision_base() {
   echo "[init] Creating base VM: $BASE_NAME"
-  # Lima's --timeout may not cover the optional Docker probe; tolerate timeout
-  # and wait for SSH readiness ourselves.
-  limactl start --cpus 6 --memory 8 --name "$BASE_NAME" --vm-type vz --mount-none --mount-type virtiofs --timeout 20m --tty=false "$TEMPLATE" || {
-    # Check if VM is running despite the timeout error
+
+  # Generate a custom Lima template based on docker-rootful but without the
+  # slow Docker readiness probe.  We check Docker readiness ourselves below,
+  # which avoids the ~10 min polling loop Lima's optional probe causes.
+  local tmpl_file
+  tmpl_file=$(mktemp /tmp/ocvm-template-XXXXXX.yaml)
+  limactl tmpl yq 'template:docker-rootful' 'del(.probes)' > "$tmpl_file"
+
+  limactl start --cpus 6 --memory 8 --name "$BASE_NAME" --vm-type vz --mount-none --mount-type virtiofs --timeout 20m --tty=false "$tmpl_file" || {
     if limactl list -q 2>/dev/null | grep -qx "$BASE_NAME"; then
-      echo "[init] Lima timed out on optional probe, but VM is running — continuing..."
+      echo "[init] Lima start returned non-zero, but VM is running — continuing..."
     else
       echo "[init] VM failed to start." >&2
+      rm -f "$tmpl_file"
       exit 1
     fi
   }
+  rm -f "$tmpl_file"
 
-  # Wait for shell access to be ready (Docker probe may still be finishing)
+  # Wait for shell access
   echo "[init] Waiting for VM shell access..."
   local retries=0
   while ! limactl shell "$BASE_NAME" -- true 2>/dev/null; do
@@ -1042,6 +1048,19 @@ provision_base() {
     sleep 2
   done
   echo "[init] VM shell ready"
+
+  # Wait for Docker to be ready (replaces the removed Lima probe)
+  echo "[init] Waiting for Docker daemon..."
+  retries=0
+  while ! limactl shell "$BASE_NAME" -- docker info >/dev/null 2>&1; do
+    retries=$((retries + 1))
+    if (( retries > 60 )); then
+      echo "[init] Docker not ready after 120s." >&2
+      exit 1
+    fi
+    sleep 2
+  done
+  echo "[init] Docker ready"
 
   # Expose auto-forwarded ports on all interfaces (LAN access for web mode)
   local lima_yaml="$HOME/.lima/$BASE_NAME/lima.yaml"
