@@ -36,7 +36,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.1.6"
+OCVM_VERSION="0.1.7"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -1066,6 +1066,7 @@ provision_base() {
   local lima_yaml="$HOME/.lima/$BASE_NAME/lima.yaml"
   if ! grep -q 'hostIP:' "$lima_yaml" 2>/dev/null; then
     echo "[init] Configuring LAN port forwarding..."
+    rm -rf "$HOME/.lima/sock" 2>/dev/null || true
     limactl stop "$BASE_NAME" 2>/dev/null || true
     # Insert catch-all rule: forward guest 0.0.0.0 ports to host 0.0.0.0
     sed -i '' '/^portForwards:/a\
@@ -1753,10 +1754,11 @@ start_session() {
 
   # Inject session overrides: Playwright + RepoMapper MCP, allow-all permissions, ask for git commit, deny git push
   local sess_cfg_file="$sess_share/config/opencode/opencode.json"
+  local vm_home="/home/$(whoami).linux"
   if command -v jq >/dev/null 2>&1 && [[ -f "$sess_cfg_file" ]]; then
     local tmp_cfg
     tmp_cfg="$(mktemp)"
-    jq '. * {
+    jq --arg vm_home "$vm_home" '. * {
       "permission": {
         "*": "allow",
         "bash": {
@@ -1774,7 +1776,7 @@ start_session() {
         },
         "repomapper": {
           "type": "local",
-          "command": ["python3", "/home/user.linux/.local/share/repomapper/repomap_server.py"]
+          "command": ["python3", ($vm_home + "/.local/share/repomapper/repomap_server.py")]
         }
       }
     }' "$sess_cfg_file" > "$tmp_cfg" \
@@ -1822,10 +1824,17 @@ start_session() {
   done
   echo $$ > "$lockfile"
   trap "rm -f '$lockfile'" EXIT
-  echo "[run] Starting base VM... $(_ts)"
-  limactl start "$BASE_NAME" 2>/dev/null || true
-  echo "[run] Base VM started $(_ts)"
-  run_with_spinner "[run] Stopping base VM before clone..." limactl stop "$BASE_NAME"
+
+  # Ensure base VM is stopped for clone — only stop if currently running
+  if is_vm_running "$BASE_NAME"; then
+    # Lima's docker-rootful template creates a shared socket dir at ~/.lima/sock/
+    # which Lima may misinterpret as a VM instance, causing a fatal error during
+    # stop/list. Remove it before stop to avoid spurious failures.
+    rm -rf "$HOME/.lima/sock" 2>/dev/null || true
+    run_with_spinner "[run] Stopping base VM before clone..." limactl stop "$BASE_NAME"
+  else
+    echo "[run] Base VM already stopped, ready for clone $(_ts)"
+  fi
 
   # Check for optional Desktop share directory
   local share_dir="$HOME/Desktop/opencode-share"
