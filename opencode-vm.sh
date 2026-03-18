@@ -36,7 +36,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.1.8"
+OCVM_VERSION="0.1.9"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -429,10 +429,18 @@ ocvm_fetch_remote_script_to_file() {
   local source_url
   source_url="$(ocvm_update_source_url)"
   command -v curl >/dev/null 2>&1 || return 1
+
+  # Build curl args — bypass CDN cache when OCVM_BYPASS_CACHE=1 (used by update_cmd)
+  local -a curl_args=(--fail --silent --location --max-time 4)
+  if [[ "${OCVM_BYPASS_CACHE:-0}" == "1" ]]; then
+    curl_args+=(-H "Cache-Control: no-cache" -H "Pragma: no-cache")
+    source_url="${source_url}?_=$(date +%s)"
+  fi
+
   if [[ "${OCVM_UPDATE_CHECK_QUIET:-0}" == "1" ]]; then
-    curl --fail --silent --location --max-time 4 "$source_url" >"$target_file" 2>/dev/null
+    curl "${curl_args[@]}" "$source_url" >"$target_file" 2>/dev/null
   else
-    curl --fail --silent --show-error --location --max-time 4 "$source_url" >"$target_file"
+    curl "${curl_args[@]}" --show-error "$source_url" >"$target_file"
   fi
 }
 
@@ -711,7 +719,7 @@ update_cmd() {
   current_version="$OCVM_VERSION"
   remote_tmp_file="$(mktemp)"
 
-  remote_version="$(ocvm_check_remote_version "$remote_tmp_file" || true)"
+  remote_version="$(OCVM_BYPASS_CACHE=1 ocvm_check_remote_version "$remote_tmp_file" || true)"
   if [[ -z "$remote_version" ]]; then
     rm -f "$remote_tmp_file"
     echo "Could not check for updates from: $(ocvm_update_source_url)" >&2
