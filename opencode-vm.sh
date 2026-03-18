@@ -36,7 +36,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.1.7"
+OCVM_VERSION="0.1.8"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -1825,14 +1825,18 @@ start_session() {
   echo $$ > "$lockfile"
   trap "rm -f '$lockfile'" EXIT
 
-  # Ensure base VM is stopped for clone — only stop if currently running
+  # Lima's docker-rootful template creates a shared socket dir at ~/.lima/sock/
+  # which Lima may misinterpret as a VM instance, causing fatal errors during
+  # list/stop. Remove it before any status check to avoid spurious failures.
+  rm -rf "$HOME/.lima/sock" 2>/dev/null || true
+
+  # Ensure base VM is stopped for clone — always attempt stop defensively
   if is_vm_running "$BASE_NAME"; then
-    # Lima's docker-rootful template creates a shared socket dir at ~/.lima/sock/
-    # which Lima may misinterpret as a VM instance, causing a fatal error during
-    # stop/list. Remove it before stop to avoid spurious failures.
-    rm -rf "$HOME/.lima/sock" 2>/dev/null || true
     run_with_spinner "[run] Stopping base VM before clone..." limactl stop "$BASE_NAME"
   else
+    # Defensively try stop even if status check says not running, in case
+    # the status check was unreliable (e.g. transient lima state)
+    limactl stop "$BASE_NAME" 2>/dev/null || true
     echo "[run] Base VM already stopped, ready for clone $(_ts)"
   fi
 
@@ -2166,6 +2170,9 @@ case "$cmd" in
       limactl stop "$BASE_NAME" 2>/dev/null || true
       limactl delete -f "$BASE_NAME"
     fi
+    # Clean up shared socket dir that Lima's docker-rootful template creates;
+    # leftover after VM deletion it confuses limactl into a fatal error.
+    rm -rf "$HOME/.lima/sock" 2>/dev/null || true
     provision_base
     echo
     echo "Next: navigate to your project directory (open terminal in VS Code) and run:"
