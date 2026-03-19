@@ -37,7 +37,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.1.16"
+OCVM_VERSION="0.1.17"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -1659,7 +1659,7 @@ provision_base() {
 
   # Expose auto-forwarded ports on all interfaces (LAN access for web mode)
   local lima_yaml="$HOME/.lima/$BASE_NAME/lima.yaml"
-  if ! grep -q 'hostIP:' "$lima_yaml" 2>/dev/null; then
+  if ! grep -q 'guestIPMustBeZero: true' "$lima_yaml" 2>/dev/null; then
     echo "[init] Configuring LAN port forwarding..."
     rm -rf "$HOME/.lima/sock" 2>/dev/null || true
     limactl stop "$BASE_NAME" 2>/dev/null || true
@@ -2535,6 +2535,21 @@ start_session() {
     echo "[run] Base VM already stopped, ready for clone $(_ts)"
   fi
 
+  # Upgrade path: patch base VM yaml if LAN port forwarding rule is missing.
+  # This fixes existing installations where provision_base used the wrong grep
+  # condition ('hostIP:' instead of 'guestIPMustBeZero: true'), causing the
+  # catch-all rule to never be inserted because Docker's socket rule already
+  # contains 'hostIP: 127.0.0.1'.
+  local base_lima_yaml="$HOME/.lima/$BASE_NAME/lima.yaml"
+  if ! grep -q 'guestIPMustBeZero: true' "$base_lima_yaml" 2>/dev/null; then
+    echo "[run] Upgrading base VM: adding LAN port forwarding rule... $(_ts)"
+    sed -i '' '/^portForwards:/a\
+- guestIPMustBeZero: true\
+  hostIP: 0.0.0.0
+' "$base_lima_yaml"
+    echo "[run] LAN port forwarding rule added to base VM $(_ts)"
+  fi
+
   # Check for optional Desktop share directory
   local share_dir="$HOME/Desktop/opencode-share"
   local share_mount=""
@@ -2812,6 +2827,7 @@ start_session() {
         echo "  TUI attach:      opencode attach http://${OC_HOST_IP}:${OC_PORT}"
         echo ""
         if [ -n "$OC_PASSWORD" ]; then
+          echo "  Username:        opencode"
           echo "  Password:        $OC_PASSWORD"
           echo ""
           echo "The REST API can be used for custom integrations,"
