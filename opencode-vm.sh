@@ -32,11 +32,12 @@ DATA_RSYNC_EXCLUDES=(--exclude='bin/' --exclude='log/' --exclude='tool-output/')
 DEFAULT_HOST_TCP_PORTS="1234 11434"   # LM Studio + Ollama
 DEFAULT_LAN_ALLOW_TCP=""              # z.B. "192.168.178.10:443 10.0.0.5:22"
 DEFAULT_LAN_ALLOW_UDP=""              # z.B. "192.168.178.20:53"
+DEFAULT_HOST_LOCALHOST_FORWARD="yes"  # expose HOST_TCP_PORTS inside VM as localhost:PORT
 DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.1.9"
+OCVM_VERSION="0.1.16"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -55,6 +56,14 @@ need() {
     echo "Missing dependency: $1" >&2
     exit 1
   }
+}
+
+sanitize_lima_sock_dir() {
+  # Lima can leave ~/.lima/sock/ behind without lima.yaml.
+  # limactl may then treat it as a broken instance and fail fatally.
+  if [[ -d "$HOME/.lima/sock" ]] && [[ ! -f "$HOME/.lima/sock/lima.yaml" ]]; then
+    rm -rf "$HOME/.lima/sock" 2>/dev/null || true
+  fi
 }
 
 run_with_spinner() {
@@ -153,6 +162,7 @@ project_state_dir() {
 
 is_vm_running() {
   local vm_name="$1"
+  sanitize_lima_sock_dir
   limactl list -q --status Running 2>/dev/null | grep -qx "$vm_name"
 }
 
@@ -322,6 +332,7 @@ ensure_policy_file() {
 HOST_TCP_PORTS="$DEFAULT_HOST_TCP_PORTS"
 LAN_ALLOW_TCP="$DEFAULT_LAN_ALLOW_TCP"
 LAN_ALLOW_UDP="$DEFAULT_LAN_ALLOW_UDP"
+HOST_LOCALHOST_FORWARD="$DEFAULT_HOST_LOCALHOST_FORWARD"
 EOF
   fi
 }
@@ -333,6 +344,7 @@ load_policy() {
   : "${HOST_TCP_PORTS:=$DEFAULT_HOST_TCP_PORTS}"
   : "${LAN_ALLOW_TCP:=$DEFAULT_LAN_ALLOW_TCP}"
   : "${LAN_ALLOW_UDP:=$DEFAULT_LAN_ALLOW_UDP}"
+  : "${HOST_LOCALHOST_FORWARD:=$DEFAULT_HOST_LOCALHOST_FORWARD}"
 }
 
 save_policy() {
@@ -341,6 +353,7 @@ save_policy() {
 HOST_TCP_PORTS="$HOST_TCP_PORTS"
 LAN_ALLOW_TCP="$LAN_ALLOW_TCP"
 LAN_ALLOW_UDP="$LAN_ALLOW_UDP"
+HOST_LOCALHOST_FORWARD="$HOST_LOCALHOST_FORWARD"
 EOF
 }
 
@@ -544,6 +557,7 @@ ports_cmd() {
       echo "HOST_TCP_PORTS: $HOST_TCP_PORTS"
       echo "LAN_ALLOW_TCP:  ${LAN_ALLOW_TCP:-<empty>}"
       echo "LAN_ALLOW_UDP:  ${LAN_ALLOW_UDP:-<empty>}"
+      echo "HOST_LOCALHOST_FORWARD: ${HOST_LOCALHOST_FORWARD:-$DEFAULT_HOST_LOCALHOST_FORWARD}"
       ;;
 
     host)
@@ -569,6 +583,29 @@ ports_cmd() {
           ;;
         *)
           echo "Usage: opencode-vm ports host {show|add|rm|set} [PORT...]" >&2
+          exit 2
+          ;;
+      esac
+      ;;
+
+    hostfwd)
+      local op="${1:-show}"; shift || true
+      case "$op" in
+        show|"")
+          echo "${HOST_LOCALHOST_FORWARD:-$DEFAULT_HOST_LOCALHOST_FORWARD}"
+          ;;
+        enable|on|yes)
+          HOST_LOCALHOST_FORWARD="yes"
+          save_policy
+          echo "HOST_LOCALHOST_FORWARD: $HOST_LOCALHOST_FORWARD"
+          ;;
+        disable|off|no)
+          HOST_LOCALHOST_FORWARD="no"
+          save_policy
+          echo "HOST_LOCALHOST_FORWARD: $HOST_LOCALHOST_FORWARD"
+          ;;
+        *)
+          echo "Usage: opencode-vm ports hostfwd {show|enable|disable}" >&2
           exit 2
           ;;
       esac
@@ -631,13 +668,560 @@ ports_cmd() {
       ;;
 
     *)
-      echo "Usage: opencode-vm ports {show|host|lan} ..." >&2
+      echo "Usage: opencode-vm ports {show|host|hostfwd|lan} ..." >&2
+      exit 2
+      ;;
+  esac
+}
+
+doctor_cmd() {
+  ensure_dirs
+  ensure_host_opencode_dirs
+
+  local auth_file="$HOST_DATA_DIR/auth.json"
+  local model_file="$HOST_STATE_DIR/model.json"
+  local db_file="$HOST_DATA_DIR/opencode.db"
+
+  local area="${1:-show}"
+  shift || true
+
+  case "$area" in
+    show|"")
+      echo "[doctor] OpenCode host paths"
+      echo "  config: $HOST_CFG_DIR"
+      echo "  data:   $HOST_DATA_DIR"
+      echo "  state:  $HOST_STATE_DIR"
+      echo ""
+
+      echo "[doctor] Files"
+      for f in "$auth_file" "$model_file" "$db_file"; do
+        if [[ -f "$f" ]]; then
+          echo "  ok: $f"
+        else
+          echo "  missing: $f"
+        fi
+      done
+      echo ""
+
+      echo "[doctor] Providers from /connect (auth.json)"
+      if [[ -f "$auth_file" ]]; then
+        if command -v jq >/dev/null 2>&1; then
+          jq -r 'keys[]' "$auth_file" 2>/dev/null | sed 's/^/  - /' || echo "  <invalid json>"
+        else
+          echo "  (jq missing - install jq to list keys)"
+        fi
+      else
+        echo "  <none>"
+      fi
+      echo ""
+
+      echo "[doctor] Recent/Favorite model providers (model.json)"
+      if [[ -f "$model_file" ]]; then
+        if command -v jq >/dev/null 2>&1; then
+          echo "  recent:"
+          jq -r '.recent[]? | "  - \(.providerID)\t\(.modelID)"' "$model_file" 2>/dev/null || echo "  <invalid json>"
+          echo "  favorite:"
+          jq -r '.favorite[]? | "  - \(.providerID)\t\(.modelID)"' "$model_file" 2>/dev/null || echo "  <invalid json>"
+        else
+          echo "  (jq missing - install jq for detailed model state)"
+        fi
+      else
+        echo "  <none>"
+      fi
+      echo ""
+
+      echo "[doctor] Provider usage found in opencode.db messages"
+      if [[ -f "$db_file" ]] && command -v sqlite3 >/dev/null 2>&1; then
+        sqlite3 "$db_file" "
+          SELECT COALESCE(json_extract(data,'$.model.providerID'),'<none>') AS provider,
+                 COUNT(*)
+          FROM message
+          GROUP BY provider
+          ORDER BY COUNT(*) DESC;
+        " | sed 's/^/  /'
+      elif [[ ! -f "$db_file" ]]; then
+        echo "  <no database yet>"
+      else
+        echo "  (sqlite3 missing - install sqlite3 to inspect db)"
+      fi
+      ;;
+
+    *)
+      echo "Usage: opencode-vm doctor [show]" >&2
+      exit 2
+      ;;
+  esac
+}
+
+provider_cmd() {
+  ensure_dirs
+  ensure_host_opencode_dirs
+
+  local auth_file="$HOST_DATA_DIR/auth.json"
+  local model_file="$HOST_STATE_DIR/model.json"
+  local db_file="$HOST_DATA_DIR/opencode.db"
+
+  local op="${1:-list}"
+  shift || true
+
+  case "$op" in
+    new)
+      provider_cmd add
+      return $?
+      ;;
+
+    add)
+      local provider="${1:-}"
+      shift || true
+
+      # If the first positional arg looks like a flag, put it back and treat provider as empty
+      if [[ "$provider" == --* ]]; then
+        set -- "$provider" "$@"
+        provider=""
+      fi
+
+      local base_url=""
+      local api_key=""
+      local provider_name=""
+      local dry_run="no"
+      local vision="no"
+      local reasoning="no"
+      local models=()  # entries stored as: id<TAB>name<TAB>context_tokens
+
+      while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+          --base-url)
+            shift
+            base_url="${1:-}"
+            ;;
+          --base-url=*)
+            base_url="${1#*=}"
+            ;;
+          --api-key)
+            shift
+            api_key="${1:-}"
+            ;;
+          --api-key=*)
+            api_key="${1#*=}"
+            ;;
+          --name)
+            shift
+            provider_name="${1:-}"
+            ;;
+          --name=*)
+            provider_name="${1#*=}"
+            ;;
+          --model)
+            shift
+            # parse id[:name[:context[:output]]] — vision/reasoning from global flags
+            { IFS=':' read -r _fm _fn _fc _fo <<< "${1:-}"; }
+            models+=("${_fm}"$'\t'"${_fn:-$_fm}"$'\t'"${_fc:-0}"$'\t'""$'\t'""$'\t'"${_fo:-0}")
+            ;;
+          --model=*)
+            { IFS=':' read -r _fm _fn _fc _fo <<< "${1#*=}"; }
+            models+=("${_fm}"$'\t'"${_fn:-$_fm}"$'\t'"${_fc:-0}"$'\t'""$'\t'""$'\t'"${_fo:-0}")
+            ;;
+          --vision)
+            vision="yes"
+            ;;
+          --reasoning)
+            reasoning="yes"
+            ;;
+          --dry-run)
+            dry_run="yes"
+            ;;
+          *)
+            echo "Unknown option: $1" >&2
+            exit 2
+            ;;
+        esac
+        shift || true
+      done
+
+      # --- Interactive prompts for missing required fields ---
+      if [[ -z "$provider" ]]; then
+        if [[ ! -t 0 ]]; then
+          echo "Usage: opencode-vm provider add [<provider-id>] [--base-url <url>] [--api-key <key>] [--name <display-name>] [--model <model-id>[:<display-name>]] [--dry-run]" >&2
+          exit 2
+        fi
+        while true; do
+          read -r -p "[provider] Provider ID (letters, digits, . _ -): " provider
+          [[ "$provider" =~ ^[A-Za-z0-9._-]+$ ]] && break
+          echo "  Invalid. Allowed: letters, digits, dot, underscore, hyphen." >&2
+        done
+      fi
+
+      if [[ ! "$provider" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        echo "Invalid provider id: '$provider'" >&2
+        echo "Allowed characters: letters, digits, dot, underscore, hyphen." >&2
+        exit 2
+      fi
+
+      if [[ -z "$base_url" ]]; then
+        if [[ ! -t 0 ]]; then
+          echo "Missing required --base-url" >&2; exit 2
+        fi
+        while true; do
+          read -r -p "[provider] Base URL (https://api.example.com/v1): " base_url
+          [[ "$base_url" == http://* || "$base_url" == https://* ]] && break
+          echo "  Must start with http:// or https://" >&2
+        done
+      fi
+
+      if [[ "$base_url" != http://* && "$base_url" != https://* ]]; then
+        echo "Invalid base url: '$base_url'" >&2
+        echo "Expected URL starting with http:// or https://" >&2
+        exit 2
+      fi
+
+      if [[ -z "$api_key" ]]; then
+        if [[ ! -t 0 ]]; then
+          echo "Missing required --api-key" >&2; exit 2
+        fi
+        read -r -s -p "[provider] API key: " api_key
+        echo
+      fi
+
+      if [[ -z "$provider_name" ]] && [[ -t 0 ]]; then
+        read -r -p "[provider] Display name [$provider]: " provider_name
+      fi
+      [[ -z "$provider_name" ]] && provider_name="$provider"
+
+      # --- Dependency check ---
+      if ! command -v jq >/dev/null 2>&1; then
+        echo "[provider] jq is required for provider add. Install jq and retry." >&2
+        exit 1
+      fi
+
+      # --- Auto model discovery (when no --model flags given) ---
+      if [[ "${#models[@]}" -eq 0 ]]; then
+        if ! command -v curl >/dev/null 2>&1; then
+          echo "[provider] ERROR: curl is required for model auto-discovery." >&2
+          echo "[provider] Install curl or specify models manually with --model <model-id>." >&2
+          exit 1
+        fi
+        local _discover_url="${base_url%/}/models"
+        echo "[provider] No --model flags given. Fetching model list from $_discover_url ..."
+        local _discover_resp
+        _discover_resp="$(curl -sf --connect-timeout 10 --max-time 15 \
+          -H "Authorization: Bearer $api_key" \
+          -H "Accept: application/json" \
+          "$_discover_url" 2>/dev/null || true)"
+
+        if [[ -z "$_discover_resp" ]]; then
+          echo "[provider] ERROR: No response from $_discover_url." >&2
+          echo "[provider] Check base URL and API key. Provider was NOT added." >&2
+          exit 1
+        fi
+        if ! printf '%s' "$_discover_resp" | jq -e . >/dev/null 2>&1; then
+          echo "[provider] ERROR: Response from $_discover_url is not valid JSON." >&2
+          echo "[provider] Provider was NOT added." >&2
+          exit 1
+        fi
+        local _discovered_tsv
+        _discovered_tsv="$(printf '%s' "$_discover_resp" | \
+          jq -r '.data[]? | [.id, (.context_length // .max_context_length // 0 | tostring)] | @tsv' \
+          2>/dev/null || true)"
+        if [[ -z "$_discovered_tsv" ]]; then
+          echo "[provider] ERROR: Endpoint returned no models (.data[].id empty)." >&2
+          echo "[provider] Provider was NOT added. Use --model <id> to specify models manually." >&2
+          exit 1
+        fi
+        # Load TSV into array first so the loop doesn't redirect stdin
+        # (a while+here-string would swallow interactive read prompts)
+        local -a _model_rows=()
+        while IFS= read -r _row; do
+          [[ -n "$_row" ]] && _model_rows+=("$_row")
+        done <<< "$_discovered_tsv"
+
+        echo "[provider] Discovered models:"
+        for _row in "${_model_rows[@]}"; do
+          local _mid _mctx
+          IFS=$'\t' read -r _mid _mctx <<< "$_row"
+          [[ -z "$_mid" ]] && continue
+          _mctx="${_mctx:-0}"
+          local _m_vision="no" _m_reasoning="no" _mout="0"
+
+          if [[ -t 0 ]]; then
+            echo ""
+            echo "[provider] Model: $_mid"
+            printf "  Context window : %s\n" "${_mctx:-unknown (0)}"
+            printf "  Vision         : no\n"
+            printf "  Reasoning      : no\n"
+            local _action=""
+            read -r -p "  Accept [Y], edit [e], skip [s]? " _action </dev/tty
+            if [[ "$_action" =~ ^[Ss] ]]; then
+              echo "  (skipped)"
+              continue
+            elif [[ "$_action" =~ ^[Ee] ]]; then
+              local _new_ctx=""
+              if [[ "${_mctx:-0}" -gt 0 ]]; then
+                read -r -p "  Context window [$_mctx]: " _new_ctx </dev/tty
+              else
+                read -r -p "  Context window (tokens, Enter to skip): " _new_ctx </dev/tty
+              fi
+              [[ -n "$_new_ctx" ]] && _mctx="$_new_ctx"
+              local _new_out=""
+              read -r -p "  Max output tokens [8192]: " _new_out </dev/tty
+              [[ -n "$_new_out" ]] && _mout="$_new_out"
+              local _v_ans="" _r_ans=""
+              read -r -p "  Supports vision/image input? [y/N]: " _v_ans </dev/tty
+              [[ "$_v_ans" =~ ^[Yy] ]] && _m_vision="yes"
+              read -r -p "  Supports reasoning/thinking? [y/N]: " _r_ans </dev/tty
+              [[ "$_r_ans" =~ ^[Yy] ]] && _m_reasoning="yes"
+            fi
+            # Y/Enter: accept discovered values (vision/reasoning stay no)
+          fi
+
+          models+=("${_mid}"$'\t'"${_mid}"$'\t'"${_mctx:-0}"$'\t'"${_m_vision}"$'\t'"${_m_reasoning}"$'\t'"${_mout:-0}")
+        done
+        echo ""
+      fi
+
+      # --- Prepare config files ---
+      local cfg_file
+      cfg_file="$(pick_host_cfg)"
+
+      if [[ ! -f "$auth_file" ]]; then
+        echo '{}' > "$auth_file"
+      fi
+
+      if ! jq -e . "$auth_file" >/dev/null 2>&1; then
+        echo "[provider] auth.json is not valid JSON: $auth_file" >&2
+        exit 1
+      fi
+
+      if ! jq -e . "$cfg_file" >/dev/null 2>&1; then
+        echo "[provider] Config file is not valid JSON and cannot be auto-edited: $cfg_file" >&2
+        echo "[provider] Please convert to JSON or edit provider config manually." >&2
+        exit 1
+      fi
+
+      local exists_auth="no" exists_cfg="no"
+      exists_auth="$(jq -r --arg p "$provider" 'if has($p) then "yes" else "no" end' "$auth_file")"
+      exists_cfg="$(jq -r --arg p "$provider" 'if (.provider // {} | has($p)) then "yes" else "no" end' "$cfg_file")"
+
+      # Build models_json (entries: id<TAB>name<TAB>context<TAB>vision<TAB>reasoning<TAB>output)
+      # Per-model vision/reasoning fall back to global --vision / --reasoning flags.
+      # limit.output defaults to 8192 — OpenCode requires it as a number when limit is set.
+      local models_json='{}'
+      for _model_entry in "${models[@]}"; do
+        local _mid _mname _mctx _m_vision _m_reasoning _mout
+        IFS=$'\t' read -r _mid _mname _mctx _m_vision _m_reasoning _mout <<< "$_model_entry"
+        _mctx="${_mctx:-0}"
+        _mout="${_mout:-0}"; [[ "$_mout" -eq 0 ]] && _mout=8192
+        [[ -z "$_m_vision" ]]    && _m_vision="$vision"
+        [[ -z "$_m_reasoning" ]] && _m_reasoning="$reasoning"
+
+        models_json="$(printf '%s' "$models_json" | jq \
+          --arg id "$_mid" --arg name "$_mname" --argjson ctx "$_mctx" --argjson out "$_mout" \
+          'if $ctx > 0
+           then .[$id] = {"name": $name, "limit": {"context": $ctx, "output": $out}}
+           else .[$id] = {"name": $name}
+           end')"
+
+        if [[ "$_m_vision" == "yes" ]]; then
+          models_json="$(printf '%s' "$models_json" | jq \
+            --arg id "$_mid" \
+            '.[$id] += {"attachment": true, "modalities": {"input": ["text","image"],"output":["text"]}}')"
+        fi
+
+        if [[ "$_m_reasoning" == "yes" ]]; then
+          models_json="$(printf '%s' "$models_json" | jq \
+            --arg id "$_mid" \
+            '.[$id].options.thinking = {"type":"enabled","budgetTokens":8192}')"
+        fi
+      done
+
+      echo "[provider] Add preview: $provider"
+      echo "  auth.json existing entry: $exists_auth"
+      echo "  config existing provider: $exists_cfg"
+      echo "  baseURL: $base_url"
+      echo "  display name: $provider_name"
+      echo "  models (${#models[@]}):"
+      for _model_entry in "${models[@]}"; do
+        local _mid _mname _mctx _m_vision _m_reasoning _mout
+        IFS=$'\t' read -r _mid _mname _mctx _m_vision _m_reasoning _mout <<< "$_model_entry"
+        [[ -z "$_m_vision" ]]    && _m_vision="$vision"
+        [[ -z "$_m_reasoning" ]] && _m_reasoning="$reasoning"
+        _mout="${_mout:-0}"; [[ "$_mout" -eq 0 ]] && _mout=8192
+        local _meta=""
+        [[ "${_mctx:-0}" -gt 0 ]] && _meta+=" ctx:${_mctx}"
+        _meta+=" out:${_mout}"
+        [[ "$_m_vision" == "yes" ]]    && _meta+=" vision"
+        [[ "$_m_reasoning" == "yes" ]] && _meta+=" reasoning"
+        echo "    - $_mid${_meta:+  ($_meta)}"
+      done
+
+      if [[ "$dry_run" == "yes" ]]; then
+        echo "[provider] Dry-run only. No changes made."
+        return 0
+      fi
+
+      local ts backup_dir
+      ts="$(date +%Y%m%d-%H%M%S)"
+      backup_dir="$BACKUP_DIR/provider-$ts"
+      mkdir -p "$backup_dir"
+
+      cp -p "$auth_file" "$backup_dir/auth.json.bak"
+      cp -p "$cfg_file" "$backup_dir/$(basename "$cfg_file").bak"
+
+      local tmp_auth tmp_cfg
+      tmp_auth="$(mktemp)"
+      tmp_cfg="$(mktemp)"
+
+      jq --arg p "$provider" --arg k "$api_key" \
+        '.[$p] = {"type":"key","key":$k}' \
+        "$auth_file" > "$tmp_auth" && mv "$tmp_auth" "$auth_file"
+
+      jq \
+        --arg p "$provider" \
+        --arg n "$provider_name" \
+        --arg b "$base_url" \
+        --argjson m "$models_json" \
+        '.provider = ((.provider // {}) + {($p): {"npm":"@ai-sdk/openai-compatible","name":$n,"options":{"baseURL":$b},"models":$m}})' \
+        "$cfg_file" > "$tmp_cfg" && mv "$tmp_cfg" "$cfg_file"
+
+      echo "[provider] '$provider' added/updated with ${#models[@]} model(s)."
+      echo "[provider] Updated auth: $auth_file"
+      echo "[provider] Updated config: $cfg_file"
+      echo "[provider] Backups written to: $backup_dir"
+      echo "[provider] Tip: restart your session (opencode-vm prune && opencode-vm start)."
+      ;;
+
+    rm|remove|forget|delete)
+      local provider="${1:-}"
+      shift || true
+      local dry_run="no"
+
+      while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+          --dry-run) dry_run="yes" ;;
+          *) echo "Unknown option: $1" >&2; exit 2 ;;
+        esac
+        shift
+      done
+
+      if [[ -z "$provider" ]]; then
+        echo "Usage: opencode-vm provider rm <provider-id> [--dry-run]" >&2
+        exit 2
+      fi
+      if [[ ! "$provider" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        echo "Invalid provider id: '$provider'" >&2
+        echo "Allowed characters: letters, digits, dot, underscore, hyphen." >&2
+        exit 2
+      fi
+
+      local cfg_file
+      cfg_file="$(pick_host_cfg)"
+
+      local auth_count=0 cfg_count=0 recent_count=0 favorite_count=0 db_count=0
+
+      if [[ -f "$auth_file" ]] && command -v jq >/dev/null 2>&1; then
+        auth_count="$(jq --arg p "$provider" 'if has($p) then 1 else 0 end' "$auth_file" 2>/dev/null || echo 0)"
+      fi
+      if [[ -f "$cfg_file" ]] && command -v jq >/dev/null 2>&1; then
+        cfg_count="$(jq -r --arg p "$provider" 'if (.provider // {} | has($p)) then 1 else 0 end' "$cfg_file" 2>/dev/null || echo 0)"
+      fi
+      if [[ -f "$model_file" ]] && command -v jq >/dev/null 2>&1; then
+        recent_count="$(jq --arg p "$provider" '[.recent[]? | select(.providerID == $p)] | length' "$model_file" 2>/dev/null || echo 0)"
+        favorite_count="$(jq --arg p "$provider" '[.favorite[]? | select(.providerID == $p)] | length' "$model_file" 2>/dev/null || echo 0)"
+      fi
+      if [[ -f "$db_file" ]] && command -v sqlite3 >/dev/null 2>&1; then
+        db_count="$(sqlite3 "$db_file" "SELECT COUNT(*) FROM message WHERE json_extract(data,'$.model.providerID')='$provider';" 2>/dev/null || echo 0)"
+      fi
+
+      echo "[provider] Remove preview: $provider"
+      echo "  auth.json entry: $auth_count"
+      echo "  opencode.json provider entry: $cfg_count"
+      echo "  model.json recent entries: $recent_count"
+      echo "  model.json favorite entries: $favorite_count"
+      echo "  opencode.db message rows: $db_count"
+
+      if [[ "$dry_run" == "yes" ]]; then
+        echo "[provider] Dry-run only. No changes made."
+        return 0
+      fi
+
+      local ts backup_dir
+      ts="$(date +%Y%m%d-%H%M%S)"
+      backup_dir="$BACKUP_DIR/provider-$ts"
+      mkdir -p "$backup_dir"
+
+      [[ -f "$auth_file" ]] && cp -p "$auth_file" "$backup_dir/auth.json.bak"
+      [[ -f "$cfg_file" ]] && cp -p "$cfg_file" "$backup_dir/$(basename "$cfg_file").bak"
+      [[ -f "$model_file" ]] && cp -p "$model_file" "$backup_dir/model.json.bak"
+      [[ -f "$db_file" ]] && cp -p "$db_file" "$backup_dir/opencode.db.bak"
+
+      if [[ -f "$auth_file" ]]; then
+        if command -v jq >/dev/null 2>&1; then
+          local tmp_auth
+          tmp_auth="$(mktemp)"
+          jq --arg p "$provider" 'del(.[$p])' "$auth_file" > "$tmp_auth" && mv "$tmp_auth" "$auth_file"
+        else
+          echo "[provider] WARNING: jq missing, auth.json not modified." >&2
+        fi
+      fi
+
+      if [[ -f "$cfg_file" ]] && command -v jq >/dev/null 2>&1; then
+        if jq -e . "$cfg_file" >/dev/null 2>&1; then
+          local tmp_cfg
+          tmp_cfg="$(mktemp)"
+          jq --arg p "$provider" 'del(.provider[$p])' "$cfg_file" > "$tmp_cfg" && mv "$tmp_cfg" "$cfg_file"
+        else
+          echo "[provider] WARNING: config file is not valid JSON, skipping provider entry removal." >&2
+        fi
+      fi
+
+      if [[ -f "$model_file" ]]; then
+        if command -v jq >/dev/null 2>&1; then
+          local tmp_model
+          tmp_model="$(mktemp)"
+          jq --arg p "$provider" '
+            .recent = [(.recent // [])[] | select(.providerID != $p)]
+            | .favorite = [(.favorite // [])[] | select(.providerID != $p)]
+            | .variant = ((.variant // {}) | with_entries(select(.key != $p and ((.value.providerID // "") != $p))))
+          ' "$model_file" > "$tmp_model" && mv "$tmp_model" "$model_file"
+        else
+          echo "[provider] WARNING: jq missing, model.json not modified." >&2
+        fi
+      fi
+
+      if [[ -f "$db_file" ]] && command -v sqlite3 >/dev/null 2>&1; then
+        sqlite3 "$db_file" "
+          UPDATE message
+          SET data = json_remove(data, '$.model')
+          WHERE json_extract(data,'$.model.providerID') = '$provider';
+          PRAGMA wal_checkpoint(FULL);
+        " >/dev/null 2>&1 || true
+      elif [[ -f "$db_file" ]]; then
+        echo "[provider] WARNING: sqlite3 missing, opencode.db not modified." >&2
+      fi
+
+      echo "[provider] '$provider' removed."
+      echo "[provider] Backups written to: $backup_dir"
+      echo "[provider] Tip: restart your session (opencode-vm prune && opencode-vm start)."
+      ;;
+
+    list|show|"")
+      if [[ -f "$auth_file" ]] && command -v jq >/dev/null 2>&1; then
+        echo "[provider] Configured providers:"
+        jq -r 'keys[]' "$auth_file" | sed 's/^/  - /'
+      else
+        echo "Usage: opencode-vm provider {list|add|rm ...}"
+      fi
+      ;;
+
+    *)
+      echo "Usage: opencode-vm provider {list|new|add [<id>] [--base-url <url>] [--api-key <key>] [--name <display-name>] [--vision] [--model <id>[:<name>[:<context>]]] [--dry-run]|rm <id> [--dry-run]}" >&2
       exit 2
       ;;
   esac
 }
 
 cleanup_sessions() {
+  sanitize_lima_sock_dir
+
   # Clean tracked sessions
   if [[ -d "$SESSIONS_DIR" ]]; then
     for senv in "$SESSIONS_DIR"/*.env; do
@@ -1020,10 +1604,13 @@ export_patch_cmd() {
 }
 
 base_exists() {
+  sanitize_lima_sock_dir
   limactl list -q 2>/dev/null | grep -qx "$BASE_NAME"
 }
 
 provision_base() {
+  sanitize_lima_sock_dir
+
   echo "[init] Creating base VM: $BASE_NAME"
 
   # Generate a custom Lima template based on docker-rootful but without the
@@ -1566,8 +2153,98 @@ EOF
   "
 }
 
+setup_host_port_forwards_in_vm() {
+  local vm_name="$1"
+
+  if [[ "${HOST_LOCALHOST_FORWARD:-$DEFAULT_HOST_LOCALHOST_FORWARD}" != "yes" ]]; then
+    echo "[run] Localhost forwarding disabled by policy"
+    return 0
+  fi
+
+  sanitize_lima_sock_dir
+
+  limactl shell --workdir / "$vm_name" -- bash -lc '
+    set -euo pipefail
+    local_ports="$1"
+    started=""
+    skipped=""
+
+    # Drop stale units from previous port policy revisions
+    shopt -s nullglob
+    for unit in /etc/systemd/system/ocvm-hostfwd-*.service; do
+      unit_name="$(basename "$unit")"
+      port="${unit_name#ocvm-hostfwd-}"
+      port="${port%.service}"
+      if [[ " $local_ports " != *" $port "* ]]; then
+        sudo -n systemctl disable --now "$unit_name" 2>/dev/null || true
+        sudo -n rm -f "$unit"
+      fi
+    done
+    sudo -n systemctl daemon-reload
+
+    for port in $local_ports; do
+      [[ -n "$port" ]] || continue
+
+      # If something already listens on localhost:port in the VM, keep it untouched.
+      if ss -ltn "sport = :$port" 2>/dev/null | tail -n +2 | grep -q .; then
+        echo "[fwd] skip localhost:$port (already in use)"
+        skipped="$skipped $port"
+        continue
+      fi
+
+      unit="ocvm-hostfwd-${port}.service"
+      sudo -n tee "/etc/systemd/system/${unit}" >/dev/null <<UNIT
+[Unit]
+Description=OpenCode VM localhost forward for host port ${port}
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/socat TCP-LISTEN:${port},bind=127.0.0.1,reuseaddr,fork TCP:192.168.5.2:${port}
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+      sudo -n systemctl daemon-reload
+      sudo -n systemctl enable --now "$unit" >/dev/null 2>&1 || true
+
+      sleep 0.1
+      if ss -ltn "sport = :$port" 2>/dev/null | tail -n +2 | grep -q .; then
+        started="$started $port"
+      else
+        echo "[fwd] failed localhost:$port"
+        sudo -n systemctl status "$unit" --no-pager 2>/dev/null | tail -n 4 || true
+        skipped="$skipped $port"
+      fi
+    done
+
+    echo "[fwd] localhost forwarding started:${started:- <none>}"
+    if [[ -n "${skipped// /}" ]]; then
+      echo "[fwd] localhost forwarding skipped:${skipped}"
+    fi
+  ' _ "$HOST_TCP_PORTS"
+}
+
+stop_host_port_forwards_in_vm() {
+  local vm_name="$1"
+  limactl shell --workdir / "$vm_name" -- bash -lc '
+    set +e
+    for port in $1; do
+      [[ -n "$port" ]] || continue
+      unit="ocvm-hostfwd-${port}.service"
+      sudo -n systemctl disable --now "$unit" 2>/dev/null || true
+      sudo -n rm -f "/etc/systemd/system/${unit}" 2>/dev/null || true
+    done
+    sudo -n systemctl daemon-reload 2>/dev/null || true
+  ' _ "$HOST_TCP_PORTS" || true
+}
+
 enter_session_shell() {
   local vm_name="$1" proj_dir="$2"
+  sanitize_lima_sock_dir
   limactl shell --workdir / "$vm_name" -- bash -lc '
     export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/.config/composer/vendor/bin:/tmp/go/bin:/tmp/pnpm-store:$PATH"
     export CARGO_TARGET_DIR=/tmp/cargo-target
@@ -1589,6 +2266,7 @@ enter_session_shell() {
 
 attach_session() {
   need limactl
+  sanitize_lima_sock_dir
   local proj senv
   proj="$(pwd)"
   senv="$(session_env "$proj")"
@@ -1651,6 +2329,7 @@ attach_session() {
 start_session() {
   need limactl
   need rsync
+  sanitize_lima_sock_dir
   printf "\r[run] Starting OpenCode VM session... |"
   ensure_dirs
   ensure_host_opencode_dirs
@@ -1690,9 +2369,17 @@ start_session() {
       if [[ -f "$old_cfg" ]]; then
         cp -p "$old_cfg" "$old_proj_state/config/opencode/opencode.json"
         cp -p "$old_cfg" "$old_proj_state/config/opencode/.opencode.json"
-        cp -p "$old_cfg" "$(pick_host_cfg)"
+        # Only overwrite host config if old session's version is newer —
+        # the user may have run 'provider add' after the session ended.
+        local _host_cfg
+        _host_cfg="$(pick_host_cfg)"
+        if [[ ! -f "$_host_cfg" ]] || [[ "$old_cfg" -nt "$_host_cfg" ]]; then
+          cp -p "$old_cfg" "$_host_cfg"
+        fi
       fi
 
+      # rsync --update already keeps the newer file in each direction;
+      # host auth.json written by 'provider add' after session end is preserved.
       sync_data_dirs_bidirectional "$HOST_DATA_DIR" "$old_sess_share/xdg-data/opencode" "${DATA_RSYNC_EXCLUDES[@]}"
       sync_data_dirs_bidirectional "$HOST_STATE_DIR" "$old_sess_share/xdg-state/opencode"
       rsync -a "${DATA_RSYNC_EXCLUDES[@]}" "$old_sess_share/xdg-data/opencode/" "$old_proj_state/xdg-data/opencode/"
@@ -1956,6 +2643,7 @@ start_session() {
     if [[ -n "${sess:-}" ]]; then
       if [[ "${OC_SHELL_OK:-}" == "1" ]]; then
         echo "[cleanup] Stopping session VM: $sess $(_ts)"
+        stop_host_port_forwards_in_vm "$sess"
         rm -f "$senv"
         rm -rf "$sess_share"
         limactl stop "$sess" 2>/dev/null || true
@@ -1976,6 +2664,9 @@ start_session() {
 
   echo "[run] Applying firewall policy... $(_ts)"
   apply_policy_in_vm "$sess"
+  if ! setup_host_port_forwards_in_vm "$sess"; then
+    echo "[run] WARNING: localhost forwarding setup failed; use host.lima.internal as fallback" >&2
+  fi
   echo "[run] Firewall policy applied $(_ts)"
 
   # Create symlink so ~/Desktop/opencode-share is accessible from VM user's home
@@ -2011,7 +2702,7 @@ start_session() {
 
   echo "[run] Launching OpenCode inside VM (project: $proj) $(_ts)"
 
-  limactl shell --workdir / "$sess" -- bash -lc '
+  if limactl shell --workdir / "$sess" -- bash -lc '
     set -euo pipefail
     PROJ_DIR="$1"
     SESS_SHARE="$2"
@@ -2103,6 +2794,11 @@ start_session() {
     cd "$PROJ_DIR"
 
     case "$OC_MODE" in
+      shell)
+        echo "[shell] Interactive shell started in session VM."
+        echo "[shell] Exit this shell to return to host terminal."
+        exec bash
+        ;;
       web)
         echo ""
         echo "=============================================="
@@ -2160,7 +2856,11 @@ start_session() {
     rsync -a --exclude="bin/" --exclude="log/" --exclude="tool-output/" "$VM_DATA/opencode/" "$SESS_SHARE/xdg-data/opencode/"
     rsync -a "$VM_STATE/opencode/" "$SESS_SHARE/xdg-state/opencode/"
     echo "[$(date +%T)] In-VM sync complete"
-  ' _ "$proj" "$sess_share" "$SESSION_MODE" "${SESSION_PORT:-0}" "${SESSION_PASSWORD:-}" "${OC_WEB_TUI:-false}" "$(get_host_ip)" && OC_SHELL_OK=1 || true
+  ' _ "$proj" "$sess_share" "$SESSION_MODE" "${SESSION_PORT:-0}" "${SESSION_PASSWORD:-}" "${OC_WEB_TUI:-false}" "$(get_host_ip)"; then
+    if [[ "$SESSION_MODE" != "shell" ]]; then
+    OC_SHELL_OK=1
+    fi
+  fi
 }
 
 ocvm_notify_if_new_version_available "$cmd"
@@ -2172,11 +2872,15 @@ case "$cmd" in
 
   init)
     need limactl
+    sanitize_lima_sock_dir
     cleanup_sessions
     if base_exists; then
       echo "[init] Stopping and deleting existing base VM: $BASE_NAME"
       limactl stop "$BASE_NAME" 2>/dev/null || true
-      limactl delete -f "$BASE_NAME"
+      if ! limactl delete -f "$BASE_NAME"; then
+        sanitize_lima_sock_dir
+        limactl delete -f "$BASE_NAME" 2>/dev/null || true
+      fi
     fi
     # Clean up shared socket dir that Lima's docker-rootful template creates;
     # leftover after VM deletion it confuses limactl into a fatal error.
@@ -2202,18 +2906,34 @@ case "$cmd" in
     ports_cmd "$@"
     ;;
 
+  doctor)
+    doctor_cmd "$@"
+    ;;
+
+  provider)
+    provider_cmd "$@"
+    ;;
+
 
   shell)
     need limactl
     proj="$(pwd)"
     senv="$(session_env "$proj")"
     if [[ ! -f "$senv" ]]; then
-      echo "No running session for this project directory." >&2
-      echo "Start one with: opencode-vm start" >&2
-      exit 1
+      echo "[shell] No running session found. Starting one now..."
+      SESSION_MODE="shell"
+      start_session
+      exit 0
     fi
     # shellcheck disable=SC1090
     source "$senv"
+    if ! is_vm_running "$SESS_NAME"; then
+      echo "[shell] Existing session record found, but VM is not running. Starting a fresh session..."
+      rm -f "$senv"
+      SESSION_MODE="shell"
+      start_session
+      exit 0
+    fi
     echo "[shell] Connecting to session: $SESS_NAME (project: $proj)"
     enter_session_shell "$SESS_NAME" "$proj"
     ;;
@@ -2266,12 +2986,17 @@ Usage:
                                            # provides: web UI, REST API, TUI attach
                                            # --tui: also start TUI in terminal (experimental)
   opencode-vm attach                       # reconnect to a running session VM
-  opencode-vm shell                        # open additional shell into running session VM
+  opencode-vm shell                        # open shell in session VM (auto-starts if missing)
   opencode-vm init                         # create/provision base VM (one-time setup)
   opencode-vm ports show                   # show current firewall policy
   opencode-vm ports host {show|add|rm|set} [PORT...]
+  opencode-vm ports hostfwd {show|enable|disable}
   opencode-vm ports lan tcp {show|add|rm|clear} [IP:PORT...]
   opencode-vm ports lan udp {show|add|rm|clear} [IP:PORT...]
+  opencode-vm doctor [show]                # inspect local sync/auth/model/db state
+  opencode-vm provider list                # list configured providers
+  opencode-vm provider new                 # add new openai-compatible provider (interactive)
+  opencode-vm provider rm <id> [--dry-run] # remove provider from auth/config/model state
   opencode-vm screenshot                   # setup guide for browser screenshot capture
   opencode-vm base                         # shell into base VM
   opencode-vm prune                        # cleanup unused Lima data

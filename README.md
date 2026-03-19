@@ -73,6 +73,8 @@ opencode-vm
 opencode-vm shell
 ```
 
+If no session is running yet, `opencode-vm shell` now starts a fresh session automatically and opens the shell directly.
+
 - Stop/clean old sessions:
 
 ```bash
@@ -120,9 +122,105 @@ Result: model selection/favorites and related preferences persist across:
 
 First run without a local OpenCode setup is supported — missing host directories are created automatically.
 
+You can inspect synced provider/auth/model/database state at any time:
+
+```bash
+opencode-vm doctor
+```
+
+This reports, among other things:
+- providers connected via `/connect` (from `auth.json`),
+- recent/favorite provider+model selections (from `model.json`),
+- provider usage markers found in `opencode.db` message metadata.
+
+## Provider Commands
+
+Provider management is a first-class top-level command — no `doctor` prefix needed:
+
+```bash
+opencode-vm provider list
+opencode-vm provider new                 # interactive wizard
+opencode-vm provider rm <provider-id> [--dry-run]
+```
+
+**Model discovery:** When no `--model` flags are given, `provider add` automatically calls the `/models` endpoint and adds all returned models. If the endpoint is unreachable or returns no models, the provider is **not** added. Pass `--model` flags explicitly to skip auto-discovery. Where available (e.g. LM Studio), the context window size is read from the API and stored automatically.
+
+**`--model` flag** (repeatable) — `id[:name[:context_tokens]]`:
+- `--model gpt-4o` — ID and display name both `gpt-4o`, no context limit stored
+- `--model gpt-4o:GPT-4o` — ID `gpt-4o`, display name `GPT-4o`
+- `--model gpt-4o:GPT-4o:128000` — additionally stores context window of 128k tokens
+
+**`--vision` flag** — marks all models of this provider as supporting image/vision input. This enables the image upload button in OpenCode and allows sending screenshots or images to the model. Required for Playwright/screenshot workflows. The interactive wizard (`provider new`) will ask about this.
+
+**`--reasoning` flag** — enables extended reasoning/thinking for all models (`options.thinking.type: "enabled", budgetTokens: 8192`). OpenCode gates reasoning behavior based on this flag — without it, the model will not use extended thinking even if it supports it. The wizard will ask about this.
+
+> **Note on missing context (`Kontextlimit 0`):** A context limit of 0 means OpenCode skips compaction and overflow protection entirely. For long sessions this can cause API errors when the model's real context window is exceeded. Always set a context limit, either via auto-discovery or `--model id:name:TOKENS`.
+
+**Real world examples:**
+
+```bash
+# 1) Fully interactive wizard (prompts for ID, URL, key, name, then auto-discovers models)
+opencode-vm provider new
+
+# 2) Local LM Studio — auto-discovers models from http://localhost:1234/v1/models
+opencode-vm provider add lmstudio-local \
+    --base-url http://localhost:1234/v1 \
+    --api-key local \
+    --name "LM Studio (host local)"
+
+# 3) Local Ollama — auto-discovers models from http://localhost:11434/v1/models
+opencode-vm provider add ollama-local \
+    --base-url http://localhost:11434/v1 \
+    --api-key local \
+    --name "Ollama (host local)"
+
+# 4) OpenRouter — auto-discovers all available models
+opencode-vm provider add openrouter-custom \
+    --base-url https://openrouter.ai/api/v1 \
+    --api-key sk-or-v1-xxxx \
+    --name "OpenRouter"
+
+# 5) Self-hosted gateway with explicit model list + context limits + vision
+opencode-vm provider add ai-gateway \
+    --base-url https://ai.example.com/v1 \
+    --api-key your-token \
+    --name "Company AI Gateway" \
+    --model "llama-3.1-70b:Llama 3.1 70B:131072" \
+    --model "mistral-7b:Mistral 7B:32768" \
+    --vision
+
+# 6) Safe preview first (auto-discovers but writes nothing)
+opencode-vm provider add myprovider \
+    --base-url https://api.example.com/v1 \
+    --api-key test-key \
+    --dry-run
+
+# 7) Remove a provider (cleans auth, config, model state, db metadata)
+opencode-vm provider rm lmstudio-local --dry-run
+opencode-vm provider rm lmstudio-local
+```
+
+After adding/updating a provider, restart the session so OpenCode reloads config/auth:
+
+```bash
+opencode-vm prune
+opencode-vm start
+```
+
+Backups are created in `~/.opencode-vm/backups/provider-<timestamp>/` before each change.
+
 ## Network Policy Commands
 
 Basic policy is: Your laptop can call the VM, but your VM can only call selected ports on your laptop .. for example to call Ollama or LMStudio.
+
+By default, host ports `1234` (LM Studio) and `11434` (Ollama) are allowed and automatically forwarded inside the VM to `localhost`. That means these work inside the VM without extra setup:
+
+```bash
+curl http://localhost:1234/v1/models
+curl http://localhost:11434/api/tags
+```
+
+Direct host access still works via `host.lima.internal`.
 
 Show policy:
 
@@ -134,6 +232,14 @@ Allow additional host ports from VM:
 
 ```bash
 opencode-vm ports host add 8080
+```
+
+Control localhost forwarding behavior:
+
+```bash
+opencode-vm ports hostfwd show
+opencode-vm ports hostfwd enable
+opencode-vm ports hostfwd disable
 ```
 
 Allow specific LAN target from VM:
@@ -171,7 +277,25 @@ chmod +x "$HOME/bin/opencode-vm"
 
 This creates a symbolic link from your `~/bin` directory to the script in your working copy, allowing you to edit and test changes without reinstalling.
 
-To suppress the automatic update-available hint on every command, set `OCVM_DISABLE_UPDATE_CHECK=1`. To override the upstream URL used for updates and patches, set `OCVM_UPDATE_URL`.
+#### Add `~/bin` to your PATH
+
+If `opencode-vm` is not found after symlinking, make sure your local `~/bin` is in your shell `PATH`.
+
+For macOS default shell (`zsh`):
+
+```bash
+echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+```
+
+For `bash`:
+
+```bash
+echo 'export PATH="$HOME/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+Optional: if you prefer to hide the update-available hint on each command, set `OCVM_DISABLE_UPDATE_CHECK=1`. If you want updates and patch generation to use a different upstream, set `OCVM_UPDATE_URL`.
 
 ## Useful Commands
 
@@ -180,9 +304,14 @@ opencode-vm install      # install/update script to ~/bin
 opencode-vm init         # create/recreate base VM
 opencode-vm start        # start TUI session (same as opencode-vm run)
 opencode-vm web          # start web server session (browser, API, TUI attach)
-opencode-vm shell        # shell into running project session
+opencode-vm shell        # shell into session VM (auto-starts if none is running)
 opencode-vm base         # shell into base VM
 opencode-vm prune        # cleanup sessions, keep base
+opencode-vm ports show   # show host/LAN policy and localhost-forwarding status
+opencode-vm doctor       # inspect synced local auth/model/db state
+opencode-vm doctor provider list
+opencode-vm doctor provider add <id> --base-url <url> --api-key <key> [--name "Display Name"] [--dry-run]
+opencode-vm doctor provider rm <id> [--dry-run]
 opencode-vm update       # update script from upstream
 opencode-vm create-patch # generate a patch submission for upstream
 ```
