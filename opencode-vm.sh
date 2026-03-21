@@ -37,7 +37,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.1.18"
+OCVM_VERSION="0.1.20"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -2735,6 +2735,7 @@ start_session() {
 
   local host_lan_ip
   host_lan_ip="$(get_host_ip)"
+  echo "[run] Host LAN IP: ${host_lan_ip} $(_ts)"
 
   if limactl shell --workdir / "$sess" -- bash -lc '
     set -euo pipefail
