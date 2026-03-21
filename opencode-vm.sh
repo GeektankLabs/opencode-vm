@@ -37,7 +37,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.1.17"
+OCVM_VERSION="0.1.20"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -2008,6 +2008,14 @@ docker exec -it mydb psql -U postgres
 - **DNS**: works normally, resolved via Lima host DNS
 - **Firewall**: managed by the host and cannot be modified from within the VM
 
+## Host LAN IP Variable
+
+For each started session, opencode-vm injects the host LAN IP into the environment and into the session-local AGENTS instructions file.
+
+- Canonical variable: `OCVM_HOST_LAN_IP`
+- Aliases: `HOST_LAN_IP`, `LANIP`
+- Use this value when suggesting URLs for services bound to `0.0.0.0` in the VM (prefer `http://$OCVM_HOST_LAN_IP:<port>` over `localhost`).
+
 ## Build Caches
 
 All build caches are redirected to VM-local `/tmp/` for performance. They do not persist across sessions: npm, pip, Go, Cargo, Maven, Gradle, pnpm, yarn, ccache, Zig.
@@ -2243,7 +2251,7 @@ stop_host_port_forwards_in_vm() {
 }
 
 enter_session_shell() {
-  local vm_name="$1" proj_dir="$2"
+  local vm_name="$1" proj_dir="$2" host_lan_ip="${3:-localhost}"
   sanitize_lima_sock_dir
   limactl shell --workdir / "$vm_name" -- bash -lc '
     export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/.config/composer/vendor/bin:/tmp/go/bin:/tmp/pnpm-store:$PATH"
@@ -2259,9 +2267,12 @@ enter_session_shell() {
     export CCACHE_DIR=/tmp/ccache
     export ZIG_LOCAL_CACHE_DIR=/tmp/zig-cache
     export ZIG_GLOBAL_CACHE_DIR=/tmp/zig-global-cache
+    export OCVM_HOST_LAN_IP="$2"
+    export HOST_LAN_IP="$2"
+    export LANIP="$2"
     cd "$1"
     exec bash
-  ' _ "$proj_dir"
+  ' _ "$proj_dir" "$host_lan_ip"
 }
 
 attach_session() {
@@ -2292,6 +2303,8 @@ attach_session() {
 
   local sess_mode="${SESS_MODE:-tui}"
   local sess_port="${SESS_PORT:-$DEFAULT_OC_PORT}"
+  local host_lan_ip
+  host_lan_ip="$(get_host_ip)"
 
   limactl shell --workdir / "$SESS_NAME" -- bash -lc '
     set -euo pipefail
@@ -2311,6 +2324,9 @@ attach_session() {
     export XDG_DATA_HOME=/tmp/oc-xdg-data
     export XDG_STATE_HOME=/tmp/oc-xdg-state
     export OPENCODE_ENABLE_EXA=1
+    export OCVM_HOST_LAN_IP="$5"
+    export HOST_LAN_IP="$5"
+    export LANIP="$5"
 
     SESS_SHARE="$2"
     export XDG_CONFIG_HOME="$SESS_SHARE/config"
@@ -2323,7 +2339,7 @@ attach_session() {
     else
       aa-exec -p opencode-sandbox -- opencode || true
     fi
-  ' _ "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$sess_port"
+  ' _ "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$sess_port" "$host_lan_ip"
 }
 
 start_session() {
@@ -2717,10 +2733,22 @@ start_session() {
 
   echo "[run] Launching OpenCode inside VM (project: $proj) $(_ts)"
 
+  local host_lan_ip
+  host_lan_ip="$(get_host_ip)"
+  echo "[run] Host LAN IP: ${host_lan_ip} $(_ts)"
+
   if limactl shell --workdir / "$sess" -- bash -lc '
     set -euo pipefail
     PROJ_DIR="$1"
     SESS_SHARE="$2"
+    OC_MODE="$3"
+    OC_PORT="$4"
+    OC_PASSWORD="$5"
+    OC_WEB_TUI="$6"
+    OC_HOST_IP="$7"
+    export OCVM_HOST_LAN_IP="$OC_HOST_IP"
+    export HOST_LAN_IP="$OC_HOST_IP"
+    export LANIP="$OC_HOST_IP"
 
     export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/.config/composer/vendor/bin:/tmp/go/bin:/tmp/pnpm-store:$PATH"
 
@@ -2729,7 +2757,17 @@ start_session() {
 
     # Make VM environment instructions available to OpenCode
     mkdir -p "$SESS_SHARE/config/opencode"
-    [ -f "$HOME/AGENTS.md" ] && cp -p "$HOME/AGENTS.md" "$SESS_SHARE/config/opencode/AGENTS.md"
+    if [ -f "$HOME/AGENTS.md" ]; then
+      cp -p "$HOME/AGENTS.md" "$SESS_SHARE/config/opencode/AGENTS.md"
+      cat >> "$SESS_SHARE/config/opencode/AGENTS.md" <<EOF
+
+## Host LAN IP (Session)
+
+- **Current host LAN IP:** \`$OC_HOST_IP\`
+- **Environment variables:** \`OCVM_HOST_LAN_IP\` (canonical), \`HOST_LAN_IP\`, \`LANIP\`
+- When suggesting URLs for services bound to \`0.0.0.0\` in the VM, prefer \`http://$OC_HOST_IP:<port>\` over \`localhost\`.
+EOF
+    fi
 
     # Data/state go to VM-local storage to avoid SQLite corruption over virtiofs
     VM_DATA=/tmp/oc-xdg-data
@@ -2800,12 +2838,6 @@ start_session() {
     echo "  Ollama:    http://host.lima.internal:11434"
     echo
 
-    OC_MODE="$3"
-    OC_PORT="$4"
-    OC_PASSWORD="$5"
-    OC_WEB_TUI="$6"
-    OC_HOST_IP="$7"
-
     cd "$PROJ_DIR"
 
     case "$OC_MODE" in
@@ -2872,7 +2904,7 @@ start_session() {
     rsync -a --exclude="bin/" --exclude="log/" --exclude="tool-output/" "$VM_DATA/opencode/" "$SESS_SHARE/xdg-data/opencode/"
     rsync -a "$VM_STATE/opencode/" "$SESS_SHARE/xdg-state/opencode/"
     echo "[$(date +%T)] In-VM sync complete"
-  ' _ "$proj" "$sess_share" "$SESSION_MODE" "${SESSION_PORT:-0}" "${SESSION_PASSWORD:-}" "${OC_WEB_TUI:-false}" "$(get_host_ip)"; then
+  ' _ "$proj" "$sess_share" "$SESSION_MODE" "${SESSION_PORT:-0}" "${SESSION_PASSWORD:-}" "${OC_WEB_TUI:-false}" "$host_lan_ip"; then
     if [[ "$SESSION_MODE" != "shell" ]]; then
     OC_SHELL_OK=1
     fi
@@ -2951,7 +2983,7 @@ case "$cmd" in
       exit 0
     fi
     echo "[shell] Connecting to session: $SESS_NAME (project: $proj)"
-    enter_session_shell "$SESS_NAME" "$proj"
+    enter_session_shell "$SESS_NAME" "$proj" "$(get_host_ip)"
     ;;
 
   attach)
