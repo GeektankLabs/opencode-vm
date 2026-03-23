@@ -37,7 +37,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.1.20"
+OCVM_VERSION="0.1.21"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -1617,7 +1617,9 @@ provision_base() {
   # slow Docker readiness probe.  We check Docker readiness ourselves below,
   # which avoids the ~10 min polling loop Lima's optional probe causes.
   local tmpl_file
-  tmpl_file=$(mktemp /tmp/ocvm-template-XXXXXX.yaml)
+  tmpl_file=$(mktemp /tmp/ocvm-template-XXXXXX)
+  mv "$tmpl_file" "${tmpl_file}.yaml"
+  tmpl_file="${tmpl_file}.yaml"
   limactl tmpl yq 'template:docker-rootful' 'del(.probes) | del(.param)' > "$tmpl_file"
 
   limactl start --cpus 6 --memory 8 --name "$BASE_NAME" --vm-type vz --mount-none --mount-type virtiofs --timeout 20m --tty=false "$tmpl_file" || {
