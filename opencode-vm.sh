@@ -37,7 +37,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.1.21"
+OCVM_VERSION="0.1.22"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -2253,7 +2253,7 @@ stop_host_port_forwards_in_vm() {
 }
 
 enter_session_shell() {
-  local vm_name="$1" proj_dir="$2" host_lan_ip="${3:-localhost}"
+  local vm_name="$1" proj_dir="$2" host_lan_ip="${3:-localhost}" sess_share="${4:-}"
   sanitize_lima_sock_dir
   limactl shell --workdir / "$vm_name" -- bash -lc '
     export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/.config/composer/vendor/bin:/tmp/go/bin:/tmp/pnpm-store:$PATH"
@@ -2272,9 +2272,28 @@ enter_session_shell() {
     export OCVM_HOST_LAN_IP="$2"
     export HOST_LAN_IP="$2"
     export LANIP="$2"
+
+    # Set XDG dirs to match session environment (same as start_session)
+    SESS_SHARE="$3"
+    if [ -n "$SESS_SHARE" ] && [ -d "$SESS_SHARE" ]; then
+      export XDG_CONFIG_HOME="$SESS_SHARE/config"
+      export XDG_DATA_HOME=/tmp/oc-xdg-data
+      export XDG_STATE_HOME=/tmp/oc-xdg-state
+      export OPENCODE_ENABLE_EXA=1
+    fi
+
     cd "$1"
-    exec bash
-  ' _ "$proj_dir" "$host_lan_ip"
+    bash
+
+    # Sync VM-local data back to session share after shell exits
+    if [ -n "$SESS_SHARE" ] && [ -d "$SESS_SHARE" ]; then
+      echo "[shell] Syncing session data back to host..."
+      rsync -a --exclude="bin/" --exclude="log/" --exclude="tool-output/" \
+        /tmp/oc-xdg-data/opencode/ "$SESS_SHARE/xdg-data/opencode/" 2>/dev/null || true
+      rsync -a /tmp/oc-xdg-state/opencode/ "$SESS_SHARE/xdg-state/opencode/" 2>/dev/null || true
+      echo "[shell] Sync complete"
+    fi
+  ' _ "$proj_dir" "$host_lan_ip" "$sess_share"
 }
 
 attach_session() {
@@ -2332,6 +2351,8 @@ attach_session() {
 
     SESS_SHARE="$2"
     export XDG_CONFIG_HOME="$SESS_SHARE/config"
+    export XDG_DATA_HOME=/tmp/oc-xdg-data
+    export XDG_STATE_HOME=/tmp/oc-xdg-state
 
     cd "$1"
 
@@ -2341,6 +2362,13 @@ attach_session() {
     else
       aa-exec -p opencode-sandbox -- opencode || true
     fi
+
+    # Sync VM-local data back to session share so host cleanup picks it up
+    echo "[attach] Syncing session data back to host..."
+    rsync -a --exclude="bin/" --exclude="log/" --exclude="tool-output/" \
+      /tmp/oc-xdg-data/opencode/ "$SESS_SHARE/xdg-data/opencode/" 2>/dev/null || true
+    rsync -a /tmp/oc-xdg-state/opencode/ "$SESS_SHARE/xdg-state/opencode/" 2>/dev/null || true
+    echo "[attach] Sync complete"
   ' _ "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$sess_port" "$host_lan_ip"
 }
 
@@ -2846,7 +2874,7 @@ EOF
       shell)
         echo "[shell] Interactive shell started in session VM."
         echo "[shell] Exit this shell to return to host terminal."
-        exec bash
+        bash
         ;;
       web)
         echo ""
@@ -2985,7 +3013,7 @@ case "$cmd" in
       exit 0
     fi
     echo "[shell] Connecting to session: $SESS_NAME (project: $proj)"
-    enter_session_shell "$SESS_NAME" "$proj" "$(get_host_ip)"
+    enter_session_shell "$SESS_NAME" "$proj" "$(get_host_ip)" "$(session_share_dir "$proj")"
     ;;
 
   attach)
