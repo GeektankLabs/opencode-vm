@@ -11,7 +11,7 @@ OpenCode runs in a VM, not directly on host.
 
 - System Isolation 
     - You share just project files, not your personal system & user space.
-    - OpenCode cannot commit to git, so you have final control over your project files.
+    - OpenCode cannot commit to origin git, so you have final control over your project.
 
 - Network Isolation
     - The AI can access the internet to load rescources and research.
