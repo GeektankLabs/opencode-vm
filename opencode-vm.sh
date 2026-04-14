@@ -46,7 +46,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.3.1"
+OCVM_VERSION="0.3.2"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -3892,14 +3892,11 @@ case "$cmd" in
     # Parse init-local flags
     _with_ecc=0
     _init_ecc_ref=""
-    _with_skills=""
     while [[ "$#" -gt 0 ]]; do
       case "$1" in
         --with-ecc) _with_ecc=1 ;;
         --ecc-ref) shift; _init_ecc_ref="${1:-}" ;;
         --ecc-ref=*) _init_ecc_ref="${1#*=}" ;;
-        --with-skills) _with_skills="ecc-auto" ;;
-        --with-skills=*) _with_skills="${1#*=}" ;;
         --no-ecc)
           ecc_load
           ECC_ENABLED=0
@@ -3917,13 +3914,6 @@ case "$cmd" in
       ecc_save
       ecc_clone_or_update || {
         echo "[init] ECC clone failed — aborting before touching base VM." >&2
-        exit 1
-      }
-    fi
-
-    if [[ -n "$_with_skills" ]]; then
-      skills_pkg_on "$_with_skills" || {
-        echo "[init] Enabling skills package '$_with_skills' failed." >&2
         exit 1
       }
     fi
@@ -4045,11 +4035,11 @@ Usage:
                                            # --tui: also start TUI in terminal (experimental)
   opencode-vm attach                       # reconnect to a running session VM
   opencode-vm shell                        # open shell in session VM (auto-starts if missing)
-  opencode-vm init [--with-ecc [--ecc-ref REF]] [--with-skills[=ecc-auto|ecc-all]]
+  opencode-vm init [--with-ecc [--ecc-ref REF]]
                                            # create/provision base VM (one-time setup)
                                            # --with-ecc: also install the ECC plugin pack
-                                           # --with-skills: enable a skills package
-                                           #   (default ecc-auto; language-filtered subset)
+                                           #   (skill packages stay off by default; enable later
+                                           #    via 'opencode-vm skills on <pkg>')
   opencode-vm ecc {status|enable|disable|update|mcp|learn}
                                            # manage the optional ECC integration
                                            # learn status|clear: inspect/reset per-project learnings

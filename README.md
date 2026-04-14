@@ -163,12 +163,7 @@ opencode-vm skills list                  # preview what would mount for cwd (no 
 opencode-vm skills list /path/to/other   # preview for another project path
 ```
 
-Convenience during base-VM setup:
-
-```bash
-opencode-vm init --with-ecc --with-skills              # defaults to ecc-auto
-opencode-vm init --with-ecc --with-skills=ecc-all      # explicit
-```
+`opencode-vm init --with-ecc` prepares the skill sources on disk but leaves every package disabled — flip them on later with `opencode-vm skills on <pkg>` whenever you want.
 
 `opencode-vm doctor` shows active packages + per-package skill count for the current working directory, plus an estimated token total.
 
