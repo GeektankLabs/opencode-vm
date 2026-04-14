@@ -46,7 +46,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.3.2"
+OCVM_VERSION="0.3.3"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -2363,8 +2363,11 @@ nvm install 22
 nvm alias default 22
 
 # Install Playwright MCP globally + Chromium browser for headless UI testing
+# Pin to cdn.playwright.dev — the default playwright.azureedge.net mirror has
+# been observed throttling to ~100 KB/s, turning the 183 MB chromium download
+# into a 30-min stall. cdn.playwright.dev serves the same artifacts at full speed.
 npm install -g @playwright/mcp@latest
-npx -y playwright install chromium
+PLAYWRIGHT_DOWNLOAD_HOST=https://cdn.playwright.dev npx -y playwright install chromium
 
 # Create NVM-version-independent symlink so playwright-mcp stays available
 # even when the agent switches Node versions with nvm use
