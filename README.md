@@ -81,6 +81,97 @@ If no session is running yet, `opencode-vm shell` now starts a fresh session aut
 opencode-vm prune
 ```
 
+## ECC Mode (optional)
+
+Opencode-vm can optionally install the [everything-claude-code](https://github.com/affaan-m/everything-claude-code) plugin pack — a community collection of agents, commands, prompts, and MCP servers — into every session.
+
+**This is fully opt-in.** Without the `--with-ecc` flag, nothing changes.
+
+Enable during base VM setup:
+
+```bash
+opencode-vm init --with-ecc                    # latest main
+opencode-vm init --with-ecc --ecc-ref v1.2.3   # pinned ref
+```
+
+This clones the ECC repo into `~/.opencode-vm/ecc/` on the host. On every `opencode-vm start` with ECC enabled, the `.opencode/` payload (commands, agents, plugins, tools) is copied into the session's config directory.
+
+Manage ECC after install:
+
+```bash
+opencode-vm ecc status           # show enabled state, ref, commit, counts
+opencode-vm ecc update           # pull latest
+opencode-vm ecc update v1.3.0    # switch to a different ref
+opencode-vm ecc disable          # stop loading ECC into new sessions
+opencode-vm ecc mcp on           # enable ECC MCP server pack
+opencode-vm ecc mcp off          # disable MCP pack (plugin payload stays)
+```
+
+During `opencode-vm provider new`, if ECC is enabled you'll be prompted to enable the MCP pack (GitHub, Context7, Exa, Playwright, etc.). You can also enable it standalone via `opencode-vm ecc mcp on`.
+
+### Coding rules (auto-inject)
+
+When ECC is enabled, opencode-vm auto-detects the languages of your project (via `go.mod`, `package.json`, `Cargo.toml`, `pyproject.toml`, `pom.xml`, etc.) and appends the matching per-language rule sets from ECC's `rules/` directory into the session's `AGENTS.md`. Covers ~15 languages; `common/` rules are always included.
+
+**Monorepo support (`mcrepo.yaml`):** if the project root contains an `mcrepo.yaml` file with a `repos:` list, each listed repo's `name` is treated as a subdirectory and scanned individually in addition to the root. Results are merged. Useful for polyglot monorepos where language markers live in per-service folders rather than at the top level.
+
+No configuration needed — happens automatically on every `opencode-vm start` while ECC is on. Token cost is small (≈5k for a 3-language project, negligible relative to base context).
+
+`opencode-vm doctor` lists the detected languages and the rule files that would be applied for the current working directory.
+
+### Persistent learning (per-project)
+
+ECC's `continuous-learning-v2` skill (commands `/learn` and `/instinct-status`) builds up a per-project store of patterns, best practices, and snippets the agent has picked up during your sessions. With ECC enabled, opencode-vm automatically persists this store across sessions:
+
+- Each project's learnings live under `~/.opencode-vm/project-state/<hash>/homunculus/` on the host.
+- On `opencode-vm start`, the store is mounted into the session VM and linked into ECC's expected path (`~/.claude/homunculus/projects/<hash>` in the VM).
+- On session end, the store is rsynced back to the host automatically.
+- Different projects stay isolated (no cross-project bleed).
+- Global instincts (not project-scoped) remain ephemeral for v1.
+
+Inspect or reset:
+
+```bash
+opencode-vm ecc learn status          # stats for the current project
+opencode-vm ecc learn status /path    # stats for a specific project
+opencode-vm ecc learn clear           # wipe learnings for the current project
+```
+
+`opencode-vm doctor` also prints a summary of learnings for the current working directory.
+
+## Skills (opt-in)
+
+opencode-vm has a top-level skills subsystem separate from the ECC integration. In v0.3.0, ECC provides the skill catalogue, but the CLI surface (`opencode-vm skills ...`) is designed to host additional skill sources (your own packs, team packs, other plugin bundles) in future releases without breaking changes.
+
+The mental model is **packages**: you turn named bundles on or off. Two packages ship today:
+
+| Package | What it mounts | Approx. token cost |
+|---|---|---|
+| `ecc-auto` | Universal skills + language-specific skills matching your project (≈30) | +2–4k tokens |
+| `ecc-all`  | Every ECC skill (~180) | +10–15k tokens |
+
+`ecc-auto` and `ecc-all` are mutually exclusive (enabling one auto-disables the other). Both require ECC enabled (`opencode-vm init --with-ecc`).
+
+**Why opt-in?** Each skill adds ~60–90 tokens of frontmatter to every new chat, whether you use it or not. `ecc-all` alone can push 10–15k tokens of pure menu noise — fine on a 200k-context remote model, painful on a 4k–32k local model.
+
+```bash
+opencode-vm skills                       # status (alias)
+opencode-vm skills on ecc-auto           # enable the language-filtered package
+opencode-vm skills on ecc-all            # enable everything (prints token warning)
+opencode-vm skills off ecc-auto          # disable
+opencode-vm skills list                  # preview what would mount for cwd (no VM touch)
+opencode-vm skills list /path/to/other   # preview for another project path
+```
+
+Convenience during base-VM setup:
+
+```bash
+opencode-vm init --with-ecc --with-skills              # defaults to ecc-auto
+opencode-vm init --with-ecc --with-skills=ecc-all      # explicit
+```
+
+`opencode-vm doctor` shows active packages + per-package skill count for the current working directory, plus an estimated token total.
+
 ## Web Mode
 
 Instead of running OpenCode as a terminal TUI inside the VM, you can start it as a web server. This gives you browser-based access — including from your phone or tablet on the same network.
@@ -302,6 +393,9 @@ Optional: if you prefer to hide the update-available hint on each command, set `
 ```bash
 opencode-vm install      # install/update script to ~/bin
 opencode-vm init         # create/recreate base VM
+opencode-vm init --with-ecc                # optional: install the ECC plugin pack
+opencode-vm ecc {status|enable|disable|update|mcp}
+                          # manage the optional ECC integration
 opencode-vm start        # start TUI session (same as opencode-vm run)
 opencode-vm web          # start web server session (browser, API, TUI attach)
 opencode-vm shell        # shell into session VM (auto-starts if none is running)

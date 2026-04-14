@@ -24,20 +24,29 @@ PROJECT_STATE_DIR="$SHARE_ROOT/project-state"
 # Policy persistiert am Host (wird pro Session in der VM angewendet)
 POLICY_ENV="$SHARE_ROOT/policy.env"
 
+# ECC (everything-claude-code) opt-in integration
+ECC_ENV="$SHARE_ROOT/ecc.env"
+ECC_DIR="$SHARE_ROOT/ecc"
+DEFAULT_ECC_REPO="https://github.com/affaan-m/everything-claude-code.git"
+DEFAULT_ECC_REF="main"
+
+# Skills subsystem (top-level, source-agnostic; v0.3.0 ships ECC packages only)
+SKILLS_ENV="$SHARE_ROOT/skills.env"
+
 # Excludes for xdg-data rsync: bin/ (375M, 28k files — downloaded on demand),
 # log/ (old session logs), tool-output/ (previous session artifacts)
 DATA_RSYNC_EXCLUDES=(--exclude='bin/' --exclude='log/' --exclude='tool-output/')
 
 # Defaults
 DEFAULT_HOST_TCP_PORTS="1234 11434"   # LM Studio + Ollama
-DEFAULT_LAN_ALLOW_TCP=""              # z.B. "192.168.178.10:443 10.0.0.5:22"
-DEFAULT_LAN_ALLOW_UDP=""              # z.B. "192.168.178.20:53"
+DEFAULT_LAN_ALLOW_TCP=""              # z.B. "192.168.178.10:443 10.0.0.5:22" (ohne :PORT = alle TCP-Ports dieser IP)
+DEFAULT_LAN_ALLOW_UDP=""              # z.B. "192.168.178.20:53"              (ohne :PORT = alle UDP-Ports dieser IP)
 DEFAULT_HOST_LOCALHOST_FORWARD="yes"  # expose HOST_TCP_PORTS inside VM as localhost:PORT
 DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.1.23"
+OCVM_VERSION="0.3.1"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -384,6 +393,525 @@ list_rm() {
 }
 
 # ---------------------------------------------------------------------------
+# ECC (everything-claude-code) integration — fully opt-in
+# ---------------------------------------------------------------------------
+
+ecc_load() {
+  ECC_ENABLED=""
+  ECC_REPO=""
+  ECC_REF=""
+  ECC_COMMIT=""
+  ECC_MCP_PACK=""
+  if [[ -f "$ECC_ENV" ]]; then
+    # shellcheck disable=SC1090
+    source "$ECC_ENV"
+  fi
+  : "${ECC_REPO:=$DEFAULT_ECC_REPO}"
+  : "${ECC_REF:=$DEFAULT_ECC_REF}"
+}
+
+ecc_save() {
+  mkdir -p "$SHARE_ROOT"
+  cat > "$ECC_ENV" <<EOF
+# opencode-vm ECC integration (host)
+ECC_ENABLED="${ECC_ENABLED:-0}"
+ECC_REPO="${ECC_REPO:-$DEFAULT_ECC_REPO}"
+ECC_REF="${ECC_REF:-$DEFAULT_ECC_REF}"
+ECC_COMMIT="${ECC_COMMIT:-}"
+ECC_MCP_PACK="${ECC_MCP_PACK:-0}"
+EOF
+}
+
+ecc_enabled() {
+  ecc_load
+  [[ "${ECC_ENABLED:-0}" == "1" ]]
+}
+
+ecc_clone_or_update() {
+  need git
+  ecc_load
+  mkdir -p "$SHARE_ROOT"
+  if [[ -d "$ECC_DIR/.git" ]]; then
+    echo "[ecc] Updating clone at $ECC_DIR (ref: $ECC_REF)"
+    git -C "$ECC_DIR" fetch --depth=1 origin "$ECC_REF" >/dev/null 2>&1 || {
+      echo "[ecc] Fetch failed; leaving existing clone in place." >&2
+      return 1
+    }
+    git -C "$ECC_DIR" checkout -q "FETCH_HEAD" || {
+      echo "[ecc] Checkout failed." >&2
+      return 1
+    }
+  else
+    echo "[ecc] Cloning $ECC_REPO (ref: $ECC_REF) into $ECC_DIR"
+    rm -rf "$ECC_DIR"
+    git clone --depth=1 --branch "$ECC_REF" "$ECC_REPO" "$ECC_DIR" >/dev/null 2>&1 || {
+      echo "[ecc] Clone failed (repo/ref: $ECC_REPO @ $ECC_REF)" >&2
+      return 1
+    }
+  fi
+  ECC_COMMIT="$(git -C "$ECC_DIR" rev-parse --short HEAD 2>/dev/null || true)"
+  ecc_save
+  echo "[ecc] Ready at commit ${ECC_COMMIT:-unknown}"
+}
+
+# Copy ECC's .opencode/ payload into the session's config share.
+# Called from start_session when ECC_ENABLED=1.
+ecc_apply_to_session() {
+  local sess_share="$1"
+  ecc_load
+  [[ "${ECC_ENABLED:-0}" == "1" ]] || return 0
+  [[ -d "$ECC_DIR/.opencode" ]] || {
+    echo "[ecc] Clone missing .opencode/ — run: opencode-vm init --with-ecc" >&2
+    return 0
+  }
+
+  local dest="$sess_share/config/opencode"
+  mkdir -p "$dest"
+
+  # Copy payload subdirs that OpenCode understands.
+  # Skip opencode.json (owned by user/session) and node_modules (rebuilt in-VM).
+  local sub
+  for sub in commands instructions plugins prompts tools; do
+    if [[ -d "$ECC_DIR/.opencode/$sub" ]]; then
+      rsync -a --delete \
+        --exclude 'node_modules' \
+        "$ECC_DIR/.opencode/$sub/" "$dest/$sub/"
+    fi
+  done
+
+  # Copy plugin entry files (index.ts, package.json, tsconfig.json) if present.
+  local f
+  for f in index.ts package.json tsconfig.json; do
+    [[ -f "$ECC_DIR/.opencode/$f" ]] && cp -p "$ECC_DIR/.opencode/$f" "$dest/$f"
+  done
+
+  # Write a marker so doctor / debugging can see what was applied.
+  cat > "$dest/.ecc-applied" <<EOF
+repo=$ECC_REPO
+ref=$ECC_REF
+commit=${ECC_COMMIT:-unknown}
+applied=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+
+  echo "[ecc] Applied plugin payload to session config (commit ${ECC_COMMIT:-unknown})"
+}
+
+# Merge ECC's MCP pack into the session's opencode.json when the user opted in.
+# Called from start_session after the existing jq overlay.
+ecc_apply_mcp_pack() {
+  local sess_cfg="$1"
+  ecc_load
+  [[ "${ECC_ENABLED:-0}" == "1" ]] || return 0
+  [[ "${ECC_MCP_PACK:-0}" == "1" ]] || return 0
+
+  local pack_file="$ECC_DIR/mcp-configs/mcp-servers.json"
+  [[ -f "$pack_file" ]] || {
+    echo "[ecc] MCP pack requested but $pack_file not found." >&2
+    return 0
+  }
+  command -v jq >/dev/null 2>&1 || {
+    echo "[ecc] jq missing; skipping MCP pack merge." >&2
+    return 0
+  }
+
+  local tmp_cfg
+  tmp_cfg="$(mktemp)"
+  # Merge: existing session config wins on conflict, pack fills gaps.
+  if jq -s '.[0] as $pack | .[1] as $cfg | $cfg * {"mcp": ($pack.mcp // $pack.mcpServers // {}) + ($cfg.mcp // {})}' \
+       "$pack_file" "$sess_cfg" > "$tmp_cfg"; then
+    mv "$tmp_cfg" "$sess_cfg"
+    echo "[ecc] Merged MCP pack into session config"
+  else
+    rm -f "$tmp_cfg"
+    echo "[ecc] MCP pack merge failed; session config unchanged." >&2
+  fi
+}
+
+# 12-char sha256 hash of a project path — matches ECC's project ID scheme
+# so the in-VM symlink name (~/.claude/homunculus/projects/<hash>) resolves
+# correctly against ECC's lookups.
+ecc_compute_project_hash() {
+  local proj="$1"
+  printf '%s' "$proj" | shasum -a 256 | cut -c1-12
+}
+
+# Seed the session-share homunculus dir from persistent project state.
+# Called from start_session only when ECC is enabled.
+ecc_seed_homunculus() {
+  local proj_state="$1"
+  local sess_share="$2"
+  mkdir -p "$proj_state/homunculus" "$sess_share/homunculus"
+  rsync -a "$proj_state/homunculus/" "$sess_share/homunculus/"
+}
+
+# Create the ~/.claude/homunculus/projects/<hash> symlink inside the running
+# session VM, pointing at the mounted session-share homunculus dir.
+ecc_link_homunculus_in_vm() {
+  local sess_name="$1"
+  local sess_share="$2"
+  local ecc_hash="$3"
+  limactl shell --workdir / "$sess_name" -- bash -lc "
+    set -e
+    mkdir -p \"\$HOME/.claude/homunculus/projects\"
+    ln -sfn '$sess_share/homunculus' \"\$HOME/.claude/homunculus/projects/$ecc_hash\"
+  " 2>/dev/null || echo "[ecc] Warning: failed to create homunculus symlink in VM" >&2
+}
+
+# Sync session-share homunculus back to persistent project state on session end.
+ecc_sync_homunculus_back() {
+  local sess_share="$1"
+  local proj_state="$2"
+  [[ -d "$sess_share/homunculus" ]] || return 0
+  mkdir -p "$proj_state/homunculus"
+  rsync -a "$sess_share/homunculus/" "$proj_state/homunculus/"
+}
+
+# ---------------------------------------------------------------------------
+# Project language detector — shared by Rules and Skills
+# ---------------------------------------------------------------------------
+
+# Emits a space-separated list of language slugs that match ECC's rules/<lang>/
+# directory names. `common` is always appended. Reads only project root +
+# first-level subdirs for speed; no recursion into node_modules / vendor / etc.
+detect_project_languages() {
+  local proj="$1"
+  local langs=""
+  _add() { case " $langs " in *" $1 "*) ;; *) langs="$langs $1" ;; esac; }
+
+  # Scan a single directory's root for language markers.
+  _scan_one_dir() {
+    local d="$1"
+    [[ -d "$d" ]] || return 0
+    if [[ -f "$d/package.json" || -f "$d/tsconfig.json" ]]; then
+      _add typescript
+    fi
+    [[ -f "$d/go.mod" ]] && _add golang
+    [[ -f "$d/Cargo.toml" ]] && _add rust
+    if [[ -f "$d/requirements.txt" || -f "$d/pyproject.toml" || -f "$d/setup.py" ]]; then
+      _add python
+    fi
+    [[ -f "$d/composer.json" ]] && _add php
+    if [[ -f "$d/pom.xml" || -f "$d/build.gradle" ]]; then
+      _add java
+    fi
+    [[ -f "$d/build.gradle.kts" ]] && _add kotlin
+    [[ -f "$d/Package.swift" ]] && _add swift
+    if ls "$d"/*.csproj "$d"/*.sln >/dev/null 2>&1; then
+      _add csharp
+    fi
+    [[ -f "$d/CMakeLists.txt" ]] && _add cpp
+    [[ -f "$d/pubspec.yaml" ]] && _add dart
+    if [[ -f "$d/index.html" || -f "$d/tailwind.config.js" || -f "$d/tailwind.config.ts" ]]; then
+      _add web
+    fi
+  }
+
+  # Always scan the root project dir.
+  _scan_one_dir "$proj"
+
+  # If mcrepo.yaml exists, scan each listed repo subdirectory as well.
+  # Parses `name:` entries under a top-level `repos:` block — no yq dependency.
+  if [[ -f "$proj/mcrepo.yaml" ]]; then
+    local repo_name
+    while IFS= read -r repo_name; do
+      [[ -n "$repo_name" ]] || continue
+      _scan_one_dir "$proj/$repo_name"
+    done < <(awk '
+      /^repos:[[:space:]]*$/        { in_repos = 1; next }
+      in_repos && /^[^[:space:]-]/  { in_repos = 0 }
+      in_repos && /name:[[:space:]]*/ {
+        sub(/.*name:[[:space:]]*/, "")
+        gsub(/["'\'']/, "")
+        sub(/[[:space:]]*#.*$/, "")
+        gsub(/[[:space:]]+$/, "")
+        if (length($0) > 0) print $0
+      }
+    ' "$proj/mcrepo.yaml")
+  fi
+
+  _add common
+  echo "${langs# }"
+  unset -f _add _scan_one_dir
+}
+
+# ---------------------------------------------------------------------------
+# Rules auto-inject (ECC-gated) — appends per-language rules to session AGENTS.md
+# ---------------------------------------------------------------------------
+
+# Stage ECC rules matching detected languages into a separate sidecar file.
+# Host-side: writes to $sess_share/config/opencode/AGENTS.ecc-rules.md — the
+# VM-side AGENTS.md composition block then appends it after its own content,
+# so this doesn't get overwritten by the VM's cp -p of $HOME/AGENTS.md.
+ecc_inject_rules() {
+  local proj="$1"
+  local sess_share="$2"
+  ecc_enabled || return 0
+  [[ -d "$ECC_DIR/rules" ]] || return 0
+
+  local langs
+  langs="$(detect_project_languages "$proj")"
+  [[ -n "$langs" ]] || return 0
+
+  local sidecar="$sess_share/config/opencode/AGENTS.ecc-rules.md"
+  mkdir -p "$(dirname "$sidecar")"
+
+  {
+    echo ""
+    echo "## ECC Rules (auto-injected: $langs)"
+    echo ""
+    local lang
+    for lang in $langs; do
+      local dir="$ECC_DIR/rules/$lang"
+      [[ -d "$dir" ]] || continue
+      local f
+      for f in "$dir"/*.md; do
+        [[ -f "$f" ]] || continue
+        echo "<!-- rules/$lang/$(basename "$f") -->"
+        cat "$f"
+        echo ""
+      done
+    done
+  } > "$sidecar"
+
+  # Cache detected languages per session (reused by skills mount + doctor)
+  echo "$langs" > "$sess_share/ecc-langs"
+  echo "[ecc] Rules prepared for: $langs"
+}
+
+# ---------------------------------------------------------------------------
+# Skills subsystem — package-based, source-agnostic
+# ---------------------------------------------------------------------------
+
+skills_load() {
+  SKILLS_PACKAGES=""
+  if [[ -f "$SKILLS_ENV" ]]; then
+    # shellcheck disable=SC1090
+    source "$SKILLS_ENV"
+  fi
+  return 0
+}
+
+skills_save() {
+  mkdir -p "$SHARE_ROOT"
+  cat > "$SKILLS_ENV" <<EOF
+# opencode-vm skills subsystem
+# space-separated list of active package names
+SKILLS_PACKAGES="${SKILLS_PACKAGES:-}"
+EOF
+}
+
+skills_pkg_is_active() {
+  skills_load
+  case " ${SKILLS_PACKAGES:-} " in *" $1 "*) return 0 ;; *) return 1 ;; esac
+}
+
+# Internal: remove $1 from SKILLS_PACKAGES (no save).
+_skills_pkg_drop() {
+  local pkg="$1" new=""
+  local p
+  for p in ${SKILLS_PACKAGES:-}; do
+    [[ "$p" == "$pkg" ]] || new="$new $p"
+  done
+  SKILLS_PACKAGES="${new# }"
+}
+
+skills_pkg_on() {
+  local pkg="$1"
+  skills_load
+  case "$pkg" in
+    ecc-auto|ecc-all)
+      ecc_enabled || {
+        echo "[skills] '$pkg' requires ECC. Run: opencode-vm init --with-ecc first." >&2
+        return 2
+      }
+      # Mutual exclusion: ecc-auto vs ecc-all
+      if [[ "$pkg" == "ecc-auto" ]] && skills_pkg_is_active ecc-all; then
+        _skills_pkg_drop ecc-all
+        echo "[skills] Disabled 'ecc-all' (superseded by 'ecc-auto')."
+      elif [[ "$pkg" == "ecc-all" ]] && skills_pkg_is_active ecc-auto; then
+        _skills_pkg_drop ecc-auto
+        echo "[skills] Disabled 'ecc-auto' (superseded by 'ecc-all')."
+      fi
+      ;;
+    *)
+      echo "[skills] Unknown package: '$pkg'. Available: ecc-auto, ecc-all." >&2
+      return 2 ;;
+  esac
+
+  if skills_pkg_is_active "$pkg"; then
+    echo "[skills] '$pkg' is already active."
+  else
+    SKILLS_PACKAGES="${SKILLS_PACKAGES:+$SKILLS_PACKAGES }$pkg"
+    skills_save
+    echo "[skills] Enabled '$pkg'. Restart session to apply."
+    if [[ "$pkg" == "ecc-all" ]]; then
+      echo "[skills] WARNING: ecc-all mounts ~180 skills (~10–15k tokens of frontmatter)."
+      echo "[skills]          Suitable only for 128k+ context models."
+    fi
+  fi
+}
+
+skills_pkg_off() {
+  local pkg="$1"
+  skills_load
+  if skills_pkg_is_active "$pkg"; then
+    _skills_pkg_drop "$pkg"
+    skills_save
+    echo "[skills] Disabled '$pkg'. Restart session to apply."
+  else
+    echo "[skills] '$pkg' is not active."
+  fi
+}
+
+# Universal whitelist (applied to any ECC-style skill source)
+_skills_universal_whitelist() {
+  cat <<'EOF'
+coding-standards
+git-workflow
+code-tour
+codebase-onboarding
+e2e-testing
+exa-search
+deep-research
+documentation-lookup
+docker-patterns
+database-migrations
+deployment-patterns
+context-budget
+claude-api
+architecture-decision-records
+iterative-retrieval
+agent-eval
+eval-harness
+api-design
+mcp-server-patterns
+EOF
+}
+
+# Per-language prefix whitelist
+# Usage: _skills_lang_prefixes <lang>  -> prints space-separated prefixes
+_skills_lang_prefixes() {
+  case "$1" in
+    typescript) echo "frontend- backend- bun-runtime react-" ;;
+    golang)     echo "golang-" ;;
+    python)     echo "django- python-" ;;
+    php)        echo "laravel-" ;;
+    java)       echo "java- jpa- hexagonal-architecture" ;;
+    kotlin)     echo "kotlin- android-clean-architecture compose-multiplatform-patterns" ;;
+    swift)      echo "foundation-models-on-device" ;;
+    csharp)     echo "csharp- dotnet-patterns" ;;
+    cpp)        echo "cpp-" ;;
+    dart)       echo "dart-flutter-patterns flutter-dart-code-review" ;;
+    web)        echo "frontend-design design-system accessibility" ;;
+    *)          echo "" ;;
+  esac
+}
+
+# Resolve "ecc-auto": returns newline-separated list of skill dir names under
+# $ECC_DIR/skills/ that match universal list OR any language-prefix whitelist.
+# Excludes continuous-learning-v2 (already mounted via plugin payload).
+skills_resolve_ecc_auto() {
+  local langs="$1"
+  [[ -d "$ECC_DIR/skills" ]] || return 0
+
+  local available
+  available="$(find "$ECC_DIR/skills" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null | sort -u)"
+  [[ -n "$available" ]] || return 0
+
+  local uwl pfx_all=""
+  uwl="$(_skills_universal_whitelist)"
+
+  local lang
+  for lang in $langs; do
+    local pfxs
+    pfxs="$(_skills_lang_prefixes "$lang")"
+    [[ -n "$pfxs" ]] && pfx_all="$pfx_all $pfxs"
+  done
+
+  local name match
+  while IFS= read -r name; do
+    [[ -z "$name" ]] && continue
+    [[ "$name" == "continuous-learning-v2" ]] && continue
+    # Universal match?
+    if printf '%s\n' "$uwl" | grep -qx "$name"; then
+      echo "$name"; continue
+    fi
+    # Prefix match?
+    match=0
+    local p
+    for p in $pfx_all; do
+      [[ -n "$p" ]] || continue
+      case "$name" in "$p"*) match=1; break ;; esac
+    done
+    (( match == 1 )) && echo "$name"
+  done <<< "$available"
+}
+
+# Resolve "ecc-all": every dir under $ECC_DIR/skills/ except continuous-learning-v2.
+skills_resolve_ecc_all() {
+  [[ -d "$ECC_DIR/skills" ]] || return 0
+  find "$ECC_DIR/skills" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null \
+    | grep -vx 'continuous-learning-v2' \
+    | sort -u
+}
+
+# Mount resolved skills for every active package into the session share.
+# Writes $sess_share/skills-manifest.txt listing <pkg>/<skill> pairs.
+skills_mount_for_session() {
+  local sess_share="$1"
+  local proj="$2"
+  skills_load
+  [[ -n "${SKILLS_PACKAGES:-}" ]] || return 0
+
+  local langs
+  if [[ -f "$sess_share/ecc-langs" ]]; then
+    langs="$(cat "$sess_share/ecc-langs")"
+  else
+    langs="$(detect_project_languages "$proj")"
+  fi
+
+  local dest_root="$sess_share/config/opencode/skills"
+  local manifest="$sess_share/skills-manifest.txt"
+  mkdir -p "$dest_root"
+  : > "$manifest"
+
+  local pkg
+  for pkg in $SKILLS_PACKAGES; do
+    local names=""
+    case "$pkg" in
+      ecc-auto) names="$(skills_resolve_ecc_auto "$langs")" ;;
+      ecc-all)  names="$(skills_resolve_ecc_all)" ;;
+      *) echo "[skills] Unknown active package '$pkg' — skipping." >&2; continue ;;
+    esac
+    [[ -n "$names" ]] || continue
+
+    local pkg_dest="$dest_root/$pkg"
+    mkdir -p "$pkg_dest"
+    local n
+    while IFS= read -r n; do
+      [[ -z "$n" ]] && continue
+      local src="$ECC_DIR/skills/$n"
+      [[ -d "$src" ]] || continue
+      rsync -a --delete "$src/" "$pkg_dest/$n/"
+      echo "$pkg/$n" >> "$manifest"
+    done <<< "$names"
+  done
+
+  local total
+  total=$(wc -l < "$manifest" 2>/dev/null | tr -d ' ')
+  echo "[skills] Mounted ${total:-0} skills (packages: ${SKILLS_PACKAGES})"
+}
+
+# Rough token-cost estimate for the skills menu based on count (frontmatter-only).
+# ~70 tokens per skill, reported as a ballpark integer range string.
+_skills_estimate_tokens() {
+  local n="${1:-0}"
+  local lo=$((n * 60))
+  local hi=$((n * 90))
+  printf '%s–%s' "$lo" "$hi"
+}
+
+# ---------------------------------------------------------------------------
 # Self-update helpers
 # ---------------------------------------------------------------------------
 
@@ -632,7 +1160,7 @@ ports_cmd() {
               save_policy
               echo "LAN_ALLOW_TCP cleared" ;;
             *)
-              echo "Usage: opencode-vm ports lan tcp {show|add|rm|clear} [IP:PORT...]" >&2
+              echo "Usage: opencode-vm ports lan tcp {show|add|rm|clear} [IP[:PORT]...]" >&2
               exit 2
               ;;
           esac
@@ -654,7 +1182,7 @@ ports_cmd() {
               save_policy
               echo "LAN_ALLOW_UDP cleared" ;;
             *)
-              echo "Usage: opencode-vm ports lan udp {show|add|rm|clear} [IP:PORT...]" >&2
+              echo "Usage: opencode-vm ports lan udp {show|add|rm|clear} [IP[:PORT]...]" >&2
               exit 2
               ;;
           esac
@@ -743,6 +1271,86 @@ doctor_cmd() {
         echo "  <no database yet>"
       else
         echo "  (sqlite3 missing - install sqlite3 to inspect db)"
+      fi
+      echo ""
+
+      echo "[doctor] ECC (everything-claude-code)"
+      ecc_load
+      if [[ "${ECC_ENABLED:-0}" == "1" ]]; then
+        echo "  enabled:   yes"
+        echo "  repo:      ${ECC_REPO:-<unset>}"
+        echo "  ref:       ${ECC_REF:-<unset>}"
+        echo "  commit:    ${ECC_COMMIT:-<unset>}"
+        echo "  mcp pack:  $([[ "${ECC_MCP_PACK:-0}" == "1" ]] && echo yes || echo no)"
+        if [[ -d "$ECC_DIR/.opencode" ]]; then
+          local _n_cmds _n_agents _n_plugins
+          _n_cmds=$(find "$ECC_DIR/.opencode/commands" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
+          _n_agents=$(find "$ECC_DIR/.opencode/prompts/agents" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
+          _n_plugins=$(find "$ECC_DIR/.opencode/plugins" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
+          echo "  payload:   ${_n_cmds} commands, ${_n_agents} agents, ${_n_plugins} plugins"
+        else
+          echo "  payload:   <clone missing — run: opencode-vm init --with-ecc>"
+        fi
+
+        # Homunculus (per-project learning store) stats for cwd
+        local _hom_proj _hom_hash _hom_dir
+        _hom_proj="$(pwd)"
+        _hom_hash="$(ecc_compute_project_hash "$_hom_proj")"
+        _hom_dir="$(project_state_dir "$_hom_proj")/homunculus"
+        echo "  learnings (cwd: $_hom_proj):"
+        echo "    project hash: $_hom_hash"
+        echo "    store:        $_hom_dir"
+        if [[ -d "$_hom_dir" ]]; then
+          local _n_personal _n_inherited _obs_line
+          _n_personal=$(find "$_hom_dir/personal" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
+          _n_inherited=$(find "$_hom_dir/inherited" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
+          echo "    instincts:    ${_n_personal} personal, ${_n_inherited} inherited"
+          if [[ -f "$_hom_dir/observations.jsonl" ]]; then
+            _obs_line=$(wc -l < "$_hom_dir/observations.jsonl" 2>/dev/null | tr -d ' ')
+            echo "    observations: ${_obs_line} entries"
+          fi
+        else
+          echo "    instincts:    <none yet — run /learn inside a session>"
+        fi
+
+        # Rules auto-inject preview
+        local _rules_langs
+        _rules_langs="$(detect_project_languages "$_hom_proj")"
+        echo "  rules (cwd):   langs: $_rules_langs"
+        if [[ -d "$ECC_DIR/rules" ]]; then
+          local _rlang _rfiles
+          for _rlang in $_rules_langs; do
+            [[ -d "$ECC_DIR/rules/$_rlang" ]] || continue
+            _rfiles=$(find "$ECC_DIR/rules/$_rlang" -maxdepth 1 -name '*.md' 2>/dev/null | wc -l | tr -d ' ')
+            echo "                 $_rlang: $_rfiles files"
+          done
+        fi
+      else
+        echo "  enabled:   no  (enable with: opencode-vm init --with-ecc)"
+      fi
+      echo ""
+
+      # ---- Skills (top-level subsystem, separate from ECC) ----
+      echo "[doctor] Skills"
+      skills_load
+      if [[ -z "${SKILLS_PACKAGES:-}" ]]; then
+        echo "  active:    <none>  (enable with: opencode-vm skills on ecc-auto)"
+      else
+        echo "  active:    $SKILLS_PACKAGES"
+        local _sk_proj _sk_langs _sk_pkg _sk_names _sk_count _sk_total=0
+        _sk_proj="$(pwd)"
+        _sk_langs="$(detect_project_languages "$_sk_proj")"
+        for _sk_pkg in $SKILLS_PACKAGES; do
+          case "$_sk_pkg" in
+            ecc-auto) _sk_names="$(skills_resolve_ecc_auto "$_sk_langs")" ;;
+            ecc-all)  _sk_names="$(skills_resolve_ecc_all)" ;;
+            *)        _sk_names="" ;;
+          esac
+          _sk_count=$(printf '%s\n' "$_sk_names" | grep -c . || true)
+          _sk_total=$((_sk_total + _sk_count))
+          echo "    [$_sk_pkg] $_sk_count skills for cwd"
+        done
+        echo "  total:     $_sk_total skills, est. $(_skills_estimate_tokens "$_sk_total") tokens"
       fi
       ;;
 
@@ -891,6 +1499,20 @@ provider_cmd() {
       if ! command -v jq >/dev/null 2>&1; then
         echo "[provider] jq is required for provider add. Install jq and retry." >&2
         exit 1
+      fi
+
+      # --- Optional ECC MCP pack opt-in (only when ECC is enabled) ---
+      if ecc_enabled && [[ -t 0 ]] && [[ "${ECC_MCP_PACK:-0}" != "1" ]]; then
+        local _ecc_mcp_ans=""
+        echo ""
+        echo "[ecc] ECC is enabled. Install the ECC MCP server pack"
+        echo "      (GitHub, Context7, Exa, Playwright etc. — merged into session config)?"
+        read -r -p "      Enable ECC MCP pack? [y/N]: " _ecc_mcp_ans </dev/tty || _ecc_mcp_ans="n"
+        if [[ "$_ecc_mcp_ans" =~ ^[Yy] ]]; then
+          ECC_MCP_PACK=1
+          ecc_save
+          echo "[ecc] MCP pack will be merged into every new session. Run 'opencode-vm ecc mcp off' to disable."
+        fi
       fi
 
       # --- Auto model discovery (when no --model flags given) ---
@@ -1782,6 +2404,14 @@ table inet ocfilter {
     type ipv4_addr . inet_service
     flags interval
   }
+  set lan_allow_host_tcp4 {
+    type ipv4_addr
+    flags interval
+  }
+  set lan_allow_host_udp4 {
+    type ipv4_addr
+    flags interval
+  }
 
   chain output {
     type filter hook output priority 0; policy accept;
@@ -1807,6 +2437,10 @@ table inet ocfilter {
     # Allowlist für private Netze
     ip daddr . tcp dport @lan_allow_tcp4 accept
     ip daddr . udp dport @lan_allow_udp4 accept
+
+    # Host-weite Freigaben (alle Ports einer IP)
+    ip daddr @lan_allow_host_tcp4 meta l4proto tcp accept
+    ip daddr @lan_allow_host_udp4 meta l4proto udp accept
 
     # Block TCP/UDP zu privaten Netzen (außer Allowlist/DNS/Host-Ausnahmen)
     ip daddr 10.0.0.0/8 meta l4proto { tcp, udp } drop
@@ -2127,22 +2761,32 @@ apply_policy_in_vm() {
   local host_ports_csv
   host_ports_csv="$(echo "$HOST_TCP_PORTS" | tr ' ' ',')"
 
-  # LAN allowlists are stored as "IP:PORT" entries
-  local lan_tcp_elems=""
+  # LAN allowlists: "IP:PORT" -> nft IP.PORT tuple, "IP" (ohne Port) -> Host-Set (alle Ports)
+  local lan_tcp_elems="" lan_host_tcp_elems=""
   for ep in $LAN_ALLOW_TCP; do
-    local ip="${ep%:*}"
-    local port="${ep##*:}"
-    lan_tcp_elems+="${ip} . ${port}, "
+    if [[ "$ep" == *:* ]]; then
+      local ip="${ep%:*}"
+      local port="${ep##*:}"
+      lan_tcp_elems+="${ip} . ${port}, "
+    else
+      lan_host_tcp_elems+="${ep}, "
+    fi
   done
   lan_tcp_elems="${lan_tcp_elems%, }"
+  lan_host_tcp_elems="${lan_host_tcp_elems%, }"
 
-  local lan_udp_elems=""
+  local lan_udp_elems="" lan_host_udp_elems=""
   for ep in $LAN_ALLOW_UDP; do
-    local ip="${ep%:*}"
-    local port="${ep##*:}"
-    lan_udp_elems+="${ip} . ${port}, "
+    if [[ "$ep" == *:* ]]; then
+      local ip="${ep%:*}"
+      local port="${ep##*:}"
+      lan_udp_elems+="${ip} . ${port}, "
+    else
+      lan_host_udp_elems+="${ep}, "
+    fi
   done
   lan_udp_elems="${lan_udp_elems%, }"
+  lan_host_udp_elems="${lan_host_udp_elems%, }"
 
   cat <<EOF
 [run] Applying policy inside VM:
@@ -2166,6 +2810,16 @@ EOF
     sudo -n nft flush set inet ocfilter lan_allow_udp4
     if [[ -n \"$lan_udp_elems\" ]]; then
       sudo -n nft add element inet ocfilter lan_allow_udp4 { $lan_udp_elems }
+    fi
+
+    sudo -n nft flush set inet ocfilter lan_allow_host_tcp4
+    if [[ -n \"$lan_host_tcp_elems\" ]]; then
+      sudo -n nft add element inet ocfilter lan_allow_host_tcp4 { $lan_host_tcp_elems }
+    fi
+
+    sudo -n nft flush set inet ocfilter lan_allow_host_udp4
+    if [[ -n \"$lan_host_udp_elems\" ]]; then
+      sudo -n nft add element inet ocfilter lan_allow_host_udp4 { $lan_host_udp_elems }
     fi
 
     sudo -n nft list table inet ocfilter >/dev/null
@@ -2289,6 +2943,10 @@ enter_session_shell() {
       export XDG_DATA_HOME=/tmp/oc-xdg-data
       export XDG_STATE_HOME=/tmp/oc-xdg-state
       export OPENCODE_ENABLE_EXA=1
+      # ECC project identity: stable hash across sessions uses host project path
+      if [ -f "$SESS_SHARE/config/opencode/.ecc-applied" ]; then
+        export CLAUDE_PROJECT_DIR="$1"
+      fi
     fi
 
     cd "$1"
@@ -2362,6 +3020,10 @@ attach_session() {
     export XDG_CONFIG_HOME="$SESS_SHARE/config"
     export XDG_DATA_HOME=/tmp/oc-xdg-data
     export XDG_STATE_HOME=/tmp/oc-xdg-state
+    # ECC project identity: stable hash across sessions uses host project path
+    if [ -f "$SESS_SHARE/config/opencode/.ecc-applied" ]; then
+      export CLAUDE_PROJECT_DIR="$1"
+    fi
 
     cd "$1"
 
@@ -2535,6 +3197,20 @@ start_session() {
     cp -p "$sess_cfg_file" "$sess_share/config/opencode/.opencode.json"
   fi
 
+  # ECC (opt-in): copy plugin payload + optional MCP pack into session config,
+  # seed homunculus learning store from persistent project state, auto-inject
+  # language-specific rules into AGENTS.md.
+  if ecc_enabled; then
+    ecc_apply_to_session "$sess_share"
+    ecc_apply_mcp_pack "$sess_cfg_file"
+    ecc_seed_homunculus "$proj_state" "$sess_share"
+    ecc_inject_rules "$proj" "$sess_share"
+    cp -p "$sess_cfg_file" "$sess_share/config/opencode/.opencode.json"
+  fi
+
+  # Skills (independent of ECC enabled state — package guards handle dependencies)
+  skills_mount_for_session "$sess_share" "$proj"
+
   rsync -a "${DATA_RSYNC_EXCLUDES[@]}" "$proj_state/xdg-data/opencode/" "$sess_share/xdg-data/opencode/"
   rsync -a "$proj_state/xdg-state/opencode/" "$sess_share/xdg-state/opencode/"
   echo "[run] Copied project state into session share $(_ts)"
@@ -2706,6 +3382,12 @@ start_session() {
     rsync -a "$sess_share/xdg-state/opencode/" "$proj_state/xdg-state/opencode/"
     echo "[cleanup] Persisted into project state $(_ts)"
 
+    # ECC: persist project-scoped homunculus learnings back to host project state.
+    if ecc_enabled; then
+      ecc_sync_homunculus_back "$sess_share" "$proj_state"
+      echo "[cleanup] ECC homunculus synced back $(_ts)"
+    fi
+
     # Prevent corrupt databases from persisting across sessions (restore from pre-session backup if needed)
     echo "[cleanup] SQLite integrity checks... $(_ts)"
     local db_backup_dir="$proj_state/db-backups"
@@ -2773,6 +3455,14 @@ start_session() {
     echo "[run] VM symlink: $proj -> $clean_link $(_ts)"
   fi
 
+  # ECC: link the mounted homunculus share into ECC's expected project path.
+  if ecc_enabled; then
+    local _ecc_proj_hash
+    _ecc_proj_hash="$(ecc_compute_project_hash "$proj")"
+    ecc_link_homunculus_in_vm "$sess" "$sess_share" "$_ecc_proj_hash"
+    echo "[run] ECC homunculus linked (project hash: $_ecc_proj_hash) $(_ts)"
+  fi
+
   echo "[run] Launching OpenCode inside VM (project: $proj) $(_ts)"
 
   local host_lan_ip
@@ -2797,6 +3487,11 @@ start_session() {
     # Config stays on mount (small JSON files, safe over virtiofs)
     export XDG_CONFIG_HOME="$SESS_SHARE/config"
 
+    # ECC project identity: stable hash across sessions uses host project path
+    if [ -f "$SESS_SHARE/config/opencode/.ecc-applied" ]; then
+      export CLAUDE_PROJECT_DIR="$PROJ_DIR"
+    fi
+
     # Make VM environment instructions available to OpenCode
     mkdir -p "$SESS_SHARE/config/opencode"
     if [ -f "$HOME/AGENTS.md" ]; then
@@ -2809,6 +3504,10 @@ start_session() {
 - **Environment variables:** \`OCVM_HOST_LAN_IP\` (canonical), \`HOST_LAN_IP\`, \`LANIP\`
 - When suggesting URLs for services bound to \`0.0.0.0\` in the VM, prefer \`http://$OC_HOST_IP:<port>\` over \`localhost\`.
 EOF
+      # Append ECC rules sidecar if host-side injector produced one
+      if [ -f "$SESS_SHARE/config/opencode/AGENTS.ecc-rules.md" ]; then
+        cat "$SESS_SHARE/config/opencode/AGENTS.ecc-rules.md" >> "$SESS_SHARE/config/opencode/AGENTS.md"
+      fi
     fi
 
     # Data/state go to VM-local storage to avoid SQLite corruption over virtiofs
@@ -2953,6 +3652,224 @@ EOF
   fi
 }
 
+ecc_cmd() {
+  local op="${1:-status}"
+  shift || true
+  case "$op" in
+    status)
+      ecc_load
+      if [[ "${ECC_ENABLED:-0}" == "1" ]]; then
+        echo "enabled:  yes"
+        echo "repo:     ${ECC_REPO}"
+        echo "ref:      ${ECC_REF}"
+        echo "commit:   ${ECC_COMMIT:-<unknown>}"
+        echo "mcp pack: $([[ "${ECC_MCP_PACK:-0}" == "1" ]] && echo yes || echo no)"
+        echo "clone:    $ECC_DIR"
+      else
+        echo "enabled:  no"
+        echo "Enable with: opencode-vm init --with-ecc"
+      fi
+      ;;
+    enable)
+      ecc_load
+      ECC_ENABLED=1
+      ecc_save
+      ecc_clone_or_update
+      echo "[ecc] Enabled. Run 'opencode-vm prune && opencode-vm start' to apply."
+      ;;
+    disable|off)
+      ecc_load
+      ECC_ENABLED=0
+      ecc_save
+      echo "[ecc] Disabled. New sessions will no longer load the ECC plugin."
+      echo "      Clone at $ECC_DIR left intact (delete manually to reclaim space)."
+      ;;
+    update|pull)
+      ecc_enabled || { echo "[ecc] ECC is not enabled." >&2; exit 2; }
+      local _new_ref="${1:-}"
+      if [[ -n "$_new_ref" ]]; then
+        ecc_load
+        ECC_REF="$_new_ref"
+        ecc_save
+      fi
+      ecc_clone_or_update
+      ;;
+    mcp)
+      local mop="${1:-status}"
+      ecc_load
+      case "$mop" in
+        on|enable)
+          ecc_enabled || { echo "[ecc] Enable ECC first: opencode-vm init --with-ecc" >&2; exit 2; }
+          ECC_MCP_PACK=1
+          ecc_save
+          echo "[ecc] MCP pack enabled. Restart session to apply."
+          ;;
+        off|disable)
+          ECC_MCP_PACK=0
+          ecc_save
+          echo "[ecc] MCP pack disabled for future sessions."
+          ;;
+        status|"")
+          echo "mcp pack: $([[ "${ECC_MCP_PACK:-0}" == "1" ]] && echo yes || echo no)"
+          ;;
+        *)
+          echo "Usage: opencode-vm ecc mcp {on|off|status}" >&2; exit 2 ;;
+      esac
+      ;;
+    learn)
+      local lop="${1:-status}"
+      shift || true
+      local learn_proj="${1:-$(pwd)}"
+      local learn_hash learn_dir
+      learn_hash="$(ecc_compute_project_hash "$learn_proj")"
+      learn_dir="$(project_state_dir "$learn_proj")/homunculus"
+      case "$lop" in
+        status|"")
+          echo "project:      $learn_proj"
+          echo "project hash: $learn_hash"
+          echo "store:        $learn_dir"
+          if [[ -d "$learn_dir" ]]; then
+            local _np _ni _ol
+            _np=$(find "$learn_dir/personal" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
+            _ni=$(find "$learn_dir/inherited" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
+            echo "instincts:    ${_np} personal, ${_ni} inherited"
+            if [[ -f "$learn_dir/observations.jsonl" ]]; then
+              _ol=$(wc -l < "$learn_dir/observations.jsonl" 2>/dev/null | tr -d ' ')
+              echo "observations: ${_ol} entries"
+            fi
+          else
+            echo "instincts:    <none yet>"
+          fi
+          ;;
+        clear)
+          [[ -d "$learn_dir" ]] || { echo "[ecc] No store at $learn_dir"; exit 0; }
+          echo "About to DELETE: $learn_dir"
+          local ans=""
+          read -r -p "Type 'yes' to confirm: " ans </dev/tty || ans=""
+          if [[ "$ans" == "yes" ]]; then
+            rm -rf "$learn_dir"
+            echo "[ecc] Cleared."
+          else
+            echo "[ecc] Aborted."
+          fi
+          ;;
+        *)
+          echo "Usage: opencode-vm ecc learn {status|clear} [project-path]" >&2; exit 2 ;;
+      esac
+      ;;
+    *)
+      cat >&2 <<EOF
+Usage:
+  opencode-vm ecc status
+  opencode-vm ecc enable              # enable + clone/update
+  opencode-vm ecc disable             # disable for future sessions
+  opencode-vm ecc update [ref]        # pull latest (optionally switch ref)
+  opencode-vm ecc mcp {on|off|status} # toggle ECC MCP pack injection
+  opencode-vm ecc learn {status|clear} [path]
+                                      # inspect or reset per-project learnings
+EOF
+      exit 2 ;;
+  esac
+}
+
+skills_cmd() {
+  local op="${1:-status}"
+  shift || true
+
+  case "$op" in
+    status|"")
+      skills_load
+      echo "active packages: ${SKILLS_PACKAGES:-<none>}"
+      if [[ -z "${SKILLS_PACKAGES:-}" ]]; then
+        echo ""
+        echo "No skill packages active. Enable one with:"
+        echo "  opencode-vm skills on ecc-auto   # language-filtered subset (~30 skills)"
+        echo "  opencode-vm skills on ecc-all    # every ECC skill (~180 skills, token-heavy)"
+        return 0
+      fi
+      local path="${1:-$(pwd)}"
+      local langs
+      langs="$(detect_project_languages "$path")"
+      echo "project:         $path"
+      echo "detected langs:  $langs"
+      echo ""
+      local pkg total=0
+      for pkg in $SKILLS_PACKAGES; do
+        local names count
+        case "$pkg" in
+          ecc-auto) names="$(skills_resolve_ecc_auto "$langs")" ;;
+          ecc-all)  names="$(skills_resolve_ecc_all)" ;;
+          *)        names="" ;;
+        esac
+        count=$(printf '%s\n' "$names" | grep -c . || true)
+        total=$((total + count))
+        echo "[$pkg] $count skills"
+        if [[ -n "$names" ]]; then
+          printf '%s\n' "$names" | sed 's/^/  - /'
+        fi
+        echo ""
+      done
+      local est
+      est="$(_skills_estimate_tokens "$total")"
+      echo "Total: ${total} skills, estimated ${est} tokens of frontmatter."
+      ;;
+    on)
+      local pkg="${1:-}"
+      [[ -n "$pkg" ]] || { echo "Usage: opencode-vm skills on <ecc-auto|ecc-all>" >&2; exit 2; }
+      skills_pkg_on "$pkg"
+      ;;
+    off)
+      local pkg="${1:-}"
+      [[ -n "$pkg" ]] || { echo "Usage: opencode-vm skills off <ecc-auto|ecc-all>" >&2; exit 2; }
+      skills_pkg_off "$pkg"
+      ;;
+    list)
+      # Preview: what would mount at the given project path with current active packages.
+      local path="${1:-$(pwd)}"
+      skills_load
+      if [[ -z "${SKILLS_PACKAGES:-}" ]]; then
+        echo "No active packages. Run 'opencode-vm skills on <pkg>' first."
+        return 0
+      fi
+      local langs
+      langs="$(detect_project_languages "$path")"
+      echo "project:         $path"
+      echo "detected langs:  $langs"
+      echo ""
+      local pkg total=0
+      for pkg in $SKILLS_PACKAGES; do
+        local names
+        case "$pkg" in
+          ecc-auto) names="$(skills_resolve_ecc_auto "$langs")" ;;
+          ecc-all)  names="$(skills_resolve_ecc_all)" ;;
+          *) continue ;;
+        esac
+        local count
+        count=$(printf '%s\n' "$names" | grep -c . || true)
+        total=$((total + count))
+        echo "[$pkg] would mount $count skills:"
+        if [[ -n "$names" ]]; then
+          printf '%s\n' "$names" | sed 's/^/  - /'
+        fi
+        echo ""
+      done
+      local est
+      est="$(_skills_estimate_tokens "$total")"
+      echo "Total: ${total} skills, estimated ${est} tokens."
+      ;;
+    *)
+      cat >&2 <<EOF
+Usage:
+  opencode-vm skills                      # status (alias)
+  opencode-vm skills status [path]        # active packages + resolved skills + token estimate
+  opencode-vm skills on <pkg>             # enable package (ecc-auto | ecc-all)
+  opencode-vm skills off <pkg>            # disable package
+  opencode-vm skills list [path]          # preview what would mount (no VM touch)
+EOF
+      exit 2 ;;
+  esac
+}
+
 ocvm_notify_if_new_version_available "$cmd"
 
 case "$cmd" in
@@ -2960,9 +3877,57 @@ case "$cmd" in
     install_cmd
     ;;
 
+  ecc)
+    ecc_cmd "$@"
+    ;;
+
+  skills)
+    skills_cmd "$@"
+    ;;
+
   init)
     need limactl
     sanitize_lima_sock_dir
+
+    # Parse init-local flags
+    _with_ecc=0
+    _init_ecc_ref=""
+    _with_skills=""
+    while [[ "$#" -gt 0 ]]; do
+      case "$1" in
+        --with-ecc) _with_ecc=1 ;;
+        --ecc-ref) shift; _init_ecc_ref="${1:-}" ;;
+        --ecc-ref=*) _init_ecc_ref="${1#*=}" ;;
+        --with-skills) _with_skills="ecc-auto" ;;
+        --with-skills=*) _with_skills="${1#*=}" ;;
+        --no-ecc)
+          ecc_load
+          ECC_ENABLED=0
+          ecc_save
+          ;;
+        *) echo "[init] Unknown option: $1" >&2; exit 2 ;;
+      esac
+      shift || true
+    done
+
+    if (( _with_ecc == 1 )); then
+      ecc_load
+      ECC_ENABLED=1
+      [[ -n "$_init_ecc_ref" ]] && ECC_REF="$_init_ecc_ref"
+      ecc_save
+      ecc_clone_or_update || {
+        echo "[init] ECC clone failed — aborting before touching base VM." >&2
+        exit 1
+      }
+    fi
+
+    if [[ -n "$_with_skills" ]]; then
+      skills_pkg_on "$_with_skills" || {
+        echo "[init] Enabling skills package '$_with_skills' failed." >&2
+        exit 1
+      }
+    fi
+
     cleanup_sessions
     if base_exists; then
       echo "[init] Stopping and deleting existing base VM: $BASE_NAME"
@@ -2977,6 +3942,9 @@ case "$cmd" in
     rm -rf "$HOME/.lima/sock" 2>/dev/null || true
     provision_base
     echo
+    if ecc_enabled; then
+      echo "[init] ECC enabled (commit ${ECC_COMMIT:-unknown}). New sessions will load the ECC plugin."
+    fi
     echo "Next: navigate to your project directory (open terminal in VS Code) and run:"
     echo "  opencode-vm start"
     ;;
@@ -3077,7 +4045,17 @@ Usage:
                                            # --tui: also start TUI in terminal (experimental)
   opencode-vm attach                       # reconnect to a running session VM
   opencode-vm shell                        # open shell in session VM (auto-starts if missing)
-  opencode-vm init                         # create/provision base VM (one-time setup)
+  opencode-vm init [--with-ecc [--ecc-ref REF]] [--with-skills[=ecc-auto|ecc-all]]
+                                           # create/provision base VM (one-time setup)
+                                           # --with-ecc: also install the ECC plugin pack
+                                           # --with-skills: enable a skills package
+                                           #   (default ecc-auto; language-filtered subset)
+  opencode-vm ecc {status|enable|disable|update|mcp|learn}
+                                           # manage the optional ECC integration
+                                           # learn status|clear: inspect/reset per-project learnings
+  opencode-vm skills {status|on|off|list} [pkg|path]
+                                           # manage skill packages
+                                           # packages: ecc-auto (~30, lang-filtered), ecc-all (~180)
   opencode-vm ports show                   # show current firewall policy
   opencode-vm ports host {show|add|rm|set} [PORT...]
   opencode-vm ports hostfwd {show|enable|disable}

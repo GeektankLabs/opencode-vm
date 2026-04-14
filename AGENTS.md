@@ -24,6 +24,14 @@ The entire tool is one file: `opencode-vm.sh` (~1800 lines of Bash).
 - `~/.opencode-vm/sessions/` — per-project session working copy + running-session env tracker
 - `~/.opencode-vm/backups/` — timestamped config backups
 - `~/.opencode-vm/policy.env` — persisted firewall policy (host TCP ports, LAN allowlists)
+- `~/.opencode-vm/ecc.env` — ECC integration state (opt-in; absent or `ECC_ENABLED=0` means no ECC)
+- `~/.opencode-vm/ecc/` — clone of the everything-claude-code repo (only when ECC is enabled)
+- `~/.opencode-vm/project-state/<hash>/homunculus/` — per-project ECC learning store (only when ECC is enabled; survives session restarts)
+- `~/.opencode-vm/skills.env` — skills subsystem state (field: `SKILLS_PACKAGES` — space-separated active package names)
+
+**ECC integration (fully opt-in):** The `init --with-ecc` flag clones [affaan-m/everything-claude-code](https://github.com/affaan-m/everything-claude-code) into `~/.opencode-vm/ecc/`. When enabled, `start_session` copies the `.opencode/` payload (commands, agents, plugins, tools) into the session config, optionally merges the MCP server pack, seeds the per-project homunculus store into the session share, links it into `~/.claude/homunculus/projects/<hash>` inside the VM, and auto-injects per-language rule sets from ECC's `rules/` into the session `AGENTS.md` (via a sidecar file `AGENTS.ecc-rules.md`). `CLAUDE_PROJECT_DIR` is exported to the host project path (not the VM mount path) so ECC's project-hash scheme stays stable across sessions; this export is gated on the `.ecc-applied` marker file. `cleanup()` rsyncs the store back to host project state. All ECC code paths are gated on `ECC_ENABLED=1`; without the flag, opencode-vm behaves exactly as before. Managed via `opencode-vm ecc {status|enable|disable|update|mcp|learn}`.
+
+**Skills subsystem (top-level, separate from ECC):** Independent CLI namespace `opencode-vm skills` with a package model. v0.3.0 ships two packages — `ecc-auto` (language-filtered subset, ~30 skills) and `ecc-all` (every ECC skill, ~180). Packages are mutually exclusive where sensible (`ecc-auto` ↔ `ecc-all`) and each package self-guards on prerequisites (the ECC ones require ECC enabled). State lives in `~/.opencode-vm/skills.env` (field: `SKILLS_PACKAGES`). Active packages are resolved at `start_session` and rsynced into `$sess_share/config/opencode/skills/<pkg>/<skill>/`; a `skills-manifest.txt` lists what mounted. The CLI is intentionally source-agnostic so future skill packs (user-defined, team packs) can be added without refactoring. Managed via `opencode-vm skills {status|on|off|list}`.
 
 **Script structure (top to bottom):**
 1. Constants and defaults (lines 1-30)
