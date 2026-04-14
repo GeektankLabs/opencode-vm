@@ -1,0 +1,6 @@
+{
+    "scm.alwaysShowRepositories": true,
+    "scm.repositories.selectionMode": "multi",
+    "git.autoRepositoryDetection": "subFolders",
+    "git.repositoryScanMaxDepth": 2
+}

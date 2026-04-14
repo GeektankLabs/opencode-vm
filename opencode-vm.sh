@@ -37,7 +37,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.1.22"
+OCVM_VERSION="0.1.23"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -1896,6 +1896,8 @@ sudo aa-status --enabled 2>/dev/null || { echo "[init] WARNING: AppArmor not sup
 echo "[init] AppArmor profile 'opencode-sandbox' loaded"
 
 # Write VM environment instructions for AI coding tools (AGENTS.md)
+# Coding Principles section adapted from andrej-karpathy-skills (MIT):
+#   https://github.com/forrestchang/andrej-karpathy-skills
 cat > ~/AGENTS.md <<'AGENTSMD'
 # VM Environment
 
@@ -2101,6 +2103,13 @@ Pre-installed at: \`~/.local/share/repomapper/\`
 - Session VMs are ephemeral — anything outside the project directory or OpenCode state is lost when the session ends.
 - Globally installed tools (via apt, npm -g, pip, go install) persist only within the current session.
 - You can freely modify system configuration, install packages, start services, and use sudo. The only restriction is on firewall and security-policy management, which are controlled by the host.
+
+## Coding Principles
+
+1. **Think before coding.** State your assumptions explicitly. If the request is ambiguous or you see multiple reasonable interpretations, surface them and ask before implementing.
+2. **Simplicity first.** Deliver the minimal code that solves the stated problem. No speculative features, unrequested abstractions, or flexibility for imagined future needs.
+3. **Surgical changes.** Modify only what's required for the request. Preserve existing style and structure; don't fold in unrelated refactors or "while I'm here" cleanups.
+4. **Goal-driven execution.** Turn vague tasks into verifiable success criteria. Validate each step (build, test, run) before declaring the task done.
 AGENTSMD
 
 echo "[init] Base ready. OpenCode: $(command -v opencode || true)"
@@ -2597,11 +2606,14 @@ start_session() {
   fi
 
   # Check for optional Desktop share directory
+  # Use ls to verify actual access — macOS may block ~/Desktop even when -d succeeds
   local share_dir="$HOME/Desktop/opencode-share"
   local share_mount=""
-  if [[ -d "$share_dir" ]]; then
+  if [[ -d "$share_dir" ]] && ls "$share_dir" >/dev/null 2>&1; then
     echo "[run] Mounting Desktop share directory (read-write) $(_ts)"
     share_mount="yes"
+  elif [[ -d "$share_dir" ]]; then
+    echo "[run] Desktop share directory exists but is not accessible (grant Full Disk Access to your terminal) $(_ts)"
   fi
 
   # If project path contains non-ASCII or whitespace, create a clean symlink
