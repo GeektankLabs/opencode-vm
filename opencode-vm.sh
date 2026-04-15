@@ -33,6 +33,15 @@ DEFAULT_ECC_REF="main"
 # Skills subsystem (top-level, source-agnostic; v0.3.0 ships ECC packages only)
 SKILLS_ENV="$SHARE_ROOT/skills.env"
 
+# Proxmox skill package (opt-in via `opencode-vm skills on proxmox`)
+PROXMOX_ENV="$SHARE_ROOT/proxmox.env"
+PROXMOX_MCP_DIR="$SHARE_ROOT/proxmox-mcp"
+PROXMOX_SKILL_CACHE="$SHARE_ROOT/proxmox-skill"   # fallback if script is not co-located with bundled skills/
+DEFAULT_PROXMOX_MCP_REPO="https://github.com/canvrno/ProxmoxMCP.git"
+DEFAULT_PROXMOX_MCP_REF="main"
+# Script location (for resolving bundled skills/proxmox when running from repo)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Excludes for xdg-data rsync: bin/ (375M, 28k files — downloaded on demand),
 # log/ (old session logs), tool-output/ (previous session artifacts)
 DATA_RSYNC_EXCLUDES=(--exclude='bin/' --exclude='log/' --exclude='tool-output/')
@@ -46,7 +55,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.3.3"
+OCVM_VERSION="0.4.0"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -427,28 +436,37 @@ ecc_enabled() {
   [[ "${ECC_ENABLED:-0}" == "1" ]]
 }
 
-ecc_clone_or_update() {
+# Shallow clone/update primitive — used by ECC and Proxmox skill packs.
+# Args: <dest_dir> <repo_url> <ref> <log_prefix>
+# Echoes "[<prefix>] …" status lines. Returns non-zero on failure.
+git_clone_or_update() {
   need git
-  ecc_load
+  local dest="$1" repo="$2" ref="$3" prefix="$4"
   mkdir -p "$SHARE_ROOT"
-  if [[ -d "$ECC_DIR/.git" ]]; then
-    echo "[ecc] Updating clone at $ECC_DIR (ref: $ECC_REF)"
-    git -C "$ECC_DIR" fetch --depth=1 origin "$ECC_REF" >/dev/null 2>&1 || {
-      echo "[ecc] Fetch failed; leaving existing clone in place." >&2
+  if [[ -d "$dest/.git" ]]; then
+    echo "[$prefix] Updating clone at $dest (ref: $ref)"
+    git -C "$dest" fetch --depth=1 origin "$ref" >/dev/null 2>&1 || {
+      echo "[$prefix] Fetch failed; leaving existing clone in place." >&2
       return 1
     }
-    git -C "$ECC_DIR" checkout -q "FETCH_HEAD" || {
-      echo "[ecc] Checkout failed." >&2
+    git -C "$dest" checkout -q "FETCH_HEAD" || {
+      echo "[$prefix] Checkout failed." >&2
       return 1
     }
   else
-    echo "[ecc] Cloning $ECC_REPO (ref: $ECC_REF) into $ECC_DIR"
-    rm -rf "$ECC_DIR"
-    git clone --depth=1 --branch "$ECC_REF" "$ECC_REPO" "$ECC_DIR" >/dev/null 2>&1 || {
-      echo "[ecc] Clone failed (repo/ref: $ECC_REPO @ $ECC_REF)" >&2
+    echo "[$prefix] Cloning $repo (ref: $ref) into $dest"
+    rm -rf "$dest"
+    git clone --depth=1 --branch "$ref" "$repo" "$dest" >/dev/null 2>&1 || {
+      echo "[$prefix] Clone failed (repo/ref: $repo @ $ref)" >&2
       return 1
     }
   fi
+  return 0
+}
+
+ecc_clone_or_update() {
+  ecc_load
+  git_clone_or_update "$ECC_DIR" "$ECC_REPO" "$ECC_REF" "ecc" || return 1
   ECC_COMMIT="$(git -C "$ECC_DIR" rev-parse --short HEAD 2>/dev/null || true)"
   ecc_save
   echo "[ecc] Ready at commit ${ECC_COMMIT:-unknown}"
@@ -564,6 +582,189 @@ ecc_sync_homunculus_back() {
   [[ -d "$sess_share/homunculus" ]] || return 0
   mkdir -p "$proj_state/homunculus"
   rsync -a "$sess_share/homunculus/" "$proj_state/homunculus/"
+}
+
+# ---------------------------------------------------------------------------
+# Proxmox skill package — opt-in via `opencode-vm skills on proxmox`
+# Ships both the knowledge skill (bundled SKILL.md) and the ProxmoxMCP server.
+# Credentials live in $PROXMOX_ENV (mode 0600); `skills off proxmox` wipes it.
+# ---------------------------------------------------------------------------
+
+proxmox_load() {
+  PROXMOX_HOST=""
+  PROXMOX_PORT=""
+  PROXMOX_USER=""
+  PROXMOX_TOKEN_NAME=""
+  PROXMOX_TOKEN_VALUE=""
+  PROXMOX_VERIFY_SSL=""
+  PROXMOX_MCP_REPO=""
+  PROXMOX_MCP_REF=""
+  PROXMOX_MCP_COMMIT=""
+  if [[ -f "$PROXMOX_ENV" ]]; then
+    # shellcheck disable=SC1090
+    source "$PROXMOX_ENV"
+  fi
+  : "${PROXMOX_PORT:=8006}"
+  : "${PROXMOX_MCP_REPO:=$DEFAULT_PROXMOX_MCP_REPO}"
+  : "${PROXMOX_MCP_REF:=$DEFAULT_PROXMOX_MCP_REF}"
+  : "${PROXMOX_VERIFY_SSL:=0}"
+  return 0
+}
+
+proxmox_save() {
+  mkdir -p "$SHARE_ROOT"
+  umask 077
+  cat > "$PROXMOX_ENV" <<EOF
+# opencode-vm Proxmox integration — credentials, mode 0600.
+# Wiped automatically by: opencode-vm skills off proxmox
+PROXMOX_HOST="${PROXMOX_HOST:-}"
+PROXMOX_PORT="${PROXMOX_PORT:-8006}"
+PROXMOX_USER="${PROXMOX_USER:-}"
+PROXMOX_TOKEN_NAME="${PROXMOX_TOKEN_NAME:-}"
+PROXMOX_TOKEN_VALUE="${PROXMOX_TOKEN_VALUE:-}"
+PROXMOX_VERIFY_SSL="${PROXMOX_VERIFY_SSL:-0}"
+PROXMOX_MCP_REPO="${PROXMOX_MCP_REPO:-$DEFAULT_PROXMOX_MCP_REPO}"
+PROXMOX_MCP_REF="${PROXMOX_MCP_REF:-$DEFAULT_PROXMOX_MCP_REF}"
+PROXMOX_MCP_COMMIT="${PROXMOX_MCP_COMMIT:-}"
+EOF
+  chmod 600 "$PROXMOX_ENV"
+  umask 022
+}
+
+proxmox_wipe_env() {
+  [[ -f "$PROXMOX_ENV" ]] || return 0
+  rm -f "$PROXMOX_ENV"
+  echo "[proxmox] Credentials wiped ($PROXMOX_ENV removed)"
+}
+
+# Prompt interactively for host/user/token. Called by skills_pkg_on when
+# pkg=proxmox and no credentials are persisted yet.
+proxmox_setup_interactive() {
+  proxmox_load
+  if [[ ! -t 0 ]]; then
+    echo "[proxmox] Interactive setup requires a TTY. Aborting." >&2
+    return 1
+  fi
+  echo "[proxmox] First-time setup — I need your Proxmox API token."
+  echo "  Create one in the PVE UI:"
+  echo "    Datacenter → Permissions → Users       → Add 'automation@pve'"
+  echo "    Datacenter → Permissions → API Tokens  → Add 'automation@pve!claude'"
+  echo "    Datacenter → Permissions → Add         → Path=/ User=automation@pve Role=PVEAdmin"
+  echo
+  local host port user tname tval tls_in tls
+  read -r -p "Host (IP or FQDN):            " host
+  [[ -n "$host" ]] || { echo "[proxmox] Host is required." >&2; return 1; }
+  read -r -p "Port [8006]:                  " port
+  port="${port:-8006}"
+  read -r -p "User [automation@pve]:        " user
+  user="${user:-automation@pve}"
+  read -r -p "Token name (e.g. claude):     " tname
+  [[ -n "$tname" ]] || { echo "[proxmox] Token name is required." >&2; return 1; }
+  read -r -s -p "Token value (hidden):         " tval
+  echo
+  [[ -n "$tval" ]] || { echo "[proxmox] Token value is required." >&2; return 1; }
+  read -r -p "Verify TLS? [y/N]:            " tls_in
+  case "$tls_in" in y|Y|yes|YES) tls=1 ;; *) tls=0 ;; esac
+
+  PROXMOX_HOST="$host"
+  PROXMOX_PORT="$port"
+  PROXMOX_USER="$user"
+  PROXMOX_TOKEN_NAME="$tname"
+  PROXMOX_TOKEN_VALUE="$tval"
+  PROXMOX_VERIFY_SSL="$tls"
+  proxmox_save
+  echo "[proxmox] Saved to $PROXMOX_ENV (mode 0600)"
+}
+
+# Clone/update the ProxmoxMCP server repo (host side — for visibility/doctor).
+# The in-VM install is handled separately by proxmox_ensure_installed_in_base.
+proxmox_mcp_clone_or_update() {
+  proxmox_load
+  git_clone_or_update "$PROXMOX_MCP_DIR" "$PROXMOX_MCP_REPO" "$PROXMOX_MCP_REF" "proxmox" || return 1
+  PROXMOX_MCP_COMMIT="$(git -C "$PROXMOX_MCP_DIR" rev-parse --short HEAD 2>/dev/null || true)"
+  proxmox_save
+  echo "[proxmox] MCP server ready at commit ${PROXMOX_MCP_COMMIT:-unknown}"
+}
+
+# Install ProxmoxMCP into the BASE VM so that every session clone inherits the
+# ready-to-run venv. Idempotent: skips when the venv already exists. Called
+# from start_session right before the base VM is stopped for cloning.
+proxmox_ensure_installed_in_base() {
+  skills_pkg_is_active proxmox || return 0
+  [[ -f "$PROXMOX_ENV" ]] || return 0
+  proxmox_load
+  local venv_path='$HOME/.local/share/proxmox-mcp-venv'
+  local src_path='$HOME/.local/share/proxmox-mcp'
+  local ref="${PROXMOX_MCP_REF:-main}"
+  local repo="${PROXMOX_MCP_REPO:-$DEFAULT_PROXMOX_MCP_REPO}"
+
+  # Quick check — skip if venv already present in base VM.
+  if limactl shell --workdir / "$BASE_NAME" -- bash -lc "test -x $venv_path/bin/python" 2>/dev/null; then
+    return 0
+  fi
+
+  # Need the base VM running for the install. Start if stopped.
+  local started_base=0
+  if ! is_vm_running "$BASE_NAME"; then
+    run_with_spinner "[proxmox] Starting base VM to install MCP server..." limactl start "$BASE_NAME" || {
+      echo "[proxmox] Could not start base VM; MCP will not be available this session." >&2
+      return 1
+    }
+    started_base=1
+  fi
+
+  echo "[proxmox] Installing ProxmoxMCP into base VM (first-run only, ~20-40s)..."
+  limactl shell --workdir / "$BASE_NAME" -- bash -lc "
+    set -euo pipefail
+    mkdir -p \$HOME/.local/share
+    if [[ ! -d $src_path/.git ]]; then
+      git clone --depth=1 --branch '$ref' '$repo' $src_path
+    else
+      git -C $src_path fetch --depth=1 origin '$ref' >/dev/null 2>&1 || true
+      git -C $src_path checkout -q FETCH_HEAD 2>/dev/null || true
+    fi
+    python3 -m venv $venv_path
+    $venv_path/bin/pip install --quiet --upgrade pip
+    $venv_path/bin/pip install --quiet -e $src_path
+  " || {
+    echo "[proxmox] MCP install failed. See VM log; disable with 'opencode-vm skills off proxmox'." >&2
+    (( started_base == 1 )) && limactl stop "$BASE_NAME" 2>/dev/null || true
+    return 1
+  }
+  echo "[proxmox] MCP server installed at $venv_path"
+
+  if (( started_base == 1 )); then
+    limactl stop "$BASE_NAME" 2>/dev/null || true
+  fi
+}
+
+# Resolve skill source dir: prefer bundled skills/proxmox next to the script,
+# fall back to a shallow clone of the OCVM repo fetching only skills/proxmox/.
+proxmox_skill_ensure() {
+  local bundled="$SCRIPT_DIR/skills/proxmox"
+  if [[ -d "$bundled" ]]; then
+    echo "$bundled"
+    return 0
+  fi
+  # Fetch from the OCVM repo when running from an installed (single-file) copy.
+  local raw_repo="https://github.com/${OCVM_UPDATE_REPO}.git"
+  if [[ ! -d "$PROXMOX_SKILL_CACHE/.git" ]]; then
+    echo "[proxmox] Fetching bundled skill content from $OCVM_UPDATE_REPO …" >&2
+    rm -rf "$PROXMOX_SKILL_CACHE"
+    git clone --depth=1 --filter=blob:none --sparse \
+      --branch "$OCVM_UPDATE_BRANCH" "$raw_repo" "$PROXMOX_SKILL_CACHE" >/dev/null 2>&1 || {
+      echo "[proxmox] Failed to clone $raw_repo for skill content." >&2
+      return 1
+    }
+    git -C "$PROXMOX_SKILL_CACHE" sparse-checkout set skills/proxmox >/dev/null 2>&1 || {
+      echo "[proxmox] sparse-checkout failed for skills/proxmox." >&2
+      return 1
+    }
+  else
+    git -C "$PROXMOX_SKILL_CACHE" fetch --depth=1 origin "$OCVM_UPDATE_BRANCH" >/dev/null 2>&1 || true
+    git -C "$PROXMOX_SKILL_CACHE" checkout -q FETCH_HEAD 2>/dev/null || true
+  fi
+  echo "$PROXMOX_SKILL_CACHE/skills/proxmox"
 }
 
 # ---------------------------------------------------------------------------
@@ -733,8 +934,19 @@ skills_pkg_on() {
         echo "[skills] Disabled 'ecc-auto' (superseded by 'ecc-all')."
       fi
       ;;
+    proxmox)
+      # Interactive credential setup + clone MCP server on first enable.
+      # Re-enable is silent when $PROXMOX_ENV already exists.
+      proxmox_load
+      if [[ -z "${PROXMOX_HOST:-}" || -z "${PROXMOX_TOKEN_VALUE:-}" ]]; then
+        proxmox_setup_interactive || return 1
+      fi
+      proxmox_mcp_clone_or_update || return 1
+      # Pre-populate the skill cache so the first session doesn't pay the clone cost.
+      proxmox_skill_ensure >/dev/null || return 1
+      ;;
     *)
-      echo "[skills] Unknown package: '$pkg'. Available: ecc-auto, ecc-all." >&2
+      echo "[skills] Unknown package: '$pkg'. Available: ecc-auto, ecc-all, proxmox." >&2
       return 2 ;;
   esac
 
@@ -758,6 +970,10 @@ skills_pkg_off() {
     _skills_pkg_drop "$pkg"
     skills_save
     echo "[skills] Disabled '$pkg'. Restart session to apply."
+    # Proxmox: drop stored credentials so the next 'on' re-prompts.
+    if [[ "$pkg" == "proxmox" ]]; then
+      proxmox_wipe_env
+    fi
   else
     echo "[skills] '$pkg' is not active."
   fi
@@ -845,6 +1061,7 @@ skills_resolve_ecc_auto() {
     done
     (( match == 1 )) && echo "$name"
   done <<< "$available"
+  return 0
 }
 
 # Resolve "ecc-all": every dir under $ECC_DIR/skills/ except continuous-learning-v2.
@@ -853,6 +1070,31 @@ skills_resolve_ecc_all() {
   find "$ECC_DIR/skills" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null \
     | grep -vx 'continuous-learning-v2' \
     | sort -u
+  return 0
+}
+
+# Resolve "proxmox": just the single bundled skill dir. Name matches the
+# directory under skills/ so the mount writes it as skills/proxmox/proxmox/.
+skills_resolve_proxmox() {
+  echo "proxmox"
+  return 0
+}
+
+# For a given package, echo the absolute path to the parent dir containing
+# the skill subdirectories (e.g. ECC: $ECC_DIR/skills, Proxmox: bundled or cache).
+skills_source_root_for() {
+  case "$1" in
+    ecc-auto|ecc-all) echo "$ECC_DIR/skills" ;;
+    proxmox)
+      local bundled="$SCRIPT_DIR/skills"
+      if [[ -d "$bundled/proxmox" ]]; then
+        echo "$bundled"
+      else
+        echo "$PROXMOX_SKILL_CACHE/skills"
+      fi
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 # Mount resolved skills for every active package into the session share.
@@ -881,16 +1123,27 @@ skills_mount_for_session() {
     case "$pkg" in
       ecc-auto) names="$(skills_resolve_ecc_auto "$langs")" ;;
       ecc-all)  names="$(skills_resolve_ecc_all)" ;;
+      proxmox)  names="$(skills_resolve_proxmox)" ;;
       *) echo "[skills] Unknown active package '$pkg' — skipping." >&2; continue ;;
     esac
     [[ -n "$names" ]] || continue
+
+    local src_root
+    src_root="$(skills_source_root_for "$pkg" 2>/dev/null)" || continue
+    # For the proxmox pack: refresh the cache if the bundled dir isn't available.
+    if [[ "$pkg" == "proxmox" && ! -d "$src_root/proxmox" ]]; then
+      proxmox_skill_ensure >/dev/null || {
+        echo "[skills] Could not prepare proxmox skill content — skipping." >&2
+        continue
+      }
+    fi
 
     local pkg_dest="$dest_root/$pkg"
     mkdir -p "$pkg_dest"
     local n
     while IFS= read -r n; do
       [[ -z "$n" ]] && continue
-      local src="$ECC_DIR/skills/$n"
+      local src="$src_root/$n"
       [[ -d "$src" ]] || continue
       rsync -a --delete "$src/" "$pkg_dest/$n/"
       echo "$pkg/$n" >> "$manifest"
@@ -1344,6 +1597,7 @@ doctor_cmd() {
           case "$_sk_pkg" in
             ecc-auto) _sk_names="$(skills_resolve_ecc_auto "$_sk_langs")" ;;
             ecc-all)  _sk_names="$(skills_resolve_ecc_all)" ;;
+            proxmox)  _sk_names="$(skills_resolve_proxmox)" ;;
             *)        _sk_names="" ;;
           esac
           _sk_count=$(printf '%s\n' "$_sk_names" | grep -c . || true)
@@ -1351,6 +1605,24 @@ doctor_cmd() {
           echo "    [$_sk_pkg] $_sk_count skills for cwd"
         done
         echo "  total:     $_sk_total skills, est. $(_skills_estimate_tokens "$_sk_total") tokens"
+      fi
+
+      # Proxmox detail (regardless of whether the skill pack is currently active)
+      if [[ -f "$PROXMOX_ENV" ]]; then
+        proxmox_load
+        echo "  proxmox:   host=${PROXMOX_HOST:-<unset>}:${PROXMOX_PORT:-8006} user=${PROXMOX_USER:-<unset>} token=${PROXMOX_TOKEN_NAME:-<unset>} verify_tls=${PROXMOX_VERIFY_SSL:-0}"
+        if [[ -d "$PROXMOX_MCP_DIR/.git" ]]; then
+          echo "             MCP clone: $PROXMOX_MCP_DIR @ ${PROXMOX_MCP_COMMIT:-<unknown>}"
+        fi
+        if is_vm_running "$BASE_NAME"; then
+          if limactl shell --workdir / "$BASE_NAME" -- bash -lc 'test -x $HOME/.local/share/proxmox-mcp-venv/bin/python' 2>/dev/null; then
+            echo "             VM venv:   present"
+          else
+            echo "             VM venv:   missing (will install on next session start)"
+          fi
+        else
+          echo "             VM venv:   unknown (base VM stopped)"
+        fi
       fi
       ;;
 
@@ -3171,9 +3443,39 @@ start_session() {
   local sess_cfg_file="$sess_share/config/opencode/opencode.json"
   local vm_home="/home/$(whoami).linux"
   if command -v jq >/dev/null 2>&1 && [[ -f "$sess_cfg_file" ]]; then
+    # Build an optional Proxmox MCP block — only when the proxmox skill pack
+    # is active and credentials are persisted. Token is materialised into the
+    # session config which lives under $SHARE_ROOT (mode inherited).
+    local mcp_extra="{}"
+    if skills_pkg_is_active proxmox && [[ -f "$PROXMOX_ENV" ]]; then
+      proxmox_load
+      if [[ -n "${PROXMOX_HOST:-}" && -n "${PROXMOX_TOKEN_VALUE:-}" ]]; then
+        mcp_extra="$(jq -n \
+          --arg host  "${PROXMOX_HOST}" \
+          --arg port  "${PROXMOX_PORT:-8006}" \
+          --arg user  "${PROXMOX_USER:-}" \
+          --arg tname "${PROXMOX_TOKEN_NAME:-}" \
+          --arg tval  "${PROXMOX_TOKEN_VALUE:-}" \
+          --arg tls   "${PROXMOX_VERIFY_SSL:-0}" \
+          --arg venv  "$vm_home/.local/share/proxmox-mcp-venv" \
+          '{proxmox: {
+             type: "local",
+             command: [($venv + "/bin/python"), "-m", "proxmox_mcp.server"],
+             environment: {
+               PROXMOX_HOST: $host,
+               PROXMOX_PORT: $port,
+               PROXMOX_USER: $user,
+               PROXMOX_TOKEN_NAME: $tname,
+               PROXMOX_TOKEN_VALUE: $tval,
+               PROXMOX_VERIFY_SSL: $tls
+             }
+           }}')"
+      fi
+    fi
+
     local tmp_cfg
     tmp_cfg="$(mktemp)"
-    jq --arg vm_home "$vm_home" '. * {
+    jq --arg vm_home "$vm_home" --argjson extra_mcp "$mcp_extra" '. * {
       "permission": {
         "*": "allow",
         "bash": {
@@ -3184,7 +3486,7 @@ start_session() {
           "git push *": "deny"
         }
       },
-      "mcp": {
+      "mcp": ({
         "playwright": {
           "type": "local",
           "command": ["playwright-mcp", "--headless", "--browser", "chromium"]
@@ -3193,7 +3495,7 @@ start_session() {
           "type": "local",
           "command": ["python3", ($vm_home + "/.local/share/repomapper/repomap_server.py")]
         }
-      }
+      } + $extra_mcp)
     }' "$sess_cfg_file" > "$tmp_cfg" \
       && mv "$tmp_cfg" "$sess_cfg_file" \
       || rm -f "$tmp_cfg"
@@ -3258,6 +3560,10 @@ start_session() {
   # which Lima may misinterpret as a VM instance, causing fatal errors during
   # list/stop. Remove it before any status check to avoid spurious failures.
   rm -rf "$HOME/.lima/sock" 2>/dev/null || true
+
+  # Install ProxmoxMCP into base VM (idempotent, only when proxmox skill is active).
+  # Must run with base VM available — slot in BEFORE the stop-for-clone step.
+  proxmox_ensure_installed_in_base || echo "[run] Proxmox MCP install skipped; session will start without it." >&2
 
   # Ensure base VM is stopped for clone — always attempt stop defensively
   if is_vm_running "$BASE_NAME"; then
@@ -3788,6 +4094,7 @@ skills_cmd() {
         echo "No skill packages active. Enable one with:"
         echo "  opencode-vm skills on ecc-auto   # language-filtered subset (~30 skills)"
         echo "  opencode-vm skills on ecc-all    # every ECC skill (~180 skills, token-heavy)"
+        echo "  opencode-vm skills on proxmox    # Proxmox knowledge skill + MCP server"
         return 0
       fi
       local path="${1:-$(pwd)}"
@@ -3802,6 +4109,7 @@ skills_cmd() {
         case "$pkg" in
           ecc-auto) names="$(skills_resolve_ecc_auto "$langs")" ;;
           ecc-all)  names="$(skills_resolve_ecc_all)" ;;
+          proxmox)  names="$(skills_resolve_proxmox)" ;;
           *)        names="" ;;
         esac
         count=$(printf '%s\n' "$names" | grep -c . || true)
@@ -3809,6 +4117,14 @@ skills_cmd() {
         echo "[$pkg] $count skills"
         if [[ -n "$names" ]]; then
           printf '%s\n' "$names" | sed 's/^/  - /'
+        fi
+        if [[ "$pkg" == "proxmox" ]]; then
+          proxmox_load
+          if [[ -n "${PROXMOX_HOST:-}" ]]; then
+            echo "  host: ${PROXMOX_HOST}:${PROXMOX_PORT:-8006}  user: ${PROXMOX_USER:-}  token: ${PROXMOX_TOKEN_NAME:-}"
+          else
+            echo "  (no credentials yet — run 'opencode-vm skills off proxmox && opencode-vm skills on proxmox')"
+          fi
         fi
         echo ""
       done
@@ -3818,12 +4134,12 @@ skills_cmd() {
       ;;
     on)
       local pkg="${1:-}"
-      [[ -n "$pkg" ]] || { echo "Usage: opencode-vm skills on <ecc-auto|ecc-all>" >&2; exit 2; }
+      [[ -n "$pkg" ]] || { echo "Usage: opencode-vm skills on <ecc-auto|ecc-all|proxmox>" >&2; exit 2; }
       skills_pkg_on "$pkg"
       ;;
     off)
       local pkg="${1:-}"
-      [[ -n "$pkg" ]] || { echo "Usage: opencode-vm skills off <ecc-auto|ecc-all>" >&2; exit 2; }
+      [[ -n "$pkg" ]] || { echo "Usage: opencode-vm skills off <ecc-auto|ecc-all|proxmox>" >&2; exit 2; }
       skills_pkg_off "$pkg"
       ;;
     list)
@@ -3845,6 +4161,7 @@ skills_cmd() {
         case "$pkg" in
           ecc-auto) names="$(skills_resolve_ecc_auto "$langs")" ;;
           ecc-all)  names="$(skills_resolve_ecc_all)" ;;
+          proxmox)  names="$(skills_resolve_proxmox)" ;;
           *) continue ;;
         esac
         local count
@@ -3865,8 +4182,8 @@ skills_cmd() {
 Usage:
   opencode-vm skills                      # status (alias)
   opencode-vm skills status [path]        # active packages + resolved skills + token estimate
-  opencode-vm skills on <pkg>             # enable package (ecc-auto | ecc-all)
-  opencode-vm skills off <pkg>            # disable package
+  opencode-vm skills on <pkg>             # enable package (ecc-auto | ecc-all | proxmox)
+  opencode-vm skills off <pkg>            # disable package (proxmox: also wipes stored credentials)
   opencode-vm skills list [path]          # preview what would mount (no VM touch)
 EOF
       exit 2 ;;
@@ -4052,8 +4369,8 @@ Usage:
   opencode-vm ports show                   # show current firewall policy
   opencode-vm ports host {show|add|rm|set} [PORT...]
   opencode-vm ports hostfwd {show|enable|disable}
-  opencode-vm ports lan tcp {show|add|rm|clear} [IP:PORT...]
-  opencode-vm ports lan udp {show|add|rm|clear} [IP:PORT...]
+  opencode-vm ports lan tcp {show|add|rm|clear} IP[:PORT]
+  opencode-vm ports lan udp {show|add|rm|clear} IP[:PORT]
   opencode-vm doctor [show]                # inspect local sync/auth/model/db state
   opencode-vm provider list                # list configured providers
   opencode-vm provider new                 # add new openai-compatible provider (interactive)

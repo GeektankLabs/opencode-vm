@@ -143,14 +143,15 @@ opencode-vm ecc learn clear           # wipe learnings for the current project
 
 opencode-vm has a top-level skills subsystem separate from the ECC integration. In v0.3.0, ECC provides the skill catalogue, but the CLI surface (`opencode-vm skills ...`) is designed to host additional skill sources (your own packs, team packs, other plugin bundles) in future releases without breaking changes.
 
-The mental model is **packages**: you turn named bundles on or off. Two packages ship today:
+The mental model is **packages**: you turn named bundles on or off. Three packages ship today:
 
 | Package | What it mounts | Approx. token cost |
 |---|---|---|
 | `ecc-auto` | Universal skills + language-specific skills matching your project (≈30) | +2–4k tokens |
 | `ecc-all`  | Every ECC skill (~180) | +10–15k tokens |
+| `proxmox`  | Proxmox VE knowledge skill **plus** an MCP server that drives the PVE API | +1 skill (~70 tokens) + MCP tools |
 
-`ecc-auto` and `ecc-all` are mutually exclusive (enabling one auto-disables the other). Both require ECC enabled (`opencode-vm init --with-ecc`).
+`ecc-auto` and `ecc-all` are mutually exclusive (enabling one auto-disables the other). Both require ECC enabled (`opencode-vm init --with-ecc`). `proxmox` is independent — no ECC needed.
 
 **Why opt-in?** Each skill adds ~60–90 tokens of frontmatter to every new chat, whether you use it or not. `ecc-all` alone can push 10–15k tokens of pure menu noise — fine on a 200k-context remote model, painful on a 4k–32k local model.
 
@@ -158,7 +159,9 @@ The mental model is **packages**: you turn named bundles on or off. Two packages
 opencode-vm skills                       # status (alias)
 opencode-vm skills on ecc-auto           # enable the language-filtered package
 opencode-vm skills on ecc-all            # enable everything (prints token warning)
+opencode-vm skills on proxmox            # interactive setup: host + API token, then ready
 opencode-vm skills off ecc-auto          # disable
+opencode-vm skills off proxmox           # disable AND wipe stored credentials
 opencode-vm skills list                  # preview what would mount for cwd (no VM touch)
 opencode-vm skills list /path/to/other   # preview for another project path
 ```
@@ -166,6 +169,19 @@ opencode-vm skills list /path/to/other   # preview for another project path
 `opencode-vm init --with-ecc` prepares the skill sources on disk but leaves every package disabled — flip them on later with `opencode-vm skills on <pkg>` whenever you want.
 
 `opencode-vm doctor` shows active packages + per-package skill count for the current working directory, plus an estimated token total.
+
+### Proxmox skill
+
+Bundles two things in a single switch:
+
+1. A **knowledge skill** so Claude knows the safe defaults for VM/LXC/storage/snapshot/backup operations.
+2. A **Proxmox MCP server** ([canvrno/ProxmoxMCP](https://github.com/canvrno/ProxmoxMCP)) so Claude can actually call the PVE API.
+
+`opencode-vm skills on proxmox` walks you through an interactive prompt for host, port, user, API token name, token value, and TLS verification — saved to `~/.opencode-vm/proxmox.env` (mode 0600). On the next `opencode-vm start`, the MCP server is installed into the base VM (one-time, ~30 s) and exposed in the session.
+
+To **rotate the token** or **change the host**: `opencode-vm skills off proxmox` (wipes credentials) then `opencode-vm skills on proxmox` (re-prompts).
+
+Token-creation cheat sheet: in the PVE UI, **Datacenter → Permissions → Users → Add `automation@pve`**, then **API Tokens → Add `automation@pve!claude`** (privilege separation off), and finally **Permissions → Add → Path `/`, User `automation@pve`, Role `PVEAdmin`** (narrow the role/path later for least privilege).
 
 ## Web Mode
 
