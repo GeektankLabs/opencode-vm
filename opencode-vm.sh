@@ -55,7 +55,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.0"
+OCVM_VERSION="0.4.1"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -479,7 +479,7 @@ ecc_apply_to_session() {
   ecc_load
   [[ "${ECC_ENABLED:-0}" == "1" ]] || return 0
   [[ -d "$ECC_DIR/.opencode" ]] || {
-    echo "[ecc] Clone missing .opencode/ — run: opencode-vm init --with-ecc" >&2
+    echo "[ecc] Clone missing .opencode/ — run: opencode-vm skills on ecc-auto" >&2
     return 0
   }
 
@@ -921,10 +921,17 @@ skills_pkg_on() {
   skills_load
   case "$pkg" in
     ecc-auto|ecc-all)
-      ecc_enabled || {
-        echo "[skills] '$pkg' requires ECC. Run: opencode-vm init --with-ecc first." >&2
-        return 2
-      }
+      # Auto-provision ECC infrastructure on first enable — no separate init flag needed.
+      ecc_load
+      if [[ ! -d "$ECC_DIR/.git" ]]; then
+        echo "[skills] '$pkg' needs ECC — fetching clone now…"
+        ecc_clone_or_update || {
+          echo "[skills] ECC clone failed; package not enabled." >&2
+          return 1
+        }
+      fi
+      ECC_ENABLED=1
+      ecc_save
       # Mutual exclusion: ecc-auto vs ecc-all
       if [[ "$pkg" == "ecc-auto" ]] && skills_pkg_is_active ecc-all; then
         _skills_pkg_drop ecc-all
@@ -973,6 +980,15 @@ skills_pkg_off() {
     # Proxmox: drop stored credentials so the next 'on' re-prompts.
     if [[ "$pkg" == "proxmox" ]]; then
       proxmox_wipe_env
+    fi
+    # ECC: if no ecc-* package is active anymore, disable the plugin payload.
+    if [[ "$pkg" == "ecc-auto" || "$pkg" == "ecc-all" ]] \
+       && ! skills_pkg_is_active ecc-auto && ! skills_pkg_is_active ecc-all; then
+      ecc_load
+      ECC_ENABLED=0
+      ecc_save
+      echo "[skills] No ECC skills active — ECC plugin payload disabled for future sessions."
+      echo "         Clone at $ECC_DIR left intact."
     fi
   else
     echo "[skills] '$pkg' is not active."
@@ -1534,7 +1550,6 @@ doctor_cmd() {
         echo "  repo:      ${ECC_REPO:-<unset>}"
         echo "  ref:       ${ECC_REF:-<unset>}"
         echo "  commit:    ${ECC_COMMIT:-<unset>}"
-        echo "  mcp pack:  $([[ "${ECC_MCP_PACK:-0}" == "1" ]] && echo yes || echo no)"
         if [[ -d "$ECC_DIR/.opencode" ]]; then
           local _n_cmds _n_agents _n_plugins
           _n_cmds=$(find "$ECC_DIR/.opencode/commands" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
@@ -1542,7 +1557,7 @@ doctor_cmd() {
           _n_plugins=$(find "$ECC_DIR/.opencode/plugins" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
           echo "  payload:   ${_n_cmds} commands, ${_n_agents} agents, ${_n_plugins} plugins"
         else
-          echo "  payload:   <clone missing — run: opencode-vm init --with-ecc>"
+          echo "  payload:   <clone missing — run: opencode-vm skills on ecc-auto>"
         fi
 
         # Homunculus (per-project learning store) stats for cwd
@@ -1579,7 +1594,7 @@ doctor_cmd() {
           done
         fi
       else
-        echo "  enabled:   no  (enable with: opencode-vm init --with-ecc)"
+        echo "  enabled:   no  (enable with: opencode-vm skills on ecc-auto)"
       fi
       echo ""
 
@@ -1771,20 +1786,6 @@ provider_cmd() {
       if ! command -v jq >/dev/null 2>&1; then
         echo "[provider] jq is required for provider add. Install jq and retry." >&2
         exit 1
-      fi
-
-      # --- Optional ECC MCP pack opt-in (only when ECC is enabled) ---
-      if ecc_enabled && [[ -t 0 ]] && [[ "${ECC_MCP_PACK:-0}" != "1" ]]; then
-        local _ecc_mcp_ans=""
-        echo ""
-        echo "[ecc] ECC is enabled. Install the ECC MCP server pack"
-        echo "      (GitHub, Context7, Exa, Playwright etc. — merged into session config)?"
-        read -r -p "      Enable ECC MCP pack? [y/N]: " _ecc_mcp_ans </dev/tty || _ecc_mcp_ans="n"
-        if [[ "$_ecc_mcp_ans" =~ ^[Yy] ]]; then
-          ECC_MCP_PACK=1
-          ecc_save
-          echo "[ecc] MCP pack will be merged into every new session. Run 'opencode-vm ecc mcp off' to disable."
-        fi
       fi
 
       # --- Auto model discovery (when no --model flags given) ---
@@ -3013,6 +3014,10 @@ Pre-installed at: \`~/.local/share/repomapper/\`
 - Globally installed tools (via apt, npm -g, pip, go install) persist only within the current session.
 - You can freely modify system configuration, install packages, start services, and use sudo. The only restriction is on firewall and security-policy management, which are controlled by the host.
 
+## Project Design References
+
+For any frontend, UI, or visual-design task, check the project root (and the root of any relevant sub-project, e.g. a mono-repo package) for a `DESIGN.md` file. If present, treat it as authoritative for design system, colors, typography, and component conventions. One public source of such files is [awesome-design-md](https://github.com/VoltAgent/awesome-design-md).
+
 ## Coding Principles
 
 1. **Think before coding.** State your assumptions explicitly. If the request is ambiguous or you see multiple reasonable interpretations, surface them and ask before implementing.
@@ -3961,126 +3966,6 @@ EOF
   fi
 }
 
-ecc_cmd() {
-  local op="${1:-status}"
-  shift || true
-  case "$op" in
-    status)
-      ecc_load
-      if [[ "${ECC_ENABLED:-0}" == "1" ]]; then
-        echo "enabled:  yes"
-        echo "repo:     ${ECC_REPO}"
-        echo "ref:      ${ECC_REF}"
-        echo "commit:   ${ECC_COMMIT:-<unknown>}"
-        echo "mcp pack: $([[ "${ECC_MCP_PACK:-0}" == "1" ]] && echo yes || echo no)"
-        echo "clone:    $ECC_DIR"
-      else
-        echo "enabled:  no"
-        echo "Enable with: opencode-vm init --with-ecc"
-      fi
-      ;;
-    enable)
-      ecc_load
-      ECC_ENABLED=1
-      ecc_save
-      ecc_clone_or_update
-      echo "[ecc] Enabled. Run 'opencode-vm prune && opencode-vm start' to apply."
-      ;;
-    disable|off)
-      ecc_load
-      ECC_ENABLED=0
-      ecc_save
-      echo "[ecc] Disabled. New sessions will no longer load the ECC plugin."
-      echo "      Clone at $ECC_DIR left intact (delete manually to reclaim space)."
-      ;;
-    update|pull)
-      ecc_enabled || { echo "[ecc] ECC is not enabled." >&2; exit 2; }
-      local _new_ref="${1:-}"
-      if [[ -n "$_new_ref" ]]; then
-        ecc_load
-        ECC_REF="$_new_ref"
-        ecc_save
-      fi
-      ecc_clone_or_update
-      ;;
-    mcp)
-      local mop="${1:-status}"
-      ecc_load
-      case "$mop" in
-        on|enable)
-          ecc_enabled || { echo "[ecc] Enable ECC first: opencode-vm init --with-ecc" >&2; exit 2; }
-          ECC_MCP_PACK=1
-          ecc_save
-          echo "[ecc] MCP pack enabled. Restart session to apply."
-          ;;
-        off|disable)
-          ECC_MCP_PACK=0
-          ecc_save
-          echo "[ecc] MCP pack disabled for future sessions."
-          ;;
-        status|"")
-          echo "mcp pack: $([[ "${ECC_MCP_PACK:-0}" == "1" ]] && echo yes || echo no)"
-          ;;
-        *)
-          echo "Usage: opencode-vm ecc mcp {on|off|status}" >&2; exit 2 ;;
-      esac
-      ;;
-    learn)
-      local lop="${1:-status}"
-      shift || true
-      local learn_proj="${1:-$(pwd)}"
-      local learn_hash learn_dir
-      learn_hash="$(ecc_compute_project_hash "$learn_proj")"
-      learn_dir="$(project_state_dir "$learn_proj")/homunculus"
-      case "$lop" in
-        status|"")
-          echo "project:      $learn_proj"
-          echo "project hash: $learn_hash"
-          echo "store:        $learn_dir"
-          if [[ -d "$learn_dir" ]]; then
-            local _np _ni _ol
-            _np=$(find "$learn_dir/personal" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
-            _ni=$(find "$learn_dir/inherited" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
-            echo "instincts:    ${_np} personal, ${_ni} inherited"
-            if [[ -f "$learn_dir/observations.jsonl" ]]; then
-              _ol=$(wc -l < "$learn_dir/observations.jsonl" 2>/dev/null | tr -d ' ')
-              echo "observations: ${_ol} entries"
-            fi
-          else
-            echo "instincts:    <none yet>"
-          fi
-          ;;
-        clear)
-          [[ -d "$learn_dir" ]] || { echo "[ecc] No store at $learn_dir"; exit 0; }
-          echo "About to DELETE: $learn_dir"
-          local ans=""
-          read -r -p "Type 'yes' to confirm: " ans </dev/tty || ans=""
-          if [[ "$ans" == "yes" ]]; then
-            rm -rf "$learn_dir"
-            echo "[ecc] Cleared."
-          else
-            echo "[ecc] Aborted."
-          fi
-          ;;
-        *)
-          echo "Usage: opencode-vm ecc learn {status|clear} [project-path]" >&2; exit 2 ;;
-      esac
-      ;;
-    *)
-      cat >&2 <<EOF
-Usage:
-  opencode-vm ecc status
-  opencode-vm ecc enable              # enable + clone/update
-  opencode-vm ecc disable             # disable for future sessions
-  opencode-vm ecc update [ref]        # pull latest (optionally switch ref)
-  opencode-vm ecc mcp {on|off|status} # toggle ECC MCP pack injection
-  opencode-vm ecc learn {status|clear} [path]
-                                      # inspect or reset per-project learnings
-EOF
-      exit 2 ;;
-  esac
-}
-
 skills_cmd() {
   local op="${1:-status}"
   shift || true
@@ -4197,10 +4082,6 @@ case "$cmd" in
     install_cmd
     ;;
 
-  ecc)
-    ecc_cmd "$@"
-    ;;
-
   skills)
     skills_cmd "$@"
     ;;
@@ -4209,34 +4090,12 @@ case "$cmd" in
     need limactl
     sanitize_lima_sock_dir
 
-    # Parse init-local flags
-    _with_ecc=0
-    _init_ecc_ref=""
+    # init no longer takes ECC-specific flags; ECC is managed via `skills on/off ecc-*`.
     while [[ "$#" -gt 0 ]]; do
       case "$1" in
-        --with-ecc) _with_ecc=1 ;;
-        --ecc-ref) shift; _init_ecc_ref="${1:-}" ;;
-        --ecc-ref=*) _init_ecc_ref="${1#*=}" ;;
-        --no-ecc)
-          ecc_load
-          ECC_ENABLED=0
-          ecc_save
-          ;;
         *) echo "[init] Unknown option: $1" >&2; exit 2 ;;
       esac
-      shift || true
     done
-
-    if (( _with_ecc == 1 )); then
-      ecc_load
-      ECC_ENABLED=1
-      [[ -n "$_init_ecc_ref" ]] && ECC_REF="$_init_ecc_ref"
-      ecc_save
-      ecc_clone_or_update || {
-        echo "[init] ECC clone failed — aborting before touching base VM." >&2
-        exit 1
-      }
-    fi
 
     cleanup_sessions
     if base_exists; then
@@ -4252,11 +4111,13 @@ case "$cmd" in
     rm -rf "$HOME/.lima/sock" 2>/dev/null || true
     provision_base
     echo
-    if ecc_enabled; then
-      echo "[init] ECC enabled (commit ${ECC_COMMIT:-unknown}). New sessions will load the ECC plugin."
-    fi
     echo "Next: navigate to your project directory (open terminal in VS Code) and run:"
     echo "  opencode-vm start"
+    echo
+    echo "Optional skill packages (enable any time):"
+    echo "  opencode-vm skills on ecc-auto   # language-filtered ECC skills (auto-clones ECC)"
+    echo "  opencode-vm skills on ecc-all    # every ECC skill (token-heavy)"
+    echo "  opencode-vm skills on proxmox    # Proxmox VE knowledge + MCP server"
     ;;
 
   start|run)
@@ -4355,17 +4216,18 @@ Usage:
                                            # --tui: also start TUI in terminal (experimental)
   opencode-vm attach                       # reconnect to a running session VM
   opencode-vm shell                        # open shell in session VM (auto-starts if missing)
-  opencode-vm init [--with-ecc [--ecc-ref REF]]
-                                           # create/provision base VM (one-time setup)
-                                           # --with-ecc: also install the ECC plugin pack
-                                           #   (skill packages stay off by default; enable later
-                                           #    via 'opencode-vm skills on <pkg>')
-  opencode-vm ecc {status|enable|disable|update|mcp|learn}
-                                           # manage the optional ECC integration
-                                           # learn status|clear: inspect/reset per-project learnings
+  opencode-vm init                         # create/provision base VM (one-time setup)
+                                           # ECC and other skill packages stay off by default —
+                                           # enable later via 'opencode-vm skills on <pkg>'.
   opencode-vm skills {status|on|off|list} [pkg|path]
                                            # manage skill packages
-                                           # packages: ecc-auto (~30, lang-filtered), ecc-all (~180)
+                                           # packages:
+                                           #   ecc-auto  — ~30 skills, filtered to project languages
+                                           #               (auto-clones ECC on first enable)
+                                           #   ecc-all   — ~180 skills, every ECC skill (token-heavy)
+                                           #   proxmox   — Proxmox VE knowledge skill + MCP server (PVE API)
+                                           #               'on' prompts interactively for host + API token;
+                                           #               'off' disables AND wipes stored credentials.
   opencode-vm ports show                   # show current firewall policy
   opencode-vm ports host {show|add|rm|set} [PORT...]
   opencode-vm ports hostfwd {show|enable|disable}
