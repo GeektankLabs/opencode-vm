@@ -2229,7 +2229,50 @@ update_cmd() {
     echo "Run opencode-vm again and inspect your state before continuing." >&2
   fi
   echo ""
-  echo "Recommended: run 'opencode-vm init' to rebuild the base VM with any new changes."
+
+  # Non-interactive (piped stdin): just print the recommendation
+  if [[ ! -t 0 ]]; then
+    echo "Recommended: run 'opencode-vm init' to rebuild the base VM with any new changes."
+    return 0
+  fi
+
+  # Interactive: offer to rebuild now
+  local answer=""
+  read -r -p "Rebuild base VM now with the new version? (y/N) " answer
+  if [[ ! "$answer" =~ ^[Yy]$ ]]; then
+    echo ""
+    echo "Recommended: run 'opencode-vm init' to rebuild the base VM with any new changes."
+    return 0
+  fi
+
+  echo ""
+  need limactl
+  sanitize_lima_sock_dir
+  cleanup_sessions
+  if base_exists; then
+    echo "[init] Stopping and deleting existing base VM: $BASE_NAME"
+    limactl stop "$BASE_NAME" 2>/dev/null || true
+    if ! limactl delete -f "$BASE_NAME"; then
+      sanitize_lima_sock_dir
+      limactl delete -f "$BASE_NAME" 2>/dev/null || true
+    fi
+  fi
+  rm -rf "$HOME/.lima/sock" 2>/dev/null || true
+  provision_base
+  echo
+  echo "Next: navigate to your project directory (open terminal in VS Code) and run:"
+  echo "  opencode-vm start"
+  echo
+  skills_load
+  if [[ -n "${SKILLS_PACKAGES:-}" ]]; then
+    echo "Active skill packages: ${SKILLS_PACKAGES}"
+    echo "These will be applied automatically on next 'opencode-vm start'."
+  else
+    echo "Optional skill packages (enable any time):"
+    echo "  opencode-vm skills on ecc-auto   # language-filtered ECC skills (auto-clones ECC)"
+    echo "  opencode-vm skills on ecc-all    # every ECC skill (token-heavy)"
+    echo "  opencode-vm skills on proxmox    # Proxmox VE knowledge + MCP server"
+  fi
 }
 
 install_cmd() {
@@ -4114,10 +4157,16 @@ case "$cmd" in
     echo "Next: navigate to your project directory (open terminal in VS Code) and run:"
     echo "  opencode-vm start"
     echo
-    echo "Optional skill packages (enable any time):"
-    echo "  opencode-vm skills on ecc-auto   # language-filtered ECC skills (auto-clones ECC)"
-    echo "  opencode-vm skills on ecc-all    # every ECC skill (token-heavy)"
-    echo "  opencode-vm skills on proxmox    # Proxmox VE knowledge + MCP server"
+    skills_load
+    if [[ -n "${SKILLS_PACKAGES:-}" ]]; then
+      echo "Active skill packages: ${SKILLS_PACKAGES}"
+      echo "These will be applied automatically on next 'opencode-vm start'."
+    else
+      echo "Optional skill packages (enable any time):"
+      echo "  opencode-vm skills on ecc-auto   # language-filtered ECC skills (auto-clones ECC)"
+      echo "  opencode-vm skills on ecc-all    # every ECC skill (token-heavy)"
+      echo "  opencode-vm skills on proxmox    # Proxmox VE knowledge + MCP server"
+    fi
     ;;
 
   start|run)
