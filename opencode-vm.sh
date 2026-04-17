@@ -63,7 +63,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.5"
+OCVM_VERSION="0.4.7"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -989,21 +989,55 @@ skills_registry_always_active() {
   jq -r '.skills | to_entries[] | select(.value.always_active == true) | .key' "$reg"
 }
 
+# Emit newline-separated package names that have default_active: true.
+# Used by skills_load to seed SKILLS_PACKAGES on first use.
+skills_registry_defaults() {
+  local reg; reg="$(_skills_registry_read 2>/dev/null)" || return 0
+  jq -r '.skills | to_entries[] | select(.value.default_active == true) | .key' "$reg"
+}
+
 skills_load() {
   SKILLS_PACKAGES=""
+  SKILLS_MIGRATED_WEBIMG=""
+  local dirty=0
   if [[ -f "$SKILLS_ENV" ]]; then
     # shellcheck disable=SC1090
     source "$SKILLS_ENV"
+  else
+    # First use: seed all default_active packages from the registry.
+    local def defs=""
+    while IFS= read -r def; do
+      [[ -n "$def" ]] || continue
+      defs="${defs:+$defs }$def"
+    done < <(skills_registry_defaults 2>/dev/null)
+    SKILLS_PACKAGES="$defs"
+    SKILLS_MIGRATED_WEBIMG=1
+    dirty=1
   fi
+
   # Legacy cleanup: 'proxmox' moved to the mcps subsystem in v0.4.4.
-  # If an older state file still lists it, quietly strip so it doesn't
-  # keep surfacing in status output or the mount loop.
   case " ${SKILLS_PACKAGES:-} " in
     *" proxmox "*)
       _skills_pkg_drop proxmox
-      skills_save
+      dirty=1
       ;;
   esac
+
+  # Migration (v0.4.6): webimg was always_active in v0.4.2–v0.4.5. It is now a
+  # default_active package — users may turn it off. Backfill webimg once for
+  # existing state files so previous behaviour is preserved by default.
+  if [[ "${SKILLS_MIGRATED_WEBIMG:-}" != "1" ]]; then
+    case " ${SKILLS_PACKAGES:-} " in
+      *" webimg "*) ;;
+      *)
+        SKILLS_PACKAGES="${SKILLS_PACKAGES:+$SKILLS_PACKAGES }webimg"
+        ;;
+    esac
+    SKILLS_MIGRATED_WEBIMG=1
+    dirty=1
+  fi
+
+  (( dirty == 1 )) && skills_save
   return 0
 }
 
@@ -1013,6 +1047,7 @@ skills_save() {
 # opencode-vm skills subsystem
 # space-separated list of active package names
 SKILLS_PACKAGES="${SKILLS_PACKAGES:-}"
+SKILLS_MIGRATED_WEBIMG="${SKILLS_MIGRATED_WEBIMG:-1}"
 EOF
 }
 
@@ -1641,17 +1676,24 @@ mcps_cmd() {
 opencode-vm mcps — manage MCP servers (separate from skills)
 
 Usage:
-  opencode-vm mcps status                show active MCPs
-  opencode-vm mcps list                  list all known MCPs (active + default + description)
-  opencode-vm mcps on <name>             enable an MCP for future sessions
-  opencode-vm mcps off <name>            disable an MCP for future sessions
+  opencode-vm mcps                        # status (alias)
+  opencode-vm mcps status                 # show active MCPs
+  opencode-vm mcps list                   # list all known MCPs (active + default + description)
+  opencode-vm mcps on <name>              # enable an MCP for future sessions
+  opencode-vm mcps off <name>             # disable an MCP for future sessions
+
+  opencode-vm skills                      # skills status (alias)
+  opencode-vm skills status [path]        # active skill packages + resolved skills
+  opencode-vm skills on <pkg>             # enable skill package (ecc-auto | ecc-all | webimg)
+  opencode-vm skills off <pkg>            # disable skill package
+  opencode-vm skills list [path]          # preview what would mount (no VM touch)
 
 MCPs are servers/tools that give the agent capabilities (browser automation,
-code indexing, infra APIs). Skills are knowledge-only markdown — see
-'opencode-vm skills'.
+code indexing, infra APIs). Skills are knowledge-only markdown.
 
-Built-in MCPs (v0.4.4): playwright (default on), repomapper (default off),
+Built-in MCPs (v0.4.6): playwright (default on), repomapper (default off),
 proxmox (default off; requires API host + token on first enable).
+Built-in skills (v0.4.6): webimg (default on, can be disabled), ecc-auto, ecc-all.
 
 Session MCP injection is data-driven: only MCPs in the active list end up
 in opencode.json's mcp block.
@@ -4514,7 +4556,6 @@ skills_cmd() {
     status|"")
       skills_load
       echo "active packages: ${SKILLS_PACKAGES:-<none>}"
-      echo "built-in:        webimg (always active)"
       if [[ -z "${SKILLS_PACKAGES:-}" ]]; then
         echo ""
         echo "No opt-in skill packages active. Enable one with:"
@@ -4540,16 +4581,11 @@ skills_cmd() {
       done < <(skills_registry_always_active)
       local pkg total=0
       for pkg in $all_status_pkgs; do
-        local names count is_always
+        local names count
         names="$(skills_resolve_pkg "$pkg" "$langs")"
         count=$(printf '%s\n' "$names" | grep -c . || true)
         total=$((total + count))
-        is_always="$(skills_registry_field "$pkg" ".always_active")"
-        if [[ "$is_always" == "true" ]]; then
-          echo "[$pkg] $count skills (built-in)"
-        else
-          echo "[$pkg] $count skills"
-        fi
+        echo "[$pkg] $count skills"
         if [[ -n "$names" ]]; then
           printf '%s\n' "$names" | sed 's/^/  - /'
         fi
@@ -4587,18 +4623,13 @@ skills_cmd() {
       done < <(skills_registry_always_active)
       local pkg total=0
       for pkg in $all_list_pkgs; do
-        local names is_always
+        local names
         names="$(skills_resolve_pkg "$pkg" "$langs")"
         [[ -n "$names" ]] || continue
         local count
         count=$(printf '%s\n' "$names" | grep -c . || true)
         total=$((total + count))
-        is_always="$(skills_registry_field "$pkg" ".always_active")"
-        if [[ "$is_always" == "true" ]]; then
-          echo "[$pkg] would mount $count skills (built-in):"
-        else
-          echo "[$pkg] would mount $count skills:"
-        fi
+        echo "[$pkg] would mount $count skills:"
         printf '%s\n' "$names" | sed 's/^/  - /'
         echo ""
       done
@@ -4614,6 +4645,11 @@ Usage:
   opencode-vm skills on <pkg>             # enable package (ecc-auto | ecc-all | webimg)
   opencode-vm skills off <pkg>            # disable package
   opencode-vm skills list [path]          # preview what would mount (no VM touch)
+
+  opencode-vm mcps                        # MCP status (alias)
+  opencode-vm mcps list                   # list all MCPs (active/default markers)
+  opencode-vm mcps on <name>              # enable MCP (playwright | repomapper | proxmox)
+  opencode-vm mcps off <name>             # disable MCP (proxmox: also wipes credentials)
 
 Note: Proxmox moved to the mcps subsystem in v0.4.4 — use 'opencode-vm mcps'.
 EOF
@@ -4776,19 +4812,24 @@ Usage:
   opencode-vm attach                       # reconnect to a running session VM
   opencode-vm shell                        # open shell in session VM (auto-starts if missing)
   opencode-vm init                         # create/provision base VM (one-time setup)
-                                           # ECC and other skill packages stay off by default —
-                                           # enable later via 'opencode-vm skills on <pkg>'.
+                                           # Skill + MCP packages stay at their defaults —
+                                           # manage later via 'opencode-vm skills|mcps on/off <pkg>'.
   opencode-vm skills {status|on|off|list} [pkg|path]
-                                           # manage skill packages
-                                           # built-in (always active):
-                                           #   webimg    — web image optimization pipeline (CLI tools)
-                                           # opt-in packages:
+                                           # manage skill packages (knowledge-only markdown)
+                                           # packages (registry: skills/registry.json):
+                                           #   webimg    — default on; web image optimization pipeline
+                                           #               (CLI tools pre-installed in base VM)
                                            #   ecc-auto  — ~30 skills, filtered to project languages
                                            #               (auto-clones ECC on first enable)
                                            #   ecc-all   — ~180 skills, every ECC skill (token-heavy)
-                                           #   proxmox   — Proxmox VE knowledge skill + MCP server (PVE API)
-                                           #               'on' prompts interactively for host + API token;
-                                           #               'off' disables AND wipes stored credentials.
+  opencode-vm mcps {status|list|on|off} [name]
+                                           # manage MCP servers (tools the agent can call)
+                                           # MCPs (registry: mcps/registry.json):
+                                           #   playwright — default on; headless browser automation
+                                           #   repomapper — default off; PageRank codebase maps
+                                           #   proxmox    — default off; Proxmox VE API via ProxmoxMCP
+                                           #                'on' prompts interactively for host + API token;
+                                           #                'off' disables AND wipes stored credentials.
   opencode-vm ports show                   # show current firewall policy
   opencode-vm ports host {show|add|rm|set} [PORT...]
   opencode-vm ports hostfwd {show|enable|disable}

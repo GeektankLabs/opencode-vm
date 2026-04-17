@@ -111,13 +111,13 @@ opencode-vm splits extensions into two subsystems: **Skills** (knowledge package
 
 The Skills subsystem is registry-driven: [`skills/registry.json`](skills/registry.json) is the source of truth. Three packages ship today:
 
-| Package | What it mounts | Approx. token cost |
-|---|---|---|
-| `webimg`  | Web image optimization pipeline (1 skill, always on, tools pre-installed in base VM) | ~70 tokens |
-| `ecc-auto`| Universal ECC skills + language-specific matches for your project (≈30) | +2–4k tokens |
-| `ecc-all` | Every ECC skill (~180) | +10–15k tokens |
+| Package | Default | What it mounts | Approx. token cost |
+|---|---|---|---|
+| `webimg`  | on  | Web image optimization pipeline (tools pre-installed in base VM) | ~70 tokens |
+| `ecc-auto`| off | Universal ECC skills + language-specific matches for your project (≈30) | +2–4k tokens |
+| `ecc-all` | off | Every ECC skill (~180) | +10–15k tokens |
 
-`ecc-auto` and `ecc-all` are mutually exclusive (enabling one auto-disables the other). Both auto-clone ECC into `~/.opencode-vm/ecc/` on first enable — no separate install step needed. `webimg` is always active (built-in).
+`ecc-auto` and `ecc-all` are mutually exclusive (enabling one auto-disables the other). Both auto-clone ECC into `~/.opencode-vm/ecc/` on first enable — no separate install step needed. `webimg` is seeded as active on first use; you can disable it with `opencode-vm skills off webimg` if you don't need the image pipeline.
 
 **Why opt-in?** Each skill adds ~60–90 tokens of frontmatter to every new chat, whether you use it or not. `ecc-all` alone can push 10–15k tokens of pure menu noise — fine on a 200k-context remote model, painful on a 4k–32k local model.
 

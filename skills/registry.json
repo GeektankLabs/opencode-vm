@@ -4,7 +4,6 @@
     "webimg": {
       "description": "Web image optimization pipeline (ImageMagick, libvips, cwebp, avifenc, pngquant, etc.)",
       "default_active": true,
-      "always_active": true,
       "resolver": "single_bundled",
       "skill_dir_name": "web-image-pipeline",
       "install": {
