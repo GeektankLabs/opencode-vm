@@ -37,6 +37,9 @@ SKILLS_ENV="$SHARE_ROOT/skills.env"
 PROXMOX_ENV="$SHARE_ROOT/proxmox.env"
 PROXMOX_MCP_DIR="$SHARE_ROOT/proxmox-mcp"
 PROXMOX_SKILL_CACHE="$SHARE_ROOT/proxmox-skill"   # fallback if script is not co-located with bundled skills/
+
+# Web Image Pipeline skill package (built-in, always active — CLI tools in base VM)
+WEBIMG_SKILL_CACHE="$SHARE_ROOT/webimg-skill"      # fallback if script is not co-located with bundled skills/
 DEFAULT_PROXMOX_MCP_REPO="https://github.com/canvrno/ProxmoxMCP.git"
 DEFAULT_PROXMOX_MCP_REF="main"
 # Script location (for resolving bundled skills/proxmox when running from repo)
@@ -55,7 +58,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.1"
+OCVM_VERSION="0.4.2"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -767,6 +770,34 @@ proxmox_skill_ensure() {
   echo "$PROXMOX_SKILL_CACHE/skills/proxmox"
 }
 
+# Resolve webimg skill source: prefer bundled skills/web-image-pipeline next to
+# the script, fall back to a shallow clone of the OCVM repo.
+webimg_skill_ensure() {
+  local bundled="$SCRIPT_DIR/skills/web-image-pipeline"
+  if [[ -d "$bundled" ]]; then
+    echo "$bundled"
+    return 0
+  fi
+  local raw_repo="https://github.com/${OCVM_UPDATE_REPO}.git"
+  if [[ ! -d "$WEBIMG_SKILL_CACHE/.git" ]]; then
+    echo "[webimg] Fetching bundled skill content from $OCVM_UPDATE_REPO ..." >&2
+    rm -rf "$WEBIMG_SKILL_CACHE"
+    git clone --depth=1 --filter=blob:none --sparse \
+      --branch "$OCVM_UPDATE_BRANCH" "$raw_repo" "$WEBIMG_SKILL_CACHE" >/dev/null 2>&1 || {
+      echo "[webimg] Failed to clone $raw_repo for skill content." >&2
+      return 1
+    }
+    git -C "$WEBIMG_SKILL_CACHE" sparse-checkout set skills/web-image-pipeline >/dev/null 2>&1 || {
+      echo "[webimg] sparse-checkout failed for skills/web-image-pipeline." >&2
+      return 1
+    }
+  else
+    git -C "$WEBIMG_SKILL_CACHE" fetch --depth=1 origin "$OCVM_UPDATE_BRANCH" >/dev/null 2>&1 || true
+    git -C "$WEBIMG_SKILL_CACHE" checkout -q FETCH_HEAD 2>/dev/null || true
+  fi
+  echo "$WEBIMG_SKILL_CACHE/skills/web-image-pipeline"
+}
+
 # ---------------------------------------------------------------------------
 # Project language detector — shared by Rules and Skills
 # ---------------------------------------------------------------------------
@@ -952,8 +983,12 @@ skills_pkg_on() {
       # Pre-populate the skill cache so the first session doesn't pay the clone cost.
       proxmox_skill_ensure >/dev/null || return 1
       ;;
+    webimg)
+      # No interactive setup needed — image tools are pre-installed in the base VM.
+      webimg_skill_ensure >/dev/null || return 1
+      ;;
     *)
-      echo "[skills] Unknown package: '$pkg'. Available: ecc-auto, ecc-all, proxmox." >&2
+      echo "[skills] Unknown package: '$pkg'. Available: ecc-auto, ecc-all, proxmox, webimg." >&2
       return 2 ;;
   esac
 
@@ -1096,6 +1131,12 @@ skills_resolve_proxmox() {
   return 0
 }
 
+# Resolve "webimg": single bundled skill dir.
+skills_resolve_webimg() {
+  echo "web-image-pipeline"
+  return 0
+}
+
 # For a given package, echo the absolute path to the parent dir containing
 # the skill subdirectories (e.g. ECC: $ECC_DIR/skills, Proxmox: bundled or cache).
 skills_source_root_for() {
@@ -1109,6 +1150,14 @@ skills_source_root_for() {
         echo "$PROXMOX_SKILL_CACHE/skills"
       fi
       ;;
+    webimg)
+      local bundled="$SCRIPT_DIR/skills"
+      if [[ -d "$bundled/web-image-pipeline" ]]; then
+        echo "$bundled"
+      else
+        echo "$WEBIMG_SKILL_CACHE/skills"
+      fi
+      ;;
     *) return 1 ;;
   esac
 }
@@ -1119,7 +1168,12 @@ skills_mount_for_session() {
   local sess_share="$1"
   local proj="$2"
   skills_load
-  [[ -n "${SKILLS_PACKAGES:-}" ]] || return 0
+
+  # Built-in packages: always mount webimg regardless of SKILLS_PACKAGES.
+  local all_pkgs="${SKILLS_PACKAGES:-}"
+  case " $all_pkgs " in *" webimg "*) ;; *) all_pkgs="${all_pkgs:+$all_pkgs }webimg" ;; esac
+
+  [[ -n "$all_pkgs" ]] || return 0
 
   local langs
   if [[ -f "$sess_share/ecc-langs" ]]; then
@@ -1134,22 +1188,29 @@ skills_mount_for_session() {
   : > "$manifest"
 
   local pkg
-  for pkg in $SKILLS_PACKAGES; do
+  for pkg in $all_pkgs; do
     local names=""
     case "$pkg" in
       ecc-auto) names="$(skills_resolve_ecc_auto "$langs")" ;;
       ecc-all)  names="$(skills_resolve_ecc_all)" ;;
       proxmox)  names="$(skills_resolve_proxmox)" ;;
+      webimg)   names="$(skills_resolve_webimg)" ;;
       *) echo "[skills] Unknown active package '$pkg' — skipping." >&2; continue ;;
     esac
     [[ -n "$names" ]] || continue
 
     local src_root
     src_root="$(skills_source_root_for "$pkg" 2>/dev/null)" || continue
-    # For the proxmox pack: refresh the cache if the bundled dir isn't available.
+    # For bundled skill packs: refresh the cache if the bundled dir isn't available.
     if [[ "$pkg" == "proxmox" && ! -d "$src_root/proxmox" ]]; then
       proxmox_skill_ensure >/dev/null || {
         echo "[skills] Could not prepare proxmox skill content — skipping." >&2
+        continue
+      }
+    fi
+    if [[ "$pkg" == "webimg" && ! -d "$src_root/web-image-pipeline" ]]; then
+      webimg_skill_ensure >/dev/null || {
+        echo "[skills] Could not prepare webimg skill content — skipping." >&2
         continue
       }
     fi
@@ -1168,7 +1229,7 @@ skills_mount_for_session() {
 
   local total
   total=$(wc -l < "$manifest" 2>/dev/null | tr -d ' ')
-  echo "[skills] Mounted ${total:-0} skills (packages: ${SKILLS_PACKAGES})"
+  echo "[skills] Mounted ${total:-0} skills (packages: ${all_pkgs})"
 }
 
 # Rough token-cost estimate for the skills menu based on count (frontmatter-only).
@@ -2264,6 +2325,7 @@ update_cmd() {
   echo "  opencode-vm start"
   echo
   skills_load
+  echo "Built-in skill: webimg (web image optimization pipeline, always active)"
   if [[ -n "${SKILLS_PACKAGES:-}" ]]; then
     echo "Active skill packages: ${SKILLS_PACKAGES}"
     echo "These will be applied automatically on next 'opencode-vm start'."
@@ -2669,7 +2731,12 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
   libglib2.0-0 libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 \
   libcups2 libdbus-1-3 libdrm2 libxcb1 libxkbcommon0 \
   libatspi2.0-0 libx11-6 libxcomposite1 libxdamage1 libxext6 \
-  libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64
+  libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64 \
+  imagemagick libvips-tools \
+  webp libavif-bin \
+  pngquant optipng jpegoptim gifsicle \
+  potrace librsvg2-bin \
+  libimage-exiftool-perl
 
 # Install NVM + Node.js 22 LTS (default)
 export NVM_DIR="$HOME/.nvm"
@@ -2682,7 +2749,7 @@ nvm alias default 22
 # Pin to cdn.playwright.dev — the default playwright.azureedge.net mirror has
 # been observed throttling to ~100 KB/s, turning the 183 MB chromium download
 # into a 30-min stall. cdn.playwright.dev serves the same artifacts at full speed.
-npm install -g @playwright/mcp@latest
+npm install -g @playwright/mcp@latest svgo
 PLAYWRIGHT_DOWNLOAD_HOST=https://cdn.playwright.dev npx -y playwright install chromium
 
 # Create NVM-version-independent symlink so playwright-mcp stays available
@@ -2954,6 +3021,25 @@ docker exec -it mydb psql -U postgres
 - **Archives**: `tar`, `gzip`, `bzip2`, `xz`, `zip`, `unzip`
 - **Process inspection**: `ps`, `top`, `lsof`, `strace`
 - **JSON**: `jq`
+
+## Image Optimization Tools
+
+Pre-installed CLI tools for web image optimization and graphics conversion:
+
+- **ImageMagick** (`convert`, `identify`, `mogrify`): versatile image conversion, resize, crop, format detection
+- **libvips** (`vips`, `vipsthumbnail`): high-performance image processing (faster and more memory-efficient than ImageMagick for batch operations)
+- **WebP** (`cwebp`, `dwebp`): encode/decode WebP format
+- **AVIF** (`avifenc`, `avifdec`): encode/decode AVIF format
+- **pngquant**: lossy PNG compression (reduces colors, dramatic size reduction)
+- **OptiPNG** (`optipng`): lossless PNG recompression
+- **jpegoptim**: JPEG optimization (lossless or lossy)
+- **gifsicle**: GIF optimization and manipulation
+- **potrace**: bitmap-to-SVG vectorization (flat logos, icons only — not photos)
+- **librsvg** (`rsvg-convert`): SVG rendering and conversion
+- **SVGO** (`svgo`): SVG optimization and cleanup
+- **ExifTool** (`exiftool`): image metadata inspection and removal
+
+The `web-image-pipeline` skill is mounted by default and provides detailed workflows, quality defaults, and reporting format for production web image optimization.
 
 ## Network Configuration
 
@@ -4017,9 +4103,10 @@ skills_cmd() {
     status|"")
       skills_load
       echo "active packages: ${SKILLS_PACKAGES:-<none>}"
+      echo "built-in:        webimg (always active)"
       if [[ -z "${SKILLS_PACKAGES:-}" ]]; then
         echo ""
-        echo "No skill packages active. Enable one with:"
+        echo "No opt-in skill packages active. Enable one with:"
         echo "  opencode-vm skills on ecc-auto   # language-filtered subset (~30 skills)"
         echo "  opencode-vm skills on ecc-all    # every ECC skill (~180 skills, token-heavy)"
         echo "  opencode-vm skills on proxmox    # Proxmox knowledge skill + MCP server"
@@ -4031,18 +4118,26 @@ skills_cmd() {
       echo "project:         $path"
       echo "detected langs:  $langs"
       echo ""
+      # Include built-in packages in status display
+      local all_status_pkgs="$SKILLS_PACKAGES"
+      case " $all_status_pkgs " in *" webimg "*) ;; *) all_status_pkgs="${all_status_pkgs:+$all_status_pkgs }webimg" ;; esac
       local pkg total=0
-      for pkg in $SKILLS_PACKAGES; do
+      for pkg in $all_status_pkgs; do
         local names count
         case "$pkg" in
           ecc-auto) names="$(skills_resolve_ecc_auto "$langs")" ;;
           ecc-all)  names="$(skills_resolve_ecc_all)" ;;
           proxmox)  names="$(skills_resolve_proxmox)" ;;
+          webimg)   names="$(skills_resolve_webimg)" ;;
           *)        names="" ;;
         esac
         count=$(printf '%s\n' "$names" | grep -c . || true)
         total=$((total + count))
-        echo "[$pkg] $count skills"
+        if [[ "$pkg" == "webimg" ]]; then
+          echo "[$pkg] $count skills (built-in)"
+        else
+          echo "[$pkg] $count skills"
+        fi
         if [[ -n "$names" ]]; then
           printf '%s\n' "$names" | sed 's/^/  - /'
         fi
@@ -4062,40 +4157,44 @@ skills_cmd() {
       ;;
     on)
       local pkg="${1:-}"
-      [[ -n "$pkg" ]] || { echo "Usage: opencode-vm skills on <ecc-auto|ecc-all|proxmox>" >&2; exit 2; }
+      [[ -n "$pkg" ]] || { echo "Usage: opencode-vm skills on <ecc-auto|ecc-all|proxmox|webimg>" >&2; exit 2; }
       skills_pkg_on "$pkg"
       ;;
     off)
       local pkg="${1:-}"
-      [[ -n "$pkg" ]] || { echo "Usage: opencode-vm skills off <ecc-auto|ecc-all|proxmox>" >&2; exit 2; }
+      [[ -n "$pkg" ]] || { echo "Usage: opencode-vm skills off <ecc-auto|ecc-all|proxmox|webimg>" >&2; exit 2; }
       skills_pkg_off "$pkg"
       ;;
     list)
       # Preview: what would mount at the given project path with current active packages.
       local path="${1:-$(pwd)}"
       skills_load
-      if [[ -z "${SKILLS_PACKAGES:-}" ]]; then
-        echo "No active packages. Run 'opencode-vm skills on <pkg>' first."
-        return 0
-      fi
       local langs
       langs="$(detect_project_languages "$path")"
       echo "project:         $path"
       echo "detected langs:  $langs"
       echo ""
+      # Include built-in packages in list preview
+      local all_list_pkgs="${SKILLS_PACKAGES:-}"
+      case " $all_list_pkgs " in *" webimg "*) ;; *) all_list_pkgs="${all_list_pkgs:+$all_list_pkgs }webimg" ;; esac
       local pkg total=0
-      for pkg in $SKILLS_PACKAGES; do
+      for pkg in $all_list_pkgs; do
         local names
         case "$pkg" in
           ecc-auto) names="$(skills_resolve_ecc_auto "$langs")" ;;
           ecc-all)  names="$(skills_resolve_ecc_all)" ;;
           proxmox)  names="$(skills_resolve_proxmox)" ;;
+          webimg)   names="$(skills_resolve_webimg)" ;;
           *) continue ;;
         esac
         local count
         count=$(printf '%s\n' "$names" | grep -c . || true)
         total=$((total + count))
-        echo "[$pkg] would mount $count skills:"
+        if [[ "$pkg" == "webimg" ]]; then
+          echo "[$pkg] would mount $count skills (built-in):"
+        else
+          echo "[$pkg] would mount $count skills:"
+        fi
         if [[ -n "$names" ]]; then
           printf '%s\n' "$names" | sed 's/^/  - /'
         fi
@@ -4110,7 +4209,7 @@ skills_cmd() {
 Usage:
   opencode-vm skills                      # status (alias)
   opencode-vm skills status [path]        # active packages + resolved skills + token estimate
-  opencode-vm skills on <pkg>             # enable package (ecc-auto | ecc-all | proxmox)
+  opencode-vm skills on <pkg>             # enable package (ecc-auto | ecc-all | proxmox | webimg)
   opencode-vm skills off <pkg>            # disable package (proxmox: also wipes stored credentials)
   opencode-vm skills list [path]          # preview what would mount (no VM touch)
 EOF
@@ -4158,6 +4257,7 @@ case "$cmd" in
     echo "  opencode-vm start"
     echo
     skills_load
+    echo "Built-in skill: webimg (web image optimization pipeline, always active)"
     if [[ -n "${SKILLS_PACKAGES:-}" ]]; then
       echo "Active skill packages: ${SKILLS_PACKAGES}"
       echo "These will be applied automatically on next 'opencode-vm start'."
@@ -4270,7 +4370,9 @@ Usage:
                                            # enable later via 'opencode-vm skills on <pkg>'.
   opencode-vm skills {status|on|off|list} [pkg|path]
                                            # manage skill packages
-                                           # packages:
+                                           # built-in (always active):
+                                           #   webimg    — web image optimization pipeline (CLI tools)
+                                           # opt-in packages:
                                            #   ecc-auto  — ~30 skills, filtered to project languages
                                            #               (auto-clones ECC on first enable)
                                            #   ecc-all   — ~180 skills, every ECC skill (token-heavy)
