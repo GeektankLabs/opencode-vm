@@ -1,0 +1,83 @@
+{
+  "$schema_version": "1",
+  "skills": {
+    "webimg": {
+      "description": "Web image optimization pipeline (ImageMagick, libvips, cwebp, avifenc, pngquant, etc.)",
+      "default_active": true,
+      "always_active": true,
+      "resolver": "single_bundled",
+      "skill_dir_name": "web-image-pipeline",
+      "install": {
+        "type": "bundled",
+        "sparse_path": "skills/web-image-pipeline",
+        "cache_var": "WEBIMG_SKILL_CACHE"
+      }
+    },
+    "ecc-auto": {
+      "description": "Language-filtered subset of ECC skills (~30 skills, ~2-4k tokens)",
+      "default_active": false,
+      "resolver": "ecc_filtered",
+      "mutually_exclusive_with": ["ecc-all"],
+      "install": {
+        "type": "git",
+        "repo_var": "ECC_REPO",
+        "ref_var": "ECC_REF",
+        "local_dir_var": "ECC_DIR",
+        "skills_subpath": "skills"
+      },
+      "filter": {
+        "universal_whitelist": [
+          "coding-standards",
+          "git-workflow",
+          "code-tour",
+          "codebase-onboarding",
+          "e2e-testing",
+          "exa-search",
+          "deep-research",
+          "documentation-lookup",
+          "docker-patterns",
+          "database-migrations",
+          "deployment-patterns",
+          "context-budget",
+          "claude-api",
+          "architecture-decision-records",
+          "iterative-retrieval",
+          "agent-eval",
+          "eval-harness",
+          "api-design",
+          "mcp-server-patterns"
+        ],
+        "language_prefixes": {
+          "typescript": ["frontend-", "backend-", "bun-runtime", "react-"],
+          "golang":     ["golang-"],
+          "python":     ["django-", "python-"],
+          "php":        ["laravel-"],
+          "java":       ["java-", "jpa-", "hexagonal-architecture"],
+          "kotlin":     ["kotlin-", "android-clean-architecture", "compose-multiplatform-patterns"],
+          "swift":      ["foundation-models-on-device"],
+          "csharp":     ["csharp-", "dotnet-patterns"],
+          "cpp":        ["cpp-"],
+          "dart":       ["dart-flutter-patterns", "flutter-dart-code-review"],
+          "web":        ["frontend-design", "design-system", "accessibility"]
+        },
+        "exclude": ["continuous-learning-v2"]
+      }
+    },
+    "ecc-all": {
+      "description": "Every ECC skill (~180 skills, ~10-15k tokens) — for 128k+ context models only",
+      "default_active": false,
+      "resolver": "ecc_all",
+      "mutually_exclusive_with": ["ecc-auto"],
+      "install": {
+        "type": "git",
+        "repo_var": "ECC_REPO",
+        "ref_var": "ECC_REF",
+        "local_dir_var": "ECC_DIR",
+        "skills_subpath": "skills"
+      },
+      "filter": {
+        "exclude": ["continuous-learning-v2"]
+      }
+    }
+  }
+}

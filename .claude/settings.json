@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -n 'case \"$cmd\"' /Users/rotzoll/Documents/rootzoll-github/opencode-vm/opencode-vm.sh)"
+    ]
+  }
+}

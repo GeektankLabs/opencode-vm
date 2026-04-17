@@ -1,0 +1,55 @@
+{
+  "$schema_version": "1",
+  "mcps": {
+    "playwright": {
+      "description": "Headless browser automation (Chromium pre-installed in base VM)",
+      "default_active": true,
+      "install": {
+        "type": "bundled",
+        "notes": "Installed globally in the base VM via npm i -g @playwright/mcp; Chromium pre-downloaded."
+      },
+      "credential_schema": [],
+      "mcp_config": {
+        "type": "local",
+        "command": ["playwright-mcp", "--headless", "--browser", "chromium"]
+      }
+    },
+    "repomapper": {
+      "description": "PageRank-ranked structural maps of the current codebase",
+      "default_active": false,
+      "install": {
+        "type": "bundled",
+        "notes": "Installed in the base VM at ~/.local/share/repomapper/."
+      },
+      "credential_schema": [],
+      "mcp_config": {
+        "type": "local",
+        "command": ["python3", "{VM_HOME}/.local/share/repomapper/repomap_server.py"]
+      }
+    },
+    "proxmox": {
+      "description": "Proxmox VE cluster operations via ProxmoxMCP server",
+      "default_active": false,
+      "install": {
+        "type": "git",
+        "repo": "https://github.com/canvrno/ProxmoxMCP.git",
+        "ref": "main",
+        "notes": "Cloned host-side on enable; Python venv installed in base VM on first session."
+      },
+      "credential_schema": [
+        { "field": "PROXMOX_HOST",        "prompt": "Proxmox host (e.g. pve.example.com)", "secret": false, "required": true },
+        { "field": "PROXMOX_PORT",        "prompt": "API port",                             "secret": false, "required": false, "default": "8006" },
+        { "field": "PROXMOX_USER",        "prompt": "Token user (e.g. root@pam)",           "secret": false, "required": true },
+        { "field": "PROXMOX_TOKEN_NAME",  "prompt": "Token name",                           "secret": false, "required": true },
+        { "field": "PROXMOX_TOKEN_VALUE", "prompt": "Token value",                          "secret": true,  "required": true },
+        { "field": "PROXMOX_VERIFY_SSL",  "prompt": "Verify SSL (0/1)",                     "secret": false, "required": false, "default": "0" }
+      ],
+      "skill_doc": "skills/proxmox",
+      "mcp_config": {
+        "type": "local",
+        "command": ["{VM_HOME}/.local/share/proxmox-mcp-venv/bin/python", "-m", "proxmox_mcp.server"],
+        "environment_from_credentials": true
+      }
+    }
+  }
+}

@@ -105,19 +105,19 @@ ECC's `continuous-learning-v2` skill (commands `/learn` and `/instinct-status`) 
 
 `opencode-vm doctor` lists detected languages, applied rule files, and a summary of the learning store for the current working directory.
 
-## Skills (opt-in)
+## Skills (opt-in, knowledge only)
 
-opencode-vm has a top-level skills subsystem. The mental model is **packages**: you turn named bundles on or off.
+opencode-vm splits extensions into two subsystems: **Skills** (knowledge packages — pure markdown mounted as agent context) and **MCPs** (server-based capabilities — tools the agent can actually call). This section covers Skills; MCPs are below.
 
-The mental model is **packages**: you turn named bundles on or off. Three packages ship today:
+The Skills subsystem is registry-driven: [`skills/registry.json`](skills/registry.json) is the source of truth. Three packages ship today:
 
 | Package | What it mounts | Approx. token cost |
 |---|---|---|
-| `ecc-auto` | Universal skills + language-specific skills matching your project (≈30) | +2–4k tokens |
-| `ecc-all`  | Every ECC skill (~180) | +10–15k tokens |
-| `proxmox`  | Proxmox VE knowledge skill **plus** an MCP server that drives the PVE API | +1 skill (~70 tokens) + MCP tools |
+| `webimg`  | Web image optimization pipeline (1 skill, always on, tools pre-installed in base VM) | ~70 tokens |
+| `ecc-auto`| Universal ECC skills + language-specific matches for your project (≈30) | +2–4k tokens |
+| `ecc-all` | Every ECC skill (~180) | +10–15k tokens |
 
-`ecc-auto` and `ecc-all` are mutually exclusive (enabling one auto-disables the other). Both auto-clone ECC into `~/.opencode-vm/ecc/` on first enable — no separate install step needed. `proxmox` is independent of ECC.
+`ecc-auto` and `ecc-all` are mutually exclusive (enabling one auto-disables the other). Both auto-clone ECC into `~/.opencode-vm/ecc/` on first enable — no separate install step needed. `webimg` is always active (built-in).
 
 **Why opt-in?** Each skill adds ~60–90 tokens of frontmatter to every new chat, whether you use it or not. `ecc-all` alone can push 10–15k tokens of pure menu noise — fine on a 200k-context remote model, painful on a 4k–32k local model.
 
@@ -125,27 +125,43 @@ The mental model is **packages**: you turn named bundles on or off. Three packag
 opencode-vm skills                       # status (alias)
 opencode-vm skills on ecc-auto           # enable the language-filtered package
 opencode-vm skills on ecc-all            # enable everything (prints token warning)
-opencode-vm skills on proxmox            # interactive setup: host + API token, then ready
 opencode-vm skills off ecc-auto          # disable
-opencode-vm skills off proxmox           # disable AND wipe stored credentials
 opencode-vm skills list                  # preview what would mount for cwd (no VM touch)
 opencode-vm skills list /path/to/other   # preview for another project path
 ```
 
-`opencode-vm init` only provisions the base VM — every skill package stays off until you explicitly run `opencode-vm skills on <pkg>`.
+`opencode-vm init` only provisions the base VM — every opt-in skill stays off until you explicitly run `opencode-vm skills on <pkg>`.
 
 `opencode-vm doctor` shows active packages + per-package skill count for the current working directory, plus an estimated token total.
 
-### Proxmox skill
+> **Moved in v0.4.4:** Proxmox is no longer a skill — it is an MCP. Use `opencode-vm mcps on proxmox` (see below).
 
-Bundles two things in a single switch:
+## MCPs (opt-in, capabilities)
 
-1. A **knowledge skill** so Claude knows the safe defaults for VM/LXC/storage/snapshot/backup operations.
-2. A **Proxmox MCP server** ([canvrno/ProxmoxMCP](https://github.com/canvrno/ProxmoxMCP)) so Claude can actually call the PVE API.
+MCPs (Model Context Protocol servers) give the agent *tools it can call* — browser automation, codebase indexing, infrastructure APIs. Registry-driven at [`mcps/registry.json`](mcps/registry.json). Three MCPs ship today:
 
-`opencode-vm skills on proxmox` walks you through an interactive prompt for host, port, user, API token name, token value, and TLS verification — saved to `~/.opencode-vm/proxmox.env` (mode 0600). On the next `opencode-vm start`, the MCP server is installed into the base VM (one-time, ~30 s) and exposed in the session.
+| MCP | Default | Needs setup | Description |
+|---|---|---|---|
+| `playwright` | on  | no | Headless browser automation (Chromium pre-installed in base VM) |
+| `repomapper` | off | no | PageRank-ranked structural maps of the current codebase |
+| `proxmox`    | off | interactive host + API token | Proxmox VE API via [canvrno/ProxmoxMCP](https://github.com/canvrno/ProxmoxMCP) |
 
-To **rotate the token** or **change the host**: `opencode-vm skills off proxmox` (wipes credentials) then `opencode-vm skills on proxmox` (re-prompts).
+```bash
+opencode-vm mcps                         # status
+opencode-vm mcps list                    # show all MCPs with active/default markers
+opencode-vm mcps on repomapper           # enable for future sessions
+opencode-vm mcps off playwright          # disable (default-on MCPs can be turned off)
+opencode-vm mcps on proxmox              # interactive setup: host + API token, then ready
+opencode-vm mcps off proxmox             # disable AND wipe stored credentials
+```
+
+Session MCP injection is data-driven: only MCPs in the active list end up in the session's `opencode.json`. Default-active MCPs are seeded into `~/.opencode-vm/mcps.env` on first use.
+
+### Proxmox MCP
+
+`opencode-vm mcps on proxmox` walks you through an interactive prompt for host, port, user, API token name, token value, and TLS verification — saved to `~/.opencode-vm/proxmox.env` (mode 0600). On the next `opencode-vm start`, the MCP server is installed into the base VM (one-time, ~30 s) and exposed in the session. A companion SKILL.md (safe defaults, common tasks, API-token guide) is mounted alongside.
+
+To **rotate the token** or **change the host**: `opencode-vm mcps off proxmox` (wipes credentials) then `opencode-vm mcps on proxmox` (re-prompts).
 
 Token-creation cheat sheet: in the PVE UI, **Datacenter → Permissions → Users → Add `automation@pve`**, then **API Tokens → Add `automation@pve!claude`** (privilege separation off), and finally **Permissions → Add → Path `/`, User `automation@pve`, Role `PVEAdmin`** (narrow the role/path later for least privilege).
 
@@ -371,7 +387,8 @@ Optional: if you prefer to hide the update-available hint on each command, set `
 opencode-vm install      # install/update script to ~/bin
 opencode-vm init         # create/recreate base VM
 opencode-vm skills on ecc-auto             # opt into ECC skills (auto-clones ECC on first run)
-opencode-vm skills on proxmox              # opt into Proxmox skill + MCP
+opencode-vm mcps on proxmox                # opt into Proxmox MCP (interactive credential prompt)
+opencode-vm mcps list                      # show all MCPs + their active state
 opencode-vm start        # start TUI session (same as opencode-vm run)
 opencode-vm web          # start web server session (browser, API, TUI attach)
 opencode-vm shell        # shell into session VM (auto-starts if none is running)

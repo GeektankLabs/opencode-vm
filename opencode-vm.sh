@@ -30,10 +30,15 @@ ECC_DIR="$SHARE_ROOT/ecc"
 DEFAULT_ECC_REPO="https://github.com/affaan-m/everything-claude-code.git"
 DEFAULT_ECC_REF="main"
 
-# Skills subsystem (top-level, source-agnostic; v0.3.0 ships ECC packages only)
+# Skills subsystem (registry-driven since v0.4.5 — skills/registry.json is the source of truth)
 SKILLS_ENV="$SHARE_ROOT/skills.env"
+SKILLS_REGISTRY_CACHE="$SHARE_ROOT/skills-registry"   # fallback if script is not co-located with bundled skills/
 
-# Proxmox skill package (opt-in via `opencode-vm skills on proxmox`)
+# MCPs subsystem (separate from skills: MCPs are servers + credentials; skills are knowledge)
+MCPS_ENV="$SHARE_ROOT/mcps.env"
+MCPS_REGISTRY_CACHE="$SHARE_ROOT/mcps-registry"   # fallback if script is not co-located with bundled mcps/
+
+# Proxmox MCP (opt-in via `opencode-vm mcps on proxmox`; migrated from skills in v0.4.4)
 PROXMOX_ENV="$SHARE_ROOT/proxmox.env"
 PROXMOX_MCP_DIR="$SHARE_ROOT/proxmox-mcp"
 PROXMOX_SKILL_CACHE="$SHARE_ROOT/proxmox-skill"   # fallback if script is not co-located with bundled skills/
@@ -58,7 +63,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.2"
+OCVM_VERSION="0.4.5"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -588,9 +593,10 @@ ecc_sync_homunculus_back() {
 }
 
 # ---------------------------------------------------------------------------
-# Proxmox skill package — opt-in via `opencode-vm skills on proxmox`
-# Ships both the knowledge skill (bundled SKILL.md) and the ProxmoxMCP server.
-# Credentials live in $PROXMOX_ENV (mode 0600); `skills off proxmox` wipes it.
+# Proxmox MCP package — opt-in via `opencode-vm mcps on proxmox`
+# Ships both the knowledge skill (bundled SKILL.md, mounted via mcps.skill_doc)
+# and the ProxmoxMCP server. Credentials live in $PROXMOX_ENV (mode 0600);
+# `mcps off proxmox` wipes them.
 # ---------------------------------------------------------------------------
 
 proxmox_load() {
@@ -619,7 +625,7 @@ proxmox_save() {
   umask 077
   cat > "$PROXMOX_ENV" <<EOF
 # opencode-vm Proxmox integration — credentials, mode 0600.
-# Wiped automatically by: opencode-vm skills off proxmox
+# Wiped automatically by: opencode-vm mcps off proxmox
 PROXMOX_HOST="${PROXMOX_HOST:-}"
 PROXMOX_PORT="${PROXMOX_PORT:-8006}"
 PROXMOX_USER="${PROXMOX_USER:-}"
@@ -693,7 +699,7 @@ proxmox_mcp_clone_or_update() {
 # ready-to-run venv. Idempotent: skips when the venv already exists. Called
 # from start_session right before the base VM is stopped for cloning.
 proxmox_ensure_installed_in_base() {
-  skills_pkg_is_active proxmox || return 0
+  mcps_pkg_is_active proxmox || return 0
   [[ -f "$PROXMOX_ENV" ]] || return 0
   proxmox_load
   local venv_path='$HOME/.local/share/proxmox-mcp-venv'
@@ -730,7 +736,7 @@ proxmox_ensure_installed_in_base() {
     $venv_path/bin/pip install --quiet --upgrade pip
     $venv_path/bin/pip install --quiet -e $src_path
   " || {
-    echo "[proxmox] MCP install failed. See VM log; disable with 'opencode-vm skills off proxmox'." >&2
+    echo "[proxmox] MCP install failed. See VM log; disable with 'opencode-vm mcps off proxmox'." >&2
     (( started_base == 1 )) && limactl stop "$BASE_NAME" 2>/dev/null || true
     return 1
   }
@@ -911,8 +917,77 @@ ecc_inject_rules() {
 }
 
 # ---------------------------------------------------------------------------
-# Skills subsystem — package-based, source-agnostic
+# Skills subsystem — registry-driven since v0.4.5
+# Source of truth: skills/registry.json (bundled alongside the script, or
+# fetched from upstream on demand).
 # ---------------------------------------------------------------------------
+
+_skills_registry_path() {
+  local bundled="$SCRIPT_DIR/skills/registry.json"
+  if [[ -f "$bundled" ]]; then
+    echo "$bundled"
+    return 0
+  fi
+  if [[ -f "$SKILLS_REGISTRY_CACHE/skills/registry.json" ]]; then
+    echo "$SKILLS_REGISTRY_CACHE/skills/registry.json"
+    return 0
+  fi
+  return 1
+}
+
+skills_registry_ensure() {
+  local bundled="$SCRIPT_DIR/skills/registry.json"
+  [[ -f "$bundled" ]] && return 0
+  local raw_repo="https://github.com/$OCVM_UPDATE_REPO.git"
+  if [[ ! -d "$SKILLS_REGISTRY_CACHE/.git" ]]; then
+    mkdir -p "$(dirname "$SKILLS_REGISTRY_CACHE")"
+    rm -rf "$SKILLS_REGISTRY_CACHE"
+    git clone --depth=1 --filter=blob:none --sparse \
+      --branch "$OCVM_UPDATE_BRANCH" "$raw_repo" "$SKILLS_REGISTRY_CACHE" >/dev/null 2>&1 || {
+      echo "[skills] Could not fetch registry from $raw_repo" >&2
+      return 1
+    }
+    git -C "$SKILLS_REGISTRY_CACHE" sparse-checkout set skills >/dev/null 2>&1 || {
+      echo "[skills] sparse-checkout failed" >&2
+      return 1
+    }
+  else
+    git -C "$SKILLS_REGISTRY_CACHE" fetch --depth=1 origin "$OCVM_UPDATE_BRANCH" >/dev/null 2>&1 || true
+    git -C "$SKILLS_REGISTRY_CACHE" checkout -q FETCH_HEAD 2>/dev/null || true
+  fi
+  [[ -f "$SKILLS_REGISTRY_CACHE/skills/registry.json" ]]
+}
+
+_skills_registry_read() {
+  local reg
+  reg="$(_skills_registry_path 2>/dev/null)" || {
+    skills_registry_ensure >/dev/null || return 1
+    reg="$(_skills_registry_path 2>/dev/null)" || return 1
+  }
+  echo "$reg"
+}
+
+skills_registry_has() {
+  local reg; reg="$(_skills_registry_read)" || return 1
+  jq -e --arg n "$1" '.skills[$n]' "$reg" >/dev/null 2>&1
+}
+
+skills_registry_field() {
+  # $1=pkg, $2=jq filter appended to .skills[$n]
+  local reg; reg="$(_skills_registry_read)" || return 1
+  jq -r --arg n "$1" ".skills[\$n]$2 // empty" "$reg" 2>/dev/null
+}
+
+skills_registry_list() {
+  local reg; reg="$(_skills_registry_read)" || return 0
+  jq -r '.skills | to_entries[] | "\(.key)\t\(.value.default_active)\t\(.value.always_active // false)\t\(.value.description)"' "$reg"
+}
+
+# Emit space-separated package names that have always_active: true.
+skills_registry_always_active() {
+  local reg; reg="$(_skills_registry_read)" || return 0
+  jq -r '.skills | to_entries[] | select(.value.always_active == true) | .key' "$reg"
+}
 
 skills_load() {
   SKILLS_PACKAGES=""
@@ -920,6 +995,15 @@ skills_load() {
     # shellcheck disable=SC1090
     source "$SKILLS_ENV"
   fi
+  # Legacy cleanup: 'proxmox' moved to the mcps subsystem in v0.4.4.
+  # If an older state file still lists it, quietly strip so it doesn't
+  # keep surfacing in status output or the mount loop.
+  case " ${SKILLS_PACKAGES:-} " in
+    *" proxmox "*)
+      _skills_pkg_drop proxmox
+      skills_save
+      ;;
+  esac
   return 0
 }
 
@@ -949,10 +1033,26 @@ _skills_pkg_drop() {
 
 skills_pkg_on() {
   local pkg="$1"
+  if [[ "$pkg" == "proxmox" ]]; then
+    echo "[skills] 'proxmox' is now an MCP, not a skill." >&2
+    echo "         Run instead: opencode-vm mcps on proxmox" >&2
+    return 2
+  fi
+  if ! skills_registry_has "$pkg"; then
+    local reg available=""
+    if reg="$(_skills_registry_read 2>/dev/null)"; then
+      available="$(jq -r '.skills | keys | join(", ")' "$reg" 2>/dev/null || true)"
+    fi
+    echo "[skills] Unknown package: '$pkg'. Available: ${available:-<registry unavailable>}" >&2
+    return 2
+  fi
   skills_load
-  case "$pkg" in
-    ecc-auto|ecc-all)
-      # Auto-provision ECC infrastructure on first enable — no separate init flag needed.
+
+  # Resolver-specific setup (auto-clone, cache seed)
+  local rtype
+  rtype="$(skills_registry_field "$pkg" ".resolver")"
+  case "$rtype" in
+    ecc_filtered|ecc_all)
       ecc_load
       if [[ ! -d "$ECC_DIR/.git" ]]; then
         echo "[skills] '$pkg' needs ECC — fetching clone now…"
@@ -963,59 +1063,60 @@ skills_pkg_on() {
       fi
       ECC_ENABLED=1
       ecc_save
-      # Mutual exclusion: ecc-auto vs ecc-all
-      if [[ "$pkg" == "ecc-auto" ]] && skills_pkg_is_active ecc-all; then
-        _skills_pkg_drop ecc-all
-        echo "[skills] Disabled 'ecc-all' (superseded by 'ecc-auto')."
-      elif [[ "$pkg" == "ecc-all" ]] && skills_pkg_is_active ecc-auto; then
-        _skills_pkg_drop ecc-auto
-        echo "[skills] Disabled 'ecc-auto' (superseded by 'ecc-all')."
+      ;;
+    single_bundled)
+      # Only webimg today: ensure the bundled skill dir is available.
+      if [[ "$pkg" == "webimg" ]]; then
+        webimg_skill_ensure >/dev/null || return 1
       fi
       ;;
-    proxmox)
-      # Interactive credential setup + clone MCP server on first enable.
-      # Re-enable is silent when $PROXMOX_ENV already exists.
-      proxmox_load
-      if [[ -z "${PROXMOX_HOST:-}" || -z "${PROXMOX_TOKEN_VALUE:-}" ]]; then
-        proxmox_setup_interactive || return 1
-      fi
-      proxmox_mcp_clone_or_update || return 1
-      # Pre-populate the skill cache so the first session doesn't pay the clone cost.
-      proxmox_skill_ensure >/dev/null || return 1
-      ;;
-    webimg)
-      # No interactive setup needed — image tools are pre-installed in the base VM.
-      webimg_skill_ensure >/dev/null || return 1
-      ;;
-    *)
-      echo "[skills] Unknown package: '$pkg'. Available: ecc-auto, ecc-all, proxmox, webimg." >&2
-      return 2 ;;
   esac
 
-  if skills_pkg_is_active "$pkg"; then
-    echo "[skills] '$pkg' is already active."
-  else
-    SKILLS_PACKAGES="${SKILLS_PACKAGES:+$SKILLS_PACKAGES }$pkg"
-    skills_save
-    echo "[skills] Enabled '$pkg'. Restart session to apply."
-    if [[ "$pkg" == "ecc-all" ]]; then
-      echo "[skills] WARNING: ecc-all mounts ~180 skills (~10–15k tokens of frontmatter)."
-      echo "[skills]          Suitable only for 128k+ context models."
-    fi
-  fi
+  # Mutual exclusion from registry. skills_pkg_is_active re-runs skills_load
+  # which would clobber our in-memory drops, so iterate against the local copy.
+  local other _active_snapshot=" ${SKILLS_PACKAGES:-} "
+  local excl_changed=0
+  while IFS= read -r other; do
+    [[ -n "$other" ]] || continue
+    case "$_active_snapshot" in
+      *" $other "*)
+        _skills_pkg_drop "$other"
+        _active_snapshot=" ${SKILLS_PACKAGES:-} "
+        excl_changed=1
+        echo "[skills] Disabled '$other' (superseded by '$pkg')."
+        ;;
+    esac
+  done < <(skills_registry_field "$pkg" ".mutually_exclusive_with[]?")
+  (( excl_changed == 1 )) && skills_save
+
+  case " ${SKILLS_PACKAGES:-} " in
+    *" $pkg "*)
+      echo "[skills] '$pkg' is already active."
+      ;;
+    *)
+      SKILLS_PACKAGES="${SKILLS_PACKAGES:+$SKILLS_PACKAGES }$pkg"
+      skills_save
+      echo "[skills] Enabled '$pkg'. Restart session to apply."
+      if [[ "$pkg" == "ecc-all" ]]; then
+        echo "[skills] WARNING: ecc-all mounts ~180 skills (~10–15k tokens of frontmatter)."
+        echo "[skills]          Suitable only for 128k+ context models."
+      fi
+      ;;
+  esac
 }
 
 skills_pkg_off() {
   local pkg="$1"
+  if [[ "$pkg" == "proxmox" ]]; then
+    echo "[skills] 'proxmox' is now an MCP, not a skill." >&2
+    echo "         Run instead: opencode-vm mcps off proxmox" >&2
+    return 2
+  fi
   skills_load
   if skills_pkg_is_active "$pkg"; then
     _skills_pkg_drop "$pkg"
     skills_save
     echo "[skills] Disabled '$pkg'. Restart session to apply."
-    # Proxmox: drop stored credentials so the next 'on' re-prompts.
-    if [[ "$pkg" == "proxmox" ]]; then
-      proxmox_wipe_env
-    fi
     # ECC: if no ecc-* package is active anymore, disable the plugin payload.
     if [[ "$pkg" == "ecc-auto" || "$pkg" == "ecc-all" ]] \
        && ! skills_pkg_is_active ecc-auto && ! skills_pkg_is_active ecc-all; then
@@ -1030,82 +1131,45 @@ skills_pkg_off() {
   fi
 }
 
-# Universal whitelist (applied to any ECC-style skill source)
-_skills_universal_whitelist() {
-  cat <<'EOF'
-coding-standards
-git-workflow
-code-tour
-codebase-onboarding
-e2e-testing
-exa-search
-deep-research
-documentation-lookup
-docker-patterns
-database-migrations
-deployment-patterns
-context-budget
-claude-api
-architecture-decision-records
-iterative-retrieval
-agent-eval
-eval-harness
-api-design
-mcp-server-patterns
-EOF
-}
-
-# Per-language prefix whitelist
-# Usage: _skills_lang_prefixes <lang>  -> prints space-separated prefixes
-_skills_lang_prefixes() {
-  case "$1" in
-    typescript) echo "frontend- backend- bun-runtime react-" ;;
-    golang)     echo "golang-" ;;
-    python)     echo "django- python-" ;;
-    php)        echo "laravel-" ;;
-    java)       echo "java- jpa- hexagonal-architecture" ;;
-    kotlin)     echo "kotlin- android-clean-architecture compose-multiplatform-patterns" ;;
-    swift)      echo "foundation-models-on-device" ;;
-    csharp)     echo "csharp- dotnet-patterns" ;;
-    cpp)        echo "cpp-" ;;
-    dart)       echo "dart-flutter-patterns flutter-dart-code-review" ;;
-    web)        echo "frontend-design design-system accessibility" ;;
-    *)          echo "" ;;
-  esac
-}
-
-# Resolve "ecc-auto": returns newline-separated list of skill dir names under
-# $ECC_DIR/skills/ that match universal list OR any language-prefix whitelist.
-# Excludes continuous-learning-v2 (already mounted via plugin payload).
-skills_resolve_ecc_auto() {
+# Resolve a resolver=ecc_filtered package: returns newline-separated skill
+# dir names under $ECC_DIR/skills/ that match the package's universal whitelist
+# or any configured language-prefix (read from skills/registry.json).
+# $1 = detected languages (space-separated)
+# $2 = package name (optional; defaults to "ecc-auto")
+skills_resolve_ecc_filtered() {
   local langs="$1"
+  local pkg="${2:-ecc-auto}"
   [[ -d "$ECC_DIR/skills" ]] || return 0
+
+  local reg; reg="$(_skills_registry_read 2>/dev/null)" || return 0
 
   local available
   available="$(find "$ECC_DIR/skills" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null | sort -u)"
   [[ -n "$available" ]] || return 0
 
-  local uwl pfx_all=""
-  uwl="$(_skills_universal_whitelist)"
+  local uwl exclude
+  uwl="$(jq -r --arg n "$pkg" '.skills[$n].filter.universal_whitelist[]? // empty' "$reg")"
+  exclude="$(jq -r --arg n "$pkg" '.skills[$n].filter.exclude[]? // empty' "$reg")"
 
-  local lang
+  local pfx_all="" lang pfxs
   for lang in $langs; do
-    local pfxs
-    pfxs="$(_skills_lang_prefixes "$lang")"
-    [[ -n "$pfxs" ]] && pfx_all="$pfx_all $pfxs"
+    pfxs="$(jq -r --arg n "$pkg" --arg lang "$lang" \
+      '.skills[$n].filter.language_prefixes[$lang][]? // empty' "$reg")"
+    while IFS= read -r p; do
+      [[ -n "$p" ]] && pfx_all="$pfx_all $p"
+    done <<< "$pfxs"
   done
 
-  local name match
+  local name p match
   while IFS= read -r name; do
     [[ -z "$name" ]] && continue
-    [[ "$name" == "continuous-learning-v2" ]] && continue
-    # Universal match?
+    if [[ -n "$exclude" ]] && printf '%s\n' "$exclude" | grep -qx "$name"; then
+      continue
+    fi
     if printf '%s\n' "$uwl" | grep -qx "$name"; then
       echo "$name"; continue
     fi
-    # Prefix match?
     match=0
-    local p
     for p in $pfx_all; do
       [[ -n "$p" ]] || continue
       case "$name" in "$p"*) match=1; break ;; esac
@@ -1115,26 +1179,62 @@ skills_resolve_ecc_auto() {
   return 0
 }
 
-# Resolve "ecc-all": every dir under $ECC_DIR/skills/ except continuous-learning-v2.
-skills_resolve_ecc_all() {
+# Resolve a resolver=ecc_all package: every dir under $ECC_DIR/skills/ except
+# entries in the package's exclude list (from registry).
+# $1 = package name (optional; defaults to "ecc-all")
+skills_resolve_ecc_all_pkg() {
+  local pkg="${1:-ecc-all}"
   [[ -d "$ECC_DIR/skills" ]] || return 0
-  find "$ECC_DIR/skills" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null \
-    | grep -vx 'continuous-learning-v2' \
-    | sort -u
+  local reg; reg="$(_skills_registry_read 2>/dev/null)" || {
+    find "$ECC_DIR/skills" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null | sort -u
+    return 0
+  }
+  local exclude
+  exclude="$(jq -r --arg n "$pkg" '.skills[$n].filter.exclude[]? // empty' "$reg")"
+
+  local all name
+  all="$(find "$ECC_DIR/skills" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null | sort -u)"
+  while IFS= read -r name; do
+    [[ -z "$name" ]] && continue
+    if [[ -n "$exclude" ]] && printf '%s\n' "$exclude" | grep -qx "$name"; then
+      continue
+    fi
+    echo "$name"
+  done <<< "$all"
   return 0
 }
 
-# Resolve "proxmox": just the single bundled skill dir. Name matches the
-# directory under skills/ so the mount writes it as skills/proxmox/proxmox/.
-skills_resolve_proxmox() {
-  echo "proxmox"
-  return 0
+# Generic resolver dispatch by registry-declared resolver type.
+# $1 = package name, $2 = detected langs (needed only for ecc_filtered)
+skills_resolve_pkg() {
+  local pkg="$1"
+  local langs="${2:-}"
+  local rtype
+  rtype="$(skills_registry_field "$pkg" ".resolver")"
+  case "$rtype" in
+    ecc_filtered)   skills_resolve_ecc_filtered "$langs" "$pkg" ;;
+    ecc_all)        skills_resolve_ecc_all_pkg "$pkg" ;;
+    single_bundled) skills_resolve_single_bundled "$pkg" ;;
+    *)              return 0 ;;  # unknown or unresolved → empty
+  esac
 }
 
-# Resolve "webimg": single bundled skill dir.
+# Back-compat aliases (kept so older call sites continue to work).
+skills_resolve_ecc_auto() { skills_resolve_ecc_filtered "$1" ecc-auto; }
+skills_resolve_ecc_all()  { skills_resolve_ecc_all_pkg     ecc-all; }
+
+# Resolve a single_bundled skill: reads skill_dir_name from the registry.
+# Works for any package with resolver=single_bundled (today: webimg).
+skills_resolve_single_bundled() {
+  local pkg="$1"
+  local name
+  name="$(skills_registry_field "$pkg" ".skill_dir_name")"
+  [[ -n "$name" ]] && echo "$name"
+}
+
+# Backwards-compatible shim for webimg (doctor/skills list call this directly).
 skills_resolve_webimg() {
-  echo "web-image-pipeline"
-  return 0
+  skills_resolve_single_bundled webimg
 }
 
 # For a given package, echo the absolute path to the parent dir containing
@@ -1142,14 +1242,6 @@ skills_resolve_webimg() {
 skills_source_root_for() {
   case "$1" in
     ecc-auto|ecc-all) echo "$ECC_DIR/skills" ;;
-    proxmox)
-      local bundled="$SCRIPT_DIR/skills"
-      if [[ -d "$bundled/proxmox" ]]; then
-        echo "$bundled"
-      else
-        echo "$PROXMOX_SKILL_CACHE/skills"
-      fi
-      ;;
     webimg)
       local bundled="$SCRIPT_DIR/skills"
       if [[ -d "$bundled/web-image-pipeline" ]]; then
@@ -1169,9 +1261,13 @@ skills_mount_for_session() {
   local proj="$2"
   skills_load
 
-  # Built-in packages: always mount webimg regardless of SKILLS_PACKAGES.
+  # Always-active packages (from registry) are mounted regardless of SKILLS_PACKAGES.
   local all_pkgs="${SKILLS_PACKAGES:-}"
-  case " $all_pkgs " in *" webimg "*) ;; *) all_pkgs="${all_pkgs:+$all_pkgs }webimg" ;; esac
+  local _always
+  while IFS= read -r _always; do
+    [[ -n "$_always" ]] || continue
+    case " $all_pkgs " in *" $_always "*) ;; *) all_pkgs="${all_pkgs:+$all_pkgs }$_always" ;; esac
+  done < <(skills_registry_always_active)
 
   [[ -n "$all_pkgs" ]] || return 0
 
@@ -1189,30 +1285,35 @@ skills_mount_for_session() {
 
   local pkg
   for pkg in $all_pkgs; do
-    local names=""
-    case "$pkg" in
-      ecc-auto) names="$(skills_resolve_ecc_auto "$langs")" ;;
-      ecc-all)  names="$(skills_resolve_ecc_all)" ;;
-      proxmox)  names="$(skills_resolve_proxmox)" ;;
-      webimg)   names="$(skills_resolve_webimg)" ;;
-      *) echo "[skills] Unknown active package '$pkg' — skipping." >&2; continue ;;
+    [[ "$pkg" == "proxmox" ]] && continue   # legacy v0.4.3 state; now an MCP
+    local names="" rtype
+    rtype="$(skills_registry_field "$pkg" ".resolver")"
+    case "$rtype" in
+      ecc_filtered)   names="$(skills_resolve_ecc_filtered "$langs" "$pkg")" ;;
+      ecc_all)        names="$(skills_resolve_ecc_all_pkg "$pkg")" ;;
+      single_bundled) names="$(skills_resolve_single_bundled "$pkg")" ;;
+      *)
+        echo "[skills] Unknown active package '$pkg' (no resolver in registry) — skipping." >&2
+        continue
+        ;;
     esac
     [[ -n "$names" ]] || continue
 
     local src_root
     src_root="$(skills_source_root_for "$pkg" 2>/dev/null)" || continue
     # For bundled skill packs: refresh the cache if the bundled dir isn't available.
-    if [[ "$pkg" == "proxmox" && ! -d "$src_root/proxmox" ]]; then
-      proxmox_skill_ensure >/dev/null || {
-        echo "[skills] Could not prepare proxmox skill content — skipping." >&2
-        continue
-      }
-    fi
-    if [[ "$pkg" == "webimg" && ! -d "$src_root/web-image-pipeline" ]]; then
-      webimg_skill_ensure >/dev/null || {
-        echo "[skills] Could not prepare webimg skill content — skipping." >&2
-        continue
-      }
+    if [[ "$rtype" == "single_bundled" ]]; then
+      local _dir_name
+      _dir_name="$(skills_registry_field "$pkg" ".skill_dir_name")"
+      if [[ -n "$_dir_name" && ! -d "$src_root/$_dir_name" ]]; then
+        # Today only webimg needs an ensure hook.
+        if [[ "$pkg" == "webimg" ]]; then
+          webimg_skill_ensure >/dev/null || {
+            echo "[skills] Could not prepare webimg skill content — skipping." >&2
+            continue
+          }
+        fi
+      fi
     fi
 
     local pkg_dest="$dest_root/$pkg"
@@ -1239,6 +1340,328 @@ _skills_estimate_tokens() {
   local lo=$((n * 60))
   local hi=$((n * 90))
   printf '%s–%s' "$lo" "$hi"
+}
+
+# ---------------------------------------------------------------------------
+# MCPs subsystem — registry-driven, distinct from skills
+# Skills = knowledge (markdown context). MCPs = capability (server processes,
+# optional credentials). Registry at mcps/registry.json is the source of truth.
+# ---------------------------------------------------------------------------
+
+_mcps_registry_path() {
+  local bundled="$SCRIPT_DIR/mcps/registry.json"
+  if [[ -f "$bundled" ]]; then
+    echo "$bundled"
+    return 0
+  fi
+  # Fallback: sparse clone from upstream on demand (parallels webimg/proxmox caches)
+  if [[ -f "$MCPS_REGISTRY_CACHE/mcps/registry.json" ]]; then
+    echo "$MCPS_REGISTRY_CACHE/mcps/registry.json"
+    return 0
+  fi
+  return 1
+}
+
+mcps_registry_ensure() {
+  local bundled="$SCRIPT_DIR/mcps/registry.json"
+  [[ -f "$bundled" ]] && return 0
+  local raw_repo="https://github.com/$OCVM_UPDATE_REPO.git"
+  if [[ ! -d "$MCPS_REGISTRY_CACHE/.git" ]]; then
+    mkdir -p "$(dirname "$MCPS_REGISTRY_CACHE")"
+    rm -rf "$MCPS_REGISTRY_CACHE"
+    git clone --depth=1 --filter=blob:none --sparse \
+      --branch "$OCVM_UPDATE_BRANCH" "$raw_repo" "$MCPS_REGISTRY_CACHE" >/dev/null 2>&1 || {
+      echo "[mcps] Could not fetch registry from $raw_repo" >&2
+      return 1
+    }
+    git -C "$MCPS_REGISTRY_CACHE" sparse-checkout set mcps >/dev/null 2>&1 || {
+      echo "[mcps] sparse-checkout failed" >&2
+      return 1
+    }
+  else
+    git -C "$MCPS_REGISTRY_CACHE" fetch --depth=1 origin "$OCVM_UPDATE_BRANCH" >/dev/null 2>&1 || true
+    git -C "$MCPS_REGISTRY_CACHE" checkout -q FETCH_HEAD 2>/dev/null || true
+  fi
+  [[ -f "$MCPS_REGISTRY_CACHE/mcps/registry.json" ]]
+}
+
+_mcps_registry_read() {
+  local reg
+  reg="$(_mcps_registry_path 2>/dev/null)" || {
+    mcps_registry_ensure >/dev/null || return 1
+    reg="$(_mcps_registry_path 2>/dev/null)" || return 1
+  }
+  echo "$reg"
+}
+
+mcps_registry_has() {
+  local reg; reg="$(_mcps_registry_read)" || return 1
+  jq -e --arg n "$1" '.mcps[$n]' "$reg" >/dev/null 2>&1
+}
+
+mcps_registry_defaults() {
+  local reg; reg="$(_mcps_registry_read)" || return 0
+  jq -r '.mcps | to_entries[] | select(.value.default_active == true) | .key' "$reg"
+}
+
+# Emits: name<TAB>default_active<TAB>description (one per registry entry)
+mcps_registry_list() {
+  local reg; reg="$(_mcps_registry_read)" || return 0
+  jq -r '.mcps | to_entries[] | "\(.key)\t\(.value.default_active)\t\(.value.description)"' "$reg"
+}
+
+mcps_load() {
+  MCPS_PACKAGES=""
+  if [[ -f "$MCPS_ENV" ]]; then
+    # shellcheck disable=SC1090
+    source "$MCPS_ENV"
+    return 0
+  fi
+  # First run: seed from registry defaults
+  local defaults
+  defaults="$(mcps_registry_defaults 2>/dev/null | tr '\n' ' ')"
+  MCPS_PACKAGES="$(echo "${defaults}" | sed -e 's/^ *//; s/ *$//')"
+  mcps_save
+}
+
+mcps_save() {
+  mkdir -p "$SHARE_ROOT"
+  cat > "$MCPS_ENV" <<EOF
+# opencode-vm mcps subsystem
+# space-separated list of active mcp names
+MCPS_PACKAGES="${MCPS_PACKAGES:-}"
+EOF
+}
+
+mcps_pkg_is_active() {
+  mcps_load
+  case " ${MCPS_PACKAGES:-} " in *" $1 "*) return 0 ;; *) return 1 ;; esac
+}
+
+# Internal: remove $1 from MCPS_PACKAGES (no save).
+_mcps_pkg_drop() {
+  local pkg="$1" new=""
+  local p
+  for p in ${MCPS_PACKAGES:-}; do
+    [[ "$p" == "$pkg" ]] || new="$new $p"
+  done
+  MCPS_PACKAGES="${new# }"
+}
+
+mcps_pkg_on() {
+  local pkg="$1"
+  if ! mcps_registry_has "$pkg"; then
+    echo "[mcps] Unknown MCP: '$pkg'. Run 'opencode-vm mcps list' to see available." >&2
+    return 2
+  fi
+
+  # Per-MCP setup hooks (credentials, external clones, skill-doc cache)
+  case "$pkg" in
+    proxmox)
+      proxmox_load
+      if [[ -z "${PROXMOX_HOST:-}" || -z "${PROXMOX_TOKEN_VALUE:-}" ]]; then
+        proxmox_setup_interactive || return 1
+      fi
+      proxmox_mcp_clone_or_update || return 1
+      proxmox_skill_ensure >/dev/null || return 1
+      ;;
+    playwright|repomapper)
+      # Bundled in base VM — nothing to do
+      :
+      ;;
+  esac
+
+  mcps_load
+  if mcps_pkg_is_active "$pkg"; then
+    echo "[mcps] '$pkg' is already active."
+    return 0
+  fi
+  MCPS_PACKAGES="${MCPS_PACKAGES:+$MCPS_PACKAGES }$pkg"
+  mcps_save
+  echo "[mcps] Enabled '$pkg'. Restart session to apply."
+}
+
+mcps_pkg_off() {
+  local pkg="$1"
+  mcps_load
+  if ! mcps_pkg_is_active "$pkg"; then
+    echo "[mcps] '$pkg' is not active."
+    return 0
+  fi
+  _mcps_pkg_drop "$pkg"
+  mcps_save
+
+  # Per-MCP teardown hooks
+  case "$pkg" in
+    proxmox) proxmox_wipe_env ;;
+  esac
+
+  echo "[mcps] Disabled '$pkg'. Restart session to apply."
+}
+
+# Build the {mcp: {...}} object for session injection by iterating
+# MCPS_PACKAGES, reading mcp_config from the registry, substituting the
+# {VM_HOME} placeholder, and materializing credentials for MCPs that flag
+# environment_from_credentials.
+# $1 = vm_home path to substitute for the {VM_HOME} placeholder.
+mcps_build_config_json() {
+  local vm_home="$1"
+  local reg
+  reg="$(_mcps_registry_read 2>/dev/null)" || { echo '{}'; return 0; }
+
+  mcps_load
+  [[ -n "${MCPS_PACKAGES:-}" ]] || { echo '{}'; return 0; }
+
+  local mcp_obj='{}'
+  local pkg cfg_json
+  for pkg in $MCPS_PACKAGES; do
+    if ! jq -e --arg n "$pkg" '.mcps[$n]' "$reg" >/dev/null 2>&1; then
+      echo "[mcps] active but unknown in registry: '$pkg' — skipping injection." >&2
+      continue
+    fi
+
+    cfg_json="$(jq --arg n "$pkg" --arg vh "$vm_home" \
+      '.mcps[$n].mcp_config
+       | walk(if type == "string" then gsub("\\{VM_HOME\\}"; $vh) else . end)
+       | del(.environment_from_credentials)' "$reg")"
+
+    # MCPs needing credentials as env vars: Proxmox is the only one today.
+    if [[ "$pkg" == "proxmox" ]]; then
+      if [[ ! -f "$PROXMOX_ENV" ]]; then
+        echo "[mcps] proxmox active but credentials missing — skipping injection." >&2
+        continue
+      fi
+      proxmox_load
+      if [[ -z "${PROXMOX_HOST:-}" || -z "${PROXMOX_TOKEN_VALUE:-}" ]]; then
+        echo "[mcps] proxmox credentials incomplete — skipping injection." >&2
+        continue
+      fi
+      cfg_json="$(echo "$cfg_json" | jq \
+        --arg host  "$PROXMOX_HOST" \
+        --arg port  "${PROXMOX_PORT:-8006}" \
+        --arg user  "${PROXMOX_USER:-}" \
+        --arg tname "${PROXMOX_TOKEN_NAME:-}" \
+        --arg tval  "${PROXMOX_TOKEN_VALUE:-}" \
+        --arg tls   "${PROXMOX_VERIFY_SSL:-0}" \
+        '. + {environment: {
+          PROXMOX_HOST: $host,
+          PROXMOX_PORT: $port,
+          PROXMOX_USER: $user,
+          PROXMOX_TOKEN_NAME: $tname,
+          PROXMOX_TOKEN_VALUE: $tval,
+          PROXMOX_VERIFY_SSL: $tls
+        }}')"
+    fi
+
+    mcp_obj="$(jq --arg n "$pkg" --argjson cfg "$cfg_json" '. + {($n): $cfg}' <<<"$mcp_obj")"
+  done
+
+  echo "$mcp_obj"
+}
+
+# Mount companion skill docs for MCPs that declare a skill_doc field in the
+# registry. Proxmox uses this to surface its SKILL.md to the agent.
+# Written under $sess_share/config/opencode/skills/<mcp>/<mcp>/ to match the
+# skills-subsystem layout so OpenCode picks them up uniformly.
+mcps_mount_skill_docs_for_session() {
+  local sess_share="$1"
+  local reg
+  reg="$(_mcps_registry_read 2>/dev/null)" || return 0
+
+  mcps_load
+  [[ -n "${MCPS_PACKAGES:-}" ]] || return 0
+
+  local dest_root="$sess_share/config/opencode/skills"
+  mkdir -p "$dest_root"
+
+  local pkg doc_rel src_dir
+  for pkg in $MCPS_PACKAGES; do
+    doc_rel="$(jq -r --arg n "$pkg" '.mcps[$n].skill_doc // empty' "$reg" 2>/dev/null)"
+    [[ -n "$doc_rel" ]] || continue
+
+    case "$pkg" in
+      proxmox)
+        src_dir="$(proxmox_skill_ensure 2>/dev/null)"
+        ;;
+      *)
+        if [[ -d "$SCRIPT_DIR/$doc_rel" ]]; then
+          src_dir="$SCRIPT_DIR/$doc_rel"
+        else
+          src_dir=""
+        fi
+        ;;
+    esac
+    [[ -n "$src_dir" && -d "$src_dir" ]] || continue
+
+    mkdir -p "$dest_root/$pkg"
+    rsync -a --delete "$src_dir/" "$dest_root/$pkg/$pkg/"
+  done
+}
+
+# CLI: opencode-vm mcps {status|list|on <name>|off <name>}
+mcps_cmd() {
+  local sub="${1:-status}"
+  [[ $# -gt 0 ]] && shift || true
+  case "$sub" in
+    status)
+      mcps_load
+      if [[ -z "${MCPS_PACKAGES:-}" ]]; then
+        echo "[mcps] No MCPs active."
+      else
+        echo "[mcps] Active: ${MCPS_PACKAGES}"
+      fi
+      ;;
+    list)
+      if ! _mcps_registry_read >/dev/null; then
+        echo "[mcps] Registry not available." >&2
+        return 1
+      fi
+      mcps_load
+      printf "%-14s %-7s %-8s %s\n" "NAME" "ACTIVE" "DEFAULT" "DESCRIPTION"
+      local name default_active desc
+      while IFS=$'\t' read -r name default_active desc; do
+        [[ -n "$name" ]] || continue
+        local active_mark="no"
+        mcps_pkg_is_active "$name" && active_mark="yes"
+        local def_mark="off"
+        [[ "$default_active" == "true" ]] && def_mark="on"
+        printf "%-14s %-7s %-8s %s\n" "$name" "$active_mark" "$def_mark" "$desc"
+      done < <(mcps_registry_list)
+      ;;
+    on)
+      [[ -n "${1:-}" ]] || { echo "Usage: opencode-vm mcps on <name>" >&2; return 2; }
+      mcps_pkg_on "$1"
+      ;;
+    off)
+      [[ -n "${1:-}" ]] || { echo "Usage: opencode-vm mcps off <name>" >&2; return 2; }
+      mcps_pkg_off "$1"
+      ;;
+    help|-h|--help)
+      cat <<'EOF'
+opencode-vm mcps — manage MCP servers (separate from skills)
+
+Usage:
+  opencode-vm mcps status                show active MCPs
+  opencode-vm mcps list                  list all known MCPs (active + default + description)
+  opencode-vm mcps on <name>             enable an MCP for future sessions
+  opencode-vm mcps off <name>            disable an MCP for future sessions
+
+MCPs are servers/tools that give the agent capabilities (browser automation,
+code indexing, infra APIs). Skills are knowledge-only markdown — see
+'opencode-vm skills'.
+
+Built-in MCPs (v0.4.4): playwright (default on), repomapper (default off),
+proxmox (default off; requires API host + token on first enable).
+
+Session MCP injection is data-driven: only MCPs in the active list end up
+in opencode.json's mcp block.
+EOF
+      ;;
+    *)
+      echo "Usage: opencode-vm mcps {status|list|on <name>|off <name>}" >&2
+      return 2
+      ;;
+  esac
 }
 
 # ---------------------------------------------------------------------------
@@ -1659,7 +2082,7 @@ doctor_cmd() {
       fi
       echo ""
 
-      # ---- Skills (top-level subsystem, separate from ECC) ----
+      # ---- Skills (knowledge-only packages) ----
       echo "[doctor] Skills"
       skills_load
       if [[ -z "${SKILLS_PACKAGES:-}" ]]; then
@@ -1670,20 +2093,36 @@ doctor_cmd() {
         _sk_proj="$(pwd)"
         _sk_langs="$(detect_project_languages "$_sk_proj")"
         for _sk_pkg in $SKILLS_PACKAGES; do
-          case "$_sk_pkg" in
-            ecc-auto) _sk_names="$(skills_resolve_ecc_auto "$_sk_langs")" ;;
-            ecc-all)  _sk_names="$(skills_resolve_ecc_all)" ;;
-            proxmox)  _sk_names="$(skills_resolve_proxmox)" ;;
-            *)        _sk_names="" ;;
-          esac
+          _sk_names="$(skills_resolve_pkg "$_sk_pkg" "$_sk_langs")"
           _sk_count=$(printf '%s\n' "$_sk_names" | grep -c . || true)
           _sk_total=$((_sk_total + _sk_count))
           echo "    [$_sk_pkg] $_sk_count skills for cwd"
         done
         echo "  total:     $_sk_total skills, est. $(_skills_estimate_tokens "$_sk_total") tokens"
       fi
+      echo ""
 
-      # Proxmox detail (regardless of whether the skill pack is currently active)
+      # ---- MCPs (server/capability packages, separate from skills) ----
+      echo "[doctor] MCPs"
+      if _mcps_registry_read >/dev/null 2>&1; then
+        mcps_load
+        if [[ -z "${MCPS_PACKAGES:-}" ]]; then
+          echo "  active:    <none>  (enable with: opencode-vm mcps on <name>)"
+        else
+          echo "  active:    $MCPS_PACKAGES"
+        fi
+        local _mcp_name _mcp_default _mcp_desc _mcp_mark
+        while IFS=$'\t' read -r _mcp_name _mcp_default _mcp_desc; do
+          [[ -n "$_mcp_name" ]] || continue
+          _mcp_mark="[ ]"
+          mcps_pkg_is_active "$_mcp_name" && _mcp_mark="[x]"
+          echo "    $_mcp_mark $_mcp_name (default ${_mcp_default:-false}): $_mcp_desc"
+        done < <(mcps_registry_list)
+      else
+        echo "  registry:  not available (bundle or fetch mcps/registry.json)"
+      fi
+
+      # Proxmox detail (regardless of whether the MCP is currently active)
       if [[ -f "$PROXMOX_ENV" ]]; then
         proxmox_load
         echo "  proxmox:   host=${PROXMOX_HOST:-<unset>}:${PROXMOX_PORT:-8006} user=${PROXMOX_USER:-<unset>} token=${PROXMOX_TOKEN_NAME:-<unset>} verify_tls=${PROXMOX_VERIFY_SSL:-0}"
@@ -2333,7 +2772,10 @@ update_cmd() {
     echo "Optional skill packages (enable any time):"
     echo "  opencode-vm skills on ecc-auto   # language-filtered ECC skills (auto-clones ECC)"
     echo "  opencode-vm skills on ecc-all    # every ECC skill (token-heavy)"
-    echo "  opencode-vm skills on proxmox    # Proxmox VE knowledge + MCP server"
+    echo ""
+    echo "Optional MCP servers (separate subsystem):"
+    echo "  opencode-vm mcps on proxmox      # Proxmox VE API via ProxmoxMCP (requires token)"
+    echo "  opencode-vm mcps on repomapper   # PageRank codebase maps (default off)"
   fi
 }
 
@@ -3573,43 +4015,18 @@ start_session() {
   fi
   cp -p "$sess_share/config/opencode/opencode.json" "$sess_share/config/opencode/.opencode.json"
 
-  # Inject session overrides: Playwright + RepoMapper MCP, allow-all permissions, ask for git commit, deny git push
+  # Inject session overrides: MCP block built from mcps/registry.json + active
+  # MCPS_PACKAGES, plus allow-all permissions with git commit=ask and git push=deny.
   local sess_cfg_file="$sess_share/config/opencode/opencode.json"
   local vm_home="/home/$(whoami).linux"
   if command -v jq >/dev/null 2>&1 && [[ -f "$sess_cfg_file" ]]; then
-    # Build an optional Proxmox MCP block — only when the proxmox skill pack
-    # is active and credentials are persisted. Token is materialised into the
-    # session config which lives under $SHARE_ROOT (mode inherited).
-    local mcp_extra="{}"
-    if skills_pkg_is_active proxmox && [[ -f "$PROXMOX_ENV" ]]; then
-      proxmox_load
-      if [[ -n "${PROXMOX_HOST:-}" && -n "${PROXMOX_TOKEN_VALUE:-}" ]]; then
-        mcp_extra="$(jq -n \
-          --arg host  "${PROXMOX_HOST}" \
-          --arg port  "${PROXMOX_PORT:-8006}" \
-          --arg user  "${PROXMOX_USER:-}" \
-          --arg tname "${PROXMOX_TOKEN_NAME:-}" \
-          --arg tval  "${PROXMOX_TOKEN_VALUE:-}" \
-          --arg tls   "${PROXMOX_VERIFY_SSL:-0}" \
-          --arg venv  "$vm_home/.local/share/proxmox-mcp-venv" \
-          '{proxmox: {
-             type: "local",
-             command: [($venv + "/bin/python"), "-m", "proxmox_mcp.server"],
-             environment: {
-               PROXMOX_HOST: $host,
-               PROXMOX_PORT: $port,
-               PROXMOX_USER: $user,
-               PROXMOX_TOKEN_NAME: $tname,
-               PROXMOX_TOKEN_VALUE: $tval,
-               PROXMOX_VERIFY_SSL: $tls
-             }
-           }}')"
-      fi
-    fi
+    local mcp_obj
+    mcp_obj="$(mcps_build_config_json "$vm_home")"
+    [[ -n "$mcp_obj" ]] || mcp_obj='{}'
 
     local tmp_cfg
     tmp_cfg="$(mktemp)"
-    jq --arg vm_home "$vm_home" --argjson extra_mcp "$mcp_extra" '. * {
+    jq --argjson mcp "$mcp_obj" '. * {
       "permission": {
         "*": "allow",
         "bash": {
@@ -3620,21 +4037,15 @@ start_session() {
           "git push *": "deny"
         }
       },
-      "mcp": ({
-        "playwright": {
-          "type": "local",
-          "command": ["playwright-mcp", "--headless", "--browser", "chromium"]
-        },
-        "repomapper": {
-          "type": "local",
-          "command": ["python3", ($vm_home + "/.local/share/repomapper/repomap_server.py")]
-        }
-      } + $extra_mcp)
+      "mcp": $mcp
     }' "$sess_cfg_file" > "$tmp_cfg" \
       && mv "$tmp_cfg" "$sess_cfg_file" \
       || rm -f "$tmp_cfg"
     cp -p "$sess_cfg_file" "$sess_share/config/opencode/.opencode.json"
   fi
+
+  # Mount companion skill docs declared by active MCPs (e.g. proxmox SKILL.md)
+  mcps_mount_skill_docs_for_session "$sess_share" 2>/dev/null || true
 
   # ECC (opt-in): copy plugin payload + optional MCP pack into session config,
   # seed homunculus learning store from persistent project state, auto-inject
@@ -4109,7 +4520,9 @@ skills_cmd() {
         echo "No opt-in skill packages active. Enable one with:"
         echo "  opencode-vm skills on ecc-auto   # language-filtered subset (~30 skills)"
         echo "  opencode-vm skills on ecc-all    # every ECC skill (~180 skills, token-heavy)"
-        echo "  opencode-vm skills on proxmox    # Proxmox knowledge skill + MCP server"
+        echo ""
+        echo "Looking for Proxmox? It is now an MCP:"
+        echo "  opencode-vm mcps on proxmox"
         return 0
       fi
       local path="${1:-$(pwd)}"
@@ -4118,36 +4531,27 @@ skills_cmd() {
       echo "project:         $path"
       echo "detected langs:  $langs"
       echo ""
-      # Include built-in packages in status display
+      # Always-active packages from registry are included even if missing from SKILLS_PACKAGES.
       local all_status_pkgs="$SKILLS_PACKAGES"
-      case " $all_status_pkgs " in *" webimg "*) ;; *) all_status_pkgs="${all_status_pkgs:+$all_status_pkgs }webimg" ;; esac
+      local _always
+      while IFS= read -r _always; do
+        [[ -n "$_always" ]] || continue
+        case " $all_status_pkgs " in *" $_always "*) ;; *) all_status_pkgs="${all_status_pkgs:+$all_status_pkgs }$_always" ;; esac
+      done < <(skills_registry_always_active)
       local pkg total=0
       for pkg in $all_status_pkgs; do
-        local names count
-        case "$pkg" in
-          ecc-auto) names="$(skills_resolve_ecc_auto "$langs")" ;;
-          ecc-all)  names="$(skills_resolve_ecc_all)" ;;
-          proxmox)  names="$(skills_resolve_proxmox)" ;;
-          webimg)   names="$(skills_resolve_webimg)" ;;
-          *)        names="" ;;
-        esac
+        local names count is_always
+        names="$(skills_resolve_pkg "$pkg" "$langs")"
         count=$(printf '%s\n' "$names" | grep -c . || true)
         total=$((total + count))
-        if [[ "$pkg" == "webimg" ]]; then
+        is_always="$(skills_registry_field "$pkg" ".always_active")"
+        if [[ "$is_always" == "true" ]]; then
           echo "[$pkg] $count skills (built-in)"
         else
           echo "[$pkg] $count skills"
         fi
         if [[ -n "$names" ]]; then
           printf '%s\n' "$names" | sed 's/^/  - /'
-        fi
-        if [[ "$pkg" == "proxmox" ]]; then
-          proxmox_load
-          if [[ -n "${PROXMOX_HOST:-}" ]]; then
-            echo "  host: ${PROXMOX_HOST}:${PROXMOX_PORT:-8006}  user: ${PROXMOX_USER:-}  token: ${PROXMOX_TOKEN_NAME:-}"
-          else
-            echo "  (no credentials yet — run 'opencode-vm skills off proxmox && opencode-vm skills on proxmox')"
-          fi
         fi
         echo ""
       done
@@ -4157,12 +4561,12 @@ skills_cmd() {
       ;;
     on)
       local pkg="${1:-}"
-      [[ -n "$pkg" ]] || { echo "Usage: opencode-vm skills on <ecc-auto|ecc-all|proxmox|webimg>" >&2; exit 2; }
+      [[ -n "$pkg" ]] || { echo "Usage: opencode-vm skills on <ecc-auto|ecc-all|webimg>" >&2; exit 2; }
       skills_pkg_on "$pkg"
       ;;
     off)
       local pkg="${1:-}"
-      [[ -n "$pkg" ]] || { echo "Usage: opencode-vm skills off <ecc-auto|ecc-all|proxmox|webimg>" >&2; exit 2; }
+      [[ -n "$pkg" ]] || { echo "Usage: opencode-vm skills off <ecc-auto|ecc-all|webimg>" >&2; exit 2; }
       skills_pkg_off "$pkg"
       ;;
     list)
@@ -4174,30 +4578,28 @@ skills_cmd() {
       echo "project:         $path"
       echo "detected langs:  $langs"
       echo ""
-      # Include built-in packages in list preview
+      # Always-active packages from registry are previewed even if missing from SKILLS_PACKAGES.
       local all_list_pkgs="${SKILLS_PACKAGES:-}"
-      case " $all_list_pkgs " in *" webimg "*) ;; *) all_list_pkgs="${all_list_pkgs:+$all_list_pkgs }webimg" ;; esac
+      local _always
+      while IFS= read -r _always; do
+        [[ -n "$_always" ]] || continue
+        case " $all_list_pkgs " in *" $_always "*) ;; *) all_list_pkgs="${all_list_pkgs:+$all_list_pkgs }$_always" ;; esac
+      done < <(skills_registry_always_active)
       local pkg total=0
       for pkg in $all_list_pkgs; do
-        local names
-        case "$pkg" in
-          ecc-auto) names="$(skills_resolve_ecc_auto "$langs")" ;;
-          ecc-all)  names="$(skills_resolve_ecc_all)" ;;
-          proxmox)  names="$(skills_resolve_proxmox)" ;;
-          webimg)   names="$(skills_resolve_webimg)" ;;
-          *) continue ;;
-        esac
+        local names is_always
+        names="$(skills_resolve_pkg "$pkg" "$langs")"
+        [[ -n "$names" ]] || continue
         local count
         count=$(printf '%s\n' "$names" | grep -c . || true)
         total=$((total + count))
-        if [[ "$pkg" == "webimg" ]]; then
+        is_always="$(skills_registry_field "$pkg" ".always_active")"
+        if [[ "$is_always" == "true" ]]; then
           echo "[$pkg] would mount $count skills (built-in):"
         else
           echo "[$pkg] would mount $count skills:"
         fi
-        if [[ -n "$names" ]]; then
-          printf '%s\n' "$names" | sed 's/^/  - /'
-        fi
+        printf '%s\n' "$names" | sed 's/^/  - /'
         echo ""
       done
       local est
@@ -4209,9 +4611,11 @@ skills_cmd() {
 Usage:
   opencode-vm skills                      # status (alias)
   opencode-vm skills status [path]        # active packages + resolved skills + token estimate
-  opencode-vm skills on <pkg>             # enable package (ecc-auto | ecc-all | proxmox | webimg)
-  opencode-vm skills off <pkg>            # disable package (proxmox: also wipes stored credentials)
+  opencode-vm skills on <pkg>             # enable package (ecc-auto | ecc-all | webimg)
+  opencode-vm skills off <pkg>            # disable package
   opencode-vm skills list [path]          # preview what would mount (no VM touch)
+
+Note: Proxmox moved to the mcps subsystem in v0.4.4 — use 'opencode-vm mcps'.
 EOF
       exit 2 ;;
   esac
@@ -4226,6 +4630,10 @@ case "$cmd" in
 
   skills)
     skills_cmd "$@"
+    ;;
+
+  mcps)
+    mcps_cmd "$@"
     ;;
 
   init)
@@ -4265,7 +4673,9 @@ case "$cmd" in
       echo "Optional skill packages (enable any time):"
       echo "  opencode-vm skills on ecc-auto   # language-filtered ECC skills (auto-clones ECC)"
       echo "  opencode-vm skills on ecc-all    # every ECC skill (token-heavy)"
-      echo "  opencode-vm skills on proxmox    # Proxmox VE knowledge + MCP server"
+      echo ""
+      echo "  opencode-vm mcps on proxmox      # Proxmox VE API via ProxmoxMCP (separate subsystem)"
+      echo "  opencode-vm mcps on repomapper   # PageRank codebase maps"
     fi
     ;;
 
