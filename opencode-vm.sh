@@ -63,7 +63,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.7"
+OCVM_VERSION="0.4.8"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -4068,19 +4068,25 @@ start_session() {
 
     local tmp_cfg
     tmp_cfg="$(mktemp)"
-    jq --argjson mcp "$mcp_obj" '. * {
-      "permission": {
-        "*": "allow",
-        "bash": {
+    # The mcp block is wholly owned by the MCPs subsystem. Any legacy mcp
+    # entries in the persisted config (e.g. from pre-v0.4.7 auto-injection
+    # or manual edits) are overwritten — we never want to leak a disabled
+    # MCP like repomapper into the session just because it was written
+    # there on a previous run.
+    jq --argjson mcp "$mcp_obj" '
+      (. * {
+        "permission": {
           "*": "allow",
-          "git commit": "ask",
-          "git commit *": "ask",
-          "git push": "deny",
-          "git push *": "deny"
+          "bash": {
+            "*": "allow",
+            "git commit": "ask",
+            "git commit *": "ask",
+            "git push": "deny",
+            "git push *": "deny"
+          }
         }
-      },
-      "mcp": $mcp
-    }' "$sess_cfg_file" > "$tmp_cfg" \
+      }) | .mcp = $mcp
+    ' "$sess_cfg_file" > "$tmp_cfg" \
       && mv "$tmp_cfg" "$sess_cfg_file" \
       || rm -f "$tmp_cfg"
     cp -p "$sess_cfg_file" "$sess_share/config/opencode/.opencode.json"
@@ -4248,8 +4254,19 @@ start_session() {
 
     echo "[cleanup] Config conflict check... $(_ts)"
     if [[ -f "$sess_cfg" ]]; then
-      cp -p "$sess_cfg" "$proj_cfg_cleanup"
-      cp -p "$sess_cfg" "$proj_cfg_cleanup_legacy"
+      # The mcp block is session-time state (injected fresh every start from
+      # the MCPs registry + active MCPS_PACKAGES) and must NOT be persisted.
+      # Strip it before writing back to project-state and host so stale
+      # entries never leak into the next session's baseline.
+      local persist_cfg="$sess_cfg.sanitized"
+      if command -v jq >/dev/null 2>&1 && jq -e '.mcp' "$sess_cfg" >/dev/null 2>&1; then
+        jq 'del(.mcp)' "$sess_cfg" > "$persist_cfg" 2>/dev/null || cp -p "$sess_cfg" "$persist_cfg"
+      else
+        cp -p "$sess_cfg" "$persist_cfg"
+      fi
+
+      cp -p "$persist_cfg" "$proj_cfg_cleanup"
+      cp -p "$persist_cfg" "$proj_cfg_cleanup_legacy"
 
       local current_hash
       current_hash="$(md5 -q "$dst")"
@@ -4258,15 +4275,16 @@ start_session() {
         echo "Another session has edited the OpenCode config since this session started."
         read -r -p "Overwrite with this session's config? [y/N] " answer </dev/tty || answer="n"
         if [[ "$answer" =~ ^[Yy]$ ]]; then
-          cp -p "$sess_cfg" "$dst"
+          cp -p "$persist_cfg" "$dst"
         else
           local bak="$dst.session-bak-$(date +%Y%m%d-%H%M%S)"
-          cp -p "$sess_cfg" "$bak"
+          cp -p "$persist_cfg" "$bak"
           echo "Keeping existing config. Session config saved to: $bak"
         fi
       else
-        cp -p "$sess_cfg" "$dst"
+        cp -p "$persist_cfg" "$dst"
       fi
+      rm -f "$persist_cfg"
     fi
 
     # Merge VM state with host state (newer files win), then persist into project state.
