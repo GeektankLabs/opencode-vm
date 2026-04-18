@@ -1,7 +1,14 @@
 {
   "permissions": {
     "allow": [
-      "Bash(grep -n 'case \"$cmd\"' /Users/rotzoll/Documents/rootzoll-github/opencode-vm/opencode-vm.sh)"
+      "Bash(grep -n 'case \"$cmd\"' /Users/rotzoll/Documents/rootzoll-github/opencode-vm/opencode-vm.sh)",
+      "Read(//Users/rotzoll/Documents/rootzoll-github/bi-mcrepo/**)",
+      "Bash(sqlite3 \"/Users/rotzoll/Library/Application Support/opencode/opencode.db\" \".tables\")",
+      "Bash(cp -p \"/Users/rotzoll/Library/Application Support/opencode/opencode.db\" /tmp/oc-inspect.db)",
+      "Bash(sqlite3 /tmp/oc-inspect.db \".tables\")",
+      "Read(//Users/rotzoll/Library/Application Support/**)",
+      "Read(//Users/rotzoll/**)",
+      "Bash(sqlite3 /tmp/oc-inspect.db \"SELECT hash, substr\\(datetime\\(created_at/1000,'unixepoch'\\),1,19\\) FROM __drizzle_migrations ORDER BY created_at;\")"
     ]
   }
 }
