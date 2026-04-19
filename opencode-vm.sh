@@ -20,6 +20,10 @@ SHARE_ROOT="$HOME/.opencode-vm"
 BACKUP_DIR="$SHARE_ROOT/backups"
 SESSIONS_DIR="$SHARE_ROOT/sessions"
 PROJECT_STATE_DIR="$SHARE_ROOT/project-state"
+PROJECT_HISTORY_DIR="$SHARE_ROOT/project-history"   # loaded only with --keep-history
+FRESH_HISTORY_DIR="$SHARE_ROOT/fresh-history"       # per-run snapshots from default fresh mode
+FRESH_DEFAULT_NOTIFIED_MARKER="$SHARE_ROOT/.fresh-default-notified"
+PROJECT_HISTORY_MIGRATED_MARKER="$SHARE_ROOT/.migrated-project-history"
 
 # Policy persistiert am Host (wird pro Session in der VM angewendet)
 POLICY_ENV="$SHARE_ROOT/policy.env"
@@ -63,7 +67,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.8"
+OCVM_VERSION="0.4.9"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -76,6 +80,7 @@ SESSION_MODE="tui"
 SESSION_PORT=""
 SESSION_PASSWORD=""
 OC_WEB_TUI=false
+KEEP_HISTORY=0
 
 need() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -141,6 +146,7 @@ parse_web_flags() {
   SESSION_PORT="$DEFAULT_OC_PORT"
   SESSION_PASSWORD=""
   OC_WEB_TUI=false
+  KEEP_HISTORY=0
   while [[ "$#" -gt 0 ]]; do
     case "$1" in
       --port)   shift; SESSION_PORT="${1:?Missing port value}" ;;
@@ -148,6 +154,18 @@ parse_web_flags() {
       --password)   shift; SESSION_PASSWORD="${1:?Missing password value}" ;;
       --password=*) SESSION_PASSWORD="${1#*=}" ;;
       --tui) OC_WEB_TUI=true ;;
+      --keep-history) KEEP_HISTORY=1 ;;
+      *) echo "Unknown option: $1" >&2; exit 2 ;;
+    esac
+    shift
+  done
+}
+
+parse_start_flags() {
+  KEEP_HISTORY=0
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      --keep-history) KEEP_HISTORY=1 ;;
       *) echo "Unknown option: $1" >&2; exit 2 ;;
     esac
     shift
@@ -167,7 +185,7 @@ get_host_ip() {
 }
 
 ensure_dirs() {
-  mkdir -p "$HOST_CFG_DIR" "$BACKUP_DIR" "$SESSIONS_DIR" "$PROJECT_STATE_DIR"
+  mkdir -p "$HOST_CFG_DIR" "$BACKUP_DIR" "$SESSIONS_DIR" "$PROJECT_STATE_DIR" "$PROJECT_HISTORY_DIR" "$FRESH_HISTORY_DIR"
 }
 
 proj_hash() {
@@ -184,6 +202,14 @@ session_share_dir() {
 
 project_state_dir() {
   echo "$PROJECT_STATE_DIR/$(proj_hash "$1")"
+}
+
+project_history_dir() {
+  echo "$PROJECT_HISTORY_DIR/$(proj_hash "$1")"
+}
+
+fresh_history_dir() {
+  echo "$FRESH_HISTORY_DIR/$(proj_hash "$1")"
 }
 
 is_vm_running() {
@@ -2726,10 +2752,54 @@ EOF
 # Self-update commands
 # ---------------------------------------------------------------------------
 
+migrate_to_project_history() {
+  # Idempotent: seed $PROJECT_HISTORY_DIR from existing $PROJECT_STATE_DIR
+  # entries so users who had OCVM sessions before the fresh-default switch
+  # can still reach their chat history via `opencode-vm web --keep-history`.
+  [[ -f "$PROJECT_HISTORY_MIGRATED_MARKER" ]] && return 0
+  mkdir -p "$PROJECT_HISTORY_DIR"
+  if [[ -d "$PROJECT_STATE_DIR" ]]; then
+    local src dst
+    for src in "$PROJECT_STATE_DIR"/*/; do
+      [[ -d "$src" ]] || continue
+      dst="$PROJECT_HISTORY_DIR/$(basename "$src")"
+      if [[ -d "$src/xdg-data/opencode" ]] && [[ ! -e "$dst/xdg-data/opencode" ]]; then
+        mkdir -p "$dst/xdg-data/opencode" "$dst/xdg-state/opencode"
+        rsync -a "${DATA_RSYNC_EXCLUDES[@]}" "$src/xdg-data/opencode/" "$dst/xdg-data/opencode/" 2>/dev/null || true
+        rsync -a "$src/xdg-state/opencode/" "$dst/xdg-state/opencode/" 2>/dev/null || true
+      fi
+    done
+  fi
+  : > "$PROJECT_HISTORY_MIGRATED_MARKER"
+}
+
+notify_fresh_default_once() {
+  [[ -f "$FRESH_DEFAULT_NOTIFIED_MARKER" ]] && return 0
+  cat <<'EOF'
+
+───────────────────────────────────────────────────────────────
+ OpenCode-VM: session handling changed
+───────────────────────────────────────────────────────────────
+ `opencode-vm web` now starts with an empty session list by
+ default. Your previous per-project chat history is preserved
+ and still available via:
+
+     opencode-vm web --keep-history
+
+ Fresh-mode sessions are archived per run under
+ ~/.opencode-vm/fresh-history/<project>/<timestamp>/.
+ The global ~/.local/share/opencode/opencode.db is no longer
+ synced into the VM — use it only from host-side opencode.
+───────────────────────────────────────────────────────────────
+
+EOF
+  : > "$FRESH_DEFAULT_NOTIFIED_MARKER"
+}
+
 ocvm_post_update_migrate() {
-  # Hook for future version-to-version migrations.
-  # Args: old_version new_version
+  # Hook for version-to-version migrations. Args: old_version new_version
   [[ "$#" -eq 2 ]] || return 0
+  migrate_to_project_history
   return 0
 }
 
@@ -3943,6 +4013,8 @@ start_session() {
   printf "\r[run] Starting OpenCode VM session... |"
   ensure_dirs
   ensure_host_opencode_dirs
+  migrate_to_project_history
+  notify_fresh_default_once
   printf "\r[run] Starting OpenCode VM session... /"
   backup_host_cfg
   ensure_policy_file
@@ -3988,10 +4060,32 @@ start_session() {
         fi
       fi
 
-      # rsync --update already keeps the newer file in each direction;
-      # host auth.json written by 'provider add' after session end is preserved.
-      sync_data_dirs_bidirectional "$HOST_DATA_DIR" "$old_sess_share/xdg-data/opencode" "${DATA_RSYNC_EXCLUDES[@]}"
-      sync_data_dirs_bidirectional "$HOST_STATE_DIR" "$old_sess_share/xdg-state/opencode"
+      # Propagate only auth.json back to host (if newer) so provider changes stick.
+      local _old_sess_auth="$old_sess_share/xdg-data/opencode/auth.json"
+      if [[ -f "$_old_sess_auth" ]]; then
+        if [[ ! -f "$HOST_DATA_DIR/auth.json" ]] || [[ "$_old_sess_auth" -nt "$HOST_DATA_DIR/auth.json" ]]; then
+          cp -p "$_old_sess_auth" "$HOST_DATA_DIR/auth.json"
+        fi
+      fi
+
+      # Persist orphaned session to the correct project-local destination
+      # based on the mode the session was started in.
+      local _old_keep="${SESS_KEEP_HISTORY:-0}"
+      if [[ "$_old_keep" -eq 1 ]]; then
+        local _old_ph_dir
+        _old_ph_dir="$(project_history_dir "$proj")"
+        mkdir -p "$_old_ph_dir/xdg-data/opencode" "$_old_ph_dir/xdg-state/opencode"
+        rsync -a "${DATA_RSYNC_EXCLUDES[@]}" "$old_sess_share/xdg-data/opencode/" "$_old_ph_dir/xdg-data/opencode/"
+        rsync -a "$old_sess_share/xdg-state/opencode/" "$_old_ph_dir/xdg-state/opencode/"
+      else
+        local _old_fh_dir
+        _old_fh_dir="$(fresh_history_dir "$proj")/${old_sess#oc-}"
+        mkdir -p "$_old_fh_dir/xdg-data/opencode" "$_old_fh_dir/xdg-state/opencode"
+        rsync -a "${DATA_RSYNC_EXCLUDES[@]}" "$old_sess_share/xdg-data/opencode/" "$_old_fh_dir/xdg-data/opencode/"
+        rsync -a "$old_sess_share/xdg-state/opencode/" "$_old_fh_dir/xdg-state/opencode/"
+      fi
+
+      # Keep project-state cache in sync too.
       rsync -a "${DATA_RSYNC_EXCLUDES[@]}" "$old_sess_share/xdg-data/opencode/" "$old_proj_state/xdg-data/opencode/"
       rsync -a "$old_sess_share/xdg-state/opencode/" "$old_proj_state/xdg-state/opencode/"
 
@@ -4034,10 +4128,28 @@ start_session() {
   # This also bootstraps first-run setups where local OpenCode was never installed.
   sync_cfg_between_host_and_project "$host_cfg" "$proj_cfg"
   echo "[run] Synced host ↔ project config $(_ts)"
-  sync_data_dirs_bidirectional "$HOST_DATA_DIR" "$proj_state/xdg-data/opencode" "${DATA_RSYNC_EXCLUDES[@]}"
-  echo "[run] Synced host ↔ project data dir $(_ts)"
-  sync_data_dirs_bidirectional "$HOST_STATE_DIR" "$proj_state/xdg-state/opencode"
-  echo "[run] Synced host ↔ project state dir $(_ts)"
+
+  # History handling: default is fresh (empty session list); --keep-history
+  # loads the project-specific history from $PROJECT_HISTORY_DIR. The global
+  # host opencode.db is never synced in either mode.
+  if [[ "${KEEP_HISTORY:-0}" -eq 1 ]]; then
+    local ph_dir
+    ph_dir="$(project_history_dir "$proj")"
+    mkdir -p "$ph_dir/xdg-data/opencode" "$ph_dir/xdg-state/opencode"
+    mkdir -p "$proj_state/xdg-data/opencode" "$proj_state/xdg-state/opencode"
+    rsync -a "${DATA_RSYNC_EXCLUDES[@]}" "$ph_dir/xdg-data/opencode/" "$proj_state/xdg-data/opencode/"
+    rsync -a "$ph_dir/xdg-state/opencode/" "$proj_state/xdg-state/opencode/"
+    echo "[run] Loaded project history $(_ts)"
+  else
+    rm -rf "$proj_state/xdg-data/opencode" "$proj_state/xdg-state/opencode"
+    mkdir -p "$proj_state/xdg-data/opencode" "$proj_state/xdg-state/opencode"
+    echo "[run] Fresh session (no history loaded) $(_ts)"
+  fi
+
+  # Carry host auth.json into the project state so provider credentials work.
+  if [[ -f "$HOST_DATA_DIR/auth.json" ]]; then
+    cp -p "$HOST_DATA_DIR/auth.json" "$proj_state/xdg-data/opencode/auth.json"
+  fi
 
   if [[ -f "$proj_cfg" ]]; then
     cp -p "$proj_cfg" "$proj_cfg_legacy"
@@ -4224,8 +4336,8 @@ start_session() {
   echo "[run] Clone complete, lock released $(_ts)"
 
   # Track session (printf '%q' safely escapes paths with spaces/special chars)
-  printf 'SESS_NAME=%q\nSESS_PROJ=%q\nCFG_HASH_AT_START=%q\nSESS_MODE=%q\nSESS_PORT=%q\n' \
-    "$sess" "$proj" "$cfg_hash" "$SESSION_MODE" "${SESSION_PORT:-}" > "$senv"
+  printf 'SESS_NAME=%q\nSESS_PROJ=%q\nCFG_HASH_AT_START=%q\nSESS_MODE=%q\nSESS_PORT=%q\nSESS_KEEP_HISTORY=%q\n' \
+    "$sess" "$proj" "$cfg_hash" "$SESSION_MODE" "${SESSION_PORT:-}" "${KEEP_HISTORY:-0}" > "$senv"
 
   cleanup() {
     echo "[cleanup] Starting cleanup... $(_ts)"
@@ -4287,14 +4399,38 @@ start_session() {
       rm -f "$persist_cfg"
     fi
 
-    # Merge VM state with host state (newer files win), then persist into project state.
-    echo "[cleanup] Syncing data dirs (host ↔ session)... $(_ts)"
-    sync_data_dirs_bidirectional "$HOST_DATA_DIR" "$sess_share/xdg-data/opencode" "${DATA_RSYNC_EXCLUDES[@]}"
-    sync_data_dirs_bidirectional "$HOST_STATE_DIR" "$sess_share/xdg-state/opencode"
-    echo "[cleanup] Synced host ↔ session data $(_ts)"
+    # Propagate only auth.json back to the host so provider changes made in
+    # the UI stick — the global opencode.db is intentionally never touched.
+    echo "[cleanup] Persisting session data... $(_ts)"
+    local _sess_auth="$sess_share/xdg-data/opencode/auth.json"
+    if [[ -f "$_sess_auth" ]]; then
+      mkdir -p "$HOST_DATA_DIR"
+      if [[ ! -f "$HOST_DATA_DIR/auth.json" ]] || [[ "$_sess_auth" -nt "$HOST_DATA_DIR/auth.json" ]]; then
+        cp -p "$_sess_auth" "$HOST_DATA_DIR/auth.json"
+      fi
+    fi
+
+    # Persist history to the mode-appropriate project-local destination.
+    if [[ "${KEEP_HISTORY:-0}" -eq 1 ]]; then
+      local ph_dir_out
+      ph_dir_out="$(project_history_dir "$proj")"
+      mkdir -p "$ph_dir_out/xdg-data/opencode" "$ph_dir_out/xdg-state/opencode"
+      rsync -a "${DATA_RSYNC_EXCLUDES[@]}" "$sess_share/xdg-data/opencode/" "$ph_dir_out/xdg-data/opencode/"
+      rsync -a "$sess_share/xdg-state/opencode/" "$ph_dir_out/xdg-state/opencode/"
+      echo "[cleanup] Persisted into project history $(_ts)"
+    else
+      local fh_dir_out
+      fh_dir_out="$(fresh_history_dir "$proj")/${sess#oc-}"
+      mkdir -p "$fh_dir_out/xdg-data/opencode" "$fh_dir_out/xdg-state/opencode"
+      rsync -a "${DATA_RSYNC_EXCLUDES[@]}" "$sess_share/xdg-data/opencode/" "$fh_dir_out/xdg-data/opencode/"
+      rsync -a "$sess_share/xdg-state/opencode/" "$fh_dir_out/xdg-state/opencode/"
+      echo "[cleanup] Persisted fresh snapshot: $fh_dir_out $(_ts)"
+    fi
+
+    # Keep project-state as a local cache (harmless; cleared on next fresh start).
     rsync -a "${DATA_RSYNC_EXCLUDES[@]}" "$sess_share/xdg-data/opencode/" "$proj_state/xdg-data/opencode/"
     rsync -a "$sess_share/xdg-state/opencode/" "$proj_state/xdg-state/opencode/"
-    echo "[cleanup] Persisted into project state $(_ts)"
+    echo "[cleanup] Project-state cache updated $(_ts)"
 
     # ECC: persist project-scoped homunculus learnings back to host project state.
     if ecc_enabled; then
@@ -4734,6 +4870,7 @@ case "$cmd" in
     ;;
 
   start|run)
+    parse_start_flags "$@"
     start_session
     ;;
 
@@ -4822,11 +4959,16 @@ opencode-vm v$OCVM_VERSION
 
 Usage:
   opencode-vm install                      # install script to ~/bin and configure PATH
-  opencode-vm start                        # start fresh session VM in current directory
-  opencode-vm web [--port PORT] [--password PW] [--tui]
+  opencode-vm start [--keep-history]       # start fresh session VM in current directory
+                                           # default: empty session list
+                                           # --keep-history: load project history
+                                           #   from ~/.opencode-vm/project-history/
+  opencode-vm web [--port PORT] [--password PW] [--tui] [--keep-history]
                                            # start web server session (default port 4096)
                                            # provides: web UI, REST API, TUI attach
                                            # --tui: also start TUI in terminal (experimental)
+                                           # --keep-history: load project-specific history
+                                           #   (default starts with empty session list)
   opencode-vm attach                       # reconnect to a running session VM
   opencode-vm shell                        # open shell in session VM (auto-starts if missing)
   opencode-vm init                         # create/provision base VM (one-time setup)
