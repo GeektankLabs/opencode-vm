@@ -67,7 +67,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.9"
+OCVM_VERSION="0.4.10"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -709,6 +709,30 @@ proxmox_setup_interactive() {
   PROXMOX_VERIFY_SSL="$tls"
   proxmox_save
   echo "[proxmox] Saved to $PROXMOX_ENV (mode 0600)"
+  proxmox_autoallow_lan || true
+}
+
+# If the configured Proxmox host is on an RFC1918 private network, append its
+# IP:PORT to LAN_ALLOW_TCP so the base VM's nftables egress filter doesn't drop
+# the connection. No-op for public hosts or when the endpoint is already listed.
+proxmox_autoallow_lan() {
+  local host="${PROXMOX_HOST:-}" port="${PROXMOX_PORT:-8006}" ip=""
+  [[ -n "$host" ]] || return 0
+  if [[ "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    ip="$host"
+  else
+    ip="$(getent hosts "$host" 2>/dev/null | awk '{print $1; exit}')"
+    [[ -z "$ip" ]] && ip="$(dscacheutil -q host -a name "$host" 2>/dev/null | awk '/ip_address:/ {print $2; exit}')"
+  fi
+  [[ "$ip" =~ ^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.) ]] || return 0
+  load_policy
+  local ep="$ip:$port"
+  case " $LAN_ALLOW_TCP " in
+    *" $ep "*|*" $ip "*) return 0 ;;
+  esac
+  LAN_ALLOW_TCP="$(list_add "$ep" $LAN_ALLOW_TCP)"
+  save_policy
+  echo "[proxmox] Added LAN allow rule for $ep (private network — needed for egress)."
 }
 
 # Clone/update the ProxmoxMCP server repo (host side — for visibility/doctor).
@@ -719,6 +743,21 @@ proxmox_mcp_clone_or_update() {
   PROXMOX_MCP_COMMIT="$(git -C "$PROXMOX_MCP_DIR" rev-parse --short HEAD 2>/dev/null || true)"
   proxmox_save
   echo "[proxmox] MCP server ready at commit ${PROXMOX_MCP_COMMIT:-unknown}"
+}
+
+VM_HOME_CACHE=""
+vm_resolve_home() {
+  [[ -n "$VM_HOME_CACHE" ]] && { printf '%s' "$VM_HOME_CACHE"; return 0; }
+  local vm="${1:-$BASE_NAME}" home=""
+  if is_vm_running "$vm"; then
+    home="$(limactl shell --workdir / "$vm" -- bash -lc 'printf %s "$HOME"' 2>/dev/null | tr -d '\r\n')"
+  fi
+  if [[ -z "$home" || "$home" != /home/* ]]; then
+    home="/home/$(whoami).linux"
+    echo "[vm] Warning: could not resolve VM \$HOME; falling back to $home" >&2
+  fi
+  VM_HOME_CACHE="$home"
+  printf '%s' "$home"
 }
 
 # Install ProxmoxMCP into the BASE VM so that every session clone inherits the
@@ -4172,7 +4211,8 @@ start_session() {
   # Inject session overrides: MCP block built from mcps/registry.json + active
   # MCPS_PACKAGES, plus allow-all permissions with git commit=ask and git push=deny.
   local sess_cfg_file="$sess_share/config/opencode/opencode.json"
-  local vm_home="/home/$(whoami).linux"
+  local vm_home
+  vm_home="$(vm_resolve_home "$BASE_NAME")"
   if command -v jq >/dev/null 2>&1 && [[ -f "$sess_cfg_file" ]]; then
     local mcp_obj
     mcp_obj="$(mcps_build_config_json "$vm_home")"
