@@ -67,7 +67,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.10"
+OCVM_VERSION="0.4.11"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -771,9 +771,14 @@ proxmox_ensure_installed_in_base() {
   local src_path='$HOME/.local/share/proxmox-mcp'
   local ref="${PROXMOX_MCP_REF:-main}"
   local repo="${PROXMOX_MCP_REPO:-$DEFAULT_PROXMOX_MCP_REPO}"
+  # Install-recipe version. Bump this when the install steps change (e.g. to
+  # pin a different mcp SDK version). Existing venvs without this stamp are
+  # wiped and reinstalled.
+  local install_stamp_version="2"
+  local stamp_path="$venv_path/.ocvm-proxmox-install-v$install_stamp_version"
 
-  # Quick check — skip if venv already present in base VM.
-  if limactl shell --workdir / "$BASE_NAME" -- bash -lc "test -x $venv_path/bin/python" 2>/dev/null; then
+  # Skip only when the stamp for the current recipe version is present.
+  if limactl shell --workdir / "$BASE_NAME" -- bash -lc "test -f $stamp_path" 2>/dev/null; then
     return 0
   fi
 
@@ -788,6 +793,10 @@ proxmox_ensure_installed_in_base() {
   fi
 
   echo "[proxmox] Installing ProxmoxMCP into base VM (first-run only, ~20-40s)..."
+  # ProxmoxMCP's pyproject.toml pins `mcp @ git+.../python-sdk.git` (main),
+  # which currently removes the `mcp.server.fastmcp` module ProxmoxMCP imports.
+  # We force-install the last released `mcp` that still ships FastMCP.
+  local mcp_sdk_pin="mcp==1.27.0"
   limactl shell --workdir / "$BASE_NAME" -- bash -lc "
     set -euo pipefail
     mkdir -p \$HOME/.local/share
@@ -797,9 +806,13 @@ proxmox_ensure_installed_in_base() {
       git -C $src_path fetch --depth=1 origin '$ref' >/dev/null 2>&1 || true
       git -C $src_path checkout -q FETCH_HEAD 2>/dev/null || true
     fi
+    rm -rf $venv_path
     python3 -m venv $venv_path
     $venv_path/bin/pip install --quiet --upgrade pip
     $venv_path/bin/pip install --quiet -e $src_path
+    $venv_path/bin/pip install --quiet --force-reinstall '$mcp_sdk_pin'
+    $venv_path/bin/python -c 'from mcp.server.fastmcp import FastMCP'
+    touch $stamp_path
   " || {
     echo "[proxmox] MCP install failed. See VM log; disable with 'opencode-vm mcps off proxmox'." >&2
     (( started_base == 1 )) && limactl stop "$BASE_NAME" 2>/dev/null || true
@@ -1604,8 +1617,11 @@ mcps_pkg_off() {
 # {VM_HOME} placeholder, and materializing credentials for MCPs that flag
 # environment_from_credentials.
 # $1 = vm_home path to substitute for the {VM_HOME} placeholder.
+# $2 = sess_share dir (host path; bind-mounted into VM at the same absolute path)
+#      used for writing per-session config files (e.g. PROXMOX_MCP_CONFIG JSON).
 mcps_build_config_json() {
   local vm_home="$1"
+  local sess_share="${2:-}"
   local reg
   reg="$(_mcps_registry_read 2>/dev/null)" || { echo '{}'; return 0; }
 
@@ -1636,21 +1652,33 @@ mcps_build_config_json() {
         echo "[mcps] proxmox credentials incomplete — skipping injection." >&2
         continue
       fi
-      cfg_json="$(echo "$cfg_json" | jq \
+      if [[ -z "$sess_share" ]]; then
+        echo "[mcps] proxmox injection requires a session share dir — skipping." >&2
+        continue
+      fi
+      # ProxmoxMCP expects PROXMOX_MCP_CONFIG pointing to a JSON file matching
+      # proxmox-config/config.example.json. Write it into the session share
+      # (bind-mounted at the same absolute path inside the VM) with 0600 perms.
+      local pmx_cfg_dir="$sess_share/config/proxmox-mcp"
+      local pmx_cfg_file="$pmx_cfg_dir/config.json"
+      mkdir -p "$pmx_cfg_dir"
+      local pmx_verify=false
+      [[ "${PROXMOX_VERIFY_SSL:-0}" == "1" ]] && pmx_verify=true
+      jq -n \
         --arg host  "$PROXMOX_HOST" \
-        --arg port  "${PROXMOX_PORT:-8006}" \
+        --argjson port  "${PROXMOX_PORT:-8006}" \
+        --argjson tls   "$pmx_verify" \
         --arg user  "${PROXMOX_USER:-}" \
         --arg tname "${PROXMOX_TOKEN_NAME:-}" \
         --arg tval  "${PROXMOX_TOKEN_VALUE:-}" \
-        --arg tls   "${PROXMOX_VERIFY_SSL:-0}" \
-        '. + {environment: {
-          PROXMOX_HOST: $host,
-          PROXMOX_PORT: $port,
-          PROXMOX_USER: $user,
-          PROXMOX_TOKEN_NAME: $tname,
-          PROXMOX_TOKEN_VALUE: $tval,
-          PROXMOX_VERIFY_SSL: $tls
-        }}')"
+        '{
+          proxmox: { host: $host, port: $port, verify_ssl: $tls, service: "PVE" },
+          auth:    { user: $user, token_name: $tname, token_value: $tval },
+          logging: { level: "INFO", format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s" }
+        }' > "$pmx_cfg_file"
+      chmod 600 "$pmx_cfg_file"
+      cfg_json="$(echo "$cfg_json" | jq --arg p "$pmx_cfg_file" \
+        '. + {environment: {PROXMOX_MCP_CONFIG: $p}}')"
     fi
 
     mcp_obj="$(jq --arg n "$pkg" --argjson cfg "$cfg_json" '. + {($n): $cfg}' <<<"$mcp_obj")"
@@ -4215,7 +4243,7 @@ start_session() {
   vm_home="$(vm_resolve_home "$BASE_NAME")"
   if command -v jq >/dev/null 2>&1 && [[ -f "$sess_cfg_file" ]]; then
     local mcp_obj
-    mcp_obj="$(mcps_build_config_json "$vm_home")"
+    mcp_obj="$(mcps_build_config_json "$vm_home" "$sess_share")"
     [[ -n "$mcp_obj" ]] || mcp_obj='{}'
 
     local tmp_cfg
