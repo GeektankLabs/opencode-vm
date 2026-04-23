@@ -23,6 +23,7 @@ PROJECT_STATE_DIR="$SHARE_ROOT/project-state"
 PROJECT_HISTORY_DIR="$SHARE_ROOT/project-history"   # loaded only with --keep-history
 FRESH_HISTORY_DIR="$SHARE_ROOT/fresh-history"       # per-run snapshots from default fresh mode
 FRESH_DEFAULT_NOTIFIED_MARKER="$SHARE_ROOT/.fresh-default-notified"
+KEPT_SESSION_NOTIFIED_MARKER="$SHARE_ROOT/.kept-session-notified"
 PROJECT_HISTORY_MIGRATED_MARKER="$SHARE_ROOT/.migrated-project-history"
 
 # Policy persistiert am Host (wird pro Session in der VM angewendet)
@@ -67,7 +68,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.12"
+OCVM_VERSION="0.4.13"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -147,6 +148,7 @@ parse_web_flags() {
   SESSION_PASSWORD=""
   OC_WEB_TUI=false
   KEEP_HISTORY=0
+  ON_EXISTING=""   # "", "reconnect", "fresh", "cancel"
   while [[ "$#" -gt 0 ]]; do
     case "$1" in
       --port)   shift; SESSION_PORT="${1:?Missing port value}" ;;
@@ -155,6 +157,9 @@ parse_web_flags() {
       --password=*) SESSION_PASSWORD="${1#*=}" ;;
       --tui) OC_WEB_TUI=true ;;
       --keep-history) KEEP_HISTORY=1 ;;
+      --reconnect) ON_EXISTING="reconnect" ;;
+      --fresh) ON_EXISTING="fresh" ;;
+      --cancel-if-exists) ON_EXISTING="cancel" ;;
       *) echo "Unknown option: $1" >&2; exit 2 ;;
     esac
     shift
@@ -163,9 +168,13 @@ parse_web_flags() {
 
 parse_start_flags() {
   KEEP_HISTORY=0
+  ON_EXISTING=""   # "", "reconnect", "fresh", "cancel"
   while [[ "$#" -gt 0 ]]; do
     case "$1" in
       --keep-history) KEEP_HISTORY=1 ;;
+      --reconnect) ON_EXISTING="reconnect" ;;
+      --fresh) ON_EXISTING="fresh" ;;
+      --cancel-if-exists) ON_EXISTING="cancel" ;;
       *) echo "Unknown option: $1" >&2; exit 2 ;;
     esac
     shift
@@ -4471,10 +4480,20 @@ attach_session() {
   source "$senv"
 
   if ! is_vm_running "$SESS_NAME"; then
-    echo "Session VM '$SESS_NAME' is no longer running." >&2
-    echo "Start a new session with: opencode-vm start" >&2
-    rm -f "$senv"
-    exit 1
+    # Session was kept on a previous exit (stop-but-keep). Resume it.
+    if limactl list -q 2>/dev/null | grep -qx "$SESS_NAME"; then
+      echo "[attach] Session VM '$SESS_NAME' is stopped — resuming..."
+      if ! run_with_spinner "[attach] Starting session VM..." limactl start "$SESS_NAME" --tty=false; then
+        echo "[attach] Failed to resume VM '$SESS_NAME'." >&2
+        echo "[attach] Start a fresh session with: opencode-vm start --fresh" >&2
+        exit 1
+      fi
+    else
+      echo "Session VM '$SESS_NAME' no longer exists." >&2
+      echo "Start a new session with: opencode-vm start" >&2
+      rm -f "$senv"
+      exit 1
+    fi
   fi
 
   echo "[attach] Reconnecting to session: $SESS_NAME"
@@ -4518,6 +4537,18 @@ attach_session() {
 
     cd "$1"
 
+    # If VM-local xdg data is missing (e.g. /tmp was cleared by systemd-tmpfiles
+    # on a stop-then-start boot), repopulate it from the persisted session
+    # share so reconnect preserves history. On a still-running VM the in-VM
+    # data is already present; we only seed when it is missing.
+    mkdir -p /tmp/oc-xdg-data/opencode /tmp/oc-xdg-state/opencode
+    if [ ! -e /tmp/oc-xdg-data/opencode/storage ] && [ -d "$SESS_SHARE/xdg-data/opencode" ]; then
+      echo "[attach] Restoring session history from share..."
+      rsync -a --exclude="bin/" --exclude="log/" --exclude="tool-output/" \
+        "$SESS_SHARE/xdg-data/opencode/" /tmp/oc-xdg-data/opencode/ 2>/dev/null || true
+      rsync -a "$SESS_SHARE/xdg-state/opencode/" /tmp/oc-xdg-state/opencode/ 2>/dev/null || true
+    fi
+
     if [ "$3" = "web" ]; then
       echo "[attach] Starting OpenCode web server on port $4..."
       aa-exec -p opencode-sandbox -- opencode web --hostname 0.0.0.0 --port "$4" || true
@@ -4532,6 +4563,193 @@ attach_session() {
     rsync -a /tmp/oc-xdg-state/opencode/ "$SESS_SHARE/xdg-state/opencode/" 2>/dev/null || true
     echo "[attach] Sync complete"
   ' _ "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$sess_port" "$host_lan_ip"
+}
+
+# Sync data back from a prior session share, then stop and delete its VM.
+# Called when the user chooses "fresh" at the start prompt.
+_destroy_prev_session() {
+  local proj="$1"
+  local senv
+  senv="$(session_env "$proj")"
+  [[ -f "$senv" ]] || return 0
+
+  # shellcheck disable=SC1090
+  source "$senv"
+  local old_sess="$SESS_NAME"
+  local old_sess_share
+  old_sess_share="$(session_share_dir "$proj")"
+  local old_proj_state
+  old_proj_state="$(project_state_dir "$proj")"
+
+  echo ""
+  echo "[cleanup] Syncing old session data back before destroy... $(_ts)"
+
+  mkdir -p "$old_proj_state/config/opencode" "$old_proj_state/xdg-data/opencode" "$old_proj_state/xdg-state/opencode"
+  mkdir -p "$HOST_DATA_DIR" "$HOST_STATE_DIR"
+
+  if [[ -d "$old_sess_share" ]]; then
+    local old_cfg="$old_sess_share/config/opencode/opencode.json"
+    local old_cfg_dot="$old_sess_share/config/opencode/.opencode.json"
+    if [[ -f "$old_cfg_dot" ]] && [[ ! -f "$old_cfg" ]]; then
+      old_cfg="$old_cfg_dot"
+    fi
+    if [[ -f "$old_cfg" ]]; then
+      cp -p "$old_cfg" "$old_proj_state/config/opencode/opencode.json"
+      cp -p "$old_cfg" "$old_proj_state/config/opencode/.opencode.json"
+      # Only overwrite host config if old session's version is newer —
+      # the user may have run 'provider add' after the session ended.
+      local _host_cfg
+      _host_cfg="$(pick_host_cfg)"
+      if [[ ! -f "$_host_cfg" ]] || [[ "$old_cfg" -nt "$_host_cfg" ]]; then
+        cp -p "$old_cfg" "$_host_cfg"
+      fi
+    fi
+
+    # Propagate only auth.json back to host (if newer) so provider changes stick.
+    local _old_sess_auth="$old_sess_share/xdg-data/opencode/auth.json"
+    if [[ -f "$_old_sess_auth" ]]; then
+      if [[ ! -f "$HOST_DATA_DIR/auth.json" ]] || [[ "$_old_sess_auth" -nt "$HOST_DATA_DIR/auth.json" ]]; then
+        cp -p "$_old_sess_auth" "$HOST_DATA_DIR/auth.json"
+      fi
+    fi
+
+    # Persist orphaned session to the correct project-local destination
+    # based on the mode the session was started in.
+    local _old_keep="${SESS_KEEP_HISTORY:-0}"
+    if [[ "$_old_keep" -eq 1 ]]; then
+      local _old_ph_dir
+      _old_ph_dir="$(project_history_dir "$proj")"
+      mkdir -p "$_old_ph_dir/xdg-data/opencode" "$_old_ph_dir/xdg-state/opencode"
+      rsync -a "${DATA_RSYNC_EXCLUDES[@]}" "$old_sess_share/xdg-data/opencode/" "$_old_ph_dir/xdg-data/opencode/"
+      rsync -a "$old_sess_share/xdg-state/opencode/" "$_old_ph_dir/xdg-state/opencode/"
+    else
+      local _old_fh_dir
+      _old_fh_dir="$(fresh_history_dir "$proj")/${old_sess#oc-}"
+      mkdir -p "$_old_fh_dir/xdg-data/opencode" "$_old_fh_dir/xdg-state/opencode"
+      rsync -a "${DATA_RSYNC_EXCLUDES[@]}" "$old_sess_share/xdg-data/opencode/" "$_old_fh_dir/xdg-data/opencode/"
+      rsync -a "$old_sess_share/xdg-state/opencode/" "$_old_fh_dir/xdg-state/opencode/"
+    fi
+
+    # Keep project-state cache in sync too.
+    rsync -a "${DATA_RSYNC_EXCLUDES[@]}" "$old_sess_share/xdg-data/opencode/" "$old_proj_state/xdg-data/opencode/"
+    rsync -a "$old_sess_share/xdg-state/opencode/" "$old_proj_state/xdg-state/opencode/"
+
+    local old_db_backup_dir="$old_proj_state/db-backups"
+    check_sqlite_integrity "$old_proj_state/xdg-data/opencode" "$old_db_backup_dir/xdg-data"
+    check_sqlite_integrity "$old_proj_state/xdg-state/opencode" "$old_db_backup_dir/xdg-state"
+  fi
+
+  echo "[old-session] Synced old session data back $(_ts)"
+
+  echo "[cleanup] Removing old session VM: $old_sess $(_ts)"
+  limactl stop "$old_sess" 2>/dev/null || true
+  limactl delete -f "$old_sess" >/dev/null 2>&1 || true
+  rm -f "$senv"
+  rm -rf "$old_sess_share"
+  echo "[cleanup] Old session removed $(_ts)"
+}
+
+# Decide what to do when a prior session exists for this project.
+# Writes one of "reconnect" / "fresh" / "cancel" to stdout; prompts go to stderr.
+# Non-interactive with no ON_EXISTING flag → returns 2 (fail closed).
+_decide_start_action() {
+  local vm_name="$1"
+
+  # Explicit flag wins.
+  if [[ -n "${ON_EXISTING:-}" ]]; then
+    echo "$ON_EXISTING"
+    return 0
+  fi
+
+  # Non-interactive: require a flag rather than silently picking an action.
+  if [[ ! -t 0 ]] || [[ ! -r /dev/tty ]]; then
+    echo "[start] A session already exists for this project (VM: $vm_name)." >&2
+    echo "[start] Non-interactive mode — pass one of:" >&2
+    echo "[start]   --reconnect         attach to existing (resume if stopped)" >&2
+    echo "[start]   --fresh             destroy and start new" >&2
+    echo "[start]   --cancel-if-exists  exit without doing anything" >&2
+    return 2
+  fi
+
+  local vm_state="stopped"
+  is_vm_running "$vm_name" && vm_state="running"
+
+  echo "" >&2
+  if [[ "$vm_state" == "running" ]]; then
+    echo "A session for this project is already running: $vm_name" >&2
+    echo "  [r] reconnect (attach to it)" >&2
+    echo "  [f] fresh     (destroy and start new — you will lose mid-session state)" >&2
+    echo "  [c] cancel" >&2
+  else
+    echo "A stopped session VM exists for this project: $vm_name" >&2
+    echo "  [r] resume (restart the VM and attach)" >&2
+    echo "  [f] fresh  (destroy and start new)" >&2
+    echo "  [c] cancel" >&2
+  fi
+
+  local _ans
+  while true; do
+    read -r -p "Choose r/f/c: " _ans </dev/tty || return 2
+    case "$_ans" in
+      r|R) echo "reconnect"; return 0 ;;
+      f|F) echo "fresh";     return 0 ;;
+      c|C) echo "cancel";    return 0 ;;
+      *)   echo "Please enter r, f, or c." >&2 ;;
+    esac
+  done
+}
+
+# Decide whether to keep or delete the session VM on clean exit.
+# Honors OCVM_ON_EXIT=keep|delete|ask. Non-interactive defaults to keep.
+# Writes "keep" or "delete" to stdout.
+_decide_cleanup_action() {
+  local override="${OCVM_ON_EXIT:-}"
+  case "$override" in
+    keep|delete)
+      echo "$override"
+      return 0
+      ;;
+    ask|"")
+      ;;
+    *)
+      echo "[cleanup] Ignoring invalid OCVM_ON_EXIT='$override' (expected: keep|delete|ask)." >&2
+      ;;
+  esac
+
+  # Non-interactive or no TTY: keep (preserve state).
+  if [[ ! -r /dev/tty ]]; then
+    echo "keep"
+    return 0
+  fi
+
+  local _ans
+  echo "" >&2
+  read -r -p "Session ended. [K]eep VM for later resume / [d]elete and clean up [K/d]: " _ans </dev/tty || _ans=""
+  case "$_ans" in
+    d|D|delete) echo "delete" ;;
+    *)          echo "keep"   ;;
+  esac
+}
+
+# One-time tip after the user first kept a session.
+_notify_kept_session_once() {
+  [[ -f "$KEPT_SESSION_NOTIFIED_MARKER" ]] && return 0
+  cat >&2 <<'EOF'
+
+───────────────────────────────────────────────────────────────
+ Tip: stopped session VMs persist on disk.
+───────────────────────────────────────────────────────────────
+ You chose to keep this session. Resume it any time with:
+     opencode-vm start        (then choose 'r' to resume)
+     opencode-vm attach       (auto-starts the stopped VM)
+
+ To clean up a kept session, answer 'd' at the next exit
+ prompt, or run:
+     opencode-vm prune        (removes all kept sessions)
+───────────────────────────────────────────────────────────────
+
+EOF
+  : > "$KEPT_SESSION_NOTIFIED_MARKER"
 }
 
 start_session() {
@@ -4550,87 +4768,40 @@ start_session() {
 
   proj="$(pwd)"
 
-  # Check if a session already exists for this project
+  # A session already exists for this project: prompt the user — never auto-destroy.
   senv="$(session_env "$proj")"
   if [[ -f "$senv" ]]; then
     # shellcheck disable=SC1090
     source "$senv"
-    local old_sess="$SESS_NAME"
-    local old_sess_share
-    old_sess_share="$(session_share_dir "$proj")"
-    local old_proj_state
-    old_proj_state="$(project_state_dir "$proj")"
-
-    echo ""
-    echo "Hey, you left a session open last time. Let me clean up for you. $(_ts)"
-    echo "This might take a little bit longer..."
-    echo ""
-
-    # Sync data back from old session share to project state and host
-    mkdir -p "$old_proj_state/config/opencode" "$old_proj_state/xdg-data/opencode" "$old_proj_state/xdg-state/opencode"
-    mkdir -p "$HOST_DATA_DIR" "$HOST_STATE_DIR"
-
-    if [[ -d "$old_sess_share" ]]; then
-      local old_cfg="$old_sess_share/config/opencode/opencode.json"
-      local old_cfg_dot="$old_sess_share/config/opencode/.opencode.json"
-      if [[ -f "$old_cfg_dot" ]] && [[ ! -f "$old_cfg" ]]; then
-        old_cfg="$old_cfg_dot"
-      fi
-      if [[ -f "$old_cfg" ]]; then
-        cp -p "$old_cfg" "$old_proj_state/config/opencode/opencode.json"
-        cp -p "$old_cfg" "$old_proj_state/config/opencode/.opencode.json"
-        # Only overwrite host config if old session's version is newer —
-        # the user may have run 'provider add' after the session ended.
-        local _host_cfg
-        _host_cfg="$(pick_host_cfg)"
-        if [[ ! -f "$_host_cfg" ]] || [[ "$old_cfg" -nt "$_host_cfg" ]]; then
-          cp -p "$old_cfg" "$_host_cfg"
-        fi
-      fi
-
-      # Propagate only auth.json back to host (if newer) so provider changes stick.
-      local _old_sess_auth="$old_sess_share/xdg-data/opencode/auth.json"
-      if [[ -f "$_old_sess_auth" ]]; then
-        if [[ ! -f "$HOST_DATA_DIR/auth.json" ]] || [[ "$_old_sess_auth" -nt "$HOST_DATA_DIR/auth.json" ]]; then
-          cp -p "$_old_sess_auth" "$HOST_DATA_DIR/auth.json"
-        fi
-      fi
-
-      # Persist orphaned session to the correct project-local destination
-      # based on the mode the session was started in.
-      local _old_keep="${SESS_KEEP_HISTORY:-0}"
-      if [[ "$_old_keep" -eq 1 ]]; then
-        local _old_ph_dir
-        _old_ph_dir="$(project_history_dir "$proj")"
-        mkdir -p "$_old_ph_dir/xdg-data/opencode" "$_old_ph_dir/xdg-state/opencode"
-        rsync -a "${DATA_RSYNC_EXCLUDES[@]}" "$old_sess_share/xdg-data/opencode/" "$_old_ph_dir/xdg-data/opencode/"
-        rsync -a "$old_sess_share/xdg-state/opencode/" "$_old_ph_dir/xdg-state/opencode/"
-      else
-        local _old_fh_dir
-        _old_fh_dir="$(fresh_history_dir "$proj")/${old_sess#oc-}"
-        mkdir -p "$_old_fh_dir/xdg-data/opencode" "$_old_fh_dir/xdg-state/opencode"
-        rsync -a "${DATA_RSYNC_EXCLUDES[@]}" "$old_sess_share/xdg-data/opencode/" "$_old_fh_dir/xdg-data/opencode/"
-        rsync -a "$old_sess_share/xdg-state/opencode/" "$_old_fh_dir/xdg-state/opencode/"
-      fi
-
-      # Keep project-state cache in sync too.
-      rsync -a "${DATA_RSYNC_EXCLUDES[@]}" "$old_sess_share/xdg-data/opencode/" "$old_proj_state/xdg-data/opencode/"
-      rsync -a "$old_sess_share/xdg-state/opencode/" "$old_proj_state/xdg-state/opencode/"
-
-      local old_db_backup_dir="$old_proj_state/db-backups"
-      check_sqlite_integrity "$old_proj_state/xdg-data/opencode" "$old_db_backup_dir/xdg-data"
-      check_sqlite_integrity "$old_proj_state/xdg-state/opencode" "$old_db_backup_dir/xdg-state"
+    local _action _rc
+    _action="$(_decide_start_action "$SESS_NAME")"
+    _rc=$?
+    if [[ "$_rc" -ne 0 ]]; then
+      exit "$_rc"
     fi
-
-    echo "[old-session] Synced old session data back $(_ts)"
-
-    # Stop and delete old session VM (may already be stopped/gone)
-    echo "[cleanup] Removing old session VM: $old_sess $(_ts)"
-    limactl stop "$old_sess" 2>/dev/null || true
-    limactl delete -f "$old_sess" >/dev/null 2>&1 || true
-    rm -f "$senv"
-    rm -rf "$old_sess_share"
-    echo "[cleanup] Old session removed $(_ts)"
+    case "$_action" in
+      reconnect)
+        if ! is_vm_running "$SESS_NAME"; then
+          if ! run_with_spinner "[start] Resuming session VM..." limactl start "$SESS_NAME" --tty=false; then
+            echo "[start] Failed to resume VM '$SESS_NAME'. Use 'opencode-vm start --fresh' to recreate." >&2
+            exit 1
+          fi
+        fi
+        attach_session
+        return 0
+        ;;
+      fresh)
+        _destroy_prev_session "$proj"
+        ;;
+      cancel)
+        echo "[start] Cancelled."
+        exit 0
+        ;;
+      *)
+        echo "[start] Internal error: unexpected action '$_action'." >&2
+        exit 1
+        ;;
+    esac
   fi
 
   sess="oc-$(date +%Y%m%d-%H%M%S)"
@@ -4996,18 +5167,34 @@ start_session() {
     echo "[cleanup] SQLite integrity checks done $(_ts)"
 
     if [[ -n "${sess:-}" ]]; then
-      if [[ "${OC_SHELL_OK:-}" == "1" ]]; then
-        echo "[cleanup] Stopping session VM: $sess $(_ts)"
-        stop_host_port_forwards_in_vm "$sess"
-        rm -f "$senv"
-        rm -rf "$sess_share"
-        limactl stop "$sess" 2>/dev/null || true
-        echo "[cleanup] Session VM stopped $(_ts)"
-        limactl delete -f "$sess" >/dev/null 2>&1 || true
-        echo "[cleanup] Session VM deleted $(_ts)"
-      else
+      if [[ "${OC_SHELL_OK:-}" != "1" ]]; then
+        # Abnormal exit (crash, Ctrl-C before opencode ran): leave the VM
+        # running so the user can 'opencode-vm attach' and recover.
         echo "[cleanup] Session VM '$sess' kept running for re-attach. $(_ts)"
-        echo "[cleanup] Use 'opencode-vm attach' to reconnect, or 'opencode-vm start' for a fresh session."
+        echo "[cleanup] Use 'opencode-vm attach' to reconnect, or 'opencode-vm start' to choose."
+      else
+        local _exit_action
+        _exit_action="$(_decide_cleanup_action)"
+        case "$_exit_action" in
+          keep)
+            echo "[cleanup] Stopping session VM (kept for resume): $sess $(_ts)"
+            stop_host_port_forwards_in_vm "$sess"
+            limactl stop "$sess" 2>/dev/null || true
+            echo "[cleanup] Session VM stopped — disk clone and session env retained. $(_ts)"
+            echo "[cleanup] Resume with 'opencode-vm start' (choose 'r') or 'opencode-vm attach'."
+            _notify_kept_session_once
+            ;;
+          delete)
+            echo "[cleanup] Stopping and deleting session VM: $sess $(_ts)"
+            stop_host_port_forwards_in_vm "$sess"
+            rm -f "$senv"
+            rm -rf "$sess_share"
+            limactl stop "$sess" 2>/dev/null || true
+            echo "[cleanup] Session VM stopped $(_ts)"
+            limactl delete -f "$sess" >/dev/null 2>&1 || true
+            echo "[cleanup] Session VM deleted $(_ts)"
+            ;;
+        esac
       fi
     fi
     # Remove clean mount symlink if created
@@ -5513,17 +5700,28 @@ opencode-vm v$OCVM_VERSION
 
 Usage:
   opencode-vm install                      # install script to ~/bin and configure PATH
-  opencode-vm start [--keep-history]       # start fresh session VM in current directory
-                                           # default: empty session list
+  opencode-vm start [--keep-history] [--reconnect|--fresh|--cancel-if-exists]
+                                           # start a session VM in current directory
+                                           # If a session already exists, prompts:
+                                           #   r = reconnect (resume if stopped)
+                                           #   f = fresh (destroy and recreate)
+                                           #   c = cancel
+                                           # On clean exit: prompts [K]eep (default) / [d]elete.
+                                           # Kept VMs are stopped but retained on disk —
+                                           # resume via start (choose 'r') or 'attach'.
                                            # --keep-history: load project history
                                            #   from ~/.opencode-vm/project-history/
-  opencode-vm web [--port PORT] [--password PW] [--tui] [--keep-history]
+                                           # --reconnect/--fresh/--cancel-if-exists:
+                                           #   non-interactive override of the prompt
+  opencode-vm web [--port PORT] [--password PW] [--tui] [--keep-history] [--reconnect|--fresh|--cancel-if-exists]
                                            # start web server session (default port 4096)
                                            # provides: web UI, REST API, TUI attach
+                                           # Session prompt/exit behavior matches 'start'.
                                            # --tui: also start TUI in terminal (experimental)
                                            # --keep-history: load project-specific history
                                            #   (default starts with empty session list)
-  opencode-vm attach                       # reconnect to a running session VM
+  opencode-vm attach                       # reconnect to the project's session VM
+                                           # (auto-starts a stopped-but-kept VM)
   opencode-vm shell                        # open shell in session VM (auto-starts if missing)
   opencode-vm init                         # create/provision base VM (one-time setup)
                                            # Skill + MCP packages stay at their defaults —
@@ -5568,6 +5766,10 @@ Quick start:
   2. opencode-vm init                      # create base VM (once)
   3. cd /path/to/your/project              # navigate to project (or open terminal in VS Code)
   4. opencode-vm start                     # launch OpenCode session
+
+Environment variables:
+  OCVM_ON_EXIT=keep|delete|ask             # override the exit prompt default
+                                           # keep (default for non-TTY) / delete / ask
 
 Tip:
   Create ~/Desktop/opencode-share/ to share files (e.g. images) with the VM.
