@@ -67,7 +67,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.11"
+OCVM_VERSION="0.4.12"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -1578,7 +1578,7 @@ mcps_pkg_on() {
       proxmox_mcp_clone_or_update || return 1
       proxmox_skill_ensure >/dev/null || return 1
       ;;
-    playwright|repomapper)
+    playwright|repomapper|graphify)
       # Bundled in base VM — nothing to do
       :
       ;;
@@ -1612,16 +1612,79 @@ mcps_pkg_off() {
   echo "[mcps] Disabled '$pkg'. Restart session to apply."
 }
 
+# Substitute well-known placeholder tokens in any JSON document. Used by both
+# mcps_build_config_json (for mcp_config.command) and mcps_build_agents_sidecar
+# (for agents_md_snippet.content). Token set:
+#   {VM_HOME}    — VM user's home dir (e.g. /home/lima.linux)
+#   {PROJ_HASH}  — md5 of the project path (matches project_state_dir naming)
+#   {SESS_SHARE} — host path of session share (also bind-mounted at same path in VM)
+#   {GRAPH_PATH} — per-project graphify graph file path (consumed by graphify MCP)
+_mcps_substitute_tokens() {
+  local json="$1" vm_home="$2" proj_hash="$3" sess_share="$4" graph_path="$5"
+  jq --arg vh "$vm_home" --arg ph "$proj_hash" --arg ss "$sess_share" --arg gp "$graph_path" \
+    'walk(if type == "string"
+          then gsub("\\{VM_HOME\\}"; $vh)
+             | gsub("\\{PROJ_HASH\\}"; $ph)
+             | gsub("\\{SESS_SHARE\\}"; $ss)
+             | gsub("\\{GRAPH_PATH\\}"; $gp)
+          else . end)' <<<"$json"
+}
+
+# Path the {GRAPH_PATH} token resolves to. The graphify MCP runs inside the
+# session VM and reads/writes through this path. Lives under $sess_share
+# (bind-mounted at the same absolute path inside the VM) so the file is
+# accessible from both host and guest. Persistence across sessions is handled
+# by graphify_persist_load_for_session / graphify_persist_save_for_session.
+_mcps_graph_path_for_session() {
+  local sess_share="$1"
+  echo "$sess_share/graphify/graph.json"
+}
+
+# Per-project persistent graph location (host-side, survives session resets).
+graphify_persist_dir_for_project() {
+  local proj="$1"
+  local hash; hash="$(proj_hash "$proj")"
+  echo "$PROJECT_STATE_DIR/$hash/graphify"
+}
+
+# At session start: load the persisted graph (if any) into sess_share so the
+# graphify MCP server inside the VM can read it.
+graphify_persist_load_for_session() {
+  local proj="$1" sess_share="$2"
+  local persist_dir; persist_dir="$(graphify_persist_dir_for_project "$proj")"
+  local sess_dir="$sess_share/graphify"
+  mkdir -p "$persist_dir" "$sess_dir"
+  if [[ -f "$persist_dir/graph.json" ]]; then
+    cp -p "$persist_dir/graph.json" "$sess_dir/graph.json"
+  fi
+}
+
+# At session end: copy any updated graph from sess_share back to the
+# per-project persist dir. Safe to call when graphify wasn't active — just
+# becomes a no-op when the file doesn't exist.
+graphify_persist_save_for_session() {
+  local proj="$1" sess_share="$2"
+  local sess_file="$sess_share/graphify/graph.json"
+  [[ -f "$sess_file" ]] || return 0
+  local persist_dir; persist_dir="$(graphify_persist_dir_for_project "$proj")"
+  mkdir -p "$persist_dir"
+  cp -p "$sess_file" "$persist_dir/graph.json"
+}
+
 # Build the {mcp: {...}} object for session injection by iterating
-# MCPS_PACKAGES, reading mcp_config from the registry, substituting the
-# {VM_HOME} placeholder, and materializing credentials for MCPs that flag
+# MCPS_PACKAGES, reading mcp_config from the registry, substituting placeholder
+# tokens, and materializing credentials for MCPs that flag
 # environment_from_credentials.
-# $1 = vm_home path to substitute for the {VM_HOME} placeholder.
+# $1 = vm_home (VM user's home dir).
 # $2 = sess_share dir (host path; bind-mounted into VM at the same absolute path)
 #      used for writing per-session config files (e.g. PROXMOX_MCP_CONFIG JSON).
+# $3 = proj path (used to derive {PROJ_HASH} and {GRAPH_PATH} tokens).
 mcps_build_config_json() {
   local vm_home="$1"
   local sess_share="${2:-}"
+  local proj="${3:-}"
+  local proj_h=""; [[ -n "$proj" ]] && proj_h="$(proj_hash "$proj")"
+  local graph_p=""; [[ -n "$sess_share" ]] && graph_p="$(_mcps_graph_path_for_session "$sess_share")"
   local reg
   reg="$(_mcps_registry_read 2>/dev/null)" || { echo '{}'; return 0; }
 
@@ -1629,17 +1692,16 @@ mcps_build_config_json() {
   [[ -n "${MCPS_PACKAGES:-}" ]] || { echo '{}'; return 0; }
 
   local mcp_obj='{}'
-  local pkg cfg_json
+  local pkg cfg_json raw_cfg
   for pkg in $MCPS_PACKAGES; do
     if ! jq -e --arg n "$pkg" '.mcps[$n]' "$reg" >/dev/null 2>&1; then
       echo "[mcps] active but unknown in registry: '$pkg' — skipping injection." >&2
       continue
     fi
 
-    cfg_json="$(jq --arg n "$pkg" --arg vh "$vm_home" \
-      '.mcps[$n].mcp_config
-       | walk(if type == "string" then gsub("\\{VM_HOME\\}"; $vh) else . end)
-       | del(.environment_from_credentials)' "$reg")"
+    raw_cfg="$(jq --arg n "$pkg" \
+      '.mcps[$n].mcp_config | del(.environment_from_credentials)' "$reg")"
+    cfg_json="$(_mcps_substitute_tokens "$raw_cfg" "$vm_home" "$proj_h" "$sess_share" "$graph_p")"
 
     # MCPs needing credentials as env vars: Proxmox is the only one today.
     if [[ "$pkg" == "proxmox" ]]; then
@@ -1726,6 +1788,72 @@ mcps_mount_skill_docs_for_session() {
   done
 }
 
+# Resolve an MCP's agents_md_snippet declaration into a substituted markdown
+# string. Returns empty for MCPs without a snippet declaration.
+# $1=pkg $2=registry-path $3=vm_home $4=proj_hash $5=sess_share $6=graph_path
+_mcps_resolve_snippet() {
+  local pkg="$1" reg="$2" vm_home="$3" proj_h="$4" sess_share="$5" graph_p="$6"
+  local source content path raw
+  source="$(jq -r --arg n "$pkg" '.mcps[$n].agents_md_snippet.source // empty' "$reg" 2>/dev/null)"
+  [[ -n "$source" ]] || return 0
+
+  case "$source" in
+    inline)
+      content="$(jq -r --arg n "$pkg" '.mcps[$n].agents_md_snippet.content // empty' "$reg" 2>/dev/null)"
+      [[ -n "$content" ]] || return 0
+      raw="$content"
+      ;;
+    file)
+      path="$(jq -r --arg n "$pkg" '.mcps[$n].agents_md_snippet.path // empty' "$reg" 2>/dev/null)"
+      [[ -n "$path" ]] || return 0
+      local abs="$SCRIPT_DIR/$path"
+      [[ -f "$abs" ]] || {
+        echo "[mcps] $pkg agents_md_snippet path not found: $abs" >&2
+        return 0
+      }
+      raw="$(cat "$abs")"
+      ;;
+    *)
+      echo "[mcps] $pkg agents_md_snippet.source unsupported: $source" >&2
+      return 0
+      ;;
+  esac
+
+  # Substitute via the same token engine as mcp_config (wrap as a JSON string
+  # to reuse _mcps_substitute_tokens, then unwrap).
+  local wrapped substituted
+  wrapped="$(jq -Rs . <<<"$raw")"
+  substituted="$(_mcps_substitute_tokens "$wrapped" "$vm_home" "$proj_h" "$sess_share" "$graph_p")"
+  jq -r . <<<"$substituted"
+}
+
+# Build the per-session AGENTS.mcps.md sidecar from active MCPs' snippets.
+# Truncates first so a deactivated MCP cannot leak from a previous session.
+# Composes after Host LAN IP and before ECC rules in the VM-side AGENTS.md.
+# $1=sess_share $2=vm_home $3=proj
+mcps_build_agents_sidecar() {
+  local sess_share="$1" vm_home="$2" proj="$3"
+  local out="$sess_share/config/opencode/AGENTS.mcps.md"
+  mkdir -p "$(dirname "$out")"
+  : > "$out"
+
+  local reg
+  reg="$(_mcps_registry_read 2>/dev/null)" || return 0
+  mcps_load
+  [[ -n "${MCPS_PACKAGES:-}" ]] || return 0
+
+  local proj_h="" graph_p=""
+  [[ -n "$proj" ]] && proj_h="$(proj_hash "$proj")"
+  [[ -n "$sess_share" ]] && graph_p="$(_mcps_graph_path_for_session "$sess_share")"
+
+  local pkg snippet
+  for pkg in $MCPS_PACKAGES; do
+    snippet="$(_mcps_resolve_snippet "$pkg" "$reg" "$vm_home" "$proj_h" "$sess_share" "$graph_p")"
+    [[ -n "$snippet" ]] || continue
+    printf '\n%s\n' "$snippet" >> "$out"
+  done
+}
+
 # CLI: opencode-vm mcps {status|list|on <name>|off <name>}
 mcps_cmd() {
   local sub="${1:-status}"
@@ -1764,6 +1892,31 @@ mcps_cmd() {
       [[ -n "${1:-}" ]] || { echo "Usage: opencode-vm mcps off <name>" >&2; return 2; }
       mcps_pkg_off "$1"
       ;;
+    purge)
+      # Wipe per-project cached state for an MCP. Currently only graphify
+      # owns persistent per-project state (the graph); add cases here for
+      # future MCPs as needed. Runs against the CWD project (proj_hash matches
+      # what start_session uses).
+      [[ -n "${1:-}" ]] || { echo "Usage: opencode-vm mcps purge <name>" >&2; return 2; }
+      local _purge_pkg="$1" _purge_proj _purge_dir
+      _purge_proj="$(pwd)"
+      case "$_purge_pkg" in
+        graphify)
+          _purge_dir="$(graphify_persist_dir_for_project "$_purge_proj")"
+          if [[ -d "$_purge_dir" ]]; then
+            rm -rf "$_purge_dir"
+            echo "[mcps] Purged graphify cache for project: $_purge_proj"
+            echo "[mcps]   removed: $_purge_dir"
+          else
+            echo "[mcps] No graphify cache to purge for: $_purge_proj"
+          fi
+          ;;
+        *)
+          echo "[mcps] '$_purge_pkg' has no per-project state to purge." >&2
+          return 1
+          ;;
+      esac
+      ;;
     help|-h|--help)
       cat <<'EOF'
 opencode-vm mcps — manage MCP servers (separate from skills)
@@ -1774,6 +1927,8 @@ Usage:
   opencode-vm mcps list                   # list all known MCPs (active + default + description)
   opencode-vm mcps on <name>              # enable an MCP for future sessions
   opencode-vm mcps off <name>             # disable an MCP for future sessions
+  opencode-vm mcps purge <name>           # wipe per-project cached state for an MCP
+                                          #   (currently only graphify owns such state)
 
   opencode-vm skills                      # skills status (alias)
   opencode-vm skills status [path]        # active skill packages + resolved skills
@@ -1785,15 +1940,18 @@ MCPs are servers/tools that give the agent capabilities (browser automation,
 code indexing, infra APIs). Skills are knowledge-only markdown.
 
 Built-in MCPs (v0.4.6): playwright (default on), repomapper (default off),
-proxmox (default off; requires API host + token on first enable).
+graphify (default off), proxmox (default off; requires API host + token on first enable).
 Built-in skills (v0.4.6): webimg (default on, can be disabled), ecc-auto, ecc-all.
 
 Session MCP injection is data-driven: only MCPs in the active list end up
-in opencode.json's mcp block.
+in opencode.json's mcp block. MCPs can also contribute an "agents_md_snippet"
+that is appended to the session AGENTS.md (composed via a sidecar — host
+writes $sess_share/config/opencode/AGENTS.mcps.md, VM-side cats it onto
+~/.config/opencode/AGENTS.md after the Host LAN IP block).
 EOF
       ;;
     *)
-      echo "Usage: opencode-vm mcps {status|list|on <name>|off <name>}" >&2
+      echo "Usage: opencode-vm mcps {status|list|on <name>|off <name>|purge <name>}" >&2
       return 2
       ;;
   esac
@@ -2283,6 +2441,85 @@ doctor_cmd() {
   esac
 }
 
+# Heuristic capability tagging for newly-discovered models. Order:
+# 1) Inspect /v1/models metadata (capabilities[]/modalities/vision/thinking)
+# 2) Fall back to model-id name patterns (Ollama tag stripped)
+# Lists drift fast — keep them in this single function for easy bumps.
+# $1=model id  $2=optional /v1/models entry as JSON
+# Output: "<vision>\t<reasoning>" where each is "yes" or "no"
+_provider_cap_heuristics() {
+  local id="$1"
+  local meta_json="${2:-}"
+  local id_stripped="${id%%:*}"
+  local id_lower
+  id_lower="$(printf '%s' "$id_stripped" | tr '[:upper:]' '[:lower:]')"
+
+  local vision="no" reasoning="no"
+
+  if [[ -n "$meta_json" ]] && command -v jq >/dev/null 2>&1; then
+    if jq -e 'any(.capabilities[]?; . == "vision" or . == "image" or . == "image-input")' <<<"$meta_json" >/dev/null 2>&1; then
+      vision="yes"
+    elif jq -e 'any(.modalities.input[]?; . == "image")' <<<"$meta_json" >/dev/null 2>&1; then
+      vision="yes"
+    elif jq -e '.vision == true' <<<"$meta_json" >/dev/null 2>&1; then
+      vision="yes"
+    fi
+    if jq -e 'any(.capabilities[]?; . == "reasoning" or . == "thinking")' <<<"$meta_json" >/dev/null 2>&1; then
+      reasoning="yes"
+    elif jq -e '.reasoning == true or .thinking == true' <<<"$meta_json" >/dev/null 2>&1; then
+      reasoning="yes"
+    fi
+  fi
+
+  if [[ "$vision" == "no" ]]; then
+    case "$id_lower" in
+      *llava*|*llama-3.2-vision*|*llama3.2-vision*|*qwen2.5-vl*|*qwen2-vl*|*qwen-vl*|*qwen3-vl*|*pixtral*|*gemma-3*|*gemma3*|*minicpm-v*|*moondream*|*phi-3-vision*|*phi-4-vision*|*phi3-vision*|*phi4-vision*|*internvl*|*idefics*)
+        vision="yes" ;;
+    esac
+  fi
+  if [[ "$reasoning" == "no" ]]; then
+    case "$id_lower" in
+      *qwq*|*deepseek-r1*|o1*|o3*|*-reasoning*|*reasoning-*|*-thinking*|*thinking-*|*sky-t1*|*qwen3*-thinking*)
+        reasoning="yes" ;;
+    esac
+  fi
+
+  printf '%s\t%s\n' "$vision" "$reasoning"
+}
+
+# Quietly refresh all "local" providers (LM Studio, Ollama, etc.) so newly
+# loaded models surface in OpenCode at session start. Cloud providers (OpenAI,
+# Anthropic) are skipped to avoid per-session API noise. Failures are
+# non-fatal — a stopped LM Studio just means we keep yesterday's model list.
+provider_refresh_all_quiet() {
+  command -v jq >/dev/null 2>&1 || return 0
+  command -v curl >/dev/null 2>&1 || return 0
+  ensure_dirs
+  ensure_host_opencode_dirs
+  local cfg_file
+  cfg_file="$(pick_host_cfg 2>/dev/null)" || return 0
+  [[ -f "$cfg_file" ]] || return 0
+  jq -e . "$cfg_file" >/dev/null 2>&1 || return 0
+
+  local local_providers
+  local_providers="$(jq -r '
+    .provider // {}
+    | to_entries[]
+    | select(.value.npm == "@ai-sdk/openai-compatible")
+    | select(((.value.options.baseURL // "") | test("^http://(localhost|127\\.0\\.0\\.1|192\\.168\\.5\\.2|host\\.lima\\.internal):")))
+    | .key
+  ' "$cfg_file" 2>/dev/null)"
+
+  [[ -n "$local_providers" ]] || return 0
+
+  local p
+  for p in $local_providers; do
+    if ! provider_cmd refresh "$p" --quiet >/dev/null 2>&1; then
+      echo "[provider] refresh skipped ($p): unreachable" >&2
+    fi
+  done
+}
+
 provider_cmd() {
   ensure_dirs
   ensure_host_opencode_dirs
@@ -2619,6 +2856,204 @@ provider_cmd() {
       echo "[provider] Tip: restart your session (opencode-vm prune && opencode-vm start)."
       ;;
 
+    refresh)
+      local provider="${1:-}"
+      shift || true
+      local prompt_new="no" skip_new="no" no_context_update="no" dry_run="no" quiet="no"
+
+      while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+          --prompt-new) prompt_new="yes" ;;
+          --skip-new) skip_new="yes" ;;
+          --no-context-update) no_context_update="yes" ;;
+          --dry-run) dry_run="yes" ;;
+          --quiet) quiet="yes" ;;
+          *) echo "Unknown option: $1" >&2; return 2 ;;
+        esac
+        shift
+      done
+
+      if [[ -z "$provider" ]]; then
+        echo "Usage: opencode-vm provider refresh <provider-id> [--prompt-new] [--skip-new] [--no-context-update] [--dry-run] [--quiet]" >&2
+        return 2
+      fi
+
+      if ! command -v jq >/dev/null 2>&1; then
+        echo "[provider] jq is required for provider refresh." >&2
+        return 1
+      fi
+      if ! command -v curl >/dev/null 2>&1; then
+        echo "[provider] curl is required for provider refresh." >&2
+        return 1
+      fi
+
+      local cfg_file
+      cfg_file="$(pick_host_cfg)"
+      if ! jq -e . "$cfg_file" >/dev/null 2>&1; then
+        echo "[provider] Config file is not valid JSON: $cfg_file" >&2
+        return 1
+      fi
+
+      if ! jq -e --arg p "$provider" '(.provider // {}) | has($p)' "$cfg_file" >/dev/null 2>&1; then
+        echo "[provider] No such provider in config: '$provider'" >&2
+        echo "[provider] Run 'opencode-vm provider add $provider ...' first." >&2
+        return 1
+      fi
+
+      local base_url
+      base_url="$(jq -r --arg p "$provider" '.provider[$p].options.baseURL // ""' "$cfg_file")"
+      if [[ -z "$base_url" ]]; then
+        echo "[provider] Provider '$provider' has no options.baseURL — cannot refresh." >&2
+        return 1
+      fi
+
+      local api_key=""
+      if [[ -f "$auth_file" ]]; then
+        api_key="$(jq -r --arg p "$provider" '.[$p].key // ""' "$auth_file" 2>/dev/null || echo "")"
+      fi
+      [[ -z "$api_key" ]] && api_key="local"
+
+      local discover_url="${base_url%/}/models"
+      local discover_resp
+      discover_resp="$(curl -sf --connect-timeout 3 --max-time 5 \
+        -H "Authorization: Bearer $api_key" \
+        -H "Accept: application/json" \
+        "$discover_url" 2>/dev/null || true)"
+
+      if [[ -z "$discover_resp" ]] || ! jq -e . <<<"$discover_resp" >/dev/null 2>&1; then
+        [[ "$quiet" == "no" ]] && echo "[provider] refresh: no/invalid response from $discover_url" >&2
+        return 1
+      fi
+
+      # discovered_map: { "<id>": { "context": <int>, "meta": <full /v1/models entry> } }
+      local discovered_map
+      discovered_map="$(jq '
+        [.data[]?
+         | { (.id): { context: (.context_length // .max_context_length // 0), meta: . } }
+        ] | add // {}' <<<"$discover_resp")"
+
+      local existing_map
+      existing_map="$(jq --arg p "$provider" '.provider[$p].models // {}' "$cfg_file")"
+
+      local removed_ids new_ids kept_ids
+      removed_ids="$(jq -r --argjson d "$discovered_map" 'keys - ($d | keys) | .[]' <<<"$existing_map")"
+      new_ids="$(jq -r --argjson e "$existing_map" 'keys - ($e | keys) | .[]' <<<"$discovered_map")"
+      kept_ids="$(jq -r --argjson d "$discovered_map" 'keys | map(select(. as $k | $d | has($k))) | .[]' <<<"$existing_map")"
+
+      local updated_models="$existing_map"
+      local mid
+
+      # 1) Drop removed
+      for mid in $removed_ids; do
+        updated_models="$(jq --arg id "$mid" 'del(.[$id])' <<<"$updated_models")"
+      done
+
+      # 2) Update kept (context only, preserve user-set vision/reasoning/output)
+      if [[ "$no_context_update" != "yes" ]]; then
+        for mid in $kept_ids; do
+          local new_ctx
+          new_ctx="$(jq -r --arg id "$mid" '.[$id].context // 0' <<<"$discovered_map")"
+          [[ "${new_ctx:-0}" -gt 0 ]] || continue
+          updated_models="$(jq --arg id "$mid" --argjson c "$new_ctx" \
+            'if (.[$id].limit?.context // 0) != $c
+             then .[$id].limit = ((.[$id].limit // {}) + {"context":$c, "output": (.[$id].limit?.output // 8192)})
+             else . end' <<<"$updated_models")"
+        done
+      fi
+
+      # 3) Add new (auto-tag via heuristics; --prompt-new for interactive; --skip-new to skip)
+      local added_ids="" skipped_ids=""
+      for mid in $new_ids; do
+        if [[ "$skip_new" == "yes" ]]; then
+          skipped_ids+="$mid "
+          continue
+        fi
+        local new_ctx new_meta v r
+        new_ctx="$(jq -r --arg id "$mid" '.[$id].context // 0' <<<"$discovered_map")"
+        new_meta="$(jq --arg id "$mid" '.[$id].meta' <<<"$discovered_map")"
+        IFS=$'\t' read -r v r < <(_provider_cap_heuristics "$mid" "$new_meta")
+
+        if [[ "$prompt_new" == "yes" ]] && [[ -t 0 ]]; then
+          echo "[provider] New model: $mid (ctx=${new_ctx:-?} vision=$v reasoning=$r)"
+          local action=""
+          read -r -p "  Add [Y], edit [e], skip [s]? " action </dev/tty
+          if [[ "$action" =~ ^[Ss] ]]; then
+            skipped_ids+="$mid "
+            continue
+          elif [[ "$action" =~ ^[Ee] ]]; then
+            local v_ans r_ans
+            read -r -p "  Vision? [${v}] (y/n): " v_ans </dev/tty
+            [[ "$v_ans" =~ ^[Yy] ]] && v="yes"
+            [[ "$v_ans" =~ ^[Nn] ]] && v="no"
+            read -r -p "  Reasoning? [${r}] (y/n): " r_ans </dev/tty
+            [[ "$r_ans" =~ ^[Yy] ]] && r="yes"
+            [[ "$r_ans" =~ ^[Nn] ]] && r="no"
+          fi
+        fi
+
+        local entry
+        if [[ "${new_ctx:-0}" -gt 0 ]]; then
+          entry="$(jq -n --arg name "$mid" --argjson c "$new_ctx" \
+            '{name: $name, limit: {context: $c, output: 8192}}')"
+        else
+          entry="$(jq -n --arg name "$mid" '{name: $name}')"
+        fi
+        if [[ "$v" == "yes" ]]; then
+          entry="$(jq '. += {attachment: true, modalities: {input: ["text","image"], output: ["text"]}}' <<<"$entry")"
+        fi
+        if [[ "$r" == "yes" ]]; then
+          entry="$(jq '.options.thinking = {type: "enabled", budgetTokens: 8192}' <<<"$entry")"
+        fi
+        updated_models="$(jq --arg id "$mid" --argjson e "$entry" '.[$id] = $e' <<<"$updated_models")"
+        added_ids+="$mid "
+      done
+
+      # If nothing changed and we're quiet, exit silently
+      if [[ "$quiet" == "yes" ]] && [[ -z "$removed_ids$added_ids" ]]; then
+        return 0
+      fi
+
+      [[ "$quiet" == "no" ]] && {
+        echo "[provider] refresh: $provider"
+        [[ -n "$removed_ids" ]] && echo "  removed: $(echo "$removed_ids" | tr '\n' ' ')"
+        [[ -n "$kept_ids"    ]] && echo "  kept:    $(echo "$kept_ids" | tr '\n' ' ')"
+        [[ -n "$added_ids"   ]] && echo "  added:   $added_ids"
+        [[ -n "$skipped_ids" ]] && echo "  skipped: $skipped_ids"
+      }
+
+      if [[ "$dry_run" == "yes" ]]; then
+        [[ "$quiet" == "no" ]] && echo "[provider] Dry-run only. No changes made."
+        return 0
+      fi
+
+      # Skip write if nothing actually changed (avoids touching mtime needlessly,
+      # which would re-trigger the host↔project sync)
+      if [[ -z "$removed_ids$added_ids" ]] && [[ "$no_context_update" == "yes" ]]; then
+        return 0
+      fi
+      # Compare updated_models against existing_map; skip write if identical
+      if jq -e --argjson a "$existing_map" --argjson b "$updated_models" '$a == $b' <<<"null" >/dev/null 2>&1; then
+        return 0
+      fi
+
+      local ts backup_dir
+      ts="$(date +%Y%m%d-%H%M%S)"
+      backup_dir="$BACKUP_DIR/provider-$ts"
+      mkdir -p "$backup_dir"
+      cp -p "$cfg_file" "$backup_dir/$(basename "$cfg_file").bak"
+
+      local tmp_cfg
+      tmp_cfg="$(mktemp)"
+      jq --arg p "$provider" --argjson m "$updated_models" \
+        '.provider[$p].models = $m' \
+        "$cfg_file" > "$tmp_cfg" && mv "$tmp_cfg" "$cfg_file"
+
+      [[ "$quiet" == "no" ]] && {
+        echo "[provider] Updated config: $cfg_file"
+        echo "[provider] Backup: $backup_dir"
+      }
+      ;;
+
     rm|remove|forget|delete)
       local provider="${1:-}"
       shift || true
@@ -2743,7 +3178,7 @@ provider_cmd() {
       ;;
 
     *)
-      echo "Usage: opencode-vm provider {list|new|add [<id>] [--base-url <url>] [--api-key <key>] [--name <display-name>] [--vision] [--model <id>[:<name>[:<context>]]] [--dry-run]|rm <id> [--dry-run]}" >&2
+      echo "Usage: opencode-vm provider {list|new|add [<id>] [--base-url <url>] [--api-key <key>] [--name <display-name>] [--vision] [--model <id>[:<name>[:<context>]]] [--dry-run]|refresh <id> [--prompt-new] [--skip-new] [--no-context-update] [--dry-run] [--quiet]|rm <id> [--dry-run]}" >&2
       exit 2
       ;;
   esac
@@ -3392,6 +3827,32 @@ git clone https://github.com/pdavis68/RepoMapper.git ~/.local/share/repomapper
 git -C ~/.local/share/repomapper checkout 3ef8914b3a2271695ac9e4b07ce1e8bf5a4c9be6
 pip3 install -r ~/.local/share/repomapper/requirements.txt
 ln -sf ~/.local/share/repomapper/repomap_server.py ~/.local/bin/repomap-server
+
+# Install graphify — code-graph MCP. Pure-Python, tree-sitter AST based.
+# The MCP server (`python -m graphify.serve`) is read-only and makes ZERO
+# LLM calls. Semantic enrichment happens via the agent's own LLM access
+# (no separate API key needed). Pinned to a tested PyPI version.
+pip3 install --user pipx
+mkdir -p ~/.local/bin
+~/.local/bin/pipx ensurepath >/dev/null 2>&1 || true
+~/.local/bin/pipx install 'graphifyy==0.4.32' >/dev/null
+# Wrapper provides a friendly "no graph yet" error when activated in a fresh
+# project — keeps the agent from seeing a Python traceback.
+sudo tee /usr/local/bin/graphify-serve-wrapper.sh >/dev/null <<'WRAPPER'
+#!/usr/bin/env bash
+graph="${1:?usage: graphify-serve-wrapper.sh <graph.json>}"
+if [[ ! -f "$graph" ]]; then
+  echo "[graphify] No graph at $graph yet." >&2
+  echo "[graphify] Build one in the project root with the graphify CLI:" >&2
+  echo "[graphify]   graphify --help    # see available subcommands" >&2
+  echo "[graphify]   graphify <build-cmd> --code-only" >&2
+  exit 2
+fi
+# pipx-installed graphify owns its own venv; invoke its python directly so we
+# don't rely on the venv's bin/ being on PATH.
+exec ~/.local/share/pipx/venvs/graphifyy/bin/python -m graphify.serve "$graph"
+WRAPPER
+sudo chmod 0755 /usr/local/bin/graphify-serve-wrapper.sh
 
 # Write nftables rules (defaults: 1234 + 11434)
 sudo tee /etc/nftables.conf >/dev/null <<'NFT'
@@ -4191,6 +4652,15 @@ start_session() {
     cp -p "$proj_cfg_legacy" "$proj_cfg"
   fi
 
+  # Auto-refresh local LLM providers (LM Studio, Ollama) so newly-loaded
+  # models surface in this session. Cloud providers are untouched. Failures
+  # are non-fatal. Set OCVM_PROVIDER_AUTOREFRESH=0 to disable.
+  # Runs BEFORE the host↔project sync so refreshed host_cfg propagates
+  # into proj_cfg via mtime comparison, and BEFORE cfg_hash is computed.
+  if [[ "${OCVM_PROVIDER_AUTOREFRESH:-1}" == "1" ]]; then
+    provider_refresh_all_quiet || true
+  fi
+
   # Keep host and project preferences in sync before each session.
   # This also bootstraps first-run setups where local OpenCode was never installed.
   sync_cfg_between_host_and_project "$host_cfg" "$proj_cfg"
@@ -4229,6 +4699,10 @@ start_session() {
 
   # Copy project state into session share (XDG directory structure)
   mkdir -p "$sess_share/config/opencode" "$sess_share/xdg-data/opencode" "$sess_share/xdg-state/opencode"
+
+  # Load any persisted graphify graph for this project into sess_share so the
+  # graphify MCP server (running in the VM via virtiofs mount) can read it.
+  graphify_persist_load_for_session "$proj" "$sess_share"
   if [[ -f "$proj_cfg" ]]; then
     cp -p "$proj_cfg" "$sess_share/config/opencode/opencode.json"
   else
@@ -4243,7 +4717,7 @@ start_session() {
   vm_home="$(vm_resolve_home "$BASE_NAME")"
   if command -v jq >/dev/null 2>&1 && [[ -f "$sess_cfg_file" ]]; then
     local mcp_obj
-    mcp_obj="$(mcps_build_config_json "$vm_home" "$sess_share")"
+    mcp_obj="$(mcps_build_config_json "$vm_home" "$sess_share" "$proj")"
     [[ -n "$mcp_obj" ]] || mcp_obj='{}'
 
     local tmp_cfg
@@ -4274,6 +4748,11 @@ start_session() {
 
   # Mount companion skill docs declared by active MCPs (e.g. proxmox SKILL.md)
   mcps_mount_skill_docs_for_session "$sess_share" 2>/dev/null || true
+
+  # Build the AGENTS.mcps.md sidecar from active MCPs' agents_md_snippet
+  # declarations. The VM-side AGENTS.md composition appends this after the
+  # Host LAN IP block and before any ECC rules sidecar.
+  mcps_build_agents_sidecar "$sess_share" "$vm_home" "$proj" 2>/dev/null || true
 
   # ECC (opt-in): copy plugin payload + optional MCP pack into session config,
   # seed homunculus learning store from persistent project state, auto-inject
@@ -4500,6 +4979,9 @@ start_session() {
     rsync -a "$sess_share/xdg-state/opencode/" "$proj_state/xdg-state/opencode/"
     echo "[cleanup] Project-state cache updated $(_ts)"
 
+    # Persist any updated graphify graph back to the per-project store.
+    graphify_persist_save_for_session "$proj" "$sess_share" 2>/dev/null || true
+
     # ECC: persist project-scoped homunculus learnings back to host project state.
     if ecc_enabled; then
       ecc_sync_homunculus_back "$sess_share" "$proj_state"
@@ -4622,6 +5104,10 @@ start_session() {
 - **Environment variables:** \`OCVM_HOST_LAN_IP\` (canonical), \`HOST_LAN_IP\`, \`LANIP\`
 - When suggesting URLs for services bound to \`0.0.0.0\` in the VM, prefer \`http://$OC_HOST_IP:<port>\` over \`localhost\`.
 EOF
+      # Append per-MCP AGENTS snippets sidecar (active MCPs that declare one)
+      if [ -s "$SESS_SHARE/config/opencode/AGENTS.mcps.md" ]; then
+        cat "$SESS_SHARE/config/opencode/AGENTS.mcps.md" >> "$SESS_SHARE/config/opencode/AGENTS.md"
+      fi
       # Append ECC rules sidecar if host-side injector produced one
       if [ -f "$SESS_SHARE/config/opencode/AGENTS.ecc-rules.md" ]; then
         cat "$SESS_SHARE/config/opencode/AGENTS.ecc-rules.md" >> "$SESS_SHARE/config/opencode/AGENTS.md"
@@ -5066,6 +5552,8 @@ Usage:
   opencode-vm doctor [show]                # inspect local sync/auth/model/db state
   opencode-vm provider list                # list configured providers
   opencode-vm provider new                 # add new openai-compatible provider (interactive)
+  opencode-vm provider refresh <id>        # re-discover models from /v1/models (auto-runs at session start
+                                           #   for local providers; OCVM_PROVIDER_AUTOREFRESH=0 disables)
   opencode-vm provider rm <id> [--dry-run] # remove provider from auth/config/model state
   opencode-vm screenshot                   # setup guide for browser screenshot capture
   opencode-vm base                         # shell into base VM

@@ -27,6 +27,23 @@
         "command": ["python3", "{VM_HOME}/.local/share/repomapper/repomap_server.py"]
       }
     },
+    "graphify": {
+      "description": "Code knowledge-graph (tree-sitter AST) — cross-file relationships, communities, god-nodes",
+      "default_active": false,
+      "install": {
+        "type": "bundled",
+        "notes": "graphifyy installed via pipx in base VM; CLI at ~/.local/bin/graphify; MCP server invoked through /usr/local/bin/graphify-serve-wrapper.sh."
+      },
+      "credential_schema": [],
+      "mcp_config": {
+        "type": "local",
+        "command": ["/usr/local/bin/graphify-serve-wrapper.sh", "{GRAPH_PATH}"]
+      },
+      "agents_md_snippet": {
+        "source": "file",
+        "path": "mcps/graphify/AGENTS-snippet.md"
+      }
+    },
     "proxmox": {
       "description": "Proxmox VE cluster operations via ProxmoxMCP server",
       "default_active": false,

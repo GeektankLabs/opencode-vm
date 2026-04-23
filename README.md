@@ -138,12 +138,13 @@ opencode-vm skills list /path/to/other   # preview for another project path
 
 ## MCPs (opt-in, capabilities)
 
-MCPs (Model Context Protocol servers) give the agent *tools it can call* — browser automation, codebase indexing, infrastructure APIs. Registry-driven at [`mcps/registry.json`](mcps/registry.json). Three MCPs ship today:
+MCPs (Model Context Protocol servers) give the agent *tools it can call* — browser automation, codebase indexing, infrastructure APIs. Registry-driven at [`mcps/registry.json`](mcps/registry.json). Four MCPs ship today:
 
 | MCP | Default | Needs setup | Description |
 |---|---|---|---|
 | `playwright` | on  | no | Headless browser automation (Chromium pre-installed in base VM) |
 | `repomapper` | off | no | PageRank-ranked structural maps of the current codebase |
+| `graphify`   | off | no | Code knowledge-graph (tree-sitter AST) — cross-file relationships, communities, god-nodes ([safishamsi/graphify](https://github.com/safishamsi/graphify)) |
 | `proxmox`    | off | interactive host + API token | Proxmox VE API via [canvrno/ProxmoxMCP](https://github.com/canvrno/ProxmoxMCP) |
 
 ```bash
@@ -151,11 +152,21 @@ opencode-vm mcps                         # status
 opencode-vm mcps list                    # show all MCPs with active/default markers
 opencode-vm mcps on repomapper           # enable for future sessions
 opencode-vm mcps off playwright          # disable (default-on MCPs can be turned off)
+opencode-vm mcps on graphify             # enable graphify; first session prompts to build the graph
+opencode-vm mcps purge graphify          # wipe per-project graph cache
 opencode-vm mcps on proxmox              # interactive setup: host + API token, then ready
 opencode-vm mcps off proxmox             # disable AND wipe stored credentials
 ```
 
 Session MCP injection is data-driven: only MCPs in the active list end up in the session's `opencode.json`. Default-active MCPs are seeded into `~/.opencode-vm/mcps.env` on first use.
+
+MCPs may also contribute an `agents_md_snippet` (in [`mcps/registry.json`](mcps/registry.json)) — a markdown block automatically appended to the session's `AGENTS.md` so the agent knows the MCP is available without you needing to nudge it. The composition is sidecar-style: host writes `$sess_share/config/opencode/AGENTS.mcps.md`, the VM-side AGENTS.md build cats it after the Host LAN IP block. Active-list changes propagate on the next session start; deactivated MCPs are silently dropped.
+
+### Graphify MCP
+
+[`graphify`](https://github.com/safishamsi/graphify) builds a tree-sitter-based knowledge graph of your codebase and exposes 7 read-only query tools (`query_graph`, `get_node`, `get_neighbors`, `get_community`, `god_nodes`, `graph_stats`, `shortest_path`). The MCP server itself makes **zero LLM calls** — semantic enrichment of non-code content (docs, papers, images) happens through the agent, which uses your already-configured opencode provider. **No separate API key is needed.**
+
+The graph file is persisted per-project at `~/.opencode-vm/project-state/<hash>/graphify/graph.json` and survives session resets. On first activation in a fresh project the wrapper returns a "no graph" message — build the graph with the `graphify` CLI inside the session VM (`graphify --help` to see the current subcommands). Use `opencode-vm mcps purge graphify` to wipe the cached graph.
 
 ### Proxmox MCP
 
@@ -224,10 +235,15 @@ Provider management is a first-class top-level command — no `doctor` prefix ne
 ```bash
 opencode-vm provider list
 opencode-vm provider new                 # interactive wizard
+opencode-vm provider refresh <id>        # re-discover models for an existing provider
 opencode-vm provider rm <provider-id> [--dry-run]
 ```
 
 **Model discovery:** When no `--model` flags are given, `provider add` automatically calls the `/models` endpoint and adds all returned models. If the endpoint is unreachable or returns no models, the provider is **not** added. Pass `--model` flags explicitly to skip auto-discovery. Where available (e.g. LM Studio), the context window size is read from the API and stored automatically.
+
+**`provider refresh` and session-start auto-refresh:** Once a provider exists, `opencode-vm provider refresh <id>` re-queries `/v1/models` and reconciles the model list — new models are added (auto-tagged for vision/reasoning where the heuristics or `/v1/models` metadata is conclusive), removed models are dropped, and existing per-model flags (`vision`, `reasoning`, `output`) are **preserved verbatim**. Flags: `--prompt-new` (interactive accept/edit/skip per new model), `--skip-new` (drop new models silently), `--no-context-update` (don't touch context windows of existing models), `--dry-run`, `--quiet`.
+
+The same refresh runs **automatically on every `opencode-vm start`** for providers that target a host-local endpoint (`localhost`, `127.0.0.1`, `192.168.5.2`, or `host.lima.internal`) — so a model you just loaded into LM Studio or Ollama shows up in the next session without you doing anything. Cloud providers (OpenAI, Anthropic, etc.) are skipped to avoid per-session API noise. Set `OCVM_PROVIDER_AUTOREFRESH=0` to disable. Failures are non-fatal — a stopped LM Studio just keeps yesterday's model list.
 
 **`--model` flag** (repeatable) — `id[:name[:context_tokens]]`:
 - `--model gpt-4o` — ID and display name both `gpt-4o`, no context limit stored
