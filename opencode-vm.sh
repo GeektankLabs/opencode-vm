@@ -50,6 +50,8 @@ PROXMOX_SKILL_CACHE="$SHARE_ROOT/proxmox-skill"   # fallback if script is not co
 
 # Web Image Pipeline skill package (built-in, always active — CLI tools in base VM)
 WEBIMG_SKILL_CACHE="$SHARE_ROOT/webimg-skill"      # fallback if script is not co-located with bundled skills/
+# SSH toolkit skill package (built-in, default active — CLI tools in base VM)
+SSH_SKILL_CACHE="$SHARE_ROOT/ssh-toolkit-skill"    # fallback if script is not co-located with bundled skills/
 DEFAULT_PROXMOX_MCP_REPO="https://github.com/canvrno/ProxmoxMCP.git"
 DEFAULT_PROXMOX_MCP_REF="main"
 # Script location (for resolving bundled skills/proxmox when running from repo)
@@ -68,7 +70,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.13"
+OCVM_VERSION="0.4.15"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -891,6 +893,34 @@ webimg_skill_ensure() {
   echo "$WEBIMG_SKILL_CACHE/skills/web-image-pipeline"
 }
 
+# Resolve ssh-toolkit skill source: prefer bundled skills/ssh-toolkit next to
+# the script, fall back to a shallow clone of the OCVM repo.
+ssh_toolkit_skill_ensure() {
+  local bundled="$SCRIPT_DIR/skills/ssh-toolkit"
+  if [[ -d "$bundled" ]]; then
+    echo "$bundled"
+    return 0
+  fi
+  local raw_repo="https://github.com/${OCVM_UPDATE_REPO}.git"
+  if [[ ! -d "$SSH_SKILL_CACHE/.git" ]]; then
+    echo "[ssh-toolkit] Fetching bundled skill content from $OCVM_UPDATE_REPO ..." >&2
+    rm -rf "$SSH_SKILL_CACHE"
+    git clone --depth=1 --filter=blob:none --sparse \
+      --branch "$OCVM_UPDATE_BRANCH" "$raw_repo" "$SSH_SKILL_CACHE" >/dev/null 2>&1 || {
+      echo "[ssh-toolkit] Failed to clone $raw_repo for skill content." >&2
+      return 1
+    }
+    git -C "$SSH_SKILL_CACHE" sparse-checkout set skills/ssh-toolkit >/dev/null 2>&1 || {
+      echo "[ssh-toolkit] sparse-checkout failed for skills/ssh-toolkit." >&2
+      return 1
+    }
+  else
+    git -C "$SSH_SKILL_CACHE" fetch --depth=1 origin "$OCVM_UPDATE_BRANCH" >/dev/null 2>&1 || true
+    git -C "$SSH_SKILL_CACHE" checkout -q FETCH_HEAD 2>/dev/null || true
+  fi
+  echo "$SSH_SKILL_CACHE/skills/ssh-toolkit"
+}
+
 # ---------------------------------------------------------------------------
 # Project language detector — shared by Rules and Skills
 # ---------------------------------------------------------------------------
@@ -1086,6 +1116,7 @@ skills_registry_defaults() {
 skills_load() {
   SKILLS_PACKAGES=""
   SKILLS_MIGRATED_WEBIMG=""
+  SKILLS_MIGRATED_SSHTK=""
   local dirty=0
   if [[ -f "$SKILLS_ENV" ]]; then
     # shellcheck disable=SC1090
@@ -1099,6 +1130,7 @@ skills_load() {
     done < <(skills_registry_defaults 2>/dev/null)
     SKILLS_PACKAGES="$defs"
     SKILLS_MIGRATED_WEBIMG=1
+    SKILLS_MIGRATED_SSHTK=1
     dirty=1
   fi
 
@@ -1124,6 +1156,20 @@ skills_load() {
     dirty=1
   fi
 
+  # Migration (v0.4.14): ssh-toolkit was added as default_active. Backfill
+  # once for existing state files so the new SSH/network knowledge surfaces
+  # for upgrading users without requiring a manual `skills on ssh-toolkit`.
+  if [[ "${SKILLS_MIGRATED_SSHTK:-}" != "1" ]]; then
+    case " ${SKILLS_PACKAGES:-} " in
+      *" ssh-toolkit "*) ;;
+      *)
+        SKILLS_PACKAGES="${SKILLS_PACKAGES:+$SKILLS_PACKAGES }ssh-toolkit"
+        ;;
+    esac
+    SKILLS_MIGRATED_SSHTK=1
+    dirty=1
+  fi
+
   (( dirty == 1 )) && skills_save
   return 0
 }
@@ -1135,6 +1181,7 @@ skills_save() {
 # space-separated list of active package names
 SKILLS_PACKAGES="${SKILLS_PACKAGES:-}"
 SKILLS_MIGRATED_WEBIMG="${SKILLS_MIGRATED_WEBIMG:-1}"
+SKILLS_MIGRATED_SSHTK="${SKILLS_MIGRATED_SSHTK:-1}"
 EOF
 }
 
@@ -1187,10 +1234,11 @@ skills_pkg_on() {
       ecc_save
       ;;
     single_bundled)
-      # Only webimg today: ensure the bundled skill dir is available.
-      if [[ "$pkg" == "webimg" ]]; then
-        webimg_skill_ensure >/dev/null || return 1
-      fi
+      # Bundled skills with their own ensure-hook for the ~/bin install path.
+      case "$pkg" in
+        webimg)      webimg_skill_ensure >/dev/null || return 1 ;;
+        ssh-toolkit) ssh_toolkit_skill_ensure >/dev/null || return 1 ;;
+      esac
       ;;
   esac
 
@@ -1372,6 +1420,14 @@ skills_source_root_for() {
         echo "$WEBIMG_SKILL_CACHE/skills"
       fi
       ;;
+    ssh-toolkit)
+      local bundled="$SCRIPT_DIR/skills"
+      if [[ -d "$bundled/ssh-toolkit" ]]; then
+        echo "$bundled"
+      else
+        echo "$SSH_SKILL_CACHE/skills"
+      fi
+      ;;
     *) return 1 ;;
   esac
 }
@@ -1428,13 +1484,21 @@ skills_mount_for_session() {
       local _dir_name
       _dir_name="$(skills_registry_field "$pkg" ".skill_dir_name")"
       if [[ -n "$_dir_name" && ! -d "$src_root/$_dir_name" ]]; then
-        # Today only webimg needs an ensure hook.
-        if [[ "$pkg" == "webimg" ]]; then
-          webimg_skill_ensure >/dev/null || {
-            echo "[skills] Could not prepare webimg skill content — skipping." >&2
-            continue
-          }
-        fi
+        # Bundled skills with their own ensure-hook for the ~/bin install path.
+        case "$pkg" in
+          webimg)
+            webimg_skill_ensure >/dev/null || {
+              echo "[skills] Could not prepare webimg skill content — skipping." >&2
+              continue
+            }
+            ;;
+          ssh-toolkit)
+            ssh_toolkit_skill_ensure >/dev/null || {
+              echo "[skills] Could not prepare ssh-toolkit skill content — skipping." >&2
+              continue
+            }
+            ;;
+        esac
       fi
     fi
 
@@ -2143,6 +2207,13 @@ ports_cmd() {
       echo "HOST_LOCALHOST_FORWARD: ${HOST_LOCALHOST_FORWARD:-$DEFAULT_HOST_LOCALHOST_FORWARD}"
       ;;
 
+    reload|apply)
+      # Force-push the current policy.env to every running session VM —
+      # useful when policy.env was changed externally (by another shell, edited
+      # by hand, restored from backup) or as a manual recovery hatch.
+      apply_policy_to_running_sessions
+      ;;
+
     host)
       local op="${1:-show}"; shift || true
       case "$op" in
@@ -2153,16 +2224,19 @@ ports_cmd() {
           for p in "$@"; do HOST_TCP_PORTS="$(list_add "$p" $HOST_TCP_PORTS)"; done
           save_policy
           echo "HOST_TCP_PORTS: $HOST_TCP_PORTS"
+          apply_policy_to_running_sessions
           ;;
         rm|remove|del)
           for p in "$@"; do HOST_TCP_PORTS="$(list_rm "$p" $HOST_TCP_PORTS)"; done
           save_policy
           echo "HOST_TCP_PORTS: $HOST_TCP_PORTS"
+          apply_policy_to_running_sessions
           ;;
         set)
           HOST_TCP_PORTS="$*"
           save_policy
           echo "HOST_TCP_PORTS: $HOST_TCP_PORTS"
+          apply_policy_to_running_sessions
           ;;
         *)
           echo "Usage: opencode-vm ports host {show|add|rm|set} [PORT...]" >&2
@@ -2181,11 +2255,13 @@ ports_cmd() {
           HOST_LOCALHOST_FORWARD="yes"
           save_policy
           echo "HOST_LOCALHOST_FORWARD: $HOST_LOCALHOST_FORWARD"
+          apply_policy_to_running_sessions
           ;;
         disable|off|no)
           HOST_LOCALHOST_FORWARD="no"
           save_policy
           echo "HOST_LOCALHOST_FORWARD: $HOST_LOCALHOST_FORWARD"
+          apply_policy_to_running_sessions
           ;;
         *)
           echo "Usage: opencode-vm ports hostfwd {show|enable|disable}" >&2
@@ -2205,15 +2281,18 @@ ports_cmd() {
             add)
               for ep in "$@"; do LAN_ALLOW_TCP="$(list_add "$ep" $LAN_ALLOW_TCP)"; done
               save_policy
-              echo "LAN_ALLOW_TCP: $LAN_ALLOW_TCP" ;;
+              echo "LAN_ALLOW_TCP: $LAN_ALLOW_TCP"
+              apply_policy_to_running_sessions ;;
             rm|remove|del)
               for ep in "$@"; do LAN_ALLOW_TCP="$(list_rm "$ep" $LAN_ALLOW_TCP)"; done
               save_policy
-              echo "LAN_ALLOW_TCP: $LAN_ALLOW_TCP" ;;
+              echo "LAN_ALLOW_TCP: $LAN_ALLOW_TCP"
+              apply_policy_to_running_sessions ;;
             clear)
               LAN_ALLOW_TCP=""
               save_policy
-              echo "LAN_ALLOW_TCP cleared" ;;
+              echo "LAN_ALLOW_TCP cleared"
+              apply_policy_to_running_sessions ;;
             *)
               echo "Usage: opencode-vm ports lan tcp {show|add|rm|clear} [IP[:PORT]...]" >&2
               exit 2
@@ -2227,15 +2306,18 @@ ports_cmd() {
             add)
               for ep in "$@"; do LAN_ALLOW_UDP="$(list_add "$ep" $LAN_ALLOW_UDP)"; done
               save_policy
-              echo "LAN_ALLOW_UDP: $LAN_ALLOW_UDP" ;;
+              echo "LAN_ALLOW_UDP: $LAN_ALLOW_UDP"
+              apply_policy_to_running_sessions ;;
             rm|remove|del)
               for ep in "$@"; do LAN_ALLOW_UDP="$(list_rm "$ep" $LAN_ALLOW_UDP)"; done
               save_policy
-              echo "LAN_ALLOW_UDP: $LAN_ALLOW_UDP" ;;
+              echo "LAN_ALLOW_UDP: $LAN_ALLOW_UDP"
+              apply_policy_to_running_sessions ;;
             clear)
               LAN_ALLOW_UDP=""
               save_policy
-              echo "LAN_ALLOW_UDP cleared" ;;
+              echo "LAN_ALLOW_UDP cleared"
+              apply_policy_to_running_sessions ;;
             *)
               echo "Usage: opencode-vm ports lan udp {show|add|rm|clear} [IP[:PORT]...]" >&2
               exit 2
@@ -2251,7 +2333,7 @@ ports_cmd() {
       ;;
 
     *)
-      echo "Usage: opencode-vm ports {show|host|hostfwd|lan} ..." >&2
+      echo "Usage: opencode-vm ports {show|reload|host|hostfwd|lan} ..." >&2
       exit 2
       ;;
   esac
@@ -3776,6 +3858,9 @@ fi
 
 # Install dev tools, languages, and nftables
 sudo apt-get update -y
+# Preseed wireshark-common: don't make dumpcap setuid (we use sudo for captures).
+# Without this, the tshark install would prompt and break non-interactive provisioning.
+echo "wireshark-common wireshark-common/install-setuid boolean false" | sudo debconf-set-selections
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
   ca-certificates curl wget openssl \
   git ripgrep jq \
@@ -3784,6 +3869,10 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
   procps lsof strace build-essential pkg-config make cmake \
   iproute2 iputils-ping traceroute mtr-tiny \
   bind9-dnsutils netcat-openbsd tcpdump socat whois iperf3 \
+  openssh-client sshpass autossh mosh sshfs rsync expect \
+  nmap arp-scan iputils-arping iputils-tracepath tcptraceroute ipcalc ldnsutils inetutils-telnet \
+  ethtool iftop nethogs bridge-utils vlan tshark hping3 \
+  gnutls-bin lftp \
   python3 python3-venv python3-pip pipx \
   php-cli php-mbstring php-xml php-curl php-zip php-bcmath php-intl \
   php-mysql php-pgsql php-sqlite3 composer \
@@ -3954,8 +4043,13 @@ profile opencode-sandbox flags=(attach_disconnected) {
   deny capability mac_admin,    # blocks MAC policy changes
 
   # --- Firewall tool execution (defense-in-depth, clearer errors) ---
-  deny /usr/sbin/nft x,
-  deny /sbin/nft x,
+  # Note: `nft` is intentionally NOT denied here — `deny capability net_admin`
+  # above already blocks every modifying nft op (set element, flush, replace,
+  # add chain/rule, etc.) at the kernel layer, while leaving read-only
+  # operations like `nft list ruleset` / `nft monitor` available so agents
+  # can diagnose firewall state. iptables/ip6tables stay denied because
+  # they're legacy, rarely useful for read-only diagnostics, and keep the
+  # defense-in-depth layer for unfamiliar attack paths.
   deny /usr/sbin/iptables x,
   deny /sbin/iptables x,
   deny /usr/sbin/iptables-save x,
@@ -4056,12 +4150,12 @@ All of these are installed and available:
 
 - **HTTP/downloads**: `curl`, `wget`
 - **DNS**: `dig`, `nslookup`, `host` (bind9-dnsutils)
-- **TCP/IP connectivity**: `nc` (netcat-openbsd), `socat`, `telnet` (via netcat)
+- **TCP/IP connectivity**: `nc` (netcat-openbsd), `ncat` (nmap, with TLS/SSL), `socat`, `telnet` (inetutils-telnet, real telnet)
 - **Packet capture**: `sudo tcpdump` (requires sudo for raw sockets)
 - **Routing & latency**: `ping`, `traceroute`, `mtr` (mtr-tiny), `ip` (iproute2)
 - **Bandwidth**: `iperf3`
 - **Domain lookups**: `whois`
-- **Port scanning/testing**: `nc -zv <host> <port>` to test if a TCP port is open
+- **Port scanning/testing**: `nc -zv <host> <port>` for a single port; `nmap -p 1-1000 <host>` for ranges; `nmap -sn 192.168.1.0/24` for ping-sweep
 - **SSL/TLS inspection**: `openssl s_client -connect <host>:<port>`
 
 ### Examples
@@ -4084,7 +4178,63 @@ openssl s_client -connect example.com:443
 
 # Quick HTTP test
 curl -sI https://example.com
+
+# SSH with non-interactive password (when key auth not set up)
+SSHPASS="$REMOTE_PW" sshpass -e ssh -o StrictHostKeyChecking=accept-new user@host uptime
+
+# Discover LAN hosts
+sudo arp-scan --localnet
+
+# Find which TCP ports are open on a host
+nmap -p 1-1000 192.168.1.10
 ```
+
+## SSH & Remote Access
+
+All standard SSH client tooling is pre-installed:
+
+- `ssh`, `scp`, `sftp`, `ssh-keygen`, `ssh-keyscan`, `ssh-copy-id` (openssh-client)
+- `sshpass` — non-interactive password auth for scripting
+- `autossh` — auto-reconnecting SSH tunnels
+- `mosh` — mobile shell over UDP, robust on flaky links
+- `sshfs` — mount remote dirs over SSH
+- `rsync` — file sync over SSH
+- `expect` — script interactive prompts
+
+**No SSH credentials are pre-loaded.** `~/.ssh` is empty; no agent forwarding.
+If you need to SSH somewhere, the user must provide the credentials per session
+(env var, paste key into `~/.ssh/`, or use sshpass with a password). Never
+attempt to reach the user's git origin from inside the VM — that boundary is
+enforced at the firewall level.
+
+## Network Discovery
+
+- `nmap` — port/host scanning. `nmap -sn 192.168.1.0/24` for ping-sweep
+- `ncat` — netcat with TLS/SSL support (from nmap package)
+- `arp-scan --localnet` — LAN host discovery via ARP (use `--interface` if multi-iface)
+- `arping <ip>` — single-host ARP reachability
+- `tracepath <host>` / `tcptraceroute <host> <port>` — path tracing without root, TCP-based traceroute through firewalls
+- `ipcalc 192.168.1.0/24` — subnet math
+- `drill <name>` — alternative DNS resolver (DNSSEC trace, CH-class)
+
+## Deep Packet Analysis
+
+- `tshark` — CLI Wireshark for protocol-level inspection (run with `sudo`)
+- `hping3` — crafted-packet probes (use carefully — can stress LANs)
+
+## Performance & Interface Diagnostics
+
+- `ethtool <iface>` — link/PHY/driver info
+- `iftop -i <iface>` — live bandwidth per connection (TUI)
+- `nethogs <iface>` — live bandwidth per process (TUI)
+- `brctl show` — bridge topology (bridge-utils)
+- `vconfig` — VLAN inspection
+
+## TLS / Secure Transport
+
+- `openssl s_client -connect host:443` — TLS handshake & cert inspection
+- `gnutls-cli host:443` — alternative TLS client (different stack, useful for cross-checks)
+- `lftp` — sftp/http/ftp client with `mirror`, scriptable bulk transfers
 
 ## Docker
 
@@ -4324,6 +4474,41 @@ EOF
 
     sudo -n nft list table inet ocfilter >/dev/null
   "
+}
+
+# Re-apply the current policy.env to every currently-running session VM.
+# Used by `ports {host,hostfwd,lan} {add,rm,set,clear}` and `ports reload` so
+# changes take effect immediately without requiring a session restart.
+# Iterates ~/.opencode-vm/sessions/*.env (one entry per project hash); for
+# each, sources SESS_NAME, checks `is_vm_running`, and pushes:
+#   - nft set updates via apply_policy_in_vm
+#   - socat hostfwd units via setup_host_port_forwards_in_vm (idempotent;
+#     drops stale ports automatically)
+# Silent no-op if no sessions are running.
+apply_policy_to_running_sessions() {
+  [[ -d "$SESSIONS_DIR" ]] || return 0
+  shopt -s nullglob
+  local applied=0 envf SESS_NAME SESS_PROJ
+  for envf in "$SESSIONS_DIR"/*.env; do
+    SESS_NAME=""; SESS_PROJ=""
+    # shellcheck disable=SC1090
+    source "$envf"
+    [[ -n "${SESS_NAME:-}" ]] || continue
+    if is_vm_running "$SESS_NAME"; then
+      echo "[ports] Re-applying policy to running session: $SESS_NAME (${SESS_PROJ:-unknown})"
+      apply_policy_in_vm "$SESS_NAME" >/dev/null || {
+        echo "[ports] WARN: nft policy push to '$SESS_NAME' failed." >&2
+      }
+      setup_host_port_forwards_in_vm "$SESS_NAME" >/dev/null || true
+      applied=$((applied + 1))
+    fi
+  done
+  shopt -u nullglob
+  if (( applied == 0 )); then
+    echo "[ports] No running sessions — changes apply on next 'opencode-vm start'."
+  else
+    echo "[ports] Applied to $applied running session(s)."
+  fi
 }
 
 setup_host_port_forwards_in_vm() {

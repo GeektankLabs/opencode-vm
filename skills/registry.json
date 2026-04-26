@@ -12,6 +12,17 @@
         "cache_var": "WEBIMG_SKILL_CACHE"
       }
     },
+    "ssh-toolkit": {
+      "description": "SSH workflows + network discovery (ssh, sshpass, autossh, mosh, sshfs, nmap, arp-scan, tshark)",
+      "default_active": true,
+      "resolver": "single_bundled",
+      "skill_dir_name": "ssh-toolkit",
+      "install": {
+        "type": "bundled",
+        "sparse_path": "skills/ssh-toolkit",
+        "cache_var": "SSH_SKILL_CACHE"
+      }
+    },
     "ecc-auto": {
       "description": "Language-filtered subset of ECC skills (~30 skills, ~2-4k tokens)",
       "default_active": false,
