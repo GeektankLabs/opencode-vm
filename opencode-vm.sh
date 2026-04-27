@@ -70,7 +70,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.16"
+OCVM_VERSION="0.4.17"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -4689,8 +4689,26 @@ attach_session() {
   local host_lan_ip
   host_lan_ip="$(get_host_ip)"
 
+  # Parity with fresh-start: nftables sets are reset on VM boot to /etc/nftables.conf
+  # defaults, and host-localhost forwards (socat units) were torn down on the
+  # previous keep-exit. Re-apply both so the resumed session matches a fresh one.
+  echo "[attach] Applying firewall policy... $(_ts)"
+  apply_policy_in_vm "$SESS_NAME" || echo "[attach] WARNING: nftables policy push failed" >&2
+  if ! setup_host_port_forwards_in_vm "$SESS_NAME"; then
+    echo "[attach] WARNING: host-localhost forwarding setup failed; use host.lima.internal as fallback" >&2
+  fi
+  echo "[attach] Firewall policy applied $(_ts)"
+
   limactl shell --workdir / "$SESS_NAME" -- bash -lc '
     set -euo pipefail
+    PROJ_DIR="$1"
+    SESS_SHARE="$2"
+    OC_MODE="$3"
+    OC_PORT="$4"
+    OC_HOST_IP="$5"
+    OC_PASSWORD="$6"
+    OC_WEB_TUI="$7"
+
     export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/.config/composer/vendor/bin:/tmp/go/bin:/tmp/pnpm-store:$PATH"
     export CARGO_TARGET_DIR=/tmp/cargo-target
     export npm_config_cache=/tmp/npm-cache
@@ -4704,23 +4722,20 @@ attach_session() {
     export CCACHE_DIR=/tmp/ccache
     export ZIG_LOCAL_CACHE_DIR=/tmp/zig-cache
     export ZIG_GLOBAL_CACHE_DIR=/tmp/zig-global-cache
-    export XDG_DATA_HOME=/tmp/oc-xdg-data
-    export XDG_STATE_HOME=/tmp/oc-xdg-state
     export OPENCODE_ENABLE_EXA=1
-    export OCVM_HOST_LAN_IP="$5"
-    export HOST_LAN_IP="$5"
-    export LANIP="$5"
+    export OCVM_HOST_LAN_IP="$OC_HOST_IP"
+    export HOST_LAN_IP="$OC_HOST_IP"
+    export LANIP="$OC_HOST_IP"
 
-    SESS_SHARE="$2"
     export XDG_CONFIG_HOME="$SESS_SHARE/config"
     export XDG_DATA_HOME=/tmp/oc-xdg-data
     export XDG_STATE_HOME=/tmp/oc-xdg-state
     # ECC project identity: stable hash across sessions uses host project path
     if [ -f "$SESS_SHARE/config/opencode/.ecc-applied" ]; then
-      export CLAUDE_PROJECT_DIR="$1"
+      export CLAUDE_PROJECT_DIR="$PROJ_DIR"
     fi
 
-    cd "$1"
+    cd "$PROJ_DIR"
 
     # If VM-local xdg data is missing (e.g. /tmp was cleared by systemd-tmpfiles
     # on a stop-then-start boot), repopulate it from the persisted session
@@ -4734,9 +4749,41 @@ attach_session() {
       rsync -a "$SESS_SHARE/xdg-state/opencode/" /tmp/oc-xdg-state/opencode/ 2>/dev/null || true
     fi
 
-    if [ "$3" = "web" ]; then
-      echo "[attach] Starting OpenCode web server on port $4..."
-      aa-exec -p opencode-sandbox -- opencode web --hostname 0.0.0.0 --port "$4" || true
+    if [ "$OC_MODE" = "web" ]; then
+      echo ""
+      echo "=============================================="
+      echo "  OpenCode Web Server (port $OC_PORT) — resumed"
+      echo "=============================================="
+      echo ""
+      echo "Connect via:"
+      echo ""
+      echo "  Browser/Web UI:  http://${OC_HOST_IP}:${OC_PORT}"
+      echo "  API docs:        http://${OC_HOST_IP}:${OC_PORT}/doc"
+      echo "  TUI attach:      opencode attach http://${OC_HOST_IP}:${OC_PORT}"
+      echo ""
+      if [ -n "$OC_PASSWORD" ]; then
+        echo "  Username:        opencode"
+        echo "  Password:        $OC_PASSWORD"
+        echo ""
+        export OPENCODE_SERVER_PASSWORD="$OC_PASSWORD"
+      else
+        echo "Tip: pass --password <pw> to opencode-vm web to secure the server."
+        echo ""
+      fi
+      if [ "$OC_WEB_TUI" = "true" ]; then
+        aa-exec -p opencode-sandbox -- opencode web --hostname 0.0.0.0 --port "$OC_PORT" &
+        OC_WEB_PID=$!
+        sleep 2
+        echo ""
+        echo "Press Enter to start TUI (web server continues running)..."
+        read -r
+        aa-exec -p opencode-sandbox -- opencode attach "http://localhost:$OC_PORT" || true
+        kill "$OC_WEB_PID" 2>/dev/null || true
+        wait "$OC_WEB_PID" 2>/dev/null || true
+      else
+        echo "Press Ctrl+C to stop the session."
+        aa-exec -p opencode-sandbox -- opencode web --hostname 0.0.0.0 --port "$OC_PORT" || true
+      fi
     else
       aa-exec -p opencode-sandbox -- opencode || true
     fi
@@ -4747,7 +4794,7 @@ attach_session() {
       /tmp/oc-xdg-data/opencode/ "$SESS_SHARE/xdg-data/opencode/" 2>/dev/null || true
     rsync -a /tmp/oc-xdg-state/opencode/ "$SESS_SHARE/xdg-state/opencode/" 2>/dev/null || true
     echo "[attach] Sync complete"
-  ' _ "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$sess_port" "$host_lan_ip"
+  ' _ "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$sess_port" "$host_lan_ip" "${SESSION_PASSWORD:-}" "${OC_WEB_TUI:-false}"
 }
 
 # Update SESS_MODE / SESS_PORT in an existing session.env, preserving other
