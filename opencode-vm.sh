@@ -70,7 +70,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.17"
+OCVM_VERSION="0.4.18"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -4737,16 +4737,17 @@ attach_session() {
 
     cd "$PROJ_DIR"
 
-    # If VM-local xdg data is missing (e.g. /tmp was cleared by systemd-tmpfiles
-    # on a stop-then-start boot), repopulate it from the persisted session
-    # share so reconnect preserves history. On a still-running VM the in-VM
-    # data is already present; we only seed when it is missing.
+    # Merge persisted session history from the host share into VM /tmp so
+    # sessions started in a different mode (e.g. TUI) show up after resume.
+    # rsync --update preserves any newer in-VM data (live session that has
+    # not yet been synced back), while filling in anything missing from the
+    # share — which covers both /tmp-cleared-on-boot and stale-/tmp cases.
     mkdir -p /tmp/oc-xdg-data/opencode /tmp/oc-xdg-state/opencode
-    if [ ! -e /tmp/oc-xdg-data/opencode/storage ] && [ -d "$SESS_SHARE/xdg-data/opencode" ]; then
-      echo "[attach] Restoring session history from share..."
-      rsync -a --exclude="bin/" --exclude="log/" --exclude="tool-output/" \
+    if [ -d "$SESS_SHARE/xdg-data/opencode" ]; then
+      echo "[attach] Merging session history from share..."
+      rsync -a --update --exclude="bin/" --exclude="log/" --exclude="tool-output/" \
         "$SESS_SHARE/xdg-data/opencode/" /tmp/oc-xdg-data/opencode/ 2>/dev/null || true
-      rsync -a "$SESS_SHARE/xdg-state/opencode/" /tmp/oc-xdg-state/opencode/ 2>/dev/null || true
+      rsync -a --update "$SESS_SHARE/xdg-state/opencode/" /tmp/oc-xdg-state/opencode/ 2>/dev/null || true
     fi
 
     if [ "$OC_MODE" = "web" ]; then
