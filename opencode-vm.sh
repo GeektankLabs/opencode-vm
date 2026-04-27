@@ -70,7 +70,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.15"
+OCVM_VERSION="0.4.16"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -4750,6 +4750,20 @@ attach_session() {
   ' _ "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$sess_port" "$host_lan_ip"
 }
 
+# Update SESS_MODE / SESS_PORT in an existing session.env, preserving other
+# fields. Used when the user resumes via a different launch verb than the one
+# that created the session (e.g. `opencode-vm web` resuming a session that was
+# created with `opencode-vm start`, where the persisted mode was tui).
+_update_senv_mode() {
+  local senv="$1" new_mode="$2" new_port="$3"
+  [[ -f "$senv" ]] || return 0
+  # shellcheck disable=SC1090
+  ( source "$senv"
+    printf 'SESS_NAME=%q\nSESS_PROJ=%q\nCFG_HASH_AT_START=%q\nSESS_MODE=%q\nSESS_PORT=%q\nSESS_KEEP_HISTORY=%q\n' \
+      "$SESS_NAME" "$SESS_PROJ" "${CFG_HASH_AT_START:-}" "$new_mode" "$new_port" "${SESS_KEEP_HISTORY:-0}" > "$senv"
+  )
+}
+
 # Sync data back from a prior session share, then stop and delete its VM.
 # Called when the user chooses "fresh" at the start prompt.
 _destroy_prev_session() {
@@ -4971,6 +4985,16 @@ start_session() {
             echo "[start] Failed to resume VM '$SESS_NAME'. Use 'opencode-vm start --fresh' to recreate." >&2
             exit 1
           fi
+        fi
+        # The launch verb (`opencode-vm web`) overrides the persisted mode
+        # from the prior session — otherwise attach_session re-sources
+        # session.env and re-launches in the old mode.
+        if [[ "$SESSION_MODE" == "web" && "${SESS_MODE:-tui}" != "web" ]]; then
+          echo "[start] Switching session mode: ${SESS_MODE:-tui} -> web (port ${SESSION_PORT:-$DEFAULT_OC_PORT})."
+          _update_senv_mode "$senv" web "${SESSION_PORT:-$DEFAULT_OC_PORT}"
+        elif [[ "$SESSION_MODE" == "web" && -n "${SESSION_PORT:-}" && "$SESSION_PORT" != "${SESS_PORT:-}" ]]; then
+          echo "[start] Updating web port: ${SESS_PORT:-?} -> $SESSION_PORT."
+          _update_senv_mode "$senv" web "$SESSION_PORT"
         fi
         attach_session
         return 0
