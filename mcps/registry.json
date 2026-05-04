@@ -41,7 +41,8 @@
       },
       "agents_md_snippet": {
         "source": "file",
-        "path": "mcps/graphify/AGENTS-snippet.md"
+        "path": "mcps/graphify/AGENTS-snippet.md",
+        "path_mcrepo": "mcps/graphify/AGENTS-snippet.mcrepo.md"
       }
     },
     "proxmox": {

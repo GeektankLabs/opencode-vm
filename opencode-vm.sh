@@ -70,7 +70,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.18"
+OCVM_VERSION="0.4.19"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -990,6 +990,51 @@ detect_project_languages() {
 }
 
 # ---------------------------------------------------------------------------
+# mcrepo (multi-context repository) detection + workspace conventions
+# ---------------------------------------------------------------------------
+# A workspace is an mcrepo iff `mcrepo.yaml` exists at the project root.
+# mcrepo creates emoji-prefixed coordination folders by convention (e.g.
+# "🧾 docs", "🧠 skills"); we tolerate plain names too.
+is_mcrepo_workspace() {
+  [[ -f "${1:?proj}/mcrepo.yaml" ]]
+}
+
+# Resolve the mcrepo docs directory. Returns the first existing match from a
+# small candidate list; falls back to plain "docs" (caller mkdirs as needed).
+mcrepo_docs_dir() {
+  local proj="${1:?proj}" cand
+  for cand in "🧾 docs" "docs"; do
+    [[ -d "$proj/$cand" ]] && { printf '%s' "$proj/$cand"; return 0; }
+  done
+  printf '%s' "$proj/docs"
+}
+
+# Ensure <docs>/graphify/ exists and that <proj>/graphify-out is a symlink to
+# it (graphifyy 0.4.x hardcodes its output dir to <project>/graphify-out and
+# offers no -o flag, so the symlink is how we redirect into docs/).
+# Idempotent. Returns the absolute docs/graphify path on stdout.
+mcrepo_ensure_graphify_dir() {
+  local proj="${1:?proj}"
+  local docs; docs="$(mcrepo_docs_dir "$proj")"
+  local target="$docs/graphify"
+  mkdir -p "$target"
+
+  local link="$proj/graphify-out"
+  if [[ -L "$link" ]]; then
+    : # already a symlink — leave it alone (path may be relative or absolute)
+  elif [[ -e "$link" ]]; then
+    echo "[mcrepo] WARNING: $link exists and is not a symlink; leaving graphify output there." >&2
+  else
+    # Use a path relative to the project root. The docs dir name may contain
+    # a space (e.g. "🧾 docs"); ln handles that fine when the arg is quoted.
+    local rel="${docs#$proj/}/graphify"
+    ln -s "$rel" "$link"
+  fi
+
+  printf '%s' "$target"
+}
+
+# ---------------------------------------------------------------------------
 # Rules auto-inject (ECC-gated) — appends per-language rules to session AGENTS.md
 # ---------------------------------------------------------------------------
 
@@ -1601,13 +1646,31 @@ mcps_load() {
   if [[ -f "$MCPS_ENV" ]]; then
     # shellcheck disable=SC1090
     source "$MCPS_ENV"
-    return 0
+  else
+    # First run: seed from registry defaults
+    local defaults
+    defaults="$(mcps_registry_defaults 2>/dev/null | tr '\n' ' ')"
+    MCPS_PACKAGES="$(echo "${defaults}" | sed -e 's/^ *//; s/ *$//')"
+    mcps_save
   fi
-  # First run: seed from registry defaults
-  local defaults
-  defaults="$(mcps_registry_defaults 2>/dev/null | tr '\n' ' ')"
-  MCPS_PACKAGES="$(echo "${defaults}" | sed -e 's/^ *//; s/ *$//')"
-  mcps_save
+
+  # Session-only overrides (e.g. mcrepo auto-activation in start_session).
+  # MCPS_FORCE_ON/MCPS_FORCE_OFF are space-separated lists exported by the
+  # caller; they don't get persisted to mcps.env.
+  local _p
+  if [[ -n "${MCPS_FORCE_ON:-}" ]]; then
+    for _p in $MCPS_FORCE_ON; do
+      case " ${MCPS_PACKAGES:-} " in
+        *" $_p "*) ;;
+        *) MCPS_PACKAGES="${MCPS_PACKAGES:+$MCPS_PACKAGES }$_p" ;;
+      esac
+    done
+  fi
+  if [[ -n "${MCPS_FORCE_OFF:-}" ]]; then
+    for _p in $MCPS_FORCE_OFF; do
+      _mcps_pkg_drop "$_p"
+    done
+  fi
 }
 
 mcps_save() {
@@ -1703,13 +1766,22 @@ _mcps_substitute_tokens() {
           else . end)' <<<"$json"
 }
 
-# Path the {GRAPH_PATH} token resolves to. The graphify MCP runs inside the
-# session VM and reads/writes through this path. Lives under $sess_share
-# (bind-mounted at the same absolute path inside the VM) so the file is
-# accessible from both host and guest. Persistence across sessions is handled
-# by graphify_persist_load_for_session / graphify_persist_save_for_session.
+# Path the {GRAPH_PATH} token resolves to. Two cases:
+#   - mcrepo workspace: the graph lives in the workspace at <docs>/graphify/
+#     graph.json (committed alongside the rest of the docs); this file is
+#     visible from the VM via the project-root virtiofs mount.
+#   - single-repo workspace: the graph lives in $sess_share/graphify/graph.json,
+#     bind-mounted at the same absolute path inside the VM, and is
+#     load-ed/save-d to host-side per-project state by
+#     graphify_persist_load_for_session / graphify_persist_save_for_session.
 _mcps_graph_path_for_session() {
   local sess_share="$1"
+  local proj="${2:-}"
+  if [[ -n "$proj" ]] && is_mcrepo_workspace "$proj"; then
+    local docs; docs="$(mcrepo_docs_dir "$proj")"
+    echo "$docs/graphify/graph.json"
+    return 0
+  fi
   echo "$sess_share/graphify/graph.json"
 }
 
@@ -1757,7 +1829,7 @@ mcps_build_config_json() {
   local sess_share="${2:-}"
   local proj="${3:-}"
   local proj_h=""; [[ -n "$proj" ]] && proj_h="$(proj_hash "$proj")"
-  local graph_p=""; [[ -n "$sess_share" ]] && graph_p="$(_mcps_graph_path_for_session "$sess_share")"
+  local graph_p=""; [[ -n "$sess_share" ]] && graph_p="$(_mcps_graph_path_for_session "$sess_share" "$proj")"
   local reg
   reg="$(_mcps_registry_read 2>/dev/null)" || { echo '{}'; return 0; }
 
@@ -1864,9 +1936,11 @@ mcps_mount_skill_docs_for_session() {
 # Resolve an MCP's agents_md_snippet declaration into a substituted markdown
 # string. Returns empty for MCPs without a snippet declaration.
 # $1=pkg $2=registry-path $3=vm_home $4=proj_hash $5=sess_share $6=graph_path
+# $7=is_mcrepo (0/1) — when 1, use agents_md_snippet.path_mcrepo if present.
 _mcps_resolve_snippet() {
   local pkg="$1" reg="$2" vm_home="$3" proj_h="$4" sess_share="$5" graph_p="$6"
-  local source content path raw
+  local is_mcrepo="${7:-0}"
+  local source content path path_mcrepo raw
   source="$(jq -r --arg n "$pkg" '.mcps[$n].agents_md_snippet.source // empty' "$reg" 2>/dev/null)"
   [[ -n "$source" ]] || return 0
 
@@ -1877,7 +1951,11 @@ _mcps_resolve_snippet() {
       raw="$content"
       ;;
     file)
-      path="$(jq -r --arg n "$pkg" '.mcps[$n].agents_md_snippet.path // empty' "$reg" 2>/dev/null)"
+      if [[ "$is_mcrepo" == "1" ]]; then
+        path_mcrepo="$(jq -r --arg n "$pkg" '.mcps[$n].agents_md_snippet.path_mcrepo // empty' "$reg" 2>/dev/null)"
+        [[ -n "$path_mcrepo" ]] && path="$path_mcrepo"
+      fi
+      [[ -n "${path:-}" ]] || path="$(jq -r --arg n "$pkg" '.mcps[$n].agents_md_snippet.path // empty' "$reg" 2>/dev/null)"
       [[ -n "$path" ]] || return 0
       local abs="$SCRIPT_DIR/$path"
       [[ -f "$abs" ]] || {
@@ -1917,11 +1995,14 @@ mcps_build_agents_sidecar() {
 
   local proj_h="" graph_p=""
   [[ -n "$proj" ]] && proj_h="$(proj_hash "$proj")"
-  [[ -n "$sess_share" ]] && graph_p="$(_mcps_graph_path_for_session "$sess_share")"
+  [[ -n "$sess_share" ]] && graph_p="$(_mcps_graph_path_for_session "$sess_share" "$proj")"
+
+  local is_mcrepo=0
+  [[ -n "$proj" ]] && is_mcrepo_workspace "$proj" && is_mcrepo=1
 
   local pkg snippet
   for pkg in $MCPS_PACKAGES; do
-    snippet="$(_mcps_resolve_snippet "$pkg" "$reg" "$vm_home" "$proj_h" "$sess_share" "$graph_p")"
+    snippet="$(_mcps_resolve_snippet "$pkg" "$reg" "$vm_home" "$proj_h" "$sess_share" "$graph_p" "$is_mcrepo")"
     [[ -n "$snippet" ]] || continue
     printf '\n%s\n' "$snippet" >> "$out"
   done
@@ -5138,6 +5219,23 @@ start_session() {
   fi
   cp -p "$sess_share/config/opencode/opencode.json" "$sess_share/config/opencode/.opencode.json"
 
+  # mcrepo (multi-context repo) auto-activation: if mcrepo.yaml is at the project
+  # root, this session uses graphify (cross-repo knowledge graph) instead of
+  # repomapper (single-repo PageRank). Override is session-only — the user's
+  # persisted ~/.opencode-vm/mcps.env is not mutated, so single-repo workspaces
+  # the user opens later get their normal selection back.
+  if is_mcrepo_workspace "$proj"; then
+    export MCPS_FORCE_ON="graphify"
+    export MCPS_FORCE_OFF="repomapper"
+    local _gfy_dir; _gfy_dir="$(mcrepo_ensure_graphify_dir "$proj")"
+    # First-activation README so a human opening the docs folder knows what
+    # the files are. Don't overwrite if the user has already edited it.
+    if [[ ! -f "$_gfy_dir/README.md" && -f "$SCRIPT_DIR/mcps/graphify/README.template.md" ]]; then
+      cp -p "$SCRIPT_DIR/mcps/graphify/README.template.md" "$_gfy_dir/README.md"
+    fi
+    echo "[run] mcrepo detected — graphify auto-on, repomapper auto-off (session only); graph dir: $_gfy_dir $(_ts)"
+  fi
+
   # Inject session overrides: MCP block built from mcps/registry.json + active
   # MCPS_PACKAGES, plus allow-all permissions with git commit=ask and git push=deny.
   local sess_cfg_file="$sess_share/config/opencode/opencode.json"
@@ -5407,7 +5505,27 @@ start_session() {
     rsync -a "$sess_share/xdg-state/opencode/" "$proj_state/xdg-state/opencode/"
     echo "[cleanup] Project-state cache updated $(_ts)"
 
-    # Persist any updated graphify graph back to the per-project store.
+    # mcrepo: stop the in-VM graphify watcher (best-effort; if the VM is
+    # already gone the kill is a no-op). The watcher is daemonized via setsid
+    # so we kill the whole process group to also catch tree-sitter children.
+    local _gfy_pidfile="$sess_share/graphify-watch.pid"
+    if [[ -f "$_gfy_pidfile" ]] && [[ -n "${sess:-}" ]]; then
+      local _gfy_pid
+      _gfy_pid="$(cat "$_gfy_pidfile" 2>/dev/null || true)"
+      if [[ -n "$_gfy_pid" ]]; then
+        limactl shell --workdir / "$sess" -- bash -c '
+          pid="$1"
+          [[ -n "$pid" ]] && kill -TERM -"$pid" 2>/dev/null
+          [[ -n "$pid" ]] && kill -TERM "$pid" 2>/dev/null
+          true
+        ' _ "$_gfy_pid" 2>/dev/null || true
+        echo "[cleanup] graphify watcher stopped (pid $_gfy_pid) $(_ts)"
+      fi
+      rm -f "$_gfy_pidfile"
+    fi
+
+    # Persist any updated graphify graph back to the per-project store
+    # (single-repo path; mcrepo workspaces commit the graph in docs/graphify/).
     graphify_persist_save_for_session "$proj" "$sess_share" 2>/dev/null || true
 
     # ECC: persist project-scoped homunculus learnings back to host project state.
@@ -5505,6 +5623,34 @@ start_session() {
     _ecc_proj_hash="$(ecc_compute_project_hash "$proj")"
     ecc_link_homunculus_in_vm "$sess" "$sess_share" "$_ecc_proj_hash"
     echo "[run] ECC homunculus linked (project hash: $_ecc_proj_hash) $(_ts)"
+  fi
+
+  # mcrepo: spawn the graphify watcher inside the session VM so the graph
+  # rebuilds incrementally as files change. Best-effort: failures are logged
+  # to the session log file but never block the session start. The PID is
+  # written to the session share so cleanup can kill it on session end.
+  if is_mcrepo_workspace "$proj"; then
+    local _gfy_log="$sess_share/graphify-watch.log"
+    local _gfy_pidfile="$sess_share/graphify-watch.pid"
+    : > "$_gfy_log"
+    # One-shot incremental update first (so the agent has *some* graph even if
+    # the watcher needs a moment to settle), then long-lived watch. Both run
+    # in the VM as the same user opencode runs as; PID is captured via $!.
+    limactl shell --workdir / "$sess" -- bash -lc '
+      set +e
+      proj="$1"; log="$2"; pidfile="$3"
+      export PATH="$HOME/.local/bin:$PATH"
+      # Initial build is fast and code-only; ignore failures (an empty repo
+      # still produces a usable empty graph on the next watch tick).
+      ( graphify update "$proj" >>"$log" 2>&1 ) || true
+      # Long-lived watcher; daemonize via setsid so it survives this shell exit.
+      setsid graphify watch "$proj" >>"$log" 2>&1 &
+      echo $! > "$pidfile"
+    ' _ "$proj" "$_gfy_log" "$_gfy_pidfile" 2>>"$_gfy_log" || \
+      echo "[run] WARN: graphify watcher spawn failed; see $_gfy_log" >&2
+    if [[ -s "$_gfy_pidfile" ]]; then
+      echo "[run] graphify watch started (pid $(cat "$_gfy_pidfile")) — log: $_gfy_log $(_ts)"
+    fi
   fi
 
   echo "[run] Launching OpenCode inside VM (project: $proj) $(_ts)"
