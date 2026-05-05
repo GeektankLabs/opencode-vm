@@ -10,56 +10,58 @@ queryable knowledge graph of all repositories in the mcrepo, built by
 **Committed (ships with the repo):**
 
 - `GRAPH_REPORT.md` — human-readable summary: god-nodes, suggested questions,
-  surprising cross-repo connections. Read this first.
-- `graph.json` — the full graph used by AI agents via the graphify MCP server.
-- `graph.html` — interactive browser visualization. Open it in a browser to
-  pan/zoom the graph.
+  surprising cross-repo connections. Diff-able in PRs. Typically <1 MB.
+- `README.md` — explains this folder's purpose.
 - `.gitignore` — keeps the local-only files below out of git.
 
-**Local-only (gitignored, regenerated automatically):**
+**Local-only, regenerated each session (gitignored):**
 
 - `cache/` — incremental-build cache (tree-sitter parses + content hashes).
-  Can grow to ~10,000 files on a medium codebase. Reproduced by
-  `graphify watch`/`update` whenever needed; committing it would trade
-  significant repo bloat for a marginal cold-start speedup, so we don't.
-- `manifest.json` — mtime-tracking. Per graphify upstream, file mtimes are
-  not preserved across `git clone`, so a committed manifest forces a full
-  rebuild on every fresh checkout anyway. Better regenerated locally.
+  Easily 10,000+ files on medium codebases — VSCode warns "too many active
+  changes" if these get tracked. Rebuilt automatically by `graphify watch`.
+- `manifest.json` — file-mtime tracking. Per graphify upstream, mtimes don't
+  survive `git clone`, so committing it forces full rebuilds anyway.
+- `graph.json` — the queryable graph the MCP server reads. **Real-world
+  mcrepos produce graphs over 100 MB**, which exceeds GitHub's hard
+  per-file cap. Rebuilt each `opencode-vm` session by the in-VM watcher.
+- `graph.html` — interactive visualization. Same rebuild-on-session story.
 
 The repository-root `graphify-out` symlink points here — it exists because
 graphify's CLI hardcodes `<project>/graphify-out/` as its output directory,
 and the symlink redirects writes into this `docs/graphify/` folder so they
 ship with the rest of the documentation.
 
-## Why the small files are committed
+## Why this policy
 
-mcrepo's whole point is that `docs/` is part of the repo. Committing
-`graph.json` + `graph.html` + `GRAPH_REPORT.md` (typically a few MB total)
-means:
+mcrepo's `docs/` is part of the repo, but graphify's full output is too
+heavyweight to commit safely. The compromise:
 
-- A fresh clone has a ready-to-use graph immediately — no rebuild from scratch.
-- PR reviewers see structural changes in `GRAPH_REPORT.md` diffs (new
-  god-nodes, new cross-repo edges).
-- Agents on first session don't have to wait for the watcher's initial pass.
+- **`GRAPH_REPORT.md` is committed** — small, human-readable, diff-able. PR
+  reviewers see new god-nodes and new cross-repo connections at a glance.
+- **`graph.json` is rebuilt every session** — `graphify watch` runs in the
+  session VM the moment you start `opencode-vm`. Within seconds the agent
+  has a fresh graph; you don't wait for it.
+- **No git bloat, no GitHub size limits hit, no VSCode warnings.**
 
-If even `graph.json` becomes noisy on a very active repo, you can extend
-`.gitignore` to skip it too — `GRAPH_REPORT.md` alone is still enough to
-make structural changes legible in PRs, and the watcher rebuilds `graph.json`
-each session anyway.
+If your codebase is small enough that `graph.json` is comfortably under
+~25 MB, you can opt back in by removing `graph.json` from this `.gitignore`
+— a fresh clone will then be query-ready instantly without waiting for the
+watcher's first pass.
 
 ## If you already committed the cache by accident
 
-If a previous session committed `cache/` or `manifest.json` before this
-`.gitignore` existed, untrack them (without deleting the local files —
-they're still useful for the running watcher):
+If a previous session created `cache/`, `manifest.json`, `graph.json` or
+`graph.html` before this `.gitignore` existed, untrack them (without deleting
+the local files — they're still useful for the running watcher):
 
 ```sh
-git rm -r --cached docs/graphify/cache docs/graphify/manifest.json
-git commit -m "chore(graphify): untrack local-only build cache"
+git rm -r --cached "docs/graphify/cache" "docs/graphify/manifest.json" \
+                   "docs/graphify/graph.json" "docs/graphify/graph.html"
+git add docs/graphify/.gitignore docs/graphify/README.md docs/graphify/GRAPH_REPORT.md
+git commit -m "chore(graphify): apply gitignore policy, untrack heavy artifacts"
 ```
 
-The next session's watcher will keep using the local cache; only git stops
-tracking it.
+(Adjust the path prefix if your mcrepo uses the emoji-prefixed `🧾 docs/`.)
 
 ## How updates happen
 
