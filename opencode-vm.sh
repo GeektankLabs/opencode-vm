@@ -70,7 +70,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.19"
+OCVM_VERSION="0.4.20"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -1011,7 +1011,11 @@ mcrepo_docs_dir() {
 
 # Ensure <docs>/graphify/ exists and that <proj>/graphify-out is a symlink to
 # it (graphifyy 0.4.x hardcodes its output dir to <project>/graphify-out and
-# offers no -o flag, so the symlink is how we redirect into docs/).
+# offers no -o flag, so the symlink is how we redirect into docs/). Also seeds
+# a .gitignore inside the graphify dir so the local-only cache and the
+# mtime-based manifest don't bloat git status (graphify upstream itself
+# recommends ignoring both — cache can grow to ~10k files on medium codebases
+# and the manifest's mtimes are unreliable across `git clone`).
 # Idempotent. Returns the absolute docs/graphify path on stdout.
 mcrepo_ensure_graphify_dir() {
   local proj="${1:?proj}"
@@ -1029,6 +1033,12 @@ mcrepo_ensure_graphify_dir() {
     # a space (e.g. "🧾 docs"); ln handles that fine when the arg is quoted.
     local rel="${docs#$proj/}/graphify"
     ln -s "$rel" "$link"
+  fi
+
+  # Drop the .gitignore on first activation. Don't overwrite a user-edited
+  # version; if they removed entries they'll have done so deliberately.
+  if [[ ! -f "$target/.gitignore" && -f "$SCRIPT_DIR/mcps/graphify/gitignore.template" ]]; then
+    cp -p "$SCRIPT_DIR/mcps/graphify/gitignore.template" "$target/.gitignore"
   fi
 
   printf '%s' "$target"
