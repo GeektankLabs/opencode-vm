@@ -70,7 +70,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.21"
+OCVM_VERSION="0.4.22"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -3990,17 +3990,25 @@ curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bas
 nvm install 22
 nvm alias default 22
 
-# Install Playwright MCP globally + Chromium browser for headless UI testing
+# Install Playwright MCP globally + Chrome for Testing for headless UI testing.
 # Pin to cdn.playwright.dev — the default playwright.azureedge.net mirror has
-# been observed throttling to ~100 KB/s, turning the 183 MB chromium download
+# been observed throttling to ~100 KB/s, turning the 185 MB browser download
 # into a 30-min stall. cdn.playwright.dev serves the same artifacts at full speed.
 npm install -g @playwright/mcp@latest svgo
-PLAYWRIGHT_DOWNLOAD_HOST=https://cdn.playwright.dev npx -y playwright install chromium
 
 # Create NVM-version-independent symlink so playwright-mcp stays available
-# even when the agent switches Node versions with nvm use
+# even when the agent switches Node versions with nvm use. Must come before
+# install-browser so the CLI is on PATH regardless of the active Node version.
 mkdir -p ~/.local/bin
 ln -sf "$(npm prefix -g)/bin/playwright-mcp" ~/.local/bin/playwright-mcp
+
+# Use the MCP's own resolver: since @playwright/mcp@0.0.74 the alias
+# `--browser chromium` maps to channel `chrome-for-testing`, which is a
+# different binary than `npx playwright install chromium` would fetch. Letting
+# playwright-mcp drive the install ensures the channel + revision match the
+# bundled playwright-core regardless of future MCP version bumps.
+PLAYWRIGHT_DOWNLOAD_HOST=https://cdn.playwright.dev \
+  playwright-mcp install-browser chrome-for-testing
 
 # Install pyenv + Python 3.13 (default)
 export PYENV_ROOT="$HOME/.pyenv"
@@ -4446,14 +4454,15 @@ Playwright MCP is available as a tool for headless browser automation. Use it fo
 
 Start a dev server first (e.g. \`npm run dev\`), then use the Playwright tools to navigate to \`http://localhost:<port>\` and interact with the UI.
 
-**Important:** Chromium is **already pre-installed** as an ARM64-native binary. Everything is configured and works out of the box. Do **NOT** run \`npx playwright install\` or try to install browsers — just use the MCP tools directly.
+**Important:** Chrome for Testing is **already pre-installed** as an ARM64-native binary, bundled with the Playwright MCP. Everything is configured and works out of the box. Do **NOT** run \`npx playwright install\` or \`playwright-mcp install-browser\` — just use the MCP tools directly.
 
 Pre-installed paths (do not change):
 - MCP server binary: \`~/.local/bin/playwright-mcp\` (stable symlink, works with any NVM Node version)
-- Chromium binary: \`~/.cache/ms-playwright/chromium-1208/chrome-linux/chrome\`
-- Headless shell: \`~/.cache/ms-playwright/chromium_headless_shell-1208/chrome-linux/headless_shell\`
+- Browser cache:     \`~/.cache/ms-playwright/chromium-<rev>/chrome-linux/chrome\`
+                     \`~/.cache/ms-playwright/chromium_headless_shell-<rev>/chrome-linux/headless_shell\`
+                     (\`<rev>\` floats with the bundled Playwright MCP version)
 
-There is no Chrome at \`/opt/google/chrome/\` — ignore that path. The bundled Chromium above is used automatically by the MCP tools (\`browser_navigate\`, \`browser_click\`, \`browser_screenshot\`, etc.).
+There is no Chrome at \`/opt/google/chrome/\` — ignore that path. The bundled Chrome for Testing above is used automatically by the MCP tools (\`browser_navigate\`, \`browser_click\`, \`browser_screenshot\`, etc.).
 
 ## Codebase Structure Maps (RepoMapper)
 
