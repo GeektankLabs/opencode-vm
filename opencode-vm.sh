@@ -5454,12 +5454,12 @@ start_session() {
       --mount-only "${mount_proj}:w" \
       --mount-only "${sess_share}:w" \
       --mount-only "${share_dir}:w" \
-      --tty=false
+      --tty=false --start
   else
     run_with_spinner "[run] Cloning session VM: $sess..." limactl clone "$BASE_NAME" "$sess" \
       --mount-only "${mount_proj}:w" \
       --mount-only "${sess_share}:w" \
-      --tty=false
+      --tty=false --start
   fi
   rm -f "$lockfile"
   trap - EXIT
