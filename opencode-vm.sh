@@ -87,7 +87,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.23"
+OCVM_VERSION="0.4.24"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -3901,14 +3901,26 @@ provision_base() {
   done
   echo "[init] VM shell ready"
 
-  # Wait for Docker to be ready (replaces the removed Lima probe)
-  echo "[init] Waiting for Docker daemon..."
+  # Wait for Docker to be ready (replaces the removed Lima probe). Cold cloud-init
+  # on slow disks can take 5+ minutes — the previous 120s budget was too tight
+  # and frequently failed with "Docker not ready" even though the VM was about
+  # to come up. We now poll for up to 10 min (matching Lima's 20-min budget for
+  # the start phase) and report progress every 30s so the wait isn't silent.
+  echo "[init] Waiting for Docker daemon (up to 10 min on cold start)..."
   retries=0
+  local max_retries=300   # 300 × 2s = 600s
   while ! limactl shell "$BASE_NAME" -- docker info >/dev/null 2>&1; do
     retries=$((retries + 1))
-    if (( retries > 60 )); then
-      echo "[init] Docker not ready after 120s." >&2
+    if (( retries > max_retries )); then
+      echo "[init] Docker still not ready after $((max_retries * 2))s." >&2
+      echo "[init]   Diagnosis hints:" >&2
+      echo "[init]     limactl shell $BASE_NAME -- cloud-init status --long" >&2
+      echo "[init]     limactl shell $BASE_NAME -- sudo cat /var/log/cloud-init-output.log | tail -50" >&2
+      echo "[init]   Recovery: re-run 'opencode-vm init' (it deletes and rebuilds oc-base)." >&2
       exit 1
+    fi
+    if (( retries % 15 == 0 )); then
+      echo "[init]   ...still waiting on Docker ($((retries * 2))s elapsed)"
     fi
     sleep 2
   done
