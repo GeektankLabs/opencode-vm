@@ -87,7 +87,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.24"
+OCVM_VERSION="0.4.25"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -813,7 +813,7 @@ proxmox_ensure_installed_in_base() {
   # Need the base VM running for the install. Start if stopped.
   local started_base=0
   if ! is_vm_running "$BASE_NAME"; then
-    run_with_spinner "[proxmox] Starting base VM to install MCP server..." limactl start "$BASE_NAME" || {
+    run_with_spinner "[proxmox] Starting base VM to install MCP server..." limactl start "$BASE_NAME" --tty=false || {
       echo "[proxmox] Could not start base VM; MCP will not be available this session." >&2
       return 1
     }
@@ -4061,7 +4061,16 @@ ln -sf ~/.local/share/repomapper/repomap_server.py ~/.local/bin/repomap-server
 pip3 install --user pipx
 mkdir -p ~/.local/bin
 ~/.local/bin/pipx ensurepath >/dev/null 2>&1 || true
-~/.local/bin/pipx install 'graphifyy==0.4.32' >/dev/null
+# graphifyy ships its MCP server (graphify.serve) but the runtime dep `mcp`
+# is gated behind the `[mcp]` extras — installing the bare package leaves
+# `python -m graphify.serve` crashing with ModuleNotFoundError, which in turn
+# makes OpenCode show graphify as "failed and disabled". Always include the
+# extras so the wrapper at /usr/local/bin/graphify-serve-wrapper.sh works.
+~/.local/bin/pipx install 'graphifyy[mcp]==0.4.32' >/dev/null \
+  || ~/.local/bin/pipx install --force 'graphifyy[mcp]==0.4.32' >/dev/null
+# Belt-and-suspenders: if a previous install of bare graphifyy is still around
+# without the mcp extras, inject the missing module into its venv directly.
+~/.local/bin/pipx inject graphifyy mcp >/dev/null 2>&1 || true
 # Wrapper provides a friendly "no graph yet" error when activated in a fresh
 # project — keeps the agent from seeing a Python traceback.
 sudo tee /usr/local/bin/graphify-serve-wrapper.sh >/dev/null <<'WRAPPER'
