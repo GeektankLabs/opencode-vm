@@ -87,7 +87,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.25"
+OCVM_VERSION="0.4.26"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -1841,6 +1841,40 @@ graphify_persist_save_for_session() {
   local persist_dir; persist_dir="$(graphify_persist_dir_for_project "$proj")"
   mkdir -p "$persist_dir"
   cp -p "$sess_file" "$persist_dir/graph.json"
+}
+
+# Ensure the graphifyy pipx venv inside the session VM can launch its MCP
+# server (`python -m graphify.serve`). graphifyy <0.5 ships the serve module
+# but gates its `mcp` runtime dep behind the [mcp] extras — bases provisioned
+# before v0.4.25 (or session VMs cloned from such a base) lack the module,
+# which makes OpenCode mark graphify as "failed and disabled" on every start
+# with no in-product recovery.
+#
+# Always-on probe: we run a ~200 ms `python -c "import mcp"` check on every
+# session start AND attach. If the venv is absent (graphify never installed),
+# we exit cleanly. If the venv exists but mcp is missing, we pipx-inject it
+# (~5 s, one-time per VM disk). Idempotent. Cost when graphify isn't active
+# at all is one short limactl shell roundtrip — negligible vs. session start.
+# Called from both start_session (fresh) and attach_session (reconnect/resume).
+# $1 = lima session VM name (e.g. oc-20260508-152352)
+graphify_ensure_mcp_in_vm() {
+  local sess="${1:?sess}"
+  limactl shell --workdir / "$sess" -- bash -lc '
+    set +e
+    python_bin="$HOME/.local/share/pipx/venvs/graphifyy/bin/python"
+    # No venv = graphify not installed in this base (older or stripped) — nothing to heal.
+    [[ -x "$python_bin" ]] || exit 0
+    if "$python_bin" -c "import mcp" 2>/dev/null; then
+      exit 0
+    fi
+    echo "[graphify] mcp module missing in pipx venv — injecting (one-time, ~5s)..." >&2
+    if pipx inject graphifyy mcp >/dev/null 2>&1; then
+      echo "[graphify] self-heal complete; MCP server will start cleanly" >&2
+    else
+      echo "[graphify] WARN self-heal failed; MCP will likely fail to start" >&2
+      echo "[graphify]      run: opencode-vm init    to rebuild oc-base cleanly" >&2
+    fi
+  ' 2>&1 || true
 }
 
 # Build the {mcp: {...}} object for session injection by iterating
@@ -4837,6 +4871,10 @@ attach_session() {
   fi
   echo "[attach] Firewall policy applied $(_ts)"
 
+  # Self-heal graphify venv before OpenCode tries to launch its MCP server.
+  # No-op when graphify isn't installed; injects mcp extras when missing.
+  graphify_ensure_mcp_in_vm "$SESS_NAME"
+
   limactl shell --workdir / "$SESS_NAME" -- bash -lc '
     set -euo pipefail
     PROJ_DIR="$1"
@@ -5681,6 +5719,10 @@ start_session() {
     ecc_link_homunculus_in_vm "$sess" "$sess_share" "$_ecc_proj_hash"
     echo "[run] ECC homunculus linked (project hash: $_ecc_proj_hash) $(_ts)"
   fi
+
+  # graphify self-heal (mcp module): runs in every session, no-op when graphify
+  # isn't installed in the base. Defined near graphify_persist_*.
+  graphify_ensure_mcp_in_vm "$sess"
 
   # mcrepo: spawn the graphify watcher inside the session VM so the graph
   # rebuilds incrementally as files change. Best-effort: failures are logged
