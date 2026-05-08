@@ -54,8 +54,25 @@ WEBIMG_SKILL_CACHE="$SHARE_ROOT/webimg-skill"      # fallback if script is not c
 SSH_SKILL_CACHE="$SHARE_ROOT/ssh-toolkit-skill"    # fallback if script is not co-located with bundled skills/
 DEFAULT_PROXMOX_MCP_REPO="https://github.com/canvrno/ProxmoxMCP.git"
 DEFAULT_PROXMOX_MCP_REF="main"
-# Script location (for resolving bundled skills/proxmox when running from repo)
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Script location (for resolving bundled skills/proxmox/mcps when running from
+# repo). Must follow symlinks: `opencode-vm install` puts a symlink at
+# ~/bin/opencode-vm pointing at the repo's opencode-vm.sh, and a naive
+# `dirname "${BASH_SOURCE[0]}"` would resolve to ~/bin — making the bundled
+# mcps/registry.json invisible and forcing a fall-back to a stale on-disk
+# cache that may pre-date recently-added MCPs (graphify lived this exact bug).
+# Portable across macOS (BSD readlink, no -f) and Linux (GNU readlink).
+_ocvm_resolve_script_dir() {
+  local src="${BASH_SOURCE[0]}"
+  while [ -L "$src" ]; do
+    local dir
+    dir="$(cd -P "$(dirname "$src")" && pwd)"
+    src="$(readlink "$src")"
+    [[ "$src" != /* ]] && src="$dir/$src"
+  done
+  cd -P "$(dirname "$src")" && pwd
+}
+SCRIPT_DIR="$(_ocvm_resolve_script_dir)"
+unset -f _ocvm_resolve_script_dir
 
 # Excludes for xdg-data rsync: bin/ (375M, 28k files — downloaded on demand),
 # log/ (old session logs), tool-output/ (previous session artifacts)
@@ -70,7 +87,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.22"
+OCVM_VERSION="0.4.23"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -5765,6 +5782,21 @@ EOF
     check_sqlite_dbs "$VM_STATE/opencode"
     echo "[$(date +%T)] SQLite checks done"
 
+    # EXIT trap so Ctrl+C in web mode still syncs VM-local data (auth.json,
+    # sessions) back to the share — without this, provider logins made via
+    # the web UI are lost when the user stops the server with Ctrl+C.
+    sync_vm_to_share() {
+      echo "[$(date +%T)] Syncing session data back to host..."
+      check_sqlite_dbs "$VM_DATA/opencode" 2>/dev/null || true
+      check_sqlite_dbs "$VM_STATE/opencode" 2>/dev/null || true
+      rsync -a --exclude="bin/" --exclude="log/" --exclude="tool-output/" \
+        "$VM_DATA/opencode/" "$SESS_SHARE/xdg-data/opencode/" 2>/dev/null || true
+      rsync -a "$VM_STATE/opencode/" "$SESS_SHARE/xdg-state/opencode/" 2>/dev/null || true
+      echo "[$(date +%T)] In-VM sync complete"
+      return 0
+    }
+    trap sync_vm_to_share EXIT
+
     # -- Build caches -> VM-local (not mounted) for performance --
     export CARGO_TARGET_DIR=/tmp/cargo-target
     export npm_config_cache=/tmp/npm-cache
@@ -5850,14 +5882,8 @@ EOF
         ;;
     esac
 
-    # After opencode exits: integrity check + sync back to mount
-    echo "[$(date +%T)] Syncing session data back to host..."
-    check_sqlite_dbs "$VM_DATA/opencode"
-    check_sqlite_dbs "$VM_STATE/opencode"
-    echo "[$(date +%T)] In-VM SQLite checks done"
-    rsync -a --exclude="bin/" --exclude="log/" --exclude="tool-output/" "$VM_DATA/opencode/" "$SESS_SHARE/xdg-data/opencode/"
-    rsync -a "$VM_STATE/opencode/" "$SESS_SHARE/xdg-state/opencode/"
-    echo "[$(date +%T)] In-VM sync complete"
+    # Sync back happens via the EXIT trap installed above (covers both clean
+    # exit and Ctrl+C-driven termination of the web server).
   ' _ "$proj" "$sess_share" "$SESSION_MODE" "${SESSION_PORT:-0}" "${SESSION_PASSWORD:-}" "${OC_WEB_TUI:-false}" "$host_lan_ip"; then
     if [[ "$SESSION_MODE" != "shell" ]]; then
     OC_SHELL_OK=1
