@@ -87,7 +87,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.26"
+OCVM_VERSION="0.4.27"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -4772,6 +4772,63 @@ stop_host_port_forwards_in_vm() {
   ' _ "$HOST_TCP_PORTS" || true
 }
 
+# Web-mode forwarding: SSH tunnel from host(0.0.0.0:port) → VM(127.0.0.1:port).
+# Lima's auto-port-forward (catchall rule with guestIPMustBeZero) silently dies
+# after the in-VM server crashes and is restarted — the host Listener keeps
+# accepting TCP but the gvisor netstack endpoint to the VM is gone. By having
+# opencode bind 127.0.0.1 inside the VM, Lima never sets up an auto-forward
+# for the web port, and our own SSH tunnel is the single forwarding path with
+# a lifecycle bound to the attach/web process.
+start_web_tunnel() {
+  local vm_name="$1" port="$2"
+  [[ -n "$vm_name" && -n "$port" ]] || return 1
+  local ssh_addr ssh_port
+  ssh_addr="$(limactl list -f '{{.SSHAddress}}' "$vm_name" 2>/dev/null)"
+  ssh_port="${ssh_addr##*:}"
+  if [[ -z "$ssh_port" || "$ssh_port" == "0" ]]; then
+    echo "[tunnel] ERROR: could not determine SSH port for $vm_name" >&2
+    return 1
+  fi
+  stop_web_tunnel "$vm_name" "$port"
+  local pidfile="/tmp/ocvm-tunnel-${vm_name}-${port}.pid"
+  if ! ssh -f -N -F /dev/null \
+      -o IdentityFile="$HOME/.lima/_config/user" \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      -o NoHostAuthenticationForLocalhost=yes \
+      -o IdentitiesOnly=yes \
+      -o ExitOnForwardFailure=yes \
+      -o ServerAliveInterval=30 \
+      -o ControlMaster=no \
+      -L "0.0.0.0:${port}:127.0.0.1:${port}" \
+      -p "$ssh_port" "${USER}@127.0.0.1" 2>&1; then
+    echo "[tunnel] ERROR: ssh -L 0.0.0.0:${port} failed (port likely in use by a stale Lima auto-forward)" >&2
+    echo "[tunnel]   Recovery: 'limactl stop ${vm_name}' then re-attach, or pick a different --port." >&2
+    return 1
+  fi
+  local pid
+  pid="$(pgrep -f "ssh -f -N .*-L 0\.0\.0\.0:${port}:127\.0\.0\.1:${port}" | head -1)"
+  if [[ -n "$pid" ]]; then
+    echo "$pid" > "$pidfile"
+    echo "[tunnel] SSH tunnel up: host 0.0.0.0:${port} → VM 127.0.0.1:${port} (pid ${pid})"
+  fi
+  return 0
+}
+
+stop_web_tunnel() {
+  local vm_name="$1" port="$2"
+  [[ -n "$vm_name" && -n "$port" ]] || return 0
+  local pidfile="/tmp/ocvm-tunnel-${vm_name}-${port}.pid"
+  if [[ -f "$pidfile" ]]; then
+    local pid
+    pid="$(cat "$pidfile" 2>/dev/null)"
+    [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+    rm -f "$pidfile"
+  fi
+  pkill -f "ssh -f -N .*-L 0\.0\.0\.0:${port}:127\.0\.0\.1:${port}" 2>/dev/null || true
+  return 0
+}
+
 enter_session_shell() {
   local vm_name="$1" proj_dir="$2" host_lan_ip="${3:-localhost}" sess_share="${4:-}"
   sanitize_lima_sock_dir
@@ -4875,6 +4932,16 @@ attach_session() {
   # No-op when graphify isn't installed; injects mcp extras when missing.
   graphify_ensure_mcp_in_vm "$SESS_NAME"
 
+  # Web mode: open SSH tunnel host(0.0.0.0:port) → VM(127.0.0.1:port) and
+  # tear it down when this attach ends. See start_web_tunnel for rationale.
+  if [[ "$sess_mode" == "web" ]]; then
+    if ! start_web_tunnel "$SESS_NAME" "$sess_port"; then
+      echo "[attach] ERROR: web tunnel could not be established — aborting." >&2
+      exit 1
+    fi
+    trap "stop_web_tunnel '$SESS_NAME' '$sess_port'" EXIT
+  fi
+
   limactl shell --workdir / "$SESS_NAME" -- bash -lc '
     set -euo pipefail
     PROJ_DIR="$1"
@@ -4948,7 +5015,7 @@ attach_session() {
         echo ""
       fi
       if [ "$OC_WEB_TUI" = "true" ]; then
-        aa-exec -p opencode-sandbox -- opencode web --hostname 0.0.0.0 --port "$OC_PORT" &
+        aa-exec -p opencode-sandbox -- opencode web --hostname 127.0.0.1 --port "$OC_PORT" &
         OC_WEB_PID=$!
         sleep 2
         echo ""
@@ -4959,7 +5026,20 @@ attach_session() {
         wait "$OC_WEB_PID" 2>/dev/null || true
       else
         echo "Press Ctrl+C to stop the session."
-        aa-exec -p opencode-sandbox -- opencode web --hostname 0.0.0.0 --port "$OC_PORT" || true
+        # Restart loop: if opencode web crashes (non-clean exit), bring it
+        # back up. The SSH tunnel from the host keeps forwarding to
+        # 127.0.0.1:$OC_PORT and stays valid across restarts. Clean exits
+        # (0 / SIGINT 130 / SIGTERM 143) end the loop.
+        while true; do
+          aa-exec -p opencode-sandbox -- opencode web --hostname 127.0.0.1 --port "$OC_PORT"
+          rc=$?
+          case "$rc" in
+            0|130|143) break ;;
+          esac
+          echo ""
+          echo "[attach] opencode web exited unexpectedly (rc=$rc) — restarting in 2s. Press Ctrl+C to abort."
+          sleep 2 || break
+        done
       fi
     else
       aa-exec -p opencode-sandbox -- opencode || true
@@ -5509,6 +5589,10 @@ start_session() {
 
   cleanup() {
     echo "[cleanup] Starting cleanup... $(_ts)"
+    # Tear down web-mode SSH tunnel (no-op if not web mode or already gone)
+    if [[ "${SESSION_MODE:-}" == "web" && -n "${sess:-}" && -n "${SESSION_PORT:-}" ]]; then
+      stop_web_tunnel "$sess" "$SESSION_PORT"
+    fi
     # Sync config back with conflict detection
     local dst
     dst="$(pick_host_cfg)"
@@ -5758,6 +5842,16 @@ start_session() {
   host_lan_ip="$(get_host_ip)"
   echo "[run] Host LAN IP: ${host_lan_ip} $(_ts)"
 
+  # Web mode: SSH tunnel host(0.0.0.0:port) → VM(127.0.0.1:port).
+  # opencode binds 127.0.0.1 inside the VM, so Lima's auto-port-forward
+  # does not fight us for the host port. See start_web_tunnel for rationale.
+  if [[ "$SESSION_MODE" == "web" ]]; then
+    if ! start_web_tunnel "$sess" "${SESSION_PORT:-0}"; then
+      echo "[run] ERROR: web tunnel could not be established — aborting." >&2
+      return 1
+    fi
+  fi
+
   if limactl shell --workdir / "$sess" -- bash -lc '
     set -euo pipefail
     PROJ_DIR="$1"
@@ -5926,7 +6020,7 @@ EOF
           echo ""
         fi
         if [ "$OC_WEB_TUI" = "true" ]; then
-          aa-exec -p opencode-sandbox -- opencode web --hostname 0.0.0.0 --port "$OC_PORT" &
+          aa-exec -p opencode-sandbox -- opencode web --hostname 127.0.0.1 --port "$OC_PORT" &
           OC_WEB_PID=$!
           sleep 2
           echo ""
@@ -5937,7 +6031,20 @@ EOF
           wait "$OC_WEB_PID" 2>/dev/null || true
         else
           echo "Press Ctrl+C to stop the session."
-          aa-exec -p opencode-sandbox -- opencode web --hostname 0.0.0.0 --port "$OC_PORT" || true
+          # Restart loop: crashes (non-clean exit) come back automatically.
+          # The host-side SSH tunnel forwards to 127.0.0.1:$OC_PORT in the VM
+          # and is stable across these in-VM restarts. Clean exits (0/130/143)
+          # end the loop.
+          while true; do
+            aa-exec -p opencode-sandbox -- opencode web --hostname 127.0.0.1 --port "$OC_PORT"
+            rc=$?
+            case "$rc" in
+              0|130|143) break ;;
+            esac
+            echo ""
+            echo "[run] opencode web exited unexpectedly (rc=$rc) — restarting in 2s. Press Ctrl+C to abort."
+            sleep 2 || break
+          done
         fi
         ;;
       *)
