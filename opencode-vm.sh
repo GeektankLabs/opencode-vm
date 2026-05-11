@@ -87,7 +87,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.27"
+OCVM_VERSION="0.4.28"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -4782,11 +4782,10 @@ stop_host_port_forwards_in_vm() {
 start_web_tunnel() {
   local vm_name="$1" port="$2"
   [[ -n "$vm_name" && -n "$port" ]] || return 1
-  local ssh_addr ssh_port
-  ssh_addr="$(limactl list -f '{{.SSHAddress}}' "$vm_name" 2>/dev/null)"
-  ssh_port="${ssh_addr##*:}"
-  if [[ -z "$ssh_port" || "$ssh_port" == "0" ]]; then
-    echo "[tunnel] ERROR: could not determine SSH port for $vm_name" >&2
+  local ssh_port
+  ssh_port="$(limactl list -f '{{.SSHLocalPort}}' "$vm_name" 2>/dev/null)"
+  if [[ -z "$ssh_port" || "$ssh_port" == "0" || ! "$ssh_port" =~ ^[0-9]+$ ]]; then
+    echo "[tunnel] ERROR: could not determine SSH port for $vm_name (got: '$ssh_port')" >&2
     return 1
   fi
   stop_web_tunnel "$vm_name" "$port"
