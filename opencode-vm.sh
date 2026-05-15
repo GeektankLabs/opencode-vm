@@ -87,7 +87,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.28"
+OCVM_VERSION="0.4.29"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -4772,46 +4772,99 @@ stop_host_port_forwards_in_vm() {
   ' _ "$HOST_TCP_PORTS" || true
 }
 
-# Web-mode forwarding: SSH tunnel from host(0.0.0.0:port) → VM(127.0.0.1:port).
-# Lima's auto-port-forward (catchall rule with guestIPMustBeZero) silently dies
-# after the in-VM server crashes and is restarted — the host Listener keeps
-# accepting TCP but the gvisor netstack endpoint to the VM is gone. By having
-# opencode bind 127.0.0.1 inside the VM, Lima never sets up an auto-forward
-# for the web port, and our own SSH tunnel is the single forwarding path with
-# a lifecycle bound to the attach/web process.
+# Web-mode forwarding: SSH tunnel from host(0.0.0.0:hostPort) → VM(127.0.0.1:vmPort).
+#
+# Layered design — co-existence with Lima's auto-port-forward:
+#   - opencode binds 127.0.0.1 inside the VM (not 0.0.0.0). Lima still creates
+#     an auto-forward via the second portForwards rule (guestIPMustBeZero:
+#     false → host-IP 127.0.0.1), so the host gets a loopback-only listener
+#     "for free" — a second path to opencode if our tunnel ever dies.
+#   - Our SSH tunnel binds 0.0.0.0:hostPort — different bind address, no
+#     conflict with Lima's 127.0.0.1:hostPort listener. The LAN/NetBird path
+#     is exclusively the tunnel.
+#
+# Robustness:
+#   - On bind conflict (e.g. stale Lima auto-forward on 0.0.0.0 from a prior
+#     session that used --hostname 0.0.0.0), we try hostPort+1..hostPort+9 and
+#     surface the actually-bound port via WEB_TUNNEL_HOST_PORT.
+#   - VM-side port stays the user-requested one — opencode --port doesn't
+#     change. Only the externally-visible host port may shift.
+WEB_TUNNEL_HOST_PORT=""
+WEB_TUNNEL_LOOPBACK_OK=""
+
 start_web_tunnel() {
-  local vm_name="$1" port="$2"
-  [[ -n "$vm_name" && -n "$port" ]] || return 1
+  local vm_name="$1" requested_port="$2"
+  [[ -n "$vm_name" && -n "$requested_port" ]] || return 1
+  WEB_TUNNEL_HOST_PORT=""
+  WEB_TUNNEL_LOOPBACK_OK=""
+
   local ssh_port
   ssh_port="$(limactl list -f '{{.SSHLocalPort}}' "$vm_name" 2>/dev/null)"
   if [[ -z "$ssh_port" || "$ssh_port" == "0" || ! "$ssh_port" =~ ^[0-9]+$ ]]; then
     echo "[tunnel] ERROR: could not determine SSH port for $vm_name (got: '$ssh_port')" >&2
     return 1
   fi
-  stop_web_tunnel "$vm_name" "$port"
-  local pidfile="/tmp/ocvm-tunnel-${vm_name}-${port}.pid"
-  if ! ssh -f -N -F /dev/null \
-      -o IdentityFile="$HOME/.lima/_config/user" \
-      -o StrictHostKeyChecking=no \
-      -o UserKnownHostsFile=/dev/null \
-      -o NoHostAuthenticationForLocalhost=yes \
-      -o IdentitiesOnly=yes \
-      -o ExitOnForwardFailure=yes \
-      -o ServerAliveInterval=30 \
-      -o ControlMaster=no \
-      -L "0.0.0.0:${port}:127.0.0.1:${port}" \
-      -p "$ssh_port" "${USER}@127.0.0.1" 2>&1; then
-    echo "[tunnel] ERROR: ssh -L 0.0.0.0:${port} failed (port likely in use by a stale Lima auto-forward)" >&2
-    echo "[tunnel]   Recovery: 'limactl stop ${vm_name}' then re-attach, or pick a different --port." >&2
-    return 1
-  fi
-  local pid
-  pid="$(pgrep -f "ssh -f -N .*-L 0\.0\.0\.0:${port}:127\.0\.0\.1:${port}" | head -1)"
-  if [[ -n "$pid" ]]; then
-    echo "$pid" > "$pidfile"
-    echo "[tunnel] SSH tunnel up: host 0.0.0.0:${port} → VM 127.0.0.1:${port} (pid ${pid})"
-  fi
-  return 0
+
+  # Sweep any stale tunnel of ours for this VM+requested port (and adjacent
+  # fallback ports) before trying to bind. Idempotent.
+  local p
+  for p in $(seq "$requested_port" $((requested_port + 9))); do
+    stop_web_tunnel "$vm_name" "$p" >/dev/null 2>&1 || true
+  done
+
+  local try_port offset pid bound_pid
+  for offset in 0 1 2 3 4 5 6 7 8 9; do
+    try_port=$((requested_port + offset))
+
+    # Pre-flight: is 0.0.0.0:try_port (or *:try_port) already bound by
+    # someone else (e.g. a stale Lima 0.0.0.0 auto-forward)? We accept
+    # 127.0.0.1-only listeners — those don't conflict with 0.0.0.0 binds.
+    if lsof -nP -iTCP:"$try_port" -sTCP:LISTEN 2>/dev/null \
+         | awk 'NR>1 {print $9}' \
+         | grep -qE '(^\*|^0\.0\.0\.0|^\[::\]|^\[::0\]):'; then
+      if [[ $offset -eq 0 ]]; then
+        echo "[tunnel] Host port $try_port is already bound on 0.0.0.0 (likely a stale auto-forward)."
+      else
+        echo "[tunnel]   ...port $try_port also busy, trying next..."
+      fi
+      continue
+    fi
+
+    if ssh -f -N -F /dev/null \
+        -o IdentityFile="$HOME/.lima/_config/user" \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o NoHostAuthenticationForLocalhost=yes \
+        -o IdentitiesOnly=yes \
+        -o ExitOnForwardFailure=yes \
+        -o ServerAliveInterval=30 \
+        -o ControlMaster=no \
+        -L "0.0.0.0:${try_port}:127.0.0.1:${requested_port}" \
+        -p "$ssh_port" "${USER}@127.0.0.1" 2>/dev/null; then
+      bound_pid="$(pgrep -f "ssh -f -N .*-L 0\.0\.0\.0:${try_port}:127\.0\.0\.1:${requested_port}" | head -1)"
+      [[ -n "$bound_pid" ]] && echo "$bound_pid" > "/tmp/ocvm-tunnel-${vm_name}-${try_port}.pid"
+      WEB_TUNNEL_HOST_PORT="$try_port"
+      if [[ "$try_port" == "$requested_port" ]]; then
+        echo "[tunnel] SSH tunnel up: host 0.0.0.0:${try_port} → VM 127.0.0.1:${requested_port} (pid ${bound_pid:-?})"
+      else
+        echo "[tunnel] SSH tunnel up on FALLBACK port: host 0.0.0.0:${try_port} → VM 127.0.0.1:${requested_port}"
+        echo "[tunnel]   (requested ${requested_port} was unavailable; use port ${try_port} in browser/NetBird)"
+      fi
+      # Lima's parallel loopback path? Probe 127.0.0.1:requested_port.
+      # (Won't block tunnel success — informational only.)
+      if (sleep 0.5; curl -fsS --max-time 2 -o /dev/null "http://127.0.0.1:${requested_port}/" 2>/dev/null) &
+      then
+        :
+      fi
+      return 0
+    fi
+  done
+
+  echo "[tunnel] ERROR: could not establish SSH tunnel on any host port in ${requested_port}..$((requested_port + 9))" >&2
+  echo "[tunnel]   Diagnose: lsof -nP -iTCP:${requested_port} -sTCP:LISTEN" >&2
+  echo "[tunnel]   If a 'limactl' process holds the port, stop & restart the VM to clear it:" >&2
+  echo "[tunnel]     limactl stop ${vm_name} && limactl start ${vm_name}" >&2
+  return 1
 }
 
 stop_web_tunnel() {
@@ -4824,7 +4877,27 @@ stop_web_tunnel() {
     [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
     rm -f "$pidfile"
   fi
-  pkill -f "ssh -f -N .*-L 0\.0\.0\.0:${port}:127\.0\.0\.1:${port}" 2>/dev/null || true
+  # Belt-and-suspenders: kill anything matching the same -L spec, regardless
+  # of pidfile presence (covers manual cleanups and torn pidfiles).
+  pkill -f "ssh -f -N .*-L 0\.0\.0\.0:${port}:127\.0\.0\.1:" 2>/dev/null || true
+  return 0
+}
+
+# Probe the tunnel from the host — returns 0 if HTTP responds (any status).
+# Runs in background after a short delay because opencode may still be
+# booting inside the VM when we call it. Used for human-readable diagnostics
+# only; tunnel teardown decisions are not made from this.
+probe_web_tunnel_async() {
+  local host_port="$1" lan_ip="$2"
+  [[ -n "$host_port" ]] || return 0
+  (
+    sleep 4
+    local rc=""
+    rc="$(curl -fsS --max-time 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${host_port}/" 2>/dev/null || echo "000")"
+    if [[ "$rc" == "000" ]]; then
+      echo "[tunnel] WARNING: probe http://127.0.0.1:${host_port}/ did not respond — opencode may still be starting or has crashed in VM."
+    fi
+  ) &
   return 0
 }
 
@@ -4931,14 +5004,21 @@ attach_session() {
   # No-op when graphify isn't installed; injects mcp extras when missing.
   graphify_ensure_mcp_in_vm "$SESS_NAME"
 
-  # Web mode: open SSH tunnel host(0.0.0.0:port) → VM(127.0.0.1:port) and
-  # tear it down when this attach ends. See start_web_tunnel for rationale.
+  # Web mode: open SSH tunnel host(0.0.0.0:hostPort) → VM(127.0.0.1:sess_port)
+  # and tear it down when this attach ends. Tunnel failure is non-fatal: the
+  # session still runs, and opencode is reachable via Lima's loopback
+  # auto-forward at 127.0.0.1:sess_port. See start_web_tunnel for rationale.
+  local effective_host_port="$sess_port"
   if [[ "$sess_mode" == "web" ]]; then
-    if ! start_web_tunnel "$SESS_NAME" "$sess_port"; then
-      echo "[attach] ERROR: web tunnel could not be established — aborting." >&2
-      exit 1
+    if start_web_tunnel "$SESS_NAME" "$sess_port"; then
+      effective_host_port="$WEB_TUNNEL_HOST_PORT"
+      trap "stop_web_tunnel '$SESS_NAME' '$WEB_TUNNEL_HOST_PORT'" EXIT
+      probe_web_tunnel_async "$WEB_TUNNEL_HOST_PORT" "$host_lan_ip"
+    else
+      echo "[attach] WARNING: SSH tunnel for LAN access could not be set up." >&2
+      echo "[attach]   Session continues. Loopback-only fallback may be available via http://127.0.0.1:${sess_port}/ (Lima auto-forward)." >&2
+      echo "[attach]   To enable LAN access: stop+restart the VM, then 'opencode-vm attach'." >&2
     fi
-    trap "stop_web_tunnel '$SESS_NAME' '$sess_port'" EXIT
   fi
 
   limactl shell --workdir / "$SESS_NAME" -- bash -lc '
@@ -4950,6 +5030,7 @@ attach_session() {
     OC_HOST_IP="$5"
     OC_PASSWORD="$6"
     OC_WEB_TUI="$7"
+    OC_HOST_PORT="${8:-$OC_PORT}"
 
     export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/.config/composer/vendor/bin:/tmp/go/bin:/tmp/pnpm-store:$PATH"
     export CARGO_TARGET_DIR=/tmp/cargo-target
@@ -4995,14 +5076,19 @@ attach_session() {
     if [ "$OC_MODE" = "web" ]; then
       echo ""
       echo "=============================================="
-      echo "  OpenCode Web Server (port $OC_PORT) — resumed"
+      echo "  OpenCode Web Server (VM port $OC_PORT) — resumed"
       echo "=============================================="
       echo ""
       echo "Connect via:"
       echo ""
-      echo "  Browser/Web UI:  http://${OC_HOST_IP}:${OC_PORT}"
-      echo "  API docs:        http://${OC_HOST_IP}:${OC_PORT}/doc"
-      echo "  TUI attach:      opencode attach http://${OC_HOST_IP}:${OC_PORT}"
+      echo "  Browser/Web UI:  http://${OC_HOST_IP}:${OC_HOST_PORT}"
+      echo "  API docs:        http://${OC_HOST_IP}:${OC_HOST_PORT}/doc"
+      echo "  TUI attach:      opencode attach http://${OC_HOST_IP}:${OC_HOST_PORT}"
+      if [ "$OC_HOST_PORT" != "$OC_PORT" ]; then
+        echo ""
+        echo "  Note: requested port ${OC_PORT} was busy; LAN tunnel uses ${OC_HOST_PORT}."
+      fi
+      echo "  Loopback also: http://127.0.0.1:${OC_PORT} (via Lima auto-forward)"
       echo ""
       if [ -n "$OC_PASSWORD" ]; then
         echo "  Username:        opencode"
@@ -5050,7 +5136,7 @@ attach_session() {
       /tmp/oc-xdg-data/opencode/ "$SESS_SHARE/xdg-data/opencode/" 2>/dev/null || true
     rsync -a /tmp/oc-xdg-state/opencode/ "$SESS_SHARE/xdg-state/opencode/" 2>/dev/null || true
     echo "[attach] Sync complete"
-  ' _ "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$sess_port" "$host_lan_ip" "${SESSION_PASSWORD:-}" "${OC_WEB_TUI:-false}"
+  ' _ "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$sess_port" "$host_lan_ip" "${SESSION_PASSWORD:-}" "${OC_WEB_TUI:-false}" "$effective_host_port"
 }
 
 # Update SESS_MODE / SESS_PORT in an existing session.env, preserving other
@@ -5588,9 +5674,13 @@ start_session() {
 
   cleanup() {
     echo "[cleanup] Starting cleanup... $(_ts)"
-    # Tear down web-mode SSH tunnel (no-op if not web mode or already gone)
+    # Tear down web-mode SSH tunnel (no-op if not web mode or already gone).
+    # Sweep the requested port plus the fallback range used by start_web_tunnel.
     if [[ "${SESSION_MODE:-}" == "web" && -n "${sess:-}" && -n "${SESSION_PORT:-}" ]]; then
-      stop_web_tunnel "$sess" "$SESSION_PORT"
+      local _p
+      for _p in $(seq "$SESSION_PORT" $((SESSION_PORT + 9))); do
+        stop_web_tunnel "$sess" "$_p" >/dev/null 2>&1 || true
+      done
     fi
     # Sync config back with conflict detection
     local dst
@@ -5841,13 +5931,19 @@ start_session() {
   host_lan_ip="$(get_host_ip)"
   echo "[run] Host LAN IP: ${host_lan_ip} $(_ts)"
 
-  # Web mode: SSH tunnel host(0.0.0.0:port) → VM(127.0.0.1:port).
-  # opencode binds 127.0.0.1 inside the VM, so Lima's auto-port-forward
-  # does not fight us for the host port. See start_web_tunnel for rationale.
+  # Web mode: SSH tunnel host(0.0.0.0:hostPort) → VM(127.0.0.1:OC_PORT).
+  # opencode binds 127.0.0.1 inside the VM. Lima's loopback auto-forward
+  # (127.0.0.1:OC_PORT) coexists with our tunnel — different bind addresses.
+  # Tunnel failure is non-fatal: opencode is still reachable via loopback.
+  local effective_host_port="${SESSION_PORT:-0}"
   if [[ "$SESSION_MODE" == "web" ]]; then
-    if ! start_web_tunnel "$sess" "${SESSION_PORT:-0}"; then
-      echo "[run] ERROR: web tunnel could not be established — aborting." >&2
-      return 1
+    if start_web_tunnel "$sess" "${SESSION_PORT:-0}"; then
+      effective_host_port="$WEB_TUNNEL_HOST_PORT"
+      probe_web_tunnel_async "$WEB_TUNNEL_HOST_PORT" "$host_lan_ip"
+    else
+      echo "[run] WARNING: SSH tunnel for LAN access could not be set up." >&2
+      echo "[run]   Session continues. Loopback fallback may work via http://127.0.0.1:${SESSION_PORT}/ (Lima auto-forward)." >&2
+      echo "[run]   To enable LAN access: 'limactl stop ${sess} && limactl start ${sess}', then 'opencode-vm attach'." >&2
     fi
   fi
 
@@ -5860,6 +5956,7 @@ start_session() {
     OC_PASSWORD="$5"
     OC_WEB_TUI="$6"
     OC_HOST_IP="$7"
+    OC_HOST_PORT="${8:-$OC_PORT}"
     export OCVM_HOST_LAN_IP="$OC_HOST_IP"
     export HOST_LAN_IP="$OC_HOST_IP"
     export LANIP="$OC_HOST_IP"
@@ -5991,14 +6088,19 @@ EOF
       web)
         echo ""
         echo "=============================================="
-        echo "  OpenCode Web Server (port $OC_PORT)"
+        echo "  OpenCode Web Server (VM port $OC_PORT)"
         echo "=============================================="
         echo ""
         echo "Connect via:"
         echo ""
-        echo "  Browser/Web UI:  http://${OC_HOST_IP}:${OC_PORT}"
-        echo "  API docs:        http://${OC_HOST_IP}:${OC_PORT}/doc"
-        echo "  TUI attach:      opencode attach http://${OC_HOST_IP}:${OC_PORT}"
+        echo "  Browser/Web UI:  http://${OC_HOST_IP}:${OC_HOST_PORT}"
+        echo "  API docs:        http://${OC_HOST_IP}:${OC_HOST_PORT}/doc"
+        echo "  TUI attach:      opencode attach http://${OC_HOST_IP}:${OC_HOST_PORT}"
+        if [ "$OC_HOST_PORT" != "$OC_PORT" ]; then
+          echo ""
+          echo "  Note: requested port ${OC_PORT} was busy; LAN tunnel uses ${OC_HOST_PORT}."
+        fi
+        echo "  Loopback also: http://127.0.0.1:${OC_PORT} (via Lima auto-forward)"
         echo ""
         if [ -n "$OC_PASSWORD" ]; then
           echo "  Username:        opencode"
@@ -6053,7 +6155,7 @@ EOF
 
     # Sync back happens via the EXIT trap installed above (covers both clean
     # exit and Ctrl+C-driven termination of the web server).
-  ' _ "$proj" "$sess_share" "$SESSION_MODE" "${SESSION_PORT:-0}" "${SESSION_PASSWORD:-}" "${OC_WEB_TUI:-false}" "$host_lan_ip"; then
+  ' _ "$proj" "$sess_share" "$SESSION_MODE" "${SESSION_PORT:-0}" "${SESSION_PASSWORD:-}" "${OC_WEB_TUI:-false}" "$host_lan_ip" "$effective_host_port"; then
     if [[ "$SESSION_MODE" != "shell" ]]; then
     OC_SHELL_OK=1
     fi
