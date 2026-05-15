@@ -204,6 +204,19 @@ opencode-vm web --tui               # also start TUI in terminal (experimental)
 
 The `--tui` flag starts the web server in the background, then lets you press Enter to launch a terminal TUI that connects to the same server — giving you both interfaces at once.
 
+### Web-UI Attachments (the "+" upload button)
+
+OpenCode's web UI lets you attach a file to a message with the "+" button. Under the hood the upload is inlined as a base64 `data:` URI into the message JSON — which means the model can *see* an image (when it's vision-capable), but the agent's tools (Read, Bash, ImageMagick, `pdftotext`, MCPs, …) can't open it as a real file.
+
+opencode-vm runs a small `ocvm-materialize` daemon inside every **web-mode** session that watches OpenCode's session storage and writes each `data:`-URI upload to disk. The agent is informed about the location via `AGENTS.md` and can simply use the real path with any tool:
+
+- **Where:** `$OCVM_ATTACHMENTS_DIR` — a subpath of the session share, one subfolder per OpenCode session id, with an `index.json` that maps part-IDs to filenames.
+- **When:** active only in `opencode-vm web` (and on `opencode-vm attach` to a web session). TUI sessions don't have a "+" upload path.
+- **Lifetime:** ephemeral — the directory is wiped at session end. Files do **not** survive `--keep-history`.
+- **Disable:** set `OCVM_MATERIALIZE=0` in your environment before `opencode-vm web` to turn the daemon off entirely.
+
+You can inspect daemon state via `opencode-vm doctor` (section *Web-UI Attachments*).
+
 ## Config & State Sync (important)
 
 This project syncs OpenCode user data between local host and VM sessions, including:

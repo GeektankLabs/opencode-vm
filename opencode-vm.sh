@@ -87,7 +87,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.29"
+OCVM_VERSION="0.4.30"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -2665,6 +2665,40 @@ doctor_cmd() {
           echo "             VM venv:   unknown (base VM stopped)"
         fi
       fi
+      echo ""
+
+      # ---- Web-UI Attachments (materialize daemon) ----
+      echo "[doctor] Web-UI Attachments (materialize daemon)"
+      local _mat_in_base="unknown"
+      if is_vm_running "$BASE_NAME"; then
+        if limactl shell --workdir / "$BASE_NAME" -- bash -lc 'test -x $HOME/.local/bin/ocvm-materialize' 2>/dev/null; then
+          _mat_in_base="present"
+        else
+          _mat_in_base="missing (run: opencode-vm init)"
+        fi
+      else
+        _mat_in_base="unknown (base VM stopped)"
+      fi
+      echo "  base VM binary: $_mat_in_base"
+      local _mat_running=0 _mat_files=0 _mat_sess
+      if [[ -d "$SESSIONS_DIR" ]]; then
+        local _sdir
+        for _sdir in "$SESSIONS_DIR"/*/; do
+          [[ -d "$_sdir" ]] || continue
+          if [[ -f "${_sdir}materialize.pid" ]]; then
+            _mat_running=$((_mat_running + 1))
+          fi
+          if [[ -d "${_sdir}attachments" ]]; then
+            _mat_sess=$(find "${_sdir}attachments" -mindepth 2 -type f ! -name 'index.json' ! -name '*.tmp' 2>/dev/null | wc -l | tr -d ' ')
+            _mat_files=$((_mat_files + _mat_sess))
+          fi
+        done
+      fi
+      echo "  active daemons: $_mat_running (one per running web session)"
+      echo "  materialized:   $_mat_files file(s) across all sessions"
+      if [[ "${OCVM_MATERIALIZE:-1}" == "0" ]]; then
+        echo "  status:         DISABLED via OCVM_MATERIALIZE=0"
+      fi
       ;;
 
     *)
@@ -4123,6 +4157,238 @@ exec ~/.local/share/pipx/venvs/graphifyy/bin/python -m graphify.serve "$graph"
 WRAPPER
 sudo chmod 0755 /usr/local/bin/graphify-serve-wrapper.sh
 
+# ocvm-materialize: poll OpenCode session storage for FilePart entries that
+# carry a data: URI (the web UI's "+" upload mechanism inlines uploads as
+# base64) and write them to disk so the agent's tools get a real path.
+# Pure stdlib Python, no inotify dependency. Started by start_session in
+# web mode; stops on SIGTERM.
+mkdir -p ~/.local/bin
+cat > ~/.local/bin/ocvm-materialize <<'OCVMMAT'
+#!/usr/bin/env python3
+"""
+ocvm-materialize: watch OpenCode session storage for inline data: URI
+attachments and persist them to OCVM_ATTACHMENTS_DIR/<session-id>/.
+
+Env:
+  OPENCODE_DATA_DIR     OpenCode XDG_DATA_HOME/opencode root (defaults to
+                        /tmp/oc-xdg-data/opencode)
+  OCVM_ATTACHMENTS_DIR  destination root (required)
+  OCVM_MATERIALIZE_LOG  log file path (optional)
+  OCVM_MATERIALIZE_POLL poll interval in seconds (default 0.5)
+"""
+
+import base64
+import hashlib
+import json
+import logging
+import mimetypes
+import os
+import re
+import signal
+import sys
+import time
+from pathlib import Path
+from urllib.parse import unquote
+
+POLL_INTERVAL = float(os.environ.get("OCVM_MATERIALIZE_POLL", "0.5"))
+DATA_DIR = Path(os.environ.get("OPENCODE_DATA_DIR", "/tmp/oc-xdg-data/opencode"))
+ATT_DIR_ENV = os.environ.get("OCVM_ATTACHMENTS_DIR")
+if not ATT_DIR_ENV:
+    sys.stderr.write("ocvm-materialize: OCVM_ATTACHMENTS_DIR not set\n")
+    sys.exit(2)
+ATTACHMENTS_DIR = Path(ATT_DIR_ENV)
+LOG_FILE = Path(os.environ.get("OCVM_MATERIALIZE_LOG",
+                               str(ATTACHMENTS_DIR.parent / "materialize.log")))
+
+DATA_URI_RE = re.compile(r"^data:([^;,]+)?(;[^,]*)?,(.*)$", re.DOTALL)
+
+
+def setup_logging():
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        filename=str(LOG_FILE),
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+    )
+
+
+def decode_data_url(url):
+    m = DATA_URI_RE.match(url)
+    if not m:
+        return None
+    mime = (m.group(1) or "application/octet-stream").strip()
+    params = (m.group(2) or "").lower()
+    payload = m.group(3)
+    if "base64" in params:
+        try:
+            data = base64.b64decode(payload, validate=False)
+        except Exception:
+            return None
+    else:
+        data = unquote(payload).encode("utf-8", errors="replace")
+    return mime, data
+
+
+def safe_filename(name, mime):
+    if name:
+        name = os.path.basename(name)
+        name = re.sub(r"[^\w.\-+]", "_", name)
+        name = name[:120].lstrip(".")
+        if name:
+            return name
+    ext = mimetypes.guess_extension(mime) or ".bin"
+    return f"attachment{ext}"
+
+
+def update_index(session_dir, part_id, filename, mime):
+    idx_file = session_dir / "index.json"
+    idx = {}
+    if idx_file.exists():
+        try:
+            idx = json.loads(idx_file.read_text())
+            if not isinstance(idx, dict):
+                idx = {}
+        except Exception:
+            idx = {}
+    idx[part_id] = {
+        "filename": filename,
+        "mime": mime,
+        "timestamp": time.time(),
+    }
+    tmp = idx_file.with_suffix(".tmp")
+    tmp.write_text(json.dumps(idx, indent=2, sort_keys=True))
+    tmp.rename(idx_file)
+
+
+def materialize(session_id, part_id, filename, mime, data):
+    session_dir = ATTACHMENTS_DIR / re.sub(r"[^\w.\-]", "_", session_id)
+    session_dir.mkdir(parents=True, exist_ok=True)
+    final_name = safe_filename(filename, mime)
+    target = session_dir / final_name
+    new_sha = hashlib.sha256(data).hexdigest()
+    if target.exists():
+        try:
+            existing_sha = hashlib.sha256(target.read_bytes()).hexdigest()
+        except Exception:
+            existing_sha = None
+        if existing_sha == new_sha:
+            update_index(session_dir, part_id, target.name, mime)
+            return target
+        base, ext = os.path.splitext(final_name)
+        i = 1
+        while (session_dir / f"{base}-{i}{ext}").exists():
+            i += 1
+        target = session_dir / f"{base}-{i}{ext}"
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    tmp.write_bytes(data)
+    tmp.rename(target)
+    update_index(session_dir, part_id, target.name, mime)
+    return target
+
+
+def walk_parts(obj, callback):
+    if isinstance(obj, dict):
+        if obj.get("type") == "file" and isinstance(obj.get("url"), str):
+            callback(obj)
+        for v in obj.values():
+            walk_parts(v, callback)
+    elif isinstance(obj, list):
+        for v in obj:
+            walk_parts(v, callback)
+
+
+def session_id_for(json_obj, file_path):
+    if isinstance(json_obj, dict):
+        for k in ("sessionID", "sessionId", "session_id"):
+            v = json_obj.get(k)
+            if isinstance(v, str) and v:
+                return v
+    parts = file_path.parts
+    for i, p in enumerate(parts):
+        if p == "session" and i + 1 < len(parts):
+            for j in range(i + 1, len(parts)):
+                cand = parts[j]
+                if cand not in ("info", "message", "part") and not cand.endswith(".json"):
+                    return cand
+    return "default"
+
+
+def process_file(file_path, seen):
+    try:
+        text = file_path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return
+    if "data:" not in text:
+        return
+    try:
+        obj = json.loads(text)
+    except Exception:
+        return
+    sid = session_id_for(obj, file_path)
+
+    def cb(part):
+        url = part.get("url", "")
+        if not url.startswith("data:"):
+            return
+        pid = part.get("id") or part.get("partID") \
+            or hashlib.sha1(url.encode("utf-8", "ignore")).hexdigest()[:16]
+        key = (sid, pid)
+        if key in seen:
+            return
+        decoded = decode_data_url(url)
+        if not decoded:
+            return
+        mime = part.get("mime") or decoded[0]
+        try:
+            target = materialize(sid, pid, part.get("filename"), mime, decoded[1])
+            logging.info("materialized sid=%s pid=%s -> %s", sid, pid, target)
+            seen.add(key)
+        except Exception:
+            logging.exception("materialize failed sid=%s pid=%s", sid, pid)
+
+    walk_parts(obj, cb)
+
+
+def main():
+    setup_logging()
+    ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
+    logging.info("ocvm-materialize starting data_dir=%s out=%s",
+                 DATA_DIR, ATTACHMENTS_DIR)
+    seen = set()
+    mtimes = {}
+    running = [True]
+
+    def stop(*_):
+        running[0] = False
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+
+    while running[0]:
+        try:
+            if DATA_DIR.exists():
+                for f in DATA_DIR.rglob("*.json"):
+                    try:
+                        mt = f.stat().st_mtime
+                    except OSError:
+                        continue
+                    if mtimes.get(f) == mt:
+                        continue
+                    mtimes[f] = mt
+                    process_file(f, seen)
+        except Exception:
+            logging.exception("scan loop error")
+        time.sleep(POLL_INTERVAL)
+
+    logging.info("ocvm-materialize stopped")
+
+
+if __name__ == "__main__":
+    main()
+OCVMMAT
+chmod +x ~/.local/bin/ocvm-materialize
+echo "[init] ocvm-materialize installed at ~/.local/bin/ocvm-materialize"
+
 # Write nftables rules (defaults: 1234 + 11434)
 sudo tee /etc/nftables.conf >/dev/null <<'NFT'
 flush ruleset
@@ -4491,6 +4757,39 @@ of the project repository.
 2. Ask the user to create a folder called `opencode-share` on their macOS Desktop
    (if it doesn't exist yet), place the file there, and **restart the session**.
 3. The file will then be accessible at its original host path.
+
+## Web-UI Attachments (uploaded via the "+" button)
+
+When a user uploads a file via the OpenCode web UI's "+" button, the file is
+delivered to the model as an inline base64 \`data:\` URI — it has **no real
+filesystem path**, so your tools (Read, Bash, \`convert\`, \`pdftotext\`,
+\`webimg\`-pipeline, MCPs, …) cannot operate on it directly.
+
+opencode-vm runs a background daemon (\`ocvm-materialize\`) in web sessions that
+detects such uploads and writes them to disk so your tools get a real path.
+
+**Location:** the directory is exposed as the env var \`$OCVM_ATTACHMENTS_DIR\`
+(a subpath of the session share, with one subfolder per OpenCode session id).
+Each session subfolder also contains an \`index.json\` mapping part-IDs to
+filenames + MIME types.
+
+**Convention** — whenever the user's prompt refers to an uploaded file, an
+image they "just sent", or you receive a \`FilePart\` you cannot otherwise act
+on, **list the directory first**:
+
+\`\`\`bash
+ls -la "\$OCVM_ATTACHMENTS_DIR"/*/ 2>/dev/null
+\`\`\`
+
+Then pass the concrete filesystem path of the newest matching file to your tool
+(e.g. \`convert "\$OCVM_ATTACHMENTS_DIR/<sid>/foo.png" -resize 800x out.png\`).
+
+Notes:
+- The daemon polls (~0.5 s); allow a beat after the user sends the message
+  before the file appears.
+- Files are **ephemeral** — the whole directory is deleted at session end.
+- This is independent of \`~/Desktop/opencode-share/\` (that one is for
+  *user-curated* material shared from the host).
 
 ## Screenshot Capture
 
@@ -4883,6 +5182,66 @@ stop_web_tunnel() {
   return 0
 }
 
+# Spawn the ocvm-materialize daemon inside the session VM so any FilePart
+# with a data: URI (web-UI "+" upload) is dumped to disk under
+# $sess_share/attachments/<oc-session-id>/. PID is written to a pidfile in
+# the session share so cleanup() can stop it on session end.
+# Idempotent: a fresh call kills any previous daemon for this session first.
+# $1 = lima vm name  $2 = session share dir on host (same absolute path in VM)
+start_materialize_daemon() {
+  local vm_name="$1" sess_share="$2"
+  [[ -n "$vm_name" && -n "$sess_share" ]] || return 1
+  [[ "${OCVM_MATERIALIZE:-1}" == "0" ]] && {
+    echo "[materialize] OCVM_MATERIALIZE=0 — daemon disabled."
+    return 0
+  }
+  local att_dir="$sess_share/attachments"
+  local pidfile="$sess_share/materialize.pid"
+  local log="$sess_share/log/materialize.log"
+  stop_materialize_daemon "$vm_name" "$sess_share" >/dev/null 2>&1 || true
+  limactl shell --workdir / "$vm_name" -- bash -lc '
+    set +e
+    att="$1"; log="$2"; pidfile="$3"
+    mkdir -p "$att" "$(dirname "$log")"
+    : > "$log"
+    if [ ! -x "$HOME/.local/bin/ocvm-materialize" ]; then
+      echo "[materialize] ocvm-materialize not installed in this VM (re-run opencode-vm init to update base)." >>"$log"
+      exit 0
+    fi
+    export OPENCODE_DATA_DIR=/tmp/oc-xdg-data/opencode
+    export OCVM_ATTACHMENTS_DIR="$att"
+    export OCVM_MATERIALIZE_LOG="$log"
+    setsid "$HOME/.local/bin/ocvm-materialize" >>"$log" 2>&1 &
+    echo $! > "$pidfile"
+  ' _ "$att_dir" "$log" "$pidfile" 2>/dev/null || {
+    echo "[materialize] WARN: daemon spawn failed; see $log" >&2
+    return 1
+  }
+  if [[ -s "$pidfile" ]]; then
+    echo "[materialize] Daemon started (pid $(cat "$pidfile")) — attachments: $att_dir"
+  fi
+  return 0
+}
+
+stop_materialize_daemon() {
+  local vm_name="$1" sess_share="$2"
+  [[ -n "$vm_name" && -n "$sess_share" ]] || return 0
+  local pidfile="$sess_share/materialize.pid"
+  [[ -f "$pidfile" ]] || return 0
+  local pid
+  pid="$(cat "$pidfile" 2>/dev/null || true)"
+  if [[ -n "$pid" ]] && is_vm_running "$vm_name"; then
+    limactl shell --workdir / "$vm_name" -- bash -c '
+      pid="$1"
+      [[ -n "$pid" ]] && kill -TERM -"$pid" 2>/dev/null
+      [[ -n "$pid" ]] && kill -TERM "$pid" 2>/dev/null
+      true
+    ' _ "$pid" 2>/dev/null || true
+  fi
+  rm -f "$pidfile"
+  return 0
+}
+
 # Probe the tunnel from the host — returns 0 if HTTP responds (any status).
 # Runs in background after a short delay because opencode may still be
 # booting inside the VM when we call it. Used for human-readable diagnostics
@@ -4929,6 +5288,7 @@ enter_session_shell() {
       export XDG_DATA_HOME=/tmp/oc-xdg-data
       export XDG_STATE_HOME=/tmp/oc-xdg-state
       export OPENCODE_ENABLE_EXA=1
+      export OCVM_ATTACHMENTS_DIR="$SESS_SHARE/attachments"
       # ECC project identity: stable hash across sessions uses host project path
       if [ -f "$SESS_SHARE/config/opencode/.ecc-applied" ]; then
         export CLAUDE_PROJECT_DIR="$1"
@@ -5019,6 +5379,10 @@ attach_session() {
       echo "[attach]   Session continues. Loopback-only fallback may be available via http://127.0.0.1:${sess_port}/ (Lima auto-forward)." >&2
       echo "[attach]   To enable LAN access: stop+restart the VM, then 'opencode-vm attach'." >&2
     fi
+    # (Re-)start materialize daemon on reattach; idempotent if already running.
+    local _att_sess_share
+    _att_sess_share="$(session_share_dir "$proj")"
+    start_materialize_daemon "$SESS_NAME" "$_att_sess_share" || true
   fi
 
   limactl shell --workdir / "$SESS_NAME" -- bash -lc '
@@ -5053,6 +5417,7 @@ attach_session() {
     export XDG_CONFIG_HOME="$SESS_SHARE/config"
     export XDG_DATA_HOME=/tmp/oc-xdg-data
     export XDG_STATE_HOME=/tmp/oc-xdg-state
+    export OCVM_ATTACHMENTS_DIR="$SESS_SHARE/attachments"
     # ECC project identity: stable hash across sessions uses host project path
     if [ -f "$SESS_SHARE/config/opencode/.ecc-applied" ]; then
       export CLAUDE_PROJECT_DIR="$PROJ_DIR"
@@ -5773,6 +6138,17 @@ start_session() {
     rsync -a "$sess_share/xdg-state/opencode/" "$proj_state/xdg-state/opencode/"
     echo "[cleanup] Project-state cache updated $(_ts)"
 
+    # Stop the materialize daemon (web-mode only; no-op if it wasn't running)
+    # and purge the attachments directory unconditionally — uploads are
+    # explicitly ephemeral per design.
+    if [[ -n "${sess:-}" ]]; then
+      stop_materialize_daemon "$sess" "$sess_share" >/dev/null 2>&1 || true
+    fi
+    if [[ -d "$sess_share/attachments" ]]; then
+      rm -rf "$sess_share/attachments" 2>/dev/null || true
+      echo "[cleanup] Web-UI attachments purged $(_ts)"
+    fi
+
     # mcrepo: stop the in-VM graphify watcher (best-effort; if the VM is
     # already gone the kill is a no-op). The watcher is daemonized via setsid
     # so we kill the whole process group to also catch tree-sitter children.
@@ -5945,6 +6321,9 @@ start_session() {
       echo "[run]   Session continues. Loopback fallback may work via http://127.0.0.1:${SESSION_PORT}/ (Lima auto-forward)." >&2
       echo "[run]   To enable LAN access: 'limactl stop ${sess} && limactl start ${sess}', then 'opencode-vm attach'." >&2
     fi
+    # Materialize daemon: dump inline data: URI attachments from web-UI
+    # uploads to $sess_share/attachments/ so agent tools get real file paths.
+    start_materialize_daemon "$sess" "$sess_share" || true
   fi
 
   if limactl shell --workdir / "$sess" -- bash -lc '
@@ -5965,6 +6344,7 @@ start_session() {
 
     # Config stays on mount (small JSON files, safe over virtiofs)
     export XDG_CONFIG_HOME="$SESS_SHARE/config"
+    export OCVM_ATTACHMENTS_DIR="$SESS_SHARE/attachments"
 
     # ECC project identity: stable hash across sessions uses host project path
     if [ -f "$SESS_SHARE/config/opencode/.ecc-applied" ]; then
