@@ -87,7 +87,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.30"
+OCVM_VERSION="0.4.31"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -4166,15 +4166,22 @@ mkdir -p ~/.local/bin
 cat > ~/.local/bin/ocvm-materialize <<'OCVMMAT'
 #!/usr/bin/env python3
 """
-ocvm-materialize: watch OpenCode session storage for inline data: URI
-attachments and persist them to OCVM_ATTACHMENTS_DIR/<session-id>/.
+ocvm-materialize: poll OpenCode's SQLite store (opencode.db) for FilePart
+rows whose `url` carries an inline `data:` URI (web-UI "+" uploads) and
+persist them to disk under $OCVM_ATTACHMENTS_DIR/<session-id>/.
+
+OpenCode stores messages and parts in SQLite (WAL mode), not as JSON
+files. We open the DB read-only via `?mode=ro` — safe for concurrent reads
+while opencode writes.
 
 Env:
-  OPENCODE_DATA_DIR     OpenCode XDG_DATA_HOME/opencode root (defaults to
-                        /tmp/oc-xdg-data/opencode)
-  OCVM_ATTACHMENTS_DIR  destination root (required)
-  OCVM_MATERIALIZE_LOG  log file path (optional)
-  OCVM_MATERIALIZE_POLL poll interval in seconds (default 0.5)
+  OPENCODE_DATA_DIR      OpenCode XDG_DATA_HOME/opencode root
+                         (defaults to /tmp/oc-xdg-data/opencode)
+  OCVM_OPENCODE_DB       Override DB path (defaults to
+                         $OPENCODE_DATA_DIR/opencode.db)
+  OCVM_ATTACHMENTS_DIR   Destination root (required)
+  OCVM_MATERIALIZE_LOG   Log file (optional)
+  OCVM_MATERIALIZE_POLL  Poll interval seconds (default 0.5)
 """
 
 import base64
@@ -4185,6 +4192,7 @@ import mimetypes
 import os
 import re
 import signal
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -4192,6 +4200,7 @@ from urllib.parse import unquote
 
 POLL_INTERVAL = float(os.environ.get("OCVM_MATERIALIZE_POLL", "0.5"))
 DATA_DIR = Path(os.environ.get("OPENCODE_DATA_DIR", "/tmp/oc-xdg-data/opencode"))
+DB_PATH = Path(os.environ.get("OCVM_OPENCODE_DB", str(DATA_DIR / "opencode.db")))
 ATT_DIR_ENV = os.environ.get("OCVM_ATTACHMENTS_DIR")
 if not ATT_DIR_ENV:
     sys.stderr.write("ocvm-materialize: OCVM_ATTACHMENTS_DIR not set\n")
@@ -4261,7 +4270,7 @@ def update_index(session_dir, part_id, filename, mime):
 
 
 def materialize(session_id, part_id, filename, mime, data):
-    session_dir = ATTACHMENTS_DIR / re.sub(r"[^\w.\-]", "_", session_id)
+    session_dir = ATTACHMENTS_DIR / re.sub(r"[^\w.\-]", "_", session_id or "default")
     session_dir.mkdir(parents=True, exist_ok=True)
     final_name = safe_filename(filename, mime)
     target = session_dir / final_name
@@ -4286,76 +4295,82 @@ def materialize(session_id, part_id, filename, mime, data):
     return target
 
 
-def walk_parts(obj, callback):
-    if isinstance(obj, dict):
-        if obj.get("type") == "file" and isinstance(obj.get("url"), str):
-            callback(obj)
-        for v in obj.values():
-            walk_parts(v, callback)
-    elif isinstance(obj, list):
-        for v in obj:
-            walk_parts(v, callback)
-
-
-def session_id_for(json_obj, file_path):
-    if isinstance(json_obj, dict):
-        for k in ("sessionID", "sessionId", "session_id"):
-            v = json_obj.get(k)
-            if isinstance(v, str) and v:
-                return v
-    parts = file_path.parts
-    for i, p in enumerate(parts):
-        if p == "session" and i + 1 < len(parts):
-            for j in range(i + 1, len(parts)):
-                cand = parts[j]
-                if cand not in ("info", "message", "part") and not cand.endswith(".json"):
-                    return cand
-    return "default"
-
-
-def process_file(file_path, seen):
+def extract_data_url_part(blob):
+    """`blob` is the raw `data` column text. OpenCode stores the part object
+    directly as JSON. Returns the parsed dict if it carries a data: URI,
+    else None.
+    """
+    if not blob or "data:" not in blob:
+        return None
     try:
-        text = file_path.read_text(encoding="utf-8", errors="ignore")
+        obj = json.loads(blob)
     except Exception:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    url = obj.get("url")
+    if isinstance(url, str) and url.startswith("data:"):
+        return obj
+    return None
+
+
+def scan_db(seen):
+    """Open opencode.db read-only and emit any newly-seen FilePart rows."""
+    if not DB_PATH.exists():
         return
-    if "data:" not in text:
+    uri = f"file:{DB_PATH}?mode=ro"
+    try:
+        conn = sqlite3.connect(uri, uri=True, timeout=2.0)
+    except sqlite3.Error as e:
+        logging.warning("sqlite connect failed: %s", e)
         return
     try:
-        obj = json.loads(text)
-    except Exception:
-        return
-    sid = session_id_for(obj, file_path)
-
-    def cb(part):
-        url = part.get("url", "")
-        if not url.startswith("data:"):
-            return
-        pid = part.get("id") or part.get("partID") \
-            or hashlib.sha1(url.encode("utf-8", "ignore")).hexdigest()[:16]
-        key = (sid, pid)
-        if key in seen:
-            return
-        decoded = decode_data_url(url)
-        if not decoded:
-            return
-        mime = part.get("mime") or decoded[0]
+        conn.row_factory = sqlite3.Row
         try:
-            target = materialize(sid, pid, part.get("filename"), mime, decoded[1])
-            logging.info("materialized sid=%s pid=%s -> %s", sid, pid, target)
-            seen.add(key)
+            cur = conn.execute(
+                "SELECT id, session_id, message_id, data "
+                "FROM part WHERE data LIKE '%\"data:%' "
+                "ORDER BY time_created"
+            )
+        except sqlite3.Error as e:
+            logging.warning("sqlite query failed: %s", e)
+            return
+        for row in cur:
+            pid = row["id"]
+            if pid in seen:
+                continue
+            part = extract_data_url_part(row["data"])
+            if not part:
+                seen.add(pid)  # negative cache — don't reparse next loop
+                continue
+            decoded = decode_data_url(part["url"])
+            if not decoded:
+                seen.add(pid)
+                continue
+            mime = part.get("mime") or decoded[0]
+            try:
+                target = materialize(
+                    row["session_id"], pid, part.get("filename"), mime, decoded[1]
+                )
+                logging.info("materialized sid=%s pid=%s -> %s",
+                             row["session_id"], pid, target)
+                seen.add(pid)
+            except Exception:
+                logging.exception("materialize failed sid=%s pid=%s",
+                                  row["session_id"], pid)
+    finally:
+        try:
+            conn.close()
         except Exception:
-            logging.exception("materialize failed sid=%s pid=%s", sid, pid)
-
-    walk_parts(obj, cb)
+            pass
 
 
 def main():
     setup_logging()
     ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
-    logging.info("ocvm-materialize starting data_dir=%s out=%s",
-                 DATA_DIR, ATTACHMENTS_DIR)
+    logging.info("ocvm-materialize starting db=%s out=%s",
+                 DB_PATH, ATTACHMENTS_DIR)
     seen = set()
-    mtimes = {}
     running = [True]
 
     def stop(*_):
@@ -4366,19 +4381,14 @@ def main():
 
     while running[0]:
         try:
-            if DATA_DIR.exists():
-                for f in DATA_DIR.rglob("*.json"):
-                    try:
-                        mt = f.stat().st_mtime
-                    except OSError:
-                        continue
-                    if mtimes.get(f) == mt:
-                        continue
-                    mtimes[f] = mt
-                    process_file(f, seen)
+            scan_db(seen)
         except Exception:
             logging.exception("scan loop error")
-        time.sleep(POLL_INTERVAL)
+        # Drain in small slices so SIGTERM is responsive.
+        for _ in range(max(1, int(POLL_INTERVAL * 10))):
+            if not running[0]:
+                break
+            time.sleep(0.1)
 
     logging.info("ocvm-materialize stopped")
 
