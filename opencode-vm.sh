@@ -2579,9 +2579,16 @@ doctor_cmd() {
         echo "    project hash: $_hom_hash"
         echo "    store:        $_hom_dir"
         if [[ -d "$_hom_dir" ]]; then
-          local _n_personal _n_inherited _obs_line
-          _n_personal=$(find "$_hom_dir/personal" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
-          _n_inherited=$(find "$_hom_dir/inherited" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
+          local _n_personal=0 _n_inherited=0 _obs_line
+          # `find` returns non-zero when the dir doesn't exist; combined with
+          # `set -o pipefail` that would propagate out and abort doctor mid-run.
+          # Guard each subdir explicitly.
+          if [[ -d "$_hom_dir/personal" ]]; then
+            _n_personal=$(find "$_hom_dir/personal" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
+          fi
+          if [[ -d "$_hom_dir/inherited" ]]; then
+            _n_inherited=$(find "$_hom_dir/inherited" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
+          fi
           echo "    instincts:    ${_n_personal} personal, ${_n_inherited} inherited"
           if [[ -f "$_hom_dir/observations.jsonl" ]]; then
             _obs_line=$(wc -l < "$_hom_dir/observations.jsonl" 2>/dev/null | tr -d ' ')
@@ -5201,14 +5208,26 @@ stop_web_tunnel() {
 start_materialize_daemon() {
   local vm_name="$1" sess_share="$2"
   [[ -n "$vm_name" && -n "$sess_share" ]] || return 1
-  [[ "${OCVM_MATERIALIZE:-1}" == "0" ]] && {
+  # Use `if` rather than `[[ ]] && { ... }` — the latter form returns the
+  # test's exit code when the test is false, which under `set -e` aborts
+  # the function before the daemon is ever spawned.
+  if [[ "${OCVM_MATERIALIZE:-1}" == "0" ]]; then
     echo "[materialize] OCVM_MATERIALIZE=0 — daemon disabled."
     return 0
-  }
+  fi
   local att_dir="$sess_share/attachments"
   local pidfile="$sess_share/materialize.pid"
   local log="$sess_share/log/materialize.log"
+  # Host-side mkdir so the `2>>"$log"` redirect on the limactl call below
+  # has a writable target. The in-VM mkdir on the same (virtiofs-shared)
+  # path is still done for clarity, but happens too late for the redirect.
+  mkdir -p "$att_dir" "$(dirname "$log")"
   stop_materialize_daemon "$vm_name" "$sess_share" >/dev/null 2>&1 || true
+  # Spawn pattern: nohup + setsid + closed stdin + a brief grace sleep before
+  # the SSH session closes. Python startup (~100ms importing sqlite3 etc.) is
+  # too slow for the bare `setsid X &` pattern that graphify (Go binary) uses
+  # — the SSH disconnect propagates before the new session is fully detached
+  # and the daemon dies silently with an empty log.
   limactl shell --workdir / "$vm_name" -- bash -lc '
     set +e
     att="$1"; log="$2"; pidfile="$3"
@@ -5221,9 +5240,10 @@ start_materialize_daemon() {
     export OPENCODE_DATA_DIR=/tmp/oc-xdg-data/opencode
     export OCVM_ATTACHMENTS_DIR="$att"
     export OCVM_MATERIALIZE_LOG="$log"
-    setsid "$HOME/.local/bin/ocvm-materialize" >>"$log" 2>&1 &
+    nohup setsid "$HOME/.local/bin/ocvm-materialize" </dev/null >>"$log" 2>&1 &
     echo $! > "$pidfile"
-  ' _ "$att_dir" "$log" "$pidfile" 2>/dev/null || {
+    sleep 0.3   # give Python time to import + reach setup_logging
+  ' _ "$att_dir" "$log" "$pidfile" 2>>"$log" || {
     echo "[materialize] WARN: daemon spawn failed; see $log" >&2
     return 1
   }
