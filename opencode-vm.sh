@@ -87,7 +87,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.31"
+OCVM_VERSION="0.4.32"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -5088,6 +5088,36 @@ stop_host_port_forwards_in_vm() {
   ' _ "$HOST_TCP_PORTS" || true
 }
 
+# Ports that browsers (Chrome, Firefox, Safari) refuse to connect to.
+# Hitting one gives ERR_UNSAFE_PORT in the browser, while curl/API clients
+# still work. Source: Chromium's net/base/port_util.cc kRestrictedPorts.
+BROWSER_UNSAFE_PORTS=(
+  1 7 9 11 13 15 17 19 20 21 22 23 25 37 42 43 53 69 77 79 87 95 101 102 103
+  104 109 110 111 113 115 117 119 123 135 137 139 143 161 179 389 427 465 512
+  513 514 515 526 530 531 532 540 548 554 556 563 587 601 636 989 990 993 995
+  1719 1720 1723 2049 3659 4045 4190 5060 5061 6000 6566 6665 6666 6667 6668
+  6669 6697 10080
+)
+
+is_browser_unsafe_port() {
+  local p="$1" u
+  for u in "${BROWSER_UNSAFE_PORTS[@]}"; do
+    [[ "$p" == "$u" ]] && return 0
+  done
+  return 1
+}
+
+warn_if_browser_unsafe_port() {
+  local port="$1"
+  is_browser_unsafe_port "$port" || return 0
+  echo ""
+  echo "[!] WARNING: port $port is on the browser hardcoded UNSAFE list."
+  echo "    Chrome/Firefox/Safari refuse to connect (ERR_UNSAFE_PORT) regardless"
+  echo "    of what listens there. Curl and API clients still work."
+  echo "    Browser-safe alternatives: 4096 (default), 5555, 7777, 8080, 8888, 9000+"
+  echo ""
+}
+
 # Web-mode forwarding: SSH tunnel from host(0.0.0.0:hostPort) → VM(127.0.0.1:vmPort).
 #
 # Layered design — co-existence with Lima's auto-port-forward:
@@ -5166,6 +5196,7 @@ start_web_tunnel() {
         echo "[tunnel] SSH tunnel up on FALLBACK port: host 0.0.0.0:${try_port} → VM 127.0.0.1:${requested_port}"
         echo "[tunnel]   (requested ${requested_port} was unavailable; use port ${try_port} in browser/NetBird)"
       fi
+      warn_if_browser_unsafe_port "$try_port"
       # Lima's parallel loopback path? Probe 127.0.0.1:requested_port.
       # (Won't block tunnel success — informational only.)
       if (sleep 0.5; curl -fsS --max-time 2 -o /dev/null "http://127.0.0.1:${requested_port}/" 2>/dev/null) &
@@ -6748,6 +6779,7 @@ case "$cmd" in
     SESSION_MODE="web"
     parse_web_flags "$@"
     check_port_available "$SESSION_PORT"
+    warn_if_browser_unsafe_port "$SESSION_PORT"
     start_session
     ;;
 
