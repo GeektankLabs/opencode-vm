@@ -1170,13 +1170,20 @@ mcrepo_docs_dir() {
   printf '%s' "$proj/docs"
 }
 
-# Ensure <docs>/graphify/ exists and that <proj>/graphify-out is a symlink to
-# it (graphifyy 0.4.x hardcodes its output dir to <project>/graphify-out and
-# offers no -o flag, so the symlink is how we redirect into docs/). Also seeds
-# a .gitignore inside the graphify dir so the local-only cache and the
-# mtime-based manifest don't bloat git status (graphify upstream itself
-# recommends ignoring both — cache can grow to ~10k files on medium codebases
-# and the manifest's mtimes are unreliable across `git clone`).
+# Ensure <docs>/graphify/ exists and that <proj>/.graphify-out is a symlink to
+# it (graphifyy 0.4.x hardcodes its output dir relative to the project; the
+# in-VM install is sed-patched at base-image build time so it writes to
+# .graphify-out instead of graphify-out, keeping the entry grouped with the
+# other hidden management dirs like .playwright-mcp). Also seeds a .gitignore
+# inside the graphify dir so the local-only cache and the mtime-based manifest
+# don't bloat git status (graphify upstream itself recommends ignoring both —
+# cache can grow to ~10k files on medium codebases and the manifest's mtimes
+# are unreliable across `git clone`).
+#
+# Auto-migration: if a previous opencode-vm release left an un-hidden
+# <proj>/graphify-out symlink behind, rename it in-place (atomic — preserves
+# the symlink target, no data movement).
+#
 # Idempotent. Returns the absolute docs/graphify path on stdout.
 mcrepo_ensure_graphify_dir() {
   local proj="${1:?proj}"
@@ -1184,16 +1191,32 @@ mcrepo_ensure_graphify_dir() {
   local target="$docs/graphify"
   mkdir -p "$target"
 
-  local link="$proj/graphify-out"
-  if [[ -L "$link" ]]; then
+  local new_link="$proj/.graphify-out"
+  local old_link="$proj/graphify-out"
+
+  # Migrate the legacy un-hidden symlink if it's still around.
+  if [[ -L "$old_link" ]]; then
+    if [[ ! -e "$new_link" && ! -L "$new_link" ]]; then
+      mv "$old_link" "$new_link"
+      echo "[mcrepo] Migrated graphify-out → .graphify-out" >&2
+    else
+      # New link already in place — drop the stale legacy link.
+      rm "$old_link"
+      echo "[mcrepo] Removed legacy graphify-out symlink (.graphify-out already present)" >&2
+    fi
+  elif [[ -e "$old_link" ]]; then
+    echo "[mcrepo] WARNING: $old_link exists and is not a symlink; leaving it untouched." >&2
+  fi
+
+  if [[ -L "$new_link" ]]; then
     : # already a symlink — leave it alone (path may be relative or absolute)
-  elif [[ -e "$link" ]]; then
-    echo "[mcrepo] WARNING: $link exists and is not a symlink; leaving graphify output there." >&2
+  elif [[ -e "$new_link" ]]; then
+    echo "[mcrepo] WARNING: $new_link exists and is not a symlink; leaving graphify output there." >&2
   else
     # Use a path relative to the project root. The docs dir name may contain
     # a space (e.g. "🧾 docs"); ln handles that fine when the arg is quoted.
     local rel="${docs#$proj/}/graphify"
-    ln -s "$rel" "$link"
+    ln -s "$rel" "$new_link"
   fi
 
   # Drop the .gitignore on first activation. Don't overwrite a user-edited
@@ -4334,6 +4357,39 @@ mkdir -p ~/.local/bin
 # Belt-and-suspenders: if a previous install of bare graphifyy is still around
 # without the mcp extras, inject the missing module into its venv directly.
 ~/.local/bin/pipx inject graphifyy mcp >/dev/null 2>&1 || true
+# Patch graphifyy so its hardcoded output dir is .graphify-out (hidden) rather
+# than graphify-out. Upstream offers no override flag, env var, or config; the
+# only way to rename the on-disk artefact is to replace the literal in the
+# installed site-packages. Pinned-version-safe — the install line above locks
+# 0.4.32, so the patch surface is fixed. A future version bump revisits this
+# block automatically. The sanity-check at the end exits the build loudly if
+# any 'graphify-out' occurrences remain, so an incomplete patch never ships.
+# Python identifiers can't contain hyphens, so 'graphify-out' only ever appears
+# inside string literals or comments — safe to globally rewrite.
+for GRAPHIFY_SRC in ~/.local/share/pipx/venvs/graphifyy/lib/python*/site-packages/graphify; do
+  [ -d "$GRAPHIFY_SRC" ] || continue
+  # Idempotent + boundary-safe:
+  # - leading boundary [^.] avoids re-prefixing an already-patched .graphify-out
+  #   on second runs (pipx skips identical-version reinstalls and leaves the
+  #   previously-patched source on disk)
+  # - trailing boundary [^a-zA-Z0-9_-] avoids false matches on graphify-output
+  #   or graphify-out-other (defensive — no such identifiers are known today)
+  graphify_match='(^|[^.])graphify-out([^a-zA-Z0-9_-]|$)'
+  grep -rlE --include='*.py' "$graphify_match" "$GRAPHIFY_SRC" 2>/dev/null \
+    | xargs -r sed -i -E "s/$graphify_match/\1.graphify-out\2/g"
+  find "$GRAPHIFY_SRC" -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
+done
+for GRAPHIFY_SRC in ~/.local/share/pipx/venvs/graphifyy/lib/python*/site-packages/graphify; do
+  [ -d "$GRAPHIFY_SRC" ] || continue
+  # After patching, every former 'graphify-out' is now '.graphify-out'.
+  # A bare 'graphify-out' still in source means our patch missed an occurrence
+  # (e.g. upstream restructured) — fail the build loudly.
+  if grep -rqE --include='*.py' '(^|[^.])graphify-out([^a-zA-Z0-9_-]|$)' "$GRAPHIFY_SRC" 2>/dev/null; then
+    echo "[graphify] FATAL: bare 'graphify-out' still present in $GRAPHIFY_SRC after patch" >&2
+    grep -rnE --include='*.py' '(^|[^.])graphify-out([^a-zA-Z0-9_-]|$)' "$GRAPHIFY_SRC" >&2 || true
+    exit 1
+  fi
+done
 # Wrapper provides a friendly "no graph yet" error when activated in a fresh
 # project — keeps the agent from seeing a Python traceback.
 sudo tee /usr/local/bin/graphify-serve-wrapper.sh >/dev/null <<'WRAPPER'

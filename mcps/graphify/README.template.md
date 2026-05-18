@@ -26,10 +26,13 @@ queryable knowledge graph of all repositories in the mcrepo, built by
   per-file cap. Rebuilt each `opencode-vm` session by the in-VM watcher.
 - `graph.html` — interactive visualization. Same rebuild-on-session story.
 
-The repository-root `graphify-out` symlink points here — it exists because
-graphify's CLI hardcodes `<project>/graphify-out/` as its output directory,
-and the symlink redirects writes into this `docs/graphify/` folder so they
-ship with the rest of the documentation.
+The repository-root `.graphify-out` symlink points here — it exists because
+graphify's CLI hardcodes its output directory relative to the project. The
+in-VM graphifyy install is sed-patched at base-image build time so it writes
+to `.graphify-out` instead of upstream's `graphify-out`, keeping the entry
+grouped with the other hidden management dirs (`.playwright-mcp`, etc.) at
+the repo root. The symlink itself redirects writes into this `docs/graphify/`
+folder so they ship with the rest of the documentation.
 
 ## Why this policy
 
