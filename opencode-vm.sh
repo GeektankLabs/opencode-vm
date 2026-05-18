@@ -5621,7 +5621,12 @@ attach_session() {
   if [[ "$sess_mode" == "web" ]]; then
     if start_web_tunnel "$SESS_NAME" "$sess_port"; then
       effective_host_port="$WEB_TUNNEL_HOST_PORT"
-      trap "stop_web_tunnel '$SESS_NAME' '$WEB_TUNNEL_HOST_PORT'" EXIT
+      trap "
+        echo ''
+        echo '[opencode-vm] Web session ended — closing LAN tunnel...'
+        stop_web_tunnel '$SESS_NAME' '$WEB_TUNNEL_HOST_PORT'
+        echo '[opencode-vm] Tunnel closed. Session paused — resume with: opencode-vm web'
+      " EXIT
       probe_web_tunnel_async "$WEB_TUNNEL_HOST_PORT" "$host_lan_ip"
     else
       echo "[attach] WARNING: SSH tunnel for LAN access could not be set up." >&2
@@ -5687,6 +5692,29 @@ attach_session() {
       rsync -a --update "$SESS_SHARE/xdg-state/opencode/" /tmp/oc-xdg-state/opencode/ 2>/dev/null || true
     fi
 
+    # EXIT trap: always sync VM-local data back to the share, even when the
+    # session ends via Ctrl+C. Without this, the rsync below the OC_MODE
+    # branch never runs because bash terminates as soon as `opencode web`
+    # exits on SIGINT (rc=130) — `set -e` propagates the signal exit.
+    sync_vm_to_share() {
+      echo ""
+      echo "[attach] Stopping session — syncing data back to host..."
+      rsync -a --exclude="bin/" --exclude="log/" --exclude="tool-output/" \
+        /tmp/oc-xdg-data/opencode/ "$SESS_SHARE/xdg-data/opencode/" 2>/dev/null || true
+      rsync -a /tmp/oc-xdg-state/opencode/ "$SESS_SHARE/xdg-state/opencode/" 2>/dev/null || true
+      echo "[attach] Sync complete."
+      return 0
+    }
+    trap sync_vm_to_share EXIT
+
+    # INT/TERM handler so bash itself survives the signal long enough to
+    # break out of the restart loop cleanly. An empty `trap "" INT` would
+    # inherit as "ignore" to opencode web on execve and kill its ability to
+    # respond to Ctrl+C; an active handler does not.
+    shutdown_requested=0
+    on_signal() { shutdown_requested=1; }
+    trap on_signal INT TERM
+
     if [ "$OC_MODE" = "web" ]; then
       echo ""
       echo "=============================================="
@@ -5728,10 +5756,14 @@ attach_session() {
         # Restart loop: if opencode web crashes (non-clean exit), bring it
         # back up. The SSH tunnel from the host keeps forwarding to
         # 127.0.0.1:$OC_PORT and stays valid across restarts. Clean exits
-        # (0 / SIGINT 130 / SIGTERM 143) end the loop.
-        while true; do
+        # (0 / SIGINT 130 / SIGTERM 143) and signal-driven shutdown end the
+        # loop and trigger the EXIT-trap sync.
+        while [ "$shutdown_requested" = "0" ]; do
+          set +e
           aa-exec -p opencode-sandbox -- opencode web --hostname 127.0.0.1 --port "$OC_PORT"
           rc=$?
+          set -e
+          [ "$shutdown_requested" = "1" ] && break
           case "$rc" in
             0|130|143) break ;;
           esac
@@ -5744,12 +5776,8 @@ attach_session() {
       aa-exec -p opencode-sandbox -- opencode || true
     fi
 
-    # Sync VM-local data back to session share so host cleanup picks it up
-    echo "[attach] Syncing session data back to host..."
-    rsync -a --exclude="bin/" --exclude="log/" --exclude="tool-output/" \
-      /tmp/oc-xdg-data/opencode/ "$SESS_SHARE/xdg-data/opencode/" 2>/dev/null || true
-    rsync -a /tmp/oc-xdg-state/opencode/ "$SESS_SHARE/xdg-state/opencode/" 2>/dev/null || true
-    echo "[attach] Sync complete"
+    # Sync-back happens via the EXIT trap installed above (covers Ctrl+C as
+    # well as normal exit).
   ' _ "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$sess_port" "$host_lan_ip" "${SESSION_PASSWORD:-}" "${OC_WEB_TUI:-false}" "$effective_host_port"
 }
 
