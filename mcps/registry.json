@@ -45,6 +45,26 @@
         "path_mcrepo": "mcps/graphify/AGENTS-snippet.mcrepo.md"
       }
     },
+    "searxng": {
+      "description": "Account-free metasearch (SearXNG container in base VM; aggregates Google/Bing/DuckDuckGo/Brave/Wikipedia, privacy-preserving)",
+      "default_active": true,
+      "install": {
+        "type": "bundled",
+        "notes": "MCP wrapper (mcp-searxng@1.0.3) installed via npm i -g in base VM; SearXNG container runs persistently in oc-base via ocvm-searxng.service."
+      },
+      "credential_schema": [],
+      "mcp_config": {
+        "type": "local",
+        "command": ["npx", "-y", "mcp-searxng"],
+        "environment": {
+          "SEARXNG_URL": "http://127.0.0.1:8888"
+        }
+      },
+      "agents_md_snippet": {
+        "source": "file",
+        "path": "mcps/searxng/AGENTS-snippet.md"
+      }
+    },
     "proxmox": {
       "description": "Proxmox VE cluster operations via ProxmoxMCP server",
       "default_active": false,

@@ -54,6 +54,12 @@ WEBIMG_SKILL_CACHE="$SHARE_ROOT/webimg-skill"      # fallback if script is not c
 SSH_SKILL_CACHE="$SHARE_ROOT/ssh-toolkit-skill"    # fallback if script is not co-located with bundled skills/
 DEFAULT_PROXMOX_MCP_REPO="https://github.com/canvrno/ProxmoxMCP.git"
 DEFAULT_PROXMOX_MCP_REF="main"
+
+# SearXNG MCP (built-in, default active — account-free metasearch container in base VM)
+SEARXNG_VM_DIR='/var/lib/ocvm-searxng'   # path inside oc-base; holds compose, settings, secret_key
+SEARXNG_PORT=8888                         # browser-safe; not in BROWSER_UNSAFE_PORTS
+SEARXNG_MIGRATION_MARKER="$SHARE_ROOT/.searxng-default-migrated"
+SEARXNG_MCP_NPM_VERSION="1.0.3"           # pin for reproducible installs in provision_base
 # Script location (for resolving bundled skills/proxmox/mcps when running from
 # repo). Must follow symlinks: `opencode-vm install` puts a symlink at
 # ~/bin/opencode-vm pointing at the repo's opencode-vm.sh, and a naive
@@ -79,7 +85,7 @@ unset -f _ocvm_resolve_script_dir
 DATA_RSYNC_EXCLUDES=(--exclude='bin/' --exclude='log/' --exclude='tool-output/')
 
 # Defaults
-DEFAULT_HOST_TCP_PORTS="1234 11434"   # LM Studio + Ollama
+DEFAULT_HOST_TCP_PORTS="1234 8888 11434"   # LM Studio + SearXNG (MCP) + Ollama
 DEFAULT_LAN_ALLOW_TCP=""              # z.B. "192.168.178.10:443 10.0.0.5:22" (ohne :PORT = alle TCP-Ports dieser IP)
 DEFAULT_LAN_ALLOW_UDP=""              # z.B. "192.168.178.20:53"              (ohne :PORT = alle UDP-Ports dieser IP)
 DEFAULT_HOST_LOCALHOST_FORWARD="yes"  # expose HOST_TCP_PORTS inside VM as localhost:PORT
@@ -87,7 +93,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.32"
+OCVM_VERSION="0.4.33"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -243,7 +249,11 @@ fresh_history_dir() {
 is_vm_running() {
   local vm_name="$1"
   sanitize_lima_sock_dir
-  limactl list -q --status Running 2>/dev/null | grep -qx "$vm_name"
+  # Lima >=2.1.0 dropped --status, so use --format and match Name+Status pair.
+  # The trailing whitespace anchor prevents prefix matches (e.g. "oc-base" vs
+  # "oc-base-2"). Output line shape: "<name> <status>".
+  limactl list --format '{{.Name}} {{.Status}}' 2>/dev/null \
+    | grep -qx "$vm_name Running"
 }
 
 ensure_host_opencode_dirs() {
@@ -847,6 +857,140 @@ proxmox_ensure_installed_in_base() {
     return 1
   }
   echo "[proxmox] MCP server installed at $venv_path"
+
+  if (( started_base == 1 )); then
+    limactl stop "$BASE_NAME" 2>/dev/null || true
+  fi
+}
+
+# Install the SearXNG metasearch stack (searxng + valkey, via docker compose)
+# into the BASE VM so every session clone inherits a ready-to-use private
+# search engine reachable at http://127.0.0.1:8888.  Idempotent via a stamp
+# file; honours `mcps_pkg_is_active searxng` and exits cleanly when disabled.
+#
+# Network path (no LAN exposure, no SSH tunnels):
+#   session-VM 127.0.0.1:8888  --(socat hostfwd)-->  host 127.0.0.1:8888
+#   host 127.0.0.1:8888         --(Lima portfwd)-->  oc-base 127.0.0.1:8888
+#   oc-base 127.0.0.1:8888      --(docker portmap)-> searxng container :8080
+#
+# Called from start_session right before the base VM is stopped for cloning,
+# parallel to proxmox_ensure_installed_in_base.
+searxng_ensure_installed_in_base() {
+  mcps_pkg_is_active searxng || return 0
+
+  # Bump this when settings.yml.template/limiter/compose changes meaningfully.
+  # Old stamps don't match → existing installs auto-re-render config on next run.
+  local install_stamp_version="2"
+  local stamp_path="$SEARXNG_VM_DIR/.installed-v$install_stamp_version"
+  local lima_yaml="$HOME/.lima/$BASE_NAME/lima.yaml"
+  local cfg_src="$SCRIPT_DIR/mcps/searxng"
+
+  if [[ ! -d "$cfg_src" ]]; then
+    echo "[searxng] WARN: bundled config dir not found at $cfg_src; install skipped." >&2
+    echo "[searxng]       (run opencode-vm from a checked-out repo or 'opencode-vm update')" >&2
+    return 0
+  fi
+
+  # Ensure lima.yaml has an explicit portForward rule for 127.0.0.1:8888.
+  # Lima's default auto-forward can be displaced when other rules are present,
+  # so we add an explicit rule above any catch-all. Idempotent.
+  local need_lima_restart=0
+  if [[ -f "$lima_yaml" ]] && ! grep -q 'guestPort: 8888' "$lima_yaml" 2>/dev/null; then
+    echo "[searxng] Adding lima.yaml portForward rule for 127.0.0.1:$SEARXNG_PORT..."
+    sed -i '' '/^portForwards:/a\
+- guestIP: "127.0.0.1"\
+  guestPort: 8888\
+  hostIP: "127.0.0.1"\
+  hostPort: 8888
+' "$lima_yaml"
+    need_lima_restart=1
+  fi
+
+  # Need the base VM running for the install. Start if stopped (track so we
+  # leave the right state behind).
+  local started_base=0
+  if ! is_vm_running "$BASE_NAME"; then
+    run_with_spinner "[searxng] Starting base VM to install SearXNG..." limactl start "$BASE_NAME" --tty=false || {
+      echo "[searxng] Could not start base VM; SearXNG will not be available this session." >&2
+      return 1
+    }
+    started_base=1
+  elif (( need_lima_restart == 1 )); then
+    run_with_spinner "[searxng] Restarting base VM to apply portForward..." bash -c "limactl stop '$BASE_NAME' && limactl start '$BASE_NAME' --tty=false" || {
+      echo "[searxng] Restart for portForward failed; SearXNG may be unreachable from host." >&2
+    }
+  fi
+
+  # Already installed?
+  if limactl shell --workdir / "$BASE_NAME" -- bash -lc "test -f $stamp_path" 2>/dev/null; then
+    # Always ensure the service is running, even if installed previously
+    # (handles base-VM reboot or docker-daemon restart).
+    limactl shell --workdir / "$BASE_NAME" -- bash -lc \
+      'sudo systemctl is-active --quiet ocvm-searxng.service || sudo systemctl start ocvm-searxng.service' 2>/dev/null || true
+    (( started_base == 1 )) && limactl stop "$BASE_NAME" 2>/dev/null || true
+    return 0
+  fi
+
+  echo "[searxng] Installing SearXNG container into base VM (first-run only, ~60-90s)..."
+
+  # Ship bundled config files into the VM. Use sudo tee to write under
+  # /var/lib (root-owned). stdin redirection delivers the host-side bytes.
+  local f
+  for f in docker-compose.yml settings.yml.template limiter.toml ocvm-searxng.service; do
+    if ! limactl shell --workdir / "$BASE_NAME" -- bash -lc \
+      "sudo mkdir -p $SEARXNG_VM_DIR && sudo tee $SEARXNG_VM_DIR/$f >/dev/null" \
+      < "$cfg_src/$f" >/dev/null; then
+      echo "[searxng] Failed to write $f into base VM." >&2
+      (( started_base == 1 )) && limactl stop "$BASE_NAME" 2>/dev/null || true
+      return 1
+    fi
+  done
+
+  # Generate the SEARXNG_SECRET once, render settings.yml + service unit,
+  # install + enable the systemd unit, then wait for the JSON API to come up.
+  # The outer "..." string is HOST-side expanded for $SEARXNG_VM_DIR /
+  # $SEARXNG_PORT / $stamp_path; in-VM shell vars are escaped as \$var.
+  if ! limactl shell --workdir / "$BASE_NAME" -- bash -lc "
+    set -euo pipefail
+    sudo chmod 755 $SEARXNG_VM_DIR
+    if [[ ! -s $SEARXNG_VM_DIR/secret_key ]]; then
+      sudo bash -c 'openssl rand -hex 32 > $SEARXNG_VM_DIR/secret_key'
+      sudo chmod 600 $SEARXNG_VM_DIR/secret_key
+    fi
+    sk=\$(sudo cat $SEARXNG_VM_DIR/secret_key)
+
+    sudo sed \"s|__SECRET_KEY__|\$sk|\" $SEARXNG_VM_DIR/settings.yml.template \
+      | sudo tee $SEARXNG_VM_DIR/settings.yml >/dev/null
+    echo \"SEARXNG_SECRET=\$sk\" | sudo tee $SEARXNG_VM_DIR/.env >/dev/null
+    sudo chmod 600 $SEARXNG_VM_DIR/.env
+
+    sudo sed \"s|__SEARXNG_VM_DIR__|$SEARXNG_VM_DIR|g\" $SEARXNG_VM_DIR/ocvm-searxng.service \
+      | sudo tee /etc/systemd/system/ocvm-searxng.service >/dev/null
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now ocvm-searxng.service
+
+    # Wait up to 60 s for HTTP 200 on the JSON API.
+    ok=0
+    for i in \$(seq 1 60); do
+      if curl -fsS -o /dev/null --max-time 2 'http://127.0.0.1:$SEARXNG_PORT/search?q=test&format=json' 2>/dev/null; then
+        ok=1; break
+      fi
+      sleep 1
+    done
+    if (( ok == 1 )); then
+      sudo touch $stamp_path
+      echo '[searxng] JSON API responding on 127.0.0.1:$SEARXNG_PORT'
+    else
+      echo '[searxng] JSON API did not respond within 60s — check: systemctl status ocvm-searxng.service' >&2
+      exit 1
+    fi
+  "; then
+    echo "[searxng] Provisioning failed; disable with 'opencode-vm mcps off searxng' or check 'opencode-vm doctor'." >&2
+    (( started_base == 1 )) && limactl stop "$BASE_NAME" 2>/dev/null || true
+    return 1
+  fi
+
+  echo "[searxng] SearXNG ready at http://127.0.0.1:$SEARXNG_PORT (private, account-free metasearch)"
 
   if (( started_base == 1 )); then
     limactl stop "$BASE_NAME" 2>/dev/null || true
@@ -1681,6 +1825,20 @@ mcps_load() {
     mcps_save
   fi
 
+  # v0.4.33 migration: auto-enable searxng for existing installs whose
+  # mcps.env predates this default. Marker file prevents re-add after the
+  # user has explicitly opted out via 'opencode-vm mcps off searxng'.
+  if [[ -f "$MCPS_ENV" ]] && [[ ! -f "$SEARXNG_MIGRATION_MARKER" ]]; then
+    case " ${MCPS_PACKAGES:-} " in
+      *" searxng "*) ;;
+      *)
+        MCPS_PACKAGES="${MCPS_PACKAGES:+$MCPS_PACKAGES }searxng"
+        mcps_save
+        ;;
+    esac
+    touch "$SEARXNG_MIGRATION_MARKER" 2>/dev/null || true
+  fi
+
   # Session-only overrides (e.g. mcrepo auto-activation in start_session).
   # MCPS_FORCE_ON/MCPS_FORCE_OFF are space-separated lists exported by the
   # caller; they don't get persisted to mcps.env.
@@ -1741,8 +1899,10 @@ mcps_pkg_on() {
       proxmox_mcp_clone_or_update || return 1
       proxmox_skill_ensure >/dev/null || return 1
       ;;
-    playwright|repomapper|graphify)
-      # Bundled in base VM — nothing to do
+    playwright|repomapper|graphify|searxng)
+      # Bundled in base VM — nothing to do here. For searxng the actual
+      # container provisioning happens lazily on first start_session via
+      # searxng_ensure_installed_in_base().
       :
       ;;
   esac
@@ -2671,6 +2831,34 @@ doctor_cmd() {
         else
           echo "             VM venv:   unknown (base VM stopped)"
         fi
+      fi
+      echo ""
+
+      # ---- SearXNG (private metasearch MCP backing service in base VM) ----
+      echo "[doctor] SearXNG"
+      if mcps_pkg_is_active searxng; then
+        if is_vm_running "$BASE_NAME"; then
+          local _sx_status _sx_http _sx_stamp
+          # is-active / curl / ls all exit non-zero in failure states; the
+          # outer `|| true` keeps `set -euo pipefail` from aborting doctor
+          # mid-run when SearXNG is stopped or unreachable.
+          _sx_status=$(limactl shell --workdir / "$BASE_NAME" -- bash -lc \
+            'systemctl is-active ocvm-searxng.service 2>/dev/null || true' \
+            2>/dev/null | tr -d '\r\n' || true)
+          echo "  service:   ${_sx_status:-inactive}"
+          _sx_http=$(limactl shell --workdir / "$BASE_NAME" -- bash -lc \
+            "curl -s -o /dev/null -w '%{http_code}' --max-time 3 'http://127.0.0.1:${SEARXNG_PORT}/search?q=opencode&format=json' 2>/dev/null || true" \
+            2>/dev/null | tr -d '\r\n' || true)
+          echo "  json api:  HTTP ${_sx_http:-000} (expect 200)"
+          _sx_stamp=$(limactl shell --workdir / "$BASE_NAME" -- bash -lc \
+            "ls $SEARXNG_VM_DIR/.installed-v* 2>/dev/null | tail -1 | awk -F/ '{print \$NF}' || true" \
+            2>/dev/null | tr -d '\r\n' || true)
+          echo "  base prov: ${_sx_stamp:-missing}"
+        else
+          echo "  active:    yes (base VM stopped — start a session to refresh status)"
+        fi
+      else
+        echo "  active:    no  (enable with: opencode-vm mcps on searxng)"
       fi
       echo ""
 
@@ -4098,7 +4286,7 @@ nvm alias default 22
 # Pin to cdn.playwright.dev — the default playwright.azureedge.net mirror has
 # been observed throttling to ~100 KB/s, turning the 185 MB browser download
 # into a 30-min stall. cdn.playwright.dev serves the same artifacts at full speed.
-npm install -g @playwright/mcp@latest svgo
+npm install -g @playwright/mcp@latest svgo mcp-searxng@1.0.3
 
 # Create NVM-version-independent symlink so playwright-mcp stays available
 # even when the agent switches Node versions with nvm use. Must come before
@@ -6028,6 +6216,11 @@ start_session() {
   # Install ProxmoxMCP into base VM (idempotent, only when proxmox skill is active).
   # Must run with base VM available — slot in BEFORE the stop-for-clone step.
   proxmox_ensure_installed_in_base || echo "[run] Proxmox MCP install skipped; session will start without it." >&2
+
+  # Install SearXNG (account-free metasearch) into base VM (idempotent, only
+  # when searxng MCP is active). Must also run BEFORE stop-for-clone so the
+  # service is fully provisioned in the base disk inherited by session VMs.
+  searxng_ensure_installed_in_base || echo "[run] SearXNG install skipped; session will start without web-search MCP." >&2
 
   # Ensure base VM is stopped for clone — always attempt stop defensively
   if is_vm_running "$BASE_NAME"; then
