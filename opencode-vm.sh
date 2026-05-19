@@ -93,7 +93,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.34"
+OCVM_VERSION="0.4.35"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -4270,7 +4270,7 @@ echo "wireshark-common wireshark-common/install-setuid boolean false" | sudo deb
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
   ca-certificates curl wget openssl \
   git ripgrep jq \
-  less nano vim-tiny file tree \
+  less nano vim-tiny file tree shellcheck \
   tar gzip bzip2 xz-utils zip unzip \
   procps lsof strace build-essential pkg-config make cmake \
   iproute2 iputils-ping traceroute mtr-tiny \

@@ -98,3 +98,4 @@ Every change to `opencode-vm.sh` **must** increment the patch version in `OCVM_V
 - LAN allowlist entries use `IP:PORT` format (e.g., `192.168.178.10:443`)
 - The nftables config lives at `/etc/nftables.conf` inside the base VM and uses the `inet ocfilter` table
 - Network model is Lima's default user-mode/slirp: host at `192.168.5.2`, DNS at `192.168.5.3`
+- Shell scripts authored or modified in a session should be validated with `shellcheck` (pre-installed in the base VM). Focus on the lines you changed — do **not** mass-fix unrelated warnings in the rest of the file unless the user asked for a cleanup pass. If `shellcheck` surfaces a **critical** pre-existing issue outside your change (e.g. SC2086 in a security-sensitive context, SC2068 around argument passing, an unquoted `rm`/`eval`), flag it in the final report and let the user decide whether to fix it now, defer it, or accept it — never silently rewrite it.
