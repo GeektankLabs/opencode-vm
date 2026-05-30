@@ -93,7 +93,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.35"
+OCVM_VERSION="0.4.40"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -2705,6 +2705,18 @@ doctor_cmd() {
       fi
       echo ""
 
+      echo "[doctor] OAuth token freshness (host vs. running VMs + saved sessions)"
+      if [[ -f "$auth_file" ]] && command -v jq >/dev/null 2>&1; then
+        if [[ -n "$(auth_oauth_provider_ids "$auth_file")" ]]; then
+          auth_collect_freshest_oauth report
+        else
+          echo "  <no OAuth providers — only static API keys>"
+        fi
+      else
+        echo "  <none>"
+      fi
+      echo ""
+
       echo "[doctor] Recent/Favorite model providers (model.json)"
       if [[ -f "$model_file" ]]; then
         if command -v jq >/dev/null 2>&1; then
@@ -3003,6 +3015,203 @@ provider_refresh_all_quiet() {
       echo "[provider] refresh skipped ($p): unreachable" >&2
     fi
   done
+}
+
+# ----------------------------------------------------------------------------
+# OAuth subscription token helpers (e.g. OpenAI/ChatGPT, GitHub Copilot).
+#
+# Unlike static API keys (auth.json entries of type "key"), OAuth logins use a
+# single-use *rotating* refresh token: each ~hourly refresh yields a new
+# access+refresh pair and invalidates the previous refresh token. Because
+# opencode-vm snapshots auth.json into every per-project VM, two VMs seeded from
+# the same auth.json end up fighting over one rotating chain — the first to
+# refresh invalidates the others, which then fail with "401 token refresh
+# failed". These helpers locate whichever copy currently holds the freshest
+# (latest-`expires`) OAuth token and adopt it into the host auth.json so the
+# next session that reads it picks up the live token.
+#
+# Scope: OAuth entries only (type=="oauth", or a "refresh" field present).
+# type:"key" entries are never read or modified by anything below.
+# ----------------------------------------------------------------------------
+
+# List provider ids in an auth.json file that are OAuth (refreshable).
+auth_oauth_provider_ids() {
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  jq -r 'to_entries[]
+         | select((.value.type? == "oauth") or (.value | has("refresh")))
+         | .key' "$file" 2>/dev/null || true
+}
+
+# Echo the `expires` value (epoch-ms; 0 when absent/invalid) for one provider.
+auth_oauth_expires() {
+  local file="$1" provider="$2"
+  { [[ -f "$file" ]] && command -v jq >/dev/null 2>&1; } || { echo 0; return 0; }
+  jq -r --arg p "$provider" '(.[$p].expires // 0) | floor' "$file" 2>/dev/null \
+    | grep -Ex '[0-9]+' || echo 0
+}
+
+# Format an epoch-ms timestamp for humans (macOS/BSD date).
+_auth_fmt_expires() {
+  local ms="$1"
+  [[ "$ms" =~ ^[0-9]+$ ]] && (( ms > 0 )) || { echo "n/a"; return 0; }
+  date -r "$(( ms / 1000 ))" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "$ms"
+}
+
+# Human label for where a candidate auth.json came from.
+# Args: <path> <host_auth_path> [tmpfiles...] (tmpfiles are VM-sourced copies)
+_auth_src_label() {
+  local path="$1" host="$2"; shift 2
+  local t
+  for t in "$@"; do
+    [[ "$path" == "$t" ]] && { echo "a running session VM"; return 0; }
+  done
+  if   [[ "$path" == "$host" ]];                 then echo "host"
+  elif [[ "$path" == "$SESSIONS_DIR"/* ]];       then echo "a saved session"
+  elif [[ "$path" == "$PROJECT_STATE_DIR"/* ]];  then echo "a project cache"
+  else echo "$path"; fi
+}
+
+# Core: scan the host auth.json, every per-project session/state copy, and the
+# live copy inside each running session VM; for each OAuth provider adopt the
+# entry with the latest `expires` into the host auth.json. Pure no-op for files
+# with no OAuth entries; type:"key" entries are never touched.
+#   $1 = mode: "report" (read-only, default) | "apply" (writes host auth.json)
+auth_collect_freshest_oauth() {
+  local mode="${1:-report}"
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "[auth] jq is required for OAuth token sync." >&2
+    return 1
+  fi
+  ensure_dirs
+  ensure_host_opencode_dirs
+  local host_auth="$HOST_DATA_DIR/auth.json"
+
+  # Candidate auth.json paths (host first, then saved sessions + project caches).
+  local -a candidates=()
+  [[ -f "$host_auth" ]] && candidates+=("$host_auth")
+  local f
+  for f in "$SESSIONS_DIR"/*/xdg-data/opencode/auth.json \
+           "$PROJECT_STATE_DIR"/*/xdg-data/opencode/auth.json; do
+    [[ -f "$f" ]] && candidates+=("$f")
+  done
+
+  # Live copy from each running session VM — a running VM holds its freshest
+  # (post-refresh) token only in its own /tmp until the session exits.
+  local -a tmpfiles=()
+  local vm tmp
+  while read -r vm; do
+    [[ -n "$vm" ]] || continue
+    tmp="$(mktemp)"
+    if limactl shell --workdir / "$vm" -- bash -lc 'cat /tmp/oc-xdg-data/opencode/auth.json 2>/dev/null' >"$tmp" 2>/dev/null \
+        && [[ -s "$tmp" ]] && jq -e . "$tmp" >/dev/null 2>&1; then
+      candidates+=("$tmp")
+      tmpfiles+=("$tmp")
+    else
+      rm -f "$tmp"
+    fi
+  done < <(limactl list --format '{{.Name}} {{.Status}}' 2>/dev/null \
+             | awk -v base="$BASE_NAME" '$2=="Running" && $1 ~ /^oc-/ && $1!=base {print $1}')
+
+  _auth_cleanup_tmp() { local x; for x in ${tmpfiles[@]+"${tmpfiles[@]}"}; do rm -f "$x"; done; }
+
+  if [[ ${#candidates[@]} -eq 0 ]]; then
+    echo "[auth] No auth.json found on host or in any session."
+    _auth_cleanup_tmp; return 0
+  fi
+
+  # Union of OAuth provider ids across all candidates.
+  local providers
+  providers="$(for f in "${candidates[@]}"; do auth_oauth_provider_ids "$f"; done | sort -u)"
+  if [[ -z "$providers" ]]; then
+    echo "[auth] No OAuth (refreshable) providers found — nothing to sync."
+    _auth_cleanup_tmp; return 0
+  fi
+
+  local now_ms backup_done=0 updated=0 p
+  now_ms="$(( $(date +%s) * 1000 ))"
+  for p in $providers; do
+    local best_file="" best_exp=-1 host_exp exp has
+    for f in "${candidates[@]}"; do
+      has="$(jq -r --arg p "$p" '(.[$p] // empty) | if (.type? == "oauth" or has("refresh")) then "y" else empty end' "$f" 2>/dev/null || true)"
+      [[ "$has" == "y" ]] || continue
+      exp="$(auth_oauth_expires "$f" "$p")"
+      if (( exp > best_exp )); then best_exp="$exp"; best_file="$f"; fi
+    done
+    [[ -n "$best_file" ]] || continue
+    host_exp="$(auth_oauth_expires "$host_auth" "$p")"
+
+    local note=""
+    (( best_exp <= now_ms )) && note="  [all copies expired — re-login: 'opencode auth login' inside a session]"
+    local src
+    src="$(_auth_src_label "$best_file" "$host_auth" ${tmpfiles[@]+"${tmpfiles[@]}"})"
+    echo "  $p: host=$(_auth_fmt_expires "$host_exp")  freshest=$(_auth_fmt_expires "$best_exp") (from $src)$note"
+
+    if (( best_exp > host_exp )) && [[ "$best_file" != "$host_auth" ]]; then
+      if [[ "$mode" == "apply" ]]; then
+        if (( backup_done == 0 )); then
+          local ts backup_dir
+          ts="$(date +%Y%m%d-%H%M%S)"
+          backup_dir="$BACKUP_DIR/auth-$ts"
+          mkdir -p "$backup_dir"
+          [[ -f "$host_auth" ]] && cp -p "$host_auth" "$backup_dir/auth.json.bak"
+          echo "  (backup: $backup_dir/auth.json.bak)"
+          backup_done=1
+        fi
+        local newentry tmp_out
+        newentry="$(jq -c --arg p "$p" '.[$p]' "$best_file")"
+        tmp_out="$(mktemp)"
+        if [[ -f "$host_auth" ]]; then
+          jq --arg p "$p" --argjson v "$newentry" '.[$p] = $v' "$host_auth" >"$tmp_out" \
+            && mv "$tmp_out" "$host_auth" && updated=1 || rm -f "$tmp_out"
+        else
+          jq -n --arg p "$p" --argjson v "$newentry" '{($p): $v}' >"$tmp_out" \
+            && mv "$tmp_out" "$host_auth" && updated=1 || rm -f "$tmp_out"
+        fi
+        echo "    -> adopted into host auth.json"
+      else
+        echo "    -> a fresher token exists; run 'opencode-vm auth resync' to adopt it"
+      fi
+    fi
+  done
+
+  if [[ "$mode" == "apply" ]]; then
+    if (( updated == 1 )); then
+      echo "[auth] Host auth.json updated. Restart (or 'opencode-vm attach') the failing session so it re-reads the token."
+    else
+      echo "[auth] Host already holds the freshest OAuth token — nothing to do."
+    fi
+  fi
+  _auth_cleanup_tmp
+  return 0
+}
+
+# `opencode-vm auth {status|resync}`
+auth_cmd() {
+  local op="${1:-status}"
+  shift || true
+  case "$op" in
+    status)
+      echo "[auth] OAuth provider token freshness (host vs. running VMs + saved sessions)"
+      auth_collect_freshest_oauth report
+      ;;
+    resync)
+      auth_collect_freshest_oauth apply
+      ;;
+    -h|--help|help)
+      cat <<'EOF'
+Usage: opencode-vm auth {status|resync}
+  status   show OAuth providers and which copy holds the freshest token (read-only)
+  resync   adopt the freshest OAuth token (across running VMs + saved sessions)
+           into the host auth.json, then restart/attach the failing session
+EOF
+      ;;
+    *)
+      echo "Usage: opencode-vm auth {status|resync}" >&2
+      return 2
+      ;;
+  esac
 }
 
 provider_cmd() {
@@ -6155,6 +6364,31 @@ start_session() {
     cp -p "$HOST_DATA_DIR/auth.json" "$proj_state/xdg-data/opencode/auth.json"
   fi
 
+  # OAuth pre-flight (non-blocking): subscription logins (e.g. OpenAI) use a
+  # single-use rotating refresh token, so two VMs seeded from the same auth.json
+  # fight over one chain and the loser hits "401 token refresh failed". If the
+  # host token is already expired, or another session VM is running and may hold
+  # a newer one, nudge the user toward 'auth resync' instead of failing silently.
+  if [[ -f "$HOST_DATA_DIR/auth.json" ]] && command -v jq >/dev/null 2>&1; then
+    local _oauth_ids _other_vms _host_stale=0
+    _oauth_ids="$(auth_oauth_provider_ids "$HOST_DATA_DIR/auth.json")"
+    if [[ -n "$_oauth_ids" ]]; then
+      local _now_ms _pid _exp
+      _now_ms="$(( $(date +%s) * 1000 ))"
+      for _pid in $_oauth_ids; do
+        _exp="$(auth_oauth_expires "$HOST_DATA_DIR/auth.json" "$_pid")"
+        (( _exp <= _now_ms )) && _host_stale=1
+      done
+      _other_vms="$(limactl list --format '{{.Name}} {{.Status}}' 2>/dev/null \
+        | awk -v base="$BASE_NAME" '$2=="Running" && $1 ~ /^oc-/ && $1!=base' | wc -l | tr -d ' ')"
+      if (( _host_stale == 1 )) || (( ${_other_vms:-0} > 0 )); then
+        echo "[run] Note: OAuth provider(s) detected and ${_other_vms:-0} other session VM(s) running." >&2
+        echo "[run]   If this session hits '401 token refresh failed', run: opencode-vm auth resync" >&2
+        echo "[run]   then restart this session (it re-reads the host token on a fresh start). $(_ts)" >&2
+      fi
+    fi
+  fi
+
   if [[ -f "$proj_cfg" ]]; then
     cp -p "$proj_cfg" "$proj_cfg_legacy"
   fi
@@ -7072,6 +7306,10 @@ case "$cmd" in
     provider_cmd "$@"
     ;;
 
+  auth)
+    auth_cmd "$@"
+    ;;
+
 
   shell)
     need limactl
@@ -7191,6 +7429,10 @@ Usage:
   opencode-vm provider refresh <id>        # re-discover models from /v1/models (auto-runs at session start
                                            #   for local providers; OCVM_PROVIDER_AUTOREFRESH=0 disables)
   opencode-vm provider rm <id> [--dry-run] # remove provider from auth/config/model state
+  opencode-vm auth status                  # show OAuth token freshness across VMs/sessions
+  opencode-vm auth resync                  # adopt the freshest OAuth token into host auth.json
+                                           #   (fix for '401 token refresh failed' across VMs;
+                                           #    restart/attach the failing session afterwards)
   opencode-vm screenshot                   # setup guide for browser screenshot capture
   opencode-vm base                         # shell into base VM
   opencode-vm prune                        # cleanup unused Lima data
