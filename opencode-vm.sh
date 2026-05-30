@@ -93,7 +93,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.40"
+OCVM_VERSION="0.4.41"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -3104,7 +3104,9 @@ auth_collect_freshest_oauth() {
   while read -r vm; do
     [[ -n "$vm" ]] || continue
     tmp="$(mktemp)"
-    if limactl shell --workdir / "$vm" -- bash -lc 'cat /tmp/oc-xdg-data/opencode/auth.json 2>/dev/null' >"$tmp" 2>/dev/null \
+    # The live auth.json inside the VM is root-owned (0600); read it via the
+    # guest's passwordless sudo. Web-mode XDG_DATA_HOME is /tmp/oc-xdg-data.
+    if limactl shell --workdir / "$vm" -- sudo cat /tmp/oc-xdg-data/opencode/auth.json >"$tmp" 2>/dev/null \
         && [[ -s "$tmp" ]] && jq -e . "$tmp" >/dev/null 2>&1; then
       candidates+=("$tmp")
       tmpfiles+=("$tmp")
@@ -5859,6 +5861,25 @@ attach_session() {
   echo "[attach] Reconnecting to session: $SESS_NAME"
   echo "[attach] Project: $proj"
 
+  # OAuth pre-flight before reconnect: adopt the freshest token (from any other
+  # running VM or saved session) into the host auth.json, then push it into this
+  # resumed VM — its own /tmp copy may hold a refresh token that another VM has
+  # since rotated, which would 401. The fresh-mtime write survives the later
+  # in-VM 'rsync --update' merge from the share. Opt out with
+  # OCVM_AUTH_AUTORESYNC=0; non-fatal.
+  if [[ "${OCVM_AUTH_AUTORESYNC:-1}" != "0" ]] && command -v jq >/dev/null 2>&1 \
+     && [[ -n "$(auth_oauth_provider_ids "$HOST_DATA_DIR/auth.json")" ]]; then
+    echo "[attach] OAuth pre-flight: adopting freshest provider token..."
+    auth_collect_freshest_oauth apply 2>&1 | sed 's/^/[attach]   /' || true
+    if [[ -f "$HOST_DATA_DIR/auth.json" ]]; then
+      limactl shell --workdir / "$SESS_NAME" -- sudo mkdir -p /tmp/oc-xdg-data/opencode 2>/dev/null || true
+      if limactl shell --workdir / "$SESS_NAME" -- sudo tee /tmp/oc-xdg-data/opencode/auth.json >/dev/null < "$HOST_DATA_DIR/auth.json" 2>/dev/null; then
+        limactl shell --workdir / "$SESS_NAME" -- sudo chmod 600 /tmp/oc-xdg-data/opencode/auth.json 2>/dev/null || true
+        echo "[attach]   pushed freshest auth.json into running VM $(_ts)"
+      fi
+    fi
+  fi
+
   local sess_mode="${SESS_MODE:-tui}"
   local sess_port="${SESS_PORT:-$DEFAULT_OC_PORT}"
   local host_lan_ip
@@ -6359,34 +6380,23 @@ start_session() {
     echo "[run] Fresh session (no history loaded) $(_ts)"
   fi
 
-  # Carry host auth.json into the project state so provider credentials work.
-  if [[ -f "$HOST_DATA_DIR/auth.json" ]]; then
-    cp -p "$HOST_DATA_DIR/auth.json" "$proj_state/xdg-data/opencode/auth.json"
+  # OAuth pre-flight: subscription logins (e.g. OpenAI) use a single-use rotating
+  # refresh token, so two VMs seeded from the same auth.json fight over one chain
+  # and the loser hits "401 token refresh failed". BEFORE seeding this VM, adopt
+  # the freshest live token — from any running session VM or saved session — into
+  # the host auth.json, so the new VM starts with a working token instead of a
+  # stale snapshot. Runs only when the host has OAuth providers; non-fatal.
+  # Opt out with OCVM_AUTH_AUTORESYNC=0.
+  if [[ "${OCVM_AUTH_AUTORESYNC:-1}" != "0" ]] && command -v jq >/dev/null 2>&1 \
+     && [[ -n "$(auth_oauth_provider_ids "$HOST_DATA_DIR/auth.json")" ]]; then
+    echo "[run] OAuth pre-flight: adopting freshest provider token before start... $(_ts)"
+    auth_collect_freshest_oauth apply 2>&1 | sed 's/^/[run]   /' || true
   fi
 
-  # OAuth pre-flight (non-blocking): subscription logins (e.g. OpenAI) use a
-  # single-use rotating refresh token, so two VMs seeded from the same auth.json
-  # fight over one chain and the loser hits "401 token refresh failed". If the
-  # host token is already expired, or another session VM is running and may hold
-  # a newer one, nudge the user toward 'auth resync' instead of failing silently.
-  if [[ -f "$HOST_DATA_DIR/auth.json" ]] && command -v jq >/dev/null 2>&1; then
-    local _oauth_ids _other_vms _host_stale=0
-    _oauth_ids="$(auth_oauth_provider_ids "$HOST_DATA_DIR/auth.json")"
-    if [[ -n "$_oauth_ids" ]]; then
-      local _now_ms _pid _exp
-      _now_ms="$(( $(date +%s) * 1000 ))"
-      for _pid in $_oauth_ids; do
-        _exp="$(auth_oauth_expires "$HOST_DATA_DIR/auth.json" "$_pid")"
-        (( _exp <= _now_ms )) && _host_stale=1
-      done
-      _other_vms="$(limactl list --format '{{.Name}} {{.Status}}' 2>/dev/null \
-        | awk -v base="$BASE_NAME" '$2=="Running" && $1 ~ /^oc-/ && $1!=base' | wc -l | tr -d ' ')"
-      if (( _host_stale == 1 )) || (( ${_other_vms:-0} > 0 )); then
-        echo "[run] Note: OAuth provider(s) detected and ${_other_vms:-0} other session VM(s) running." >&2
-        echo "[run]   If this session hits '401 token refresh failed', run: opencode-vm auth resync" >&2
-        echo "[run]   then restart this session (it re-reads the host token on a fresh start). $(_ts)" >&2
-      fi
-    fi
+  # Carry (the now-freshened) host auth.json into the project state so provider
+  # credentials work.
+  if [[ -f "$HOST_DATA_DIR/auth.json" ]]; then
+    cp -p "$HOST_DATA_DIR/auth.json" "$proj_state/xdg-data/opencode/auth.json"
   fi
 
   if [[ -f "$proj_cfg" ]]; then
