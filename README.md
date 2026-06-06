@@ -355,11 +355,43 @@ opencode-vm ports hostfwd enable
 opencode-vm ports hostfwd disable
 ```
 
-Allow specific LAN target from VM:
+Allow LAN targets from VM (single hosts **or whole subnets**):
 
 ```bash
-opencode-vm ports lan tcp add 192.168.178.10:443
+opencode-vm ports lan tcp add 192.168.178.10:443   # one host, one port
+opencode-vm ports lan tcp add 192.168.19.10        # one host, all TCP ports
+opencode-vm ports lan tcp add 192.168.19.0/24      # whole /24 subnet
+opencode-vm ports lan tcp add 192.168.19.*         # same /24, wildcard form
+opencode-vm ports lan udp add 192.168.19.0/24:53   # UDP is configured separately
+opencode-vm ports lan tcp rm  192.168.19.*         # remove again
+opencode-vm ports lan tcp clear                    # drop the whole TCP allowlist
 ```
+
+Accepted input forms (all normalized to CIDR notation internally, so `ports show`
+will display e.g. `192.168.19.0/24`):
+
+| Input | Means |
+|---|---|
+| `192.168.19.10` | single host, all ports |
+| `192.168.19.10:443` | single host, port 443 only |
+| `192.168.19.0/24` | whole subnet, all ports |
+| `192.168.19.0/24:443` | whole subnet, port 443 only |
+| `192.168.19.*` | whole `192.168.19.0/24` |
+| `192.168.*.*` | whole `192.168.0.0/16` |
+| `10.*` | whole `10.0.0.0/8` |
+
+Notes:
+
+- The policy lives in `~/.opencode-vm/policy.env` and is **global — it applies to
+  every OpenCode VM instance**. Changes are pushed to all running sessions
+  immediately (no restart needed); for an instance not yet started they take
+  effect on the next `opencode-vm start`.
+- TCP and UDP are separate lists — add an entry to both if you need both.
+- Quote wildcard forms so your shell doesn't expand `*` against the current
+  directory: `opencode-vm ports lan tcp add '192.168.19.*'` (or just use the
+  equivalent CIDR `192.168.19.0/24`, which needs no quoting).
+- Invalid input (e.g. `192.168.19`, an octet > 255, or a wildcard that isn't
+  trailing like `192.*.19.*`) is rejected with an error and nothing is saved.
 
 If a docker container within the VM exposes a port its reachable from your laptops with: `localhost:[PORT]`
 

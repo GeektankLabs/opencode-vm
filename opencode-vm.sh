@@ -93,7 +93,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.41"
+OCVM_VERSION="0.4.42"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -471,6 +471,111 @@ list_rm() {
   local list="$*"
   echo "$list" | tr ' ' '
 ' | awk -v i="$item" '$0!=i && $0!=""' | paste -sd' ' - | xargs
+}
+
+# Normalize + validate a LAN allowlist endpoint for `ports lan {tcp,udp}`.
+# IPv4 only (the nft LAN sets are ipv4_addr). Accepts these forms and prints the
+# canonical (CIDR-normalized) form on stdout; on any invalid input it prints a
+# clear reason to stderr and returns 1 (caller must abort BEFORE save_policy):
+#   192.168.19.10        -> 192.168.19.10        (single host, all ports)
+#   192.168.19.10:443    -> 192.168.19.10:443    (single host, one port)
+#   192.168.19.0/24      -> 192.168.19.0/24      (CIDR, all ports)
+#   192.168.19.0/24:443  -> 192.168.19.0/24:443  (CIDR, one port)
+#   192.168.19.*         -> 192.168.19.0/24      (wildcard -> /24)
+#   192.168.*.*          -> 192.168.0.0/16       (wildcard -> /16)
+#   10.* | 10.*.*.*      -> 10.0.0.0/8           (wildcard -> /8)
+#   192.168.19.*:443     -> 192.168.19.0/24:443  (wildcard + port)
+# A trailing wildcard octet may only be followed by more wildcards, never by a
+# fixed octet (e.g. 192.*.19.* is rejected).
+normalize_lan_endpoint() {
+  local ep="$1"
+  local addr="$ep" port=""
+
+  # Split an optional :PORT suffix. IPv4/CIDR/wildcard never contain ':'.
+  if [[ "$ep" == *:* ]]; then
+    addr="${ep%:*}"
+    port="${ep##*:}"
+    if ! [[ "$port" =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
+      echo "[ports] Invalid LAN target '$ep': port must be 1-65535" >&2
+      return 1
+    fi
+  fi
+
+  local norm_addr=""
+  if [[ "$addr" == *"*"* ]]; then
+    # Wildcard form: count leading fixed octets, rest must be wildcards.
+    # read -ra splits on IFS without pathname expansion (a bare '*' octet must
+    # not be glob-expanded against the current directory).
+    local -a oct; IFS='.' read -ra oct <<< "$addr"
+    if (( ${#oct[@]} < 1 || ${#oct[@]} > 4 )); then
+      echo "[ports] Invalid LAN target '$ep': expected up to 4 dot-separated octets" >&2
+      return 1
+    fi
+    local i fixed=0 seen_star=0
+    for ((i = 0; i < ${#oct[@]}; i++)); do
+      local o="${oct[$i]}"
+      if [[ "$o" == "*" ]]; then
+        seen_star=1
+      elif [[ "$o" =~ ^[0-9]+$ ]] && (( o >= 0 && o <= 255 )); then
+        if (( seen_star )); then
+          echo "[ports] Invalid LAN target '$ep': wildcard '*' may only appear in trailing octets" >&2
+          return 1
+        fi
+        fixed=$((fixed + 1))
+      else
+        echo "[ports] Invalid LAN target '$ep': octet '$o' is not 0-255 or '*'" >&2
+        return 1
+      fi
+    done
+    if (( fixed < 1 || fixed > 3 )); then
+      echo "[ports] Invalid LAN target '$ep': need 1-3 fixed octets before the wildcard" >&2
+      return 1
+    fi
+    local -a base=("${oct[@]:0:fixed}")
+    while (( ${#base[@]} < 4 )); do base+=("0"); done
+    local oldifs="$IFS"; IFS='.'; norm_addr="${base[*]}/$((fixed * 8))"; IFS="$oldifs"
+  elif [[ "$addr" == *"/"* ]]; then
+    # CIDR form: validate base IP octets and prefix.
+    local ip="${addr%/*}" prefix="${addr##*/}"
+    if ! [[ "$prefix" =~ ^[0-9]+$ ]] || (( prefix < 0 || prefix > 32 )); then
+      echo "[ports] Invalid LAN target '$ep': CIDR prefix must be 0-32" >&2
+      return 1
+    fi
+    local -a oct; IFS='.' read -ra oct <<< "$ip"
+    if (( ${#oct[@]} != 4 )); then
+      echo "[ports] Invalid LAN target '$ep': CIDR base must be a full IPv4 address" >&2
+      return 1
+    fi
+    local o
+    for o in "${oct[@]}"; do
+      if ! [[ "$o" =~ ^[0-9]+$ ]] || (( o < 0 || o > 255 )); then
+        echo "[ports] Invalid LAN target '$ep': octet '$o' is not 0-255" >&2
+        return 1
+      fi
+    done
+    norm_addr="$ip/$prefix"
+  else
+    # Plain IPv4: exactly 4 octets 0-255.
+    local -a oct; IFS='.' read -ra oct <<< "$addr"
+    if (( ${#oct[@]} != 4 )); then
+      echo "[ports] Invalid LAN target '$ep': expected IPv4 (a.b.c.d), CIDR (a.b.c.d/n) or wildcard (a.b.c.*)" >&2
+      return 1
+    fi
+    local o
+    for o in "${oct[@]}"; do
+      if ! [[ "$o" =~ ^[0-9]+$ ]] || (( o < 0 || o > 255 )); then
+        echo "[ports] Invalid LAN target '$ep': octet '$o' is not 0-255" >&2
+        return 1
+      fi
+    done
+    norm_addr="$addr"
+  fi
+
+  if [[ -n "$port" ]]; then
+    echo "${norm_addr}:${port}"
+  else
+    echo "$norm_addr"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -2604,12 +2709,18 @@ ports_cmd() {
           case "$op" in
             show|"") echo "${LAN_ALLOW_TCP:-}" ;;
             add)
-              for ep in "$@"; do LAN_ALLOW_TCP="$(list_add "$ep" $LAN_ALLOW_TCP)"; done
+              for ep in "$@"; do
+                ep="$(normalize_lan_endpoint "$ep")" || exit 2
+                LAN_ALLOW_TCP="$(list_add "$ep" $LAN_ALLOW_TCP)"
+              done
               save_policy
               echo "LAN_ALLOW_TCP: $LAN_ALLOW_TCP"
               apply_policy_to_running_sessions ;;
             rm|remove|del)
-              for ep in "$@"; do LAN_ALLOW_TCP="$(list_rm "$ep" $LAN_ALLOW_TCP)"; done
+              for ep in "$@"; do
+                ep="$(normalize_lan_endpoint "$ep")" || exit 2
+                LAN_ALLOW_TCP="$(list_rm "$ep" $LAN_ALLOW_TCP)"
+              done
               save_policy
               echo "LAN_ALLOW_TCP: $LAN_ALLOW_TCP"
               apply_policy_to_running_sessions ;;
@@ -2619,7 +2730,8 @@ ports_cmd() {
               echo "LAN_ALLOW_TCP cleared"
               apply_policy_to_running_sessions ;;
             *)
-              echo "Usage: opencode-vm ports lan tcp {show|add|rm|clear} [IP[:PORT]...]" >&2
+              echo "Usage: opencode-vm ports lan tcp {show|add|rm|clear} [IP|CIDR|WILDCARD[:PORT]...]" >&2
+              echo "  e.g. 192.168.19.10  192.168.19.10:443  192.168.19.0/24  192.168.19.*  192.168.*.*" >&2
               exit 2
               ;;
           esac
@@ -2629,12 +2741,18 @@ ports_cmd() {
           case "$op" in
             show|"") echo "${LAN_ALLOW_UDP:-}" ;;
             add)
-              for ep in "$@"; do LAN_ALLOW_UDP="$(list_add "$ep" $LAN_ALLOW_UDP)"; done
+              for ep in "$@"; do
+                ep="$(normalize_lan_endpoint "$ep")" || exit 2
+                LAN_ALLOW_UDP="$(list_add "$ep" $LAN_ALLOW_UDP)"
+              done
               save_policy
               echo "LAN_ALLOW_UDP: $LAN_ALLOW_UDP"
               apply_policy_to_running_sessions ;;
             rm|remove|del)
-              for ep in "$@"; do LAN_ALLOW_UDP="$(list_rm "$ep" $LAN_ALLOW_UDP)"; done
+              for ep in "$@"; do
+                ep="$(normalize_lan_endpoint "$ep")" || exit 2
+                LAN_ALLOW_UDP="$(list_rm "$ep" $LAN_ALLOW_UDP)"
+              done
               save_policy
               echo "LAN_ALLOW_UDP: $LAN_ALLOW_UDP"
               apply_policy_to_running_sessions ;;
@@ -2644,7 +2762,8 @@ ports_cmd() {
               echo "LAN_ALLOW_UDP cleared"
               apply_policy_to_running_sessions ;;
             *)
-              echo "Usage: opencode-vm ports lan udp {show|add|rm|clear} [IP[:PORT]...]" >&2
+              echo "Usage: opencode-vm ports lan udp {show|add|rm|clear} [IP|CIDR|WILDCARD[:PORT]...]" >&2
+              echo "  e.g. 192.168.19.20:53  192.168.19.0/24  192.168.19.*" >&2
               exit 2
               ;;
           esac
