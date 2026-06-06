@@ -578,6 +578,84 @@ normalize_lan_endpoint() {
   fi
 }
 
+# IPv4 dotted-quad -> unsigned 32-bit integer. Inputs are already validated by
+# normalize_lan_endpoint, so no range checking here.
+_ipv4_to_int() {
+  local a b c d IFS=.
+  read -r a b c d <<< "$1"
+  echo $(( (a << 24) + (b << 16) + (c << 8) + d ))
+}
+
+# True (return 0) if CIDR/IP $1 fully contains CIDR/IP $2. Bare IPs count as /32.
+_cidr_contains() {
+  local outer="$1" inner="$2" oip op iip ipfx
+  if [[ "$outer" == */* ]]; then oip="${outer%/*}"; op="${outer##*/}"; else oip="$outer"; op=32; fi
+  if [[ "$inner" == */* ]]; then iip="${inner%/*}"; ipfx="${inner##*/}"; else iip="$inner"; ipfx=32; fi
+  (( op <= ipfx )) || return 1
+  local oint iint mask
+  oint="$(_ipv4_to_int "$oip")"
+  iint="$(_ipv4_to_int "$iip")"
+  if (( op == 0 )); then mask=0; else mask=$(( (0xFFFFFFFF << (32 - op)) & 0xFFFFFFFF )); fi
+  (( (oint & mask) == (iint & mask) ))
+}
+
+# Collapse a space-separated list of IPv4/CIDR tokens: drop any token fully
+# contained by a *different* token (a host inside a wider CIDR, a CIDR inside a
+# larger one, or an exact duplicate). Preserves first-seen order. nftables
+# `interval` sets reject overlapping elements ("conflicting intervals"), so the
+# element lists must be collapsed before they are pushed into a set.
+_collapse_cidrs() {
+  local -a toks=( $* ) keep=()
+  local i j drop
+  for (( i = 0; i < ${#toks[@]}; i++ )); do
+    drop=0
+    for (( j = 0; j < ${#toks[@]}; j++ )); do
+      (( i == j )) && continue
+      if _cidr_contains "${toks[$j]}" "${toks[$i]}"; then
+        if _cidr_contains "${toks[$i]}" "${toks[$j]}"; then
+          # equal blocks contain each other — keep only the earlier index
+          (( j < i )) && { drop=1; break; }
+        else
+          drop=1; break
+        fi
+      fi
+    done
+    (( drop )) || keep+=( "${toks[$i]}" )
+  done
+  echo "${keep[*]}"
+}
+
+# Bare-host nft elements (entries without :PORT) from a LAN_ALLOW_* list,
+# overlap-collapsed and comma-joined for `nft add element`.
+_lan_host_elems() {
+  local list="$1" ep hosts="" collapsed ip out=""
+  for ep in $list; do
+    [[ "$ep" == *:* ]] && continue
+    hosts+=" $ep"
+  done
+  collapsed="$(_collapse_cidrs $hosts)"
+  for ip in $collapsed; do out+="${ip}, "; done
+  echo "${out%, }"
+}
+
+# Tuple nft elements ("ip . port") from a LAN_ALLOW_* list, overlap-collapsed
+# per port (overlaps only conflict when the port matches) and comma-joined.
+_lan_tuple_elems() {
+  local list="$1" ep ports port ips collapsed ip out=""
+  ports="$(for ep in $list; do [[ "$ep" == *:* ]] && echo "${ep##*:}"; done | sort -un)"
+  for port in $ports; do
+    ips=""
+    for ep in $list; do
+      [[ "$ep" == *:* ]] || continue
+      [[ "${ep##*:}" == "$port" ]] || continue
+      ips+=" ${ep%:*}"
+    done
+    collapsed="$(_collapse_cidrs $ips)"
+    for ip in $collapsed; do out+="${ip} . ${port}, "; done
+  done
+  echo "${out%, }"
+}
+
 # ---------------------------------------------------------------------------
 # ECC (everything-claude-code) integration — fully opt-in
 # ---------------------------------------------------------------------------
@@ -5473,32 +5551,15 @@ apply_policy_in_vm() {
   local host_ports_csv
   host_ports_csv="$(echo "$HOST_TCP_PORTS" | tr ' ' ',')"
 
-  # LAN allowlists: "IP:PORT" -> nft IP.PORT tuple, "IP" (ohne Port) -> Host-Set (alle Ports)
-  local lan_tcp_elems="" lan_host_tcp_elems=""
-  for ep in $LAN_ALLOW_TCP; do
-    if [[ "$ep" == *:* ]]; then
-      local ip="${ep%:*}"
-      local port="${ep##*:}"
-      lan_tcp_elems+="${ip} . ${port}, "
-    else
-      lan_host_tcp_elems+="${ep}, "
-    fi
-  done
-  lan_tcp_elems="${lan_tcp_elems%, }"
-  lan_host_tcp_elems="${lan_host_tcp_elems%, }"
-
-  local lan_udp_elems="" lan_host_udp_elems=""
-  for ep in $LAN_ALLOW_UDP; do
-    if [[ "$ep" == *:* ]]; then
-      local ip="${ep%:*}"
-      local port="${ep##*:}"
-      lan_udp_elems+="${ip} . ${port}, "
-    else
-      lan_host_udp_elems+="${ep}, "
-    fi
-  done
-  lan_udp_elems="${lan_udp_elems%, }"
-  lan_host_udp_elems="${lan_host_udp_elems%, }"
+  # LAN allowlists: "IP:PORT" -> nft IP.PORT tuple, "IP" (ohne Port) -> Host-Set
+  # (alle Ports). Overlaps (e.g. a single IP plus a /24 that covers it) are
+  # collapsed first, otherwise nft rejects the interval set with "conflicting
+  # intervals".
+  local lan_tcp_elems lan_host_tcp_elems lan_udp_elems lan_host_udp_elems
+  lan_tcp_elems="$(_lan_tuple_elems "$LAN_ALLOW_TCP")"
+  lan_host_tcp_elems="$(_lan_host_elems "$LAN_ALLOW_TCP")"
+  lan_udp_elems="$(_lan_tuple_elems "$LAN_ALLOW_UDP")"
+  lan_host_udp_elems="$(_lan_host_elems "$LAN_ALLOW_UDP")"
 
   cat <<EOF
 [run] Applying policy inside VM:

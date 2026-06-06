@@ -392,6 +392,10 @@ Notes:
   equivalent CIDR `192.168.19.0/24`, which needs no quoting).
 - Invalid input (e.g. `192.168.19`, an octet > 255, or a wildcard that isn't
   trailing like `192.*.19.*`) is rejected with an error and nothing is saved.
+- Overlapping entries are fine: if you add a subnet that already covers single
+  hosts you listed (e.g. `192.168.19.132` plus `192.168.19.0/24`), the redundant
+  host entries are automatically dropped when the policy is pushed into the VM —
+  the firewall only ever sees the widest covering block per port.
 
 If a docker container within the VM exposes a port its reachable from your laptops with: `localhost:[PORT]`
 
