@@ -93,7 +93,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.42"
+OCVM_VERSION="0.4.43"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -622,7 +622,9 @@ _collapse_cidrs() {
     done
     (( drop )) || keep+=( "${toks[$i]}" )
   done
-  echo "${keep[*]}"
+  # `${keep[*]:-}` guard: under `set -u`, bash 3.2 (macOS) treats expansion of an
+  # empty array as an unbound variable. Empty input (no LAN allowlist) is normal.
+  echo "${keep[*]:-}"
 }
 
 # Bare-host nft elements (entries without :PORT) from a LAN_ALLOW_* list,
