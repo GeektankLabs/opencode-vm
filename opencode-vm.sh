@@ -104,7 +104,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.44"
+OCVM_VERSION="0.4.45"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -263,7 +263,12 @@ is_vm_running() {
   # Lima >=2.1.0 dropped --status, so use --format and match Name+Status pair.
   # The trailing whitespace anchor prevents prefix matches (e.g. "oc-base" vs
   # "oc-base-2"). Output line shape: "<name> <status>".
-  limactl list --format '{{.Name}} {{.Status}}' 2>/dev/null \
+  # Query the named instance explicitly: a bare `limactl list --format` loads
+  # EVERY instance dir and dies fatally if a phantom ~/.lima/sock/ exists (the
+  # docker-rootful hostSocket recreates it faster than sanitize can clear it),
+  # which would falsely report a running VM as down. Naming the instance only
+  # warns (to stderr) and still emits the row, so the check stays correct.
+  limactl list "$vm_name" --format '{{.Name}} {{.Status}}' 2>/dev/null \
     | grep -qx "$vm_name Running"
 }
 
