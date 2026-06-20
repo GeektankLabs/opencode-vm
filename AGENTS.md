@@ -93,6 +93,8 @@ Every change to `opencode-vm.sh` **must** increment the patch version in `OCVM_V
 
 ## Conventions
 
+- Write only the code the task actually needs — prefer the minimal, smallest-footprint solution over a more general or "future-proof" one. **Follow YAGNI principles** ("You Aren't Gonna Need It"): do not add abstractions, options, or machinery for hypothetical future requirements. If a need is real, it can be added when it arrives.
+- When the work is **user-facing** (UI/UX, CLI output, prompts, messages, errors), balance YAGNI with the **Principle of Least Astonishment (POLA)**: the interface should behave the way users already expect, honoring established conventions and the context of the interaction. YAGNI governs the *feature set* (don't build what isn't needed); POLA governs *behavior* (whatever you do build must not surprise). Reconcile the two with **progressive disclosure** (minimal default surface, depth revealed when needed) and **sensible defaults over configuration**.
 - The script uses `set -euo pipefail` — all errors are fatal
 - Policy is stored as space-separated lists in shell variables (sourced from `policy.env`)
 - LAN allowlist entries use `IP:PORT` format (e.g., `192.168.178.10:443`)

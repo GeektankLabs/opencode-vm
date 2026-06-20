@@ -80,6 +80,17 @@ _ocvm_resolve_script_dir() {
 SCRIPT_DIR="$(_ocvm_resolve_script_dir)"
 unset -f _ocvm_resolve_script_dir
 
+# Force Lima's SSH-based port forwarder for ALL `limactl start`/`clone --start`
+# invocations below. Lima >= 1.1 defaults to the gRPC forwarder, which silently
+# fails to relay VM->host TCP for vz + Docker instances: the host listener is
+# created and accepts the connection, but no data ever flows (curl connects then
+# times out). This breaks the core promise that a container port published in the
+# VM is reachable on the host as localhost:PORT. The SSH forwarder relays
+# correctly (verified). See lima-vm/lima#3355 and https://lima-vm.io/docs/config/port/.
+# Caveat: the SSH forwarder does not support UDP forwarding (TCP web services are
+# unaffected). Must be exported before any `limactl start` so the hostagent inherits it.
+export LIMA_SSH_PORT_FORWARDER=true
+
 # Excludes for xdg-data rsync: bin/ (375M, 28k files — downloaded on demand),
 # log/ (old session logs), tool-output/ (previous session artifacts)
 DATA_RSYNC_EXCLUDES=(--exclude='bin/' --exclude='log/' --exclude='tool-output/')
@@ -93,7 +104,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.43"
+OCVM_VERSION="0.4.44"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -5533,9 +5544,10 @@ For any frontend, UI, or visual-design task, check the project root (and the roo
 ## Coding Principles
 
 1. **Think before coding.** State your assumptions explicitly. If the request is ambiguous or you see multiple reasonable interpretations, surface them and ask before implementing.
-2. **Simplicity first.** Deliver the minimal code that solves the stated problem. No speculative features, unrequested abstractions, or flexibility for imagined future needs.
+2. **Simplicity first (YAGNI).** Deliver the minimal code that solves the stated problem. **Follow YAGNI** ("You Aren't Gonna Need It"): no speculative features, unrequested abstractions, or flexibility for imagined future needs. If a need is real, add it when it arrives.
 3. **Surgical changes.** Modify only what's required for the request. Preserve existing style and structure; don't fold in unrelated refactors or "while I'm here" cleanups.
 4. **Goal-driven execution.** Turn vague tasks into verifiable success criteria. Validate each step (build, test, run) before declaring the task done.
+5. **User-facing work follows POLA.** For UI/UX, CLI output, prompts, messages, and errors, balance YAGNI with the **Principle of Least Astonishment**: the interface must behave the way users already expect, honoring established conventions and the context of the interaction. YAGNI governs the *feature set* (don't build what isn't needed); POLA governs *behavior* (whatever you do build must not surprise). Reconcile the two with **progressive disclosure** (minimal default surface, depth revealed when needed) and **sensible defaults over configuration**.
 AGENTSMD
 
 echo "[init] Base ready. OpenCode: $(command -v opencode || true)"
