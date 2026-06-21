@@ -3319,8 +3319,10 @@ auth_collect_freshest_oauth() {
   while read -r vm; do
     [[ -n "$vm" ]] || continue
     tmp="$(mktemp)"
-    # The live auth.json inside the VM is root-owned (0600); read it via the
-    # guest's passwordless sudo. Web-mode XDG_DATA_HOME is /tmp/oc-xdg-data.
+    # The live auth.json inside the VM is mode 0600 (owned by the VM user, but
+    # may be root-owned on VMs seeded by older versions); read it via the
+    # guest's passwordless sudo so either ownership works. Web-mode
+    # XDG_DATA_HOME is /tmp/oc-xdg-data.
     if limactl shell --workdir / "$vm" -- sudo cat /tmp/oc-xdg-data/opencode/auth.json >"$tmp" 2>/dev/null \
         && [[ -s "$tmp" ]] && jq -e . "$tmp" >/dev/null 2>&1; then
       candidates+=("$tmp")
@@ -6071,9 +6073,21 @@ attach_session() {
     echo "[attach] OAuth pre-flight: adopting freshest provider token..."
     auth_collect_freshest_oauth apply 2>&1 | sed 's/^/[attach]   /' || true
     if [[ -f "$HOST_DATA_DIR/auth.json" ]]; then
-      limactl shell --workdir / "$SESS_NAME" -- sudo mkdir -p /tmp/oc-xdg-data/opencode 2>/dev/null || true
-      if limactl shell --workdir / "$SESS_NAME" -- sudo tee /tmp/oc-xdg-data/opencode/auth.json >/dev/null < "$HOST_DATA_DIR/auth.json" 2>/dev/null; then
-        limactl shell --workdir / "$SESS_NAME" -- sudo chmod 600 /tmp/oc-xdg-data/opencode/auth.json 2>/dev/null || true
+      # Write as the normal VM user (NOT sudo): opencode runs unprivileged and
+      # must be able to read this auth.json AND create log/ + repos/ siblings
+      # under /tmp/oc-xdg-data/opencode. A root-owned tree here makes opencode
+      # web crash-loop with EACCES on mkdir. The leading chown heals any
+      # root-owned remnant left by older versions (which did push via sudo).
+      if limactl shell --workdir / "$SESS_NAME" -- bash -lc '
+        set -e
+        d=/tmp/oc-xdg-data/opencode
+        if [ -e "$d" ] && [ ! -O "$d" ]; then
+          sudo chown -R "$(id -u):$(id -g)" /tmp/oc-xdg-data 2>/dev/null || true
+        fi
+        mkdir -p "$d"
+        cat > "$d/auth.json"
+        chmod 600 "$d/auth.json"
+      ' < "$HOST_DATA_DIR/auth.json" 2>/dev/null; then
         echo "[attach]   pushed freshest auth.json into running VM $(_ts)"
       fi
     fi
