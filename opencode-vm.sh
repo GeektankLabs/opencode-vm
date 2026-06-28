@@ -104,7 +104,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.50"
+OCVM_VERSION="0.4.51"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -276,6 +276,29 @@ ensure_host_opencode_dirs() {
   mkdir -p "$HOST_CFG_DIR" "$HOST_DATA_DIR" "$HOST_STATE_DIR"
 }
 
+# Deep-merge two opencode config JSONs into $3 so neither side loses a provider:
+# $2 (overlay) wins on conflicting keys; keys present only in $1 (base) survive.
+# `jq '.[0] * .[1]'` merges recursively with the right operand winning. Returns
+# non-zero and writes nothing when jq is missing or the result is empty/invalid,
+# so every caller can fall back to a plain copy. This is the single place that
+# defines "merge, don't clobber" for the host/project/session config triangle.
+# Caveat: union semantics mean an intentional provider deletion must be applied
+# to every copy (or via `provider rm`) — anything still present in the other
+# copy is re-added on the next merge.
+_cfg_merge() {
+  local base="$1" overlay="$2" out="$3"
+  command -v jq >/dev/null 2>&1 || return 1
+  [[ -f "$base" && -f "$overlay" ]] || return 1
+  local tmp; tmp="$(mktemp)"
+  if jq -s '.[0] * .[1]' "$base" "$overlay" > "$tmp" 2>/dev/null \
+     && [[ -s "$tmp" ]] && jq -e . "$tmp" >/dev/null 2>&1; then
+    mv "$tmp" "$out"
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
 sync_cfg_between_host_and_project() {
   local host_cfg="$1"
   local proj_cfg="$2"
@@ -284,14 +307,31 @@ sync_cfg_between_host_and_project() {
 
   if [[ -f "$proj_cfg" ]] && [[ -f "$host_cfg" ]]; then
     if ! cmp -s "$proj_cfg" "$host_cfg"; then
-      local host_mtime proj_mtime
+      local host_mtime proj_mtime newer older
       host_mtime="$(stat -f %m "$host_cfg" 2>/dev/null || echo 0)"
       proj_mtime="$(stat -f %m "$proj_cfg" 2>/dev/null || echo 0)"
+      # The newer file wins on scalar/conflicting keys.
       if (( host_mtime >= proj_mtime )); then
-        cp -p "$host_cfg" "$proj_cfg"
+        newer="$host_cfg"; older="$proj_cfg"
       else
-        cp -p "$proj_cfg" "$host_cfg"
+        newer="$proj_cfg"; older="$host_cfg"
       fi
+      # Deep-MERGE rather than wholesale-copy: a provider added on one side must
+      # not nuke providers defined on the other (the old `cp` did exactly that —
+      # editing the host to provider X silently dropped provider Y still held in
+      # a project's stored config on the next session start). Write the UNION to
+      # BOTH files so they converge and stop ping-ponging.
+      local _merged
+      _merged="$(mktemp)"
+      if _cfg_merge "$older" "$newer" "$_merged"; then
+        cp -p "$_merged" "$host_cfg"
+        cp -p "$_merged" "$proj_cfg"
+      else
+        # No jq / merge failed — preserve the legacy newer-wins wholesale copy.
+        cp -p "$newer" "$host_cfg"
+        cp -p "$newer" "$proj_cfg"
+      fi
+      rm -f "$_merged"
     fi
   elif [[ -f "$host_cfg" ]]; then
     cp -p "$host_cfg" "$proj_cfg"
@@ -6980,8 +7020,21 @@ start_session() {
         cp -p "$sess_cfg" "$persist_cfg"
       fi
 
-      cp -p "$persist_cfg" "$proj_cfg_cleanup"
-      cp -p "$persist_cfg" "$proj_cfg_cleanup_legacy"
+      # Merge the session config INTO the project-state baseline (session wins)
+      # rather than overwriting it, so a provider that lives only in project
+      # state is not dropped just because this session never referenced it.
+      local _pmerge="$persist_cfg.proj"
+      if _cfg_merge "$proj_cfg_cleanup" "$persist_cfg" "$_pmerge"; then
+        cp -p "$_pmerge" "$proj_cfg_cleanup"
+        rm -f "$_pmerge"
+      else
+        cp -p "$persist_cfg" "$proj_cfg_cleanup"
+      fi
+      cp -p "$proj_cfg_cleanup" "$proj_cfg_cleanup_legacy"
+
+      # Same merge-not-clobber rule for the host config write below.
+      local _hmerge="$persist_cfg.host"
+      _cfg_merge "$dst" "$persist_cfg" "$_hmerge" || cp -p "$persist_cfg" "$_hmerge"
 
       local current_hash
       current_hash="$(md5 -q "$dst")"
@@ -6990,16 +7043,16 @@ start_session() {
         echo "Another session has edited the OpenCode config since this session started."
         read -r -p "Overwrite with this session's config? [y/N] " answer </dev/tty || answer="n"
         if [[ "$answer" =~ ^[Yy]$ ]]; then
-          cp -p "$persist_cfg" "$dst"
+          cp -p "$_hmerge" "$dst"
         else
           local bak="$dst.session-bak-$(date +%Y%m%d-%H%M%S)"
-          cp -p "$persist_cfg" "$bak"
+          cp -p "$_hmerge" "$bak"
           echo "Keeping existing config. Session config saved to: $bak"
         fi
       else
-        cp -p "$persist_cfg" "$dst"
+        cp -p "$_hmerge" "$dst"
       fi
-      rm -f "$persist_cfg"
+      rm -f "$persist_cfg" "$_hmerge"
     fi
 
     # Propagate only auth.json back to the host so provider changes made in
