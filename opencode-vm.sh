@@ -104,7 +104,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.48"
+OCVM_VERSION="0.4.49"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -3756,8 +3756,11 @@ provider_cmd() {
       tmp_auth="$(mktemp)"
       tmp_cfg="$(mktemp)"
 
+      # OpenCode's auth.json discriminates on "type" with values oauth|api|wellknown.
+      # A static API key MUST be type "api" (not "key", which OpenCode ignores ->
+      # "API key not present" at runtime even though the key sits in the file).
       jq --arg p "$provider" --arg k "$api_key" \
-        '.[$p] = {"type":"key","key":$k}' \
+        '.[$p] = {"type":"api","key":$k}' \
         "$auth_file" > "$tmp_auth" && mv "$tmp_auth" "$auth_file"
 
       jq \
