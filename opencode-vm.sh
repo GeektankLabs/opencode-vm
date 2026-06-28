@@ -104,7 +104,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.51"
+OCVM_VERSION="0.4.52"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -6123,6 +6123,13 @@ attach_session() {
   echo "[attach] Reconnecting to session: $SESS_NAME"
   echo "[attach] Project: $proj"
 
+  # Re-run model enrichment on the share config so sessions created before this
+  # feature (or before a table bump) gain limits/modalities/reasoning on resume.
+  # Fill-only and idempotent — a no-op for already-enriched configs.
+  local _att_cfg
+  _att_cfg="$(session_share_dir "$proj")/config/opencode/opencode.json"
+  [[ -f "$_att_cfg" ]] && apply_model_enrichment "$_att_cfg"
+
   # OAuth pre-flight before reconnect: adopt the freshest token (from any other
   # running VM or saved session) into the host auth.json, then push it into this
   # resumed VM — its own /tmp copy may hold a refresh token that another VM has
@@ -6542,80 +6549,141 @@ EOF
   : > "$KEPT_SESSION_NOTIFIED_MARKER"
 }
 
-# Static fallback table of context-window / max-output limits, keyed by model id.
-# OpenCode pulls limits from models.dev for known models, but custom/gateway
-# providers that surface models dynamically (no "limit" in config) fall back to
-# context=0 — which silently disables auto-compaction, breaks the usage gauge,
-# and caps output at a hardcoded 32k. This table backfills those for the cloud
-# models served via the gateway. Values are {context, output} (OpenCode's
-# limit.context / limit.output). Edit here to add/adjust models.
-_model_limit_fallback_table() {
+# Static enrichment table for frontier models, keyed by model id. OpenCode pulls
+# this metadata from models.dev for known providers, but custom/gateway providers
+# that surface models dynamically (LiteLLM-style proxies, ai-gateway) get NONE of
+# it: context falls back to 0 (silently disables auto-compaction, breaks the usage
+# gauge, caps output at ~32k), media uploads are blocked, and reasoning is never
+# requested. apply_model_enrichment() backfills the missing pieces from this table.
+# Per-entry fields:
+#   context / output : OpenCode limit.context / limit.output (tokens)
+#   vision           : accepts image input  -> attachment + modalities.input image
+#   pdf              : accepts pdf input     -> appends "pdf" to modalities.input
+#   reasoning        : supports thinking/reasoning -> options.reasoningEffort
+#                      (openai-compatible providers) or options.thinking (native)
+# Edit here to add/adjust models. _model_limit_fallback_table is kept as an alias.
+_model_enrichment_table() {
   cat <<'EOF'
 {
-  "claude-opus-4-8":   { "name": "claude-opus-4-8",   "context": 200000,  "output": 32000 },
-  "claude-opus-4-7":   { "name": "claude-opus-4-7",   "context": 200000,  "output": 32000 },
-  "claude-opus-4-6":   { "name": "claude-opus-4-6",   "context": 200000,  "output": 32000 },
-  "claude-sonnet-4-8": { "name": "claude-sonnet-4-8", "context": 200000,  "output": 64000 },
-  "claude-sonnet-4-6": { "name": "claude-sonnet-4-6", "context": 1000000, "output": 64000 },
-  "claude-sonnet-4-5": { "name": "claude-sonnet-4-5", "context": 1000000, "output": 64000 },
-  "claude-sonnet-3-7": { "name": "claude-sonnet-3-7", "context": 200000,  "output": 128000 },
-  "claude-sonnet-3-5": { "name": "claude-sonnet-3-5", "context": 200000,  "output": 8192 },
-  "claude-haiku-4-8":  { "name": "claude-haiku-4-8",  "context": 200000,  "output": 64000 },
-  "claude-haiku-4-5":  { "name": "claude-haiku-4-5",  "context": 200000,  "output": 64000 },
-  "claude-haiku-3-5":  { "name": "claude-haiku-3-5",  "context": 200000,  "output": 8192 },
-  "claude-3-opus":     { "name": "claude-3-opus",     "context": 200000,  "output": 4096 },
-  "claude-3-sonnet":   { "name": "claude-3-sonnet",   "context": 200000,  "output": 4096 },
-  "claude-3-haiku":    { "name": "claude-3-haiku",    "context": 200000,  "output": 4096 },
-  "gpt-5.5":           { "name": "gpt-5.5",           "context": 1048576, "output": 128000 },
-  "gpt-5.4":           { "name": "gpt-5.4",           "context": 1050000, "output": 128000 },
-  "gpt-5.4-mini":      { "name": "gpt-5.4-mini",      "context": 400000,  "output": 128000 },
-  "gpt-5":             { "name": "gpt-5",             "context": 272000,  "output": 32768 },
-  "gpt-5-mini":        { "name": "gpt-5-mini",        "context": 128000,  "output": 16384 },
-  "o4":                { "name": "o4",                "context": 200000,  "output": 100000 },
-  "gemini-2.5-pro":    { "name": "gemini-2.5-pro",    "context": 2000000, "output": 65536 },
-  "gemini-2.5-flash":  { "name": "gemini-2.5-flash",  "context": 1000000, "output": 65536 }
+  "claude-opus-4-8":   { "name": "claude-opus-4-8",   "context": 200000,  "output": 64000,  "vision": true,  "pdf": true,  "reasoning": true },
+  "claude-opus-4-7":   { "name": "claude-opus-4-7",   "context": 200000,  "output": 32000,  "vision": true,  "pdf": true,  "reasoning": true },
+  "claude-opus-4-6":   { "name": "claude-opus-4-6",   "context": 200000,  "output": 32000,  "vision": true,  "pdf": true,  "reasoning": true },
+  "claude-fable-5":    { "name": "claude-fable-5",    "context": 200000,  "output": 64000,  "vision": true,  "pdf": true,  "reasoning": true },
+  "claude-sonnet-4-8": { "name": "claude-sonnet-4-8", "context": 200000,  "output": 64000,  "vision": true,  "pdf": true,  "reasoning": true },
+  "claude-sonnet-4-6": { "name": "claude-sonnet-4-6", "context": 1000000, "output": 64000,  "vision": true,  "pdf": true,  "reasoning": true },
+  "claude-sonnet-4-5": { "name": "claude-sonnet-4-5", "context": 1000000, "output": 64000,  "vision": true,  "pdf": true,  "reasoning": true },
+  "claude-sonnet-3-7": { "name": "claude-sonnet-3-7", "context": 200000,  "output": 128000, "vision": true,  "pdf": true,  "reasoning": true },
+  "claude-sonnet-3-5": { "name": "claude-sonnet-3-5", "context": 200000,  "output": 8192,   "vision": true,  "pdf": true,  "reasoning": false },
+  "claude-haiku-4-8":  { "name": "claude-haiku-4-8",  "context": 200000,  "output": 64000,  "vision": true,  "pdf": true,  "reasoning": true },
+  "claude-haiku-4-5":  { "name": "claude-haiku-4-5",  "context": 200000,  "output": 64000,  "vision": true,  "pdf": true,  "reasoning": true },
+  "claude-haiku-3-5":  { "name": "claude-haiku-3-5",  "context": 200000,  "output": 8192,   "vision": true,  "pdf": true,  "reasoning": false },
+  "claude-3-opus":     { "name": "claude-3-opus",     "context": 200000,  "output": 4096,   "vision": true,  "pdf": true,  "reasoning": false },
+  "claude-3-sonnet":   { "name": "claude-3-sonnet",   "context": 200000,  "output": 4096,   "vision": true,  "pdf": true,  "reasoning": false },
+  "claude-3-haiku":    { "name": "claude-3-haiku",    "context": 200000,  "output": 4096,   "vision": true,  "pdf": true,  "reasoning": false },
+  "gpt-5.5":           { "name": "gpt-5.5",           "context": 1048576, "output": 128000, "vision": true,  "pdf": false, "reasoning": true },
+  "gpt-5.4":           { "name": "gpt-5.4",           "context": 1050000, "output": 128000, "vision": true,  "pdf": false, "reasoning": true },
+  "gpt-5.4-mini":      { "name": "gpt-5.4-mini",      "context": 400000,  "output": 128000, "vision": true,  "pdf": false, "reasoning": true },
+  "gpt-5":             { "name": "gpt-5",             "context": 272000,  "output": 32768,  "vision": true,  "pdf": false, "reasoning": true },
+  "gpt-5-mini":        { "name": "gpt-5-mini",        "context": 128000,  "output": 16384,  "vision": true,  "pdf": false, "reasoning": true },
+  "o4":                { "name": "o4",                "context": 200000,  "output": 100000, "vision": true,  "pdf": false, "reasoning": true },
+  "gemini-2.5-pro":    { "name": "gemini-2.5-pro",    "context": 2000000, "output": 65536,  "vision": true,  "pdf": true,  "reasoning": true },
+  "gemini-2.5-flash":  { "name": "gemini-2.5-flash",  "context": 1000000, "output": 65536,  "vision": true,  "pdf": true,  "reasoning": true }
 }
 EOF
 }
 
-# Pre-declare the fallback-table models (with limits) under the gateway
-# provider(s) so OpenCode merges the limits onto the same-id models the gateway
-# surfaces dynamically. Only augments providers that already exist in the config;
-# never overwrites a model that already carries an explicit "limit". Operates on
-# the session config file in place. Non-fatal; needs jq.
-#   OCVM_MODEL_LIMIT_FALLBACK=0          -> disable entirely
-#   OCVM_MODEL_LIMIT_PROVIDERS="a,b"     -> target provider ids (default: ai-gateway)
-apply_model_limit_fallback() {
+# Back-compat alias: older call sites / external scripts may reference this name.
+_model_limit_fallback_table() { _model_enrichment_table; }
+
+# Enrich the same-id models that custom/gateway providers surface dynamically with
+# the metadata from _model_enrichment_table. Three additive passes, each FILL-ONLY
+# (never overwrites a field the user already set):
+#   1. limit       — backfills limit.{context,output} when no .limit present.
+#   2. modalities  — for vision entries with no .modalities: sets attachment:true
+#                    + modalities.input ["text","image"(,"pdf")], output ["text"].
+#   3. reasoning   — for reasoning entries with no reasoning option already set:
+#                    openai-compatible providers get options.reasoningEffort (the
+#                    knob a proxy understands, covering gpt AND proxied claude),
+#                    native providers get options.thinking{type,budgetTokens}.
+# Only touches providers that already exist in the config. Operates on the session
+# config file in place. Non-fatal; needs jq.
+#   OCVM_MODEL_ENRICH=0                  -> disable entirely (legacy
+#                                          OCVM_MODEL_LIMIT_FALLBACK=0 also honored)
+#   OCVM_MODEL_ENRICH_PROVIDERS="a,b"    -> explicit target provider ids; default
+#                                          is every @ai-sdk/openai-compatible
+#                                          provider plus "ai-gateway". Legacy
+#                                          OCVM_MODEL_LIMIT_PROVIDERS still honored.
+#   OCVM_REASONING_EFFORT=medium         -> reasoningEffort for openai-compatible
+#   OCVM_REASONING_BUDGET=8192           -> thinking.budgetTokens for native
+apply_model_enrichment() {
   local cfg_file="$1"
-  [[ "${OCVM_MODEL_LIMIT_FALLBACK:-1}" == "0" ]] && return 0
+  { [[ "${OCVM_MODEL_ENRICH:-1}" == "0" ]] || [[ "${OCVM_MODEL_LIMIT_FALLBACK:-1}" == "0" ]]; } && return 0
   command -v jq >/dev/null 2>&1 || return 0
   [[ -f "$cfg_file" ]] || return 0
 
-  local providers="${OCVM_MODEL_LIMIT_PROVIDERS:-ai-gateway}"
-  local tbl; tbl="$(_model_limit_fallback_table)"
+  # Explicit override (new var preferred, legacy var honored). Empty => auto-select.
+  local providers="${OCVM_MODEL_ENRICH_PROVIDERS:-${OCVM_MODEL_LIMIT_PROVIDERS:-}}"
+  local effort="${OCVM_REASONING_EFFORT:-medium}"
+  local budget="${OCVM_REASONING_BUDGET:-8192}"
+  local tbl; tbl="$(_model_enrichment_table)"
 
   local tmp; tmp="$(mktemp)"
-  if jq --argjson tbl "$tbl" --arg providers "$providers" '
-        ($providers | split(",") | map(gsub("^\\s+|\\s+$"; ""))) as $plist
+  if jq \
+      --argjson tbl "$tbl" \
+      --arg providers "$providers" \
+      --arg effort "$effort" \
+      --argjson budget "$budget" '
+        # Target provider ids: explicit list if given, else every
+        # openai-compatible provider plus a literal "ai-gateway".
+        ( ($providers | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) ) as $explicit
+        | ( if ($explicit | length) > 0 then $explicit
+            else ((.provider // {}) | to_entries
+                  | map(select(.value.npm == "@ai-sdk/openai-compatible") | .key) + ["ai-gateway"]
+                  | unique)
+          end ) as $plist
         | reduce $plist[] as $p (.;
             if (.provider[$p]?) then
-              .provider[$p].models = (
-                (.provider[$p].models // {}) as $models
-                | reduce ($tbl | to_entries[]) as $e ($models;
-                    if (.[$e.key]?.limit) then .
-                    else .[$e.key] = ((.[$e.key] // {}) * {
-                           name: (.[$e.key].name // $e.value.name),
-                           limit: { context: $e.value.context, output: $e.value.output }
-                         })
-                    end))
+              ((.provider[$p].npm // "") == "@ai-sdk/openai-compatible") as $oai
+              | .provider[$p].models = (
+                  (.provider[$p].models // {}) as $models
+                  | reduce ($tbl | to_entries[]) as $e ($models;
+                      .[$e.key] as $m
+                      | if ($m == null) then .
+                        else
+                          # 1. limit (fill-only)
+                          ( if ($m.limit) then $m
+                            else $m * { name: ($m.name // $e.value.name),
+                                        limit: { context: $e.value.context, output: $e.value.output } }
+                            end ) as $m1
+                          # 2. modalities (fill-only, vision entries)
+                          | ( if (($e.value.vision == true) and ($m1.modalities | not))
+                              then $m1 + { attachment: true,
+                                           modalities: { input: (["text","image"] + (if $e.value.pdf == true then ["pdf"] else [] end)),
+                                                         output: ["text"] } }
+                              else $m1
+                              end ) as $m2
+                          # 3. reasoning (fill-only)
+                          | ( if (($e.value.reasoning == true)
+                                  and (($m2.options.reasoningEffort // $m2.options.thinking) | not))
+                              then ( if $oai
+                                     then $m2 * { options: { reasoningEffort: $effort } }
+                                     else $m2 * { options: { thinking: { type: "enabled", budgetTokens: $budget } } }
+                                     end )
+                              else $m2
+                              end ) as $m3
+                          | .[$e.key] = $m3
+                        end))
             else . end)
       ' "$cfg_file" > "$tmp" 2>/dev/null; then
     mv "$tmp" "$cfg_file"
   else
     rm -f "$tmp"
-    echo "[run] WARN: model-limit fallback pass failed; leaving config unchanged." >&2
+    echo "[run] WARN: model enrichment pass failed; leaving config unchanged." >&2
   fi
 }
+
+# Back-compat alias for the old function name.
+apply_model_limit_fallback() { apply_model_enrichment "$@"; }
 
 start_session() {
   need limactl
@@ -6821,10 +6889,11 @@ start_session() {
       && mv "$tmp_cfg" "$sess_cfg_file" \
       || rm -f "$tmp_cfg"
 
-    # Backfill context/output limits for gateway-served cloud models that
-    # surface without limit info (OpenCode would otherwise default them to
-    # context=0, disabling auto-compaction). Mutates $sess_cfg_file in place.
-    apply_model_limit_fallback "$sess_cfg_file"
+    # Enrich custom/gateway-served frontier models that surface without metadata:
+    # backfills context/output limits (OpenCode would otherwise default context=0,
+    # disabling auto-compaction), media modalities (image/pdf input), and reasoning
+    # options. Fill-only — never overwrites explicit user fields. Mutates in place.
+    apply_model_enrichment "$sess_cfg_file"
 
     cp -p "$sess_cfg_file" "$sess_share/config/opencode/.opencode.json"
   fi
