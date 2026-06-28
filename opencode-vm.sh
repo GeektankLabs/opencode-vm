@@ -104,7 +104,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.46"
+OCVM_VERSION="0.4.48"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -3558,8 +3558,14 @@ provider_cmd() {
         if [[ ! -t 0 ]]; then
           echo "Missing required --api-key" >&2; exit 2
         fi
-        read -r -s -p "[provider] API key: " api_key
-        echo
+        # Cleartext (not -s/silent) so the user can see what they type and
+        # confirm it is non-empty. These are local processes; a key briefly
+        # visible on the console is an acceptable trade-off for usability.
+        read -r -p "[provider] API key: " api_key
+        if [[ -z "$api_key" ]]; then
+          echo "[provider] No API key entered. Aborting (nothing was added)." >&2
+          exit 2
+        fi
       fi
 
       if [[ -z "$provider_name" ]] && [[ -t 0 ]]; then
@@ -4744,6 +4750,18 @@ npm install -g @playwright/mcp@latest svgo mcp-searxng@1.0.3
 # install-browser so the CLI is on PATH regardless of the active Node version.
 mkdir -p ~/.local/bin
 ln -sf "$(npm prefix -g)/bin/playwright-mcp" ~/.local/bin/playwright-mcp
+
+# No-op xdg-open: `opencode web` tries to auto-open a browser on startup, but
+# this VM is headless and accessed remotely over the LAN tunnel. Without a
+# handler the spawn throws a scary "Executable not found: xdg-open" ENOENT on
+# every (re)start. ~/.local/bin is ahead of $PATH, so this stub wins; it just
+# logs the URL and exits 0, turning the auto-open into a harmless no-op.
+cat > ~/.local/bin/xdg-open <<'XDGOPEN'
+#!/usr/bin/env bash
+echo "[xdg-open] headless VM — open this on your host browser: $*" >&2
+exit 0
+XDGOPEN
+chmod +x ~/.local/bin/xdg-open
 
 # Use the MCP's own resolver: since @playwright/mcp@0.0.74 the alias
 # `--browser chromium` maps to channel `chrome-for-testing`, which is a
