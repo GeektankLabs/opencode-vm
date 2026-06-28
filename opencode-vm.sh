@@ -104,7 +104,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.52"
+OCVM_VERSION="0.4.53"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -3753,9 +3753,13 @@ provider_cmd() {
         fi
 
         if [[ "$_m_reasoning" == "yes" ]]; then
+          # Top-level "reasoning": true is the models.dev capability flag OpenCode
+          # reads for the model-picker badge; reasoningEffort is the runtime knob.
+          # provider add always builds an @ai-sdk/openai-compatible provider, so the
+          # proxy-understood knob is reasoningEffort (not the native thinking{...}).
           models_json="$(printf '%s' "$models_json" | jq \
             --arg id "$_mid" \
-            '.[$id].options.thinking = {"type":"enabled","budgetTokens":8192}')"
+            '.[$id].reasoning = true | .[$id].options.reasoningEffort = "medium"')"
         fi
       done
 
@@ -3810,6 +3814,13 @@ provider_cmd() {
         --argjson m "$models_json" \
         '.provider = ((.provider // {}) + {($p): {"npm":"@ai-sdk/openai-compatible","name":$n,"options":{"baseURL":$b},"models":$m}})' \
         "$cfg_file" > "$tmp_cfg" && mv "$tmp_cfg" "$cfg_file"
+
+      # Enrich the host config in place (fill-only): backfills limit/modalities/
+      # reasoning by model-id for frontier models the name heuristic can't classify
+      # (claude-*, gpt-*). Without this the host config keeps raw entries with no
+      # reasoning flag; only the ephemeral session copy got enriched at start, so
+      # the user inspecting the host config saw "no reasoning" on every model.
+      apply_model_enrichment "$cfg_file"
 
       echo "[provider] '$provider' added/updated with ${#models[@]} model(s)."
       echo "[provider] Updated auth: $auth_file"
@@ -6662,13 +6673,23 @@ apply_model_enrichment() {
                                                          output: ["text"] } }
                               else $m1
                               end ) as $m2
-                          # 3. reasoning (fill-only)
-                          | ( if (($e.value.reasoning == true)
-                                  and (($m2.options.reasoningEffort // $m2.options.thinking) | not))
-                              then ( if $oai
-                                     then $m2 * { options: { reasoningEffort: $effort } }
-                                     else $m2 * { options: { thinking: { type: "enabled", budgetTokens: $budget } } }
-                                     end )
+                          # 3. reasoning (fill-only). Two distinct things:
+                          #    a) top-level "reasoning": true  -> the models.dev
+                          #       capability flag OpenCode reads to mark a model as
+                          #       a reasoning model (the model-picker badge). Without
+                          #       this, reasoningEffort alone leaves the UI showing
+                          #       "no reasoning" (analogue of attachment for vision).
+                          #    b) the runtime knob: reasoningEffort (openai-compatible)
+                          #       or thinking{...} (native).
+                          | ( if ($e.value.reasoning == true)
+                              then ( $m2
+                                     | ( if (.reasoning == null) then .reasoning = true else . end )
+                                     | ( if ((.options.reasoningEffort // .options.thinking) | not)
+                                         then ( if $oai
+                                                then . * { options: { reasoningEffort: $effort } }
+                                                else . * { options: { thinking: { type: "enabled", budgetTokens: $budget } } }
+                                                end )
+                                         else . end ) )
                               else $m2
                               end ) as $m3
                           | .[$e.key] = $m3
