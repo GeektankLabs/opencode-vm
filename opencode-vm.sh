@@ -104,7 +104,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.49"
+OCVM_VERSION="0.4.50"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -6502,6 +6502,81 @@ EOF
   : > "$KEPT_SESSION_NOTIFIED_MARKER"
 }
 
+# Static fallback table of context-window / max-output limits, keyed by model id.
+# OpenCode pulls limits from models.dev for known models, but custom/gateway
+# providers that surface models dynamically (no "limit" in config) fall back to
+# context=0 — which silently disables auto-compaction, breaks the usage gauge,
+# and caps output at a hardcoded 32k. This table backfills those for the cloud
+# models served via the gateway. Values are {context, output} (OpenCode's
+# limit.context / limit.output). Edit here to add/adjust models.
+_model_limit_fallback_table() {
+  cat <<'EOF'
+{
+  "claude-opus-4-8":   { "name": "claude-opus-4-8",   "context": 200000,  "output": 32000 },
+  "claude-opus-4-7":   { "name": "claude-opus-4-7",   "context": 200000,  "output": 32000 },
+  "claude-opus-4-6":   { "name": "claude-opus-4-6",   "context": 200000,  "output": 32000 },
+  "claude-sonnet-4-8": { "name": "claude-sonnet-4-8", "context": 200000,  "output": 64000 },
+  "claude-sonnet-4-6": { "name": "claude-sonnet-4-6", "context": 1000000, "output": 64000 },
+  "claude-sonnet-4-5": { "name": "claude-sonnet-4-5", "context": 1000000, "output": 64000 },
+  "claude-sonnet-3-7": { "name": "claude-sonnet-3-7", "context": 200000,  "output": 128000 },
+  "claude-sonnet-3-5": { "name": "claude-sonnet-3-5", "context": 200000,  "output": 8192 },
+  "claude-haiku-4-8":  { "name": "claude-haiku-4-8",  "context": 200000,  "output": 64000 },
+  "claude-haiku-4-5":  { "name": "claude-haiku-4-5",  "context": 200000,  "output": 64000 },
+  "claude-haiku-3-5":  { "name": "claude-haiku-3-5",  "context": 200000,  "output": 8192 },
+  "claude-3-opus":     { "name": "claude-3-opus",     "context": 200000,  "output": 4096 },
+  "claude-3-sonnet":   { "name": "claude-3-sonnet",   "context": 200000,  "output": 4096 },
+  "claude-3-haiku":    { "name": "claude-3-haiku",    "context": 200000,  "output": 4096 },
+  "gpt-5.5":           { "name": "gpt-5.5",           "context": 1048576, "output": 128000 },
+  "gpt-5.4":           { "name": "gpt-5.4",           "context": 1050000, "output": 128000 },
+  "gpt-5.4-mini":      { "name": "gpt-5.4-mini",      "context": 400000,  "output": 128000 },
+  "gpt-5":             { "name": "gpt-5",             "context": 272000,  "output": 32768 },
+  "gpt-5-mini":        { "name": "gpt-5-mini",        "context": 128000,  "output": 16384 },
+  "o4":                { "name": "o4",                "context": 200000,  "output": 100000 },
+  "gemini-2.5-pro":    { "name": "gemini-2.5-pro",    "context": 2000000, "output": 65536 },
+  "gemini-2.5-flash":  { "name": "gemini-2.5-flash",  "context": 1000000, "output": 65536 }
+}
+EOF
+}
+
+# Pre-declare the fallback-table models (with limits) under the gateway
+# provider(s) so OpenCode merges the limits onto the same-id models the gateway
+# surfaces dynamically. Only augments providers that already exist in the config;
+# never overwrites a model that already carries an explicit "limit". Operates on
+# the session config file in place. Non-fatal; needs jq.
+#   OCVM_MODEL_LIMIT_FALLBACK=0          -> disable entirely
+#   OCVM_MODEL_LIMIT_PROVIDERS="a,b"     -> target provider ids (default: ai-gateway)
+apply_model_limit_fallback() {
+  local cfg_file="$1"
+  [[ "${OCVM_MODEL_LIMIT_FALLBACK:-1}" == "0" ]] && return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  [[ -f "$cfg_file" ]] || return 0
+
+  local providers="${OCVM_MODEL_LIMIT_PROVIDERS:-ai-gateway}"
+  local tbl; tbl="$(_model_limit_fallback_table)"
+
+  local tmp; tmp="$(mktemp)"
+  if jq --argjson tbl "$tbl" --arg providers "$providers" '
+        ($providers | split(",") | map(gsub("^\\s+|\\s+$"; ""))) as $plist
+        | reduce $plist[] as $p (.;
+            if (.provider[$p]?) then
+              .provider[$p].models = (
+                (.provider[$p].models // {}) as $models
+                | reduce ($tbl | to_entries[]) as $e ($models;
+                    if (.[$e.key]?.limit) then .
+                    else .[$e.key] = ((.[$e.key] // {}) * {
+                           name: (.[$e.key].name // $e.value.name),
+                           limit: { context: $e.value.context, output: $e.value.output }
+                         })
+                    end))
+            else . end)
+      ' "$cfg_file" > "$tmp" 2>/dev/null; then
+    mv "$tmp" "$cfg_file"
+  else
+    rm -f "$tmp"
+    echo "[run] WARN: model-limit fallback pass failed; leaving config unchanged." >&2
+  fi
+}
+
 start_session() {
   need limactl
   need rsync
@@ -6705,6 +6780,12 @@ start_session() {
     ' "$sess_cfg_file" > "$tmp_cfg" \
       && mv "$tmp_cfg" "$sess_cfg_file" \
       || rm -f "$tmp_cfg"
+
+    # Backfill context/output limits for gateway-served cloud models that
+    # surface without limit info (OpenCode would otherwise default them to
+    # context=0, disabling auto-compaction). Mutates $sess_cfg_file in place.
+    apply_model_limit_fallback "$sess_cfg_file"
+
     cp -p "$sess_cfg_file" "$sess_share/config/opencode/.opencode.json"
   fi
 
