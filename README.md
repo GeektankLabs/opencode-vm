@@ -109,15 +109,16 @@ ECC's `continuous-learning-v2` skill (commands `/learn` and `/instinct-status`) 
 
 opencode-vm splits extensions into two subsystems: **Skills** (knowledge packages — pure markdown mounted as agent context) and **MCPs** (server-based capabilities — tools the agent can actually call). This section covers Skills; MCPs are below.
 
-The Skills subsystem is registry-driven: [`skills/registry.json`](skills/registry.json) is the source of truth. Three packages ship today:
+The Skills subsystem is registry-driven: [`skills/registry.json`](skills/registry.json) is the source of truth. Four packages ship today:
 
 | Package | Default | What it mounts | Approx. token cost |
 |---|---|---|---|
-| `webimg`  | on  | Web image optimization pipeline (tools pre-installed in base VM) | ~70 tokens |
-| `ecc-auto`| off | Universal ECC skills + language-specific matches for your project (≈30) | +2–4k tokens |
-| `ecc-all` | off | Every ECC skill (~180) | +10–15k tokens |
+| `webimg`      | on  | Web image optimization pipeline (tools pre-installed in base VM) | ~70 tokens |
+| `ssh-toolkit` | on  | SSH/network workflows (tunnels, sshfs, discovery — tools pre-installed in base VM) | ~70 tokens |
+| `ecc-auto`    | off | Universal ECC skills + language-specific matches for your project (≈30) | +2–4k tokens |
+| `ecc-all`     | off | Every ECC skill (~180) | +10–15k tokens |
 
-`ecc-auto` and `ecc-all` are mutually exclusive (enabling one auto-disables the other). Both auto-clone ECC into `~/.opencode-vm/ecc/` on first enable — no separate install step needed. `webimg` is seeded as active on first use; you can disable it with `opencode-vm skills off webimg` if you don't need the image pipeline.
+`ecc-auto` and `ecc-all` are mutually exclusive (enabling one auto-disables the other). Both auto-clone ECC into `~/.opencode-vm/ecc/` on first enable — no separate install step needed. `webimg` and `ssh-toolkit` are seeded as active on first use; you can disable them with `opencode-vm skills off <pkg>` if you don't need them.
 
 **Why opt-in?** Each skill adds ~60–90 tokens of frontmatter to every new chat, whether you use it or not. `ecc-all` alone can push 10–15k tokens of pure menu noise — fine on a 200k-context remote model, painful on a 4k–32k local model.
 
@@ -134,15 +135,14 @@ opencode-vm skills list /path/to/other   # preview for another project path
 
 `opencode-vm doctor` shows active packages + per-package skill count for the current working directory, plus an estimated token total.
 
-> **Moved in v0.4.4:** Proxmox is no longer a skill — it is an MCP. Use `opencode-vm mcps on proxmox` (see below).
-
 ## MCPs (opt-in, capabilities)
 
-MCPs (Model Context Protocol servers) give the agent *tools it can call* — browser automation, codebase indexing, infrastructure APIs. Registry-driven at [`mcps/registry.json`](mcps/registry.json). Four MCPs ship today:
+MCPs (Model Context Protocol servers) give the agent *tools it can call* — browser automation, web search, codebase indexing, infrastructure APIs. Registry-driven at [`mcps/registry.json`](mcps/registry.json). Five MCPs ship today:
 
 | MCP | Default | Needs setup | Description |
 |---|---|---|---|
 | `playwright` | on  | no | Headless browser automation (Chromium pre-installed in base VM) |
+| `searxng`    | on  | no | Account-free metasearch (SearXNG container in base VM; aggregates Google/Bing/DuckDuckGo/Brave/Wikipedia) |
 | `repomapper` | off | no | PageRank-ranked structural maps of the current codebase |
 | `graphify`   | off | no | Code knowledge-graph (tree-sitter AST) — cross-file relationships, communities, god-nodes ([safishamsi/graphify](https://github.com/safishamsi/graphify)) |
 | `proxmox`    | off | interactive host + API token | Proxmox VE API via [canvrno/ProxmoxMCP](https://github.com/canvrno/ProxmoxMCP) |
@@ -456,20 +456,52 @@ opencode-vm mcps on proxmox                # opt into Proxmox MCP (interactive c
 opencode-vm mcps list                      # show all MCPs + their active state
 opencode-vm start        # start TUI session (same as opencode-vm run)
 opencode-vm web          # start web server session (browser, API, TUI attach)
+opencode-vm attach       # reconnect to a running/kept session (e.g. after a terminal crash)
 opencode-vm shell        # shell into session VM (auto-starts if none is running)
 opencode-vm base         # shell into base VM
 opencode-vm prune        # cleanup sessions, keep base
 opencode-vm ports show   # show host/LAN policy and localhost-forwarding status
 opencode-vm doctor       # inspect synced local auth/model/db state
-opencode-vm doctor provider list
-opencode-vm doctor provider add <id> --base-url <url> --api-key <key> [--name "Display Name"] [--dry-run]
-opencode-vm doctor provider rm <id> [--dry-run]
+opencode-vm provider list
+opencode-vm provider add <id> --base-url <url> --api-key <key> [--name "Display Name"] [--dry-run]
+opencode-vm provider rm <id> [--dry-run]
+opencode-vm auth status  # show OAuth token freshness across VMs/sessions
+opencode-vm auth resync  # adopt the freshest OAuth token into the host auth.json
+                         #   (fix for "401 token refresh failed" across VMs)
+opencode-vm screenshot   # setup guide for browser screenshot capture
 opencode-vm update       # update script from upstream
 opencode-vm create-patch # generate a patch submission for upstream
 ```
 
+### Advanced environment variables
+
+All optional; the defaults are the documented behavior.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `OCVM_ON_EXIT` | `ask` (`keep` for non-TTY) | Session-end action: `keep`, `delete`, or `ask` |
+| `OCVM_AUTH_AUTORESYNC` | `1` | OAuth freshest-token pre-flight before start/attach (`0` disables) |
+| `OCVM_PROVIDER_AUTOREFRESH` | `1` | Auto-refresh local LM Studio/Ollama providers at session start (`0` disables) |
+| `OCVM_MODEL_ENRICH` | `1` | Backfill context/output/vision/reasoning metadata for known frontier models (`0` disables) |
+| `OCVM_MODEL_ENRICH_PROVIDERS` | auto | Comma-separated provider ids to enrich (default: openai-compatible + ai-gateway) |
+| `OCVM_REASONING_EFFORT` | `medium` | `reasoningEffort` injected for openai-compatible reasoning models |
+| `OCVM_REASONING_BUDGET` | `8192` | `thinking.budgetTokens` injected for native reasoning models |
+| `OCVM_HOST_LAN_IP` | auto-detect | Override the host LAN IP announced to the VM/web UI |
+| `OCVM_DISABLE_UPDATE_CHECK` | unset | `1` hides the update-available hint |
+| `OCVM_UPDATE_URL` | GitHub upstream | Alternative raw URL for self-update and patch generation |
+
 To update OpenCode or system packages in the base VM, simply re-run `opencode-vm init`.
 To update the opencode-vm script itself, run `opencode-vm update`.
+
+## Upgrading to 0.5.0
+
+0.5.0 is a cleanup/hardening release. Breaking changes:
+
+- **Pre-0.4.x state migrations removed.** The one-shot shims (proxmox-as-skill state, project-history seeding, searxng auto-enable, legacy `.opencode.json` project-state shadowing) are gone. If you upgrade from a very old version (pre-0.4.4), go through the latest 0.4.x first — or simply re-run `opencode-vm init` and re-enable your skills/MCPs.
+- **Legacy env-var aliases removed:** `OCVM_MODEL_LIMIT_FALLBACK` → `OCVM_MODEL_ENRICH`, `OCVM_MODEL_LIMIT_PROVIDERS` → `OCVM_MODEL_ENRICH_PROVIDERS`.
+- **`ports host add/set` now validates ports** (integers 1–65535 only) and invalid `HOST_TCP_PORTS` entries in a hand-edited `policy.env` are ignored with a warning. `policy.env` and `proxmox.env` are now written shell-escaped.
+
+Recommended after updating: `opencode-vm init` to rebuild the base VM.
 
 ## Best Practices (short)
 

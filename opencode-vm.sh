@@ -22,9 +22,7 @@ SESSIONS_DIR="$SHARE_ROOT/sessions"
 PROJECT_STATE_DIR="$SHARE_ROOT/project-state"
 PROJECT_HISTORY_DIR="$SHARE_ROOT/project-history"   # loaded only with --keep-history
 FRESH_HISTORY_DIR="$SHARE_ROOT/fresh-history"       # per-run snapshots from default fresh mode
-FRESH_DEFAULT_NOTIFIED_MARKER="$SHARE_ROOT/.fresh-default-notified"
 KEPT_SESSION_NOTIFIED_MARKER="$SHARE_ROOT/.kept-session-notified"
-PROJECT_HISTORY_MIGRATED_MARKER="$SHARE_ROOT/.migrated-project-history"
 
 # Policy persistiert am Host (wird pro Session in der VM angewendet)
 POLICY_ENV="$SHARE_ROOT/policy.env"
@@ -48,7 +46,7 @@ PROXMOX_ENV="$SHARE_ROOT/proxmox.env"
 PROXMOX_MCP_DIR="$SHARE_ROOT/proxmox-mcp"
 PROXMOX_SKILL_CACHE="$SHARE_ROOT/proxmox-skill"   # fallback if script is not co-located with bundled skills/
 
-# Web Image Pipeline skill package (built-in, always active — CLI tools in base VM)
+# Web Image Pipeline skill package (built-in, default active — CLI tools in base VM)
 WEBIMG_SKILL_CACHE="$SHARE_ROOT/webimg-skill"      # fallback if script is not co-located with bundled skills/
 # SSH toolkit skill package (built-in, default active — CLI tools in base VM)
 SSH_SKILL_CACHE="$SHARE_ROOT/ssh-toolkit-skill"    # fallback if script is not co-located with bundled skills/
@@ -58,7 +56,6 @@ DEFAULT_PROXMOX_MCP_REF="main"
 # SearXNG MCP (built-in, default active — account-free metasearch container in base VM)
 SEARXNG_VM_DIR='/var/lib/ocvm-searxng'   # path inside oc-base; holds compose, settings, secret_key
 SEARXNG_PORT=8888                         # browser-safe; not in BROWSER_UNSAFE_PORTS
-SEARXNG_MIGRATION_MARKER="$SHARE_ROOT/.searxng-default-migrated"
 SEARXNG_MCP_NPM_VERSION="1.0.3"           # pin for reproducible installs in provision_base
 # Script location (for resolving bundled skills/proxmox/mcps when running from
 # repo). Must follow symlinks: `opencode-vm install` copies the script to
@@ -105,7 +102,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.54"
+OCVM_VERSION="0.5.0"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -125,6 +122,17 @@ need() {
     echo "Missing dependency: $1" >&2
     exit 1
   }
+}
+
+# Run a script inside a VM via a login shell (profile PATH available).
+# Usage: vm_exec <vm> <script> [args...]
+# Host values must be passed as positional args — never interpolated into the
+# script string — so they reach the guest strictly as data ($1, $2, ... in the
+# script). This is the injection-safe pattern for all host→VM calls.
+vm_exec() {
+  local vm="$1" script="$2"
+  shift 2
+  limactl shell --workdir / "$vm" -- bash -lc "$script" _ "$@"
 }
 
 sanitize_lima_sock_dir() {
@@ -294,6 +302,24 @@ _cfg_merge() {
   if jq -s '.[0] * .[1]' "$base" "$overlay" > "$tmp" 2>/dev/null \
      && [[ -s "$tmp" ]] && jq -e . "$tmp" >/dev/null 2>&1; then
     mv "$tmp" "$out"
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+# Run a jq filter over a JSON file and replace it atomically. Guarded: the
+# file is only replaced when jq succeeds AND produced non-empty valid JSON;
+# on failure the file is left untouched and the temp file is cleaned up.
+# Usage: jq_inplace <file> <jq-args...>
+jq_inplace() {
+  local file="$1"; shift
+  command -v jq >/dev/null 2>&1 || return 1
+  [[ -f "$file" ]] || return 1
+  local tmp; tmp="$(mktemp)"
+  if jq "$@" "$file" > "$tmp" 2>/dev/null \
+     && [[ -s "$tmp" ]] && jq -e . "$tmp" >/dev/null 2>&1; then
+    mv "$tmp" "$file"
     return 0
   fi
   rm -f "$tmp"
@@ -471,16 +497,21 @@ backup_host_cfg() {
   cp -p "$src" "$BACKUP_DIR/$(basename "$src").bak-$(date +%Y%m%d-%H%M%S)"
 }
 
+# A valid host port is a plain integer 1–65535. Rejecting anything else keeps
+# policy.env (sourced on the host) and the in-VM nft command free of
+# shell-metacharacter injection.
+is_valid_port() {
+  [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= 1 && $1 <= 65535 ))
+}
+
 ensure_policy_file() {
   ensure_dirs
   if [[ ! -f "$POLICY_ENV" ]]; then
-    cat > "$POLICY_ENV" <<EOF
-# opencode-vm policy (host)
-HOST_TCP_PORTS="$DEFAULT_HOST_TCP_PORTS"
-LAN_ALLOW_TCP="$DEFAULT_LAN_ALLOW_TCP"
-LAN_ALLOW_UDP="$DEFAULT_LAN_ALLOW_UDP"
-HOST_LOCALHOST_FORWARD="$DEFAULT_HOST_LOCALHOST_FORWARD"
-EOF
+    HOST_TCP_PORTS="$DEFAULT_HOST_TCP_PORTS"
+    LAN_ALLOW_TCP="$DEFAULT_LAN_ALLOW_TCP"
+    LAN_ALLOW_UDP="$DEFAULT_LAN_ALLOW_UDP"
+    HOST_LOCALHOST_FORWARD="$DEFAULT_HOST_LOCALHOST_FORWARD"
+    save_policy
   fi
 }
 
@@ -492,16 +523,27 @@ load_policy() {
   : "${LAN_ALLOW_TCP:=$DEFAULT_LAN_ALLOW_TCP}"
   : "${LAN_ALLOW_UDP:=$DEFAULT_LAN_ALLOW_UDP}"
   : "${HOST_LOCALHOST_FORWARD:=$DEFAULT_HOST_LOCALHOST_FORWARD}"
+  # Scrub hand-edited values: keep only valid port tokens so nothing but
+  # digits ever reaches the in-VM nft command.
+  local _p _clean=""
+  for _p in $HOST_TCP_PORTS; do
+    if is_valid_port "$_p"; then
+      _clean="${_clean:+$_clean }$_p"
+    else
+      echo "[policy] WARN: ignoring invalid HOST_TCP_PORTS entry in $POLICY_ENV: $_p" >&2
+    fi
+  done
+  HOST_TCP_PORTS="$_clean"
 }
 
 save_policy() {
-  cat > "$POLICY_ENV" <<EOF
-# opencode-vm policy (host)
-HOST_TCP_PORTS="$HOST_TCP_PORTS"
-LAN_ALLOW_TCP="$LAN_ALLOW_TCP"
-LAN_ALLOW_UDP="$LAN_ALLOW_UDP"
-HOST_LOCALHOST_FORWARD="$HOST_LOCALHOST_FORWARD"
-EOF
+  {
+    echo "# opencode-vm policy (host)"
+    printf 'HOST_TCP_PORTS=%q\n' "$HOST_TCP_PORTS"
+    printf 'LAN_ALLOW_TCP=%q\n' "$LAN_ALLOW_TCP"
+    printf 'LAN_ALLOW_UDP=%q\n' "$LAN_ALLOW_UDP"
+    printf 'HOST_LOCALHOST_FORWARD=%q\n' "$HOST_LOCALHOST_FORWARD"
+  } > "$POLICY_ENV"
 }
 
 
@@ -882,11 +924,11 @@ ecc_link_homunculus_in_vm() {
   local sess_name="$1"
   local sess_share="$2"
   local ecc_hash="$3"
-  limactl shell --workdir / "$sess_name" -- bash -lc "
+  vm_exec "$sess_name" '
     set -e
-    mkdir -p \"\$HOME/.claude/homunculus/projects\"
-    ln -sfn '$sess_share/homunculus' \"\$HOME/.claude/homunculus/projects/$ecc_hash\"
-  " 2>/dev/null || echo "[ecc] Warning: failed to create homunculus symlink in VM" >&2
+    mkdir -p "$HOME/.claude/homunculus/projects"
+    ln -sfn "$1/homunculus" "$HOME/.claude/homunculus/projects/$2"
+  ' "$sess_share" "$ecc_hash" 2>/dev/null || echo "[ecc] Warning: failed to create homunculus symlink in VM" >&2
 }
 
 # Sync session-share homunculus back to persistent project state on session end.
@@ -929,19 +971,19 @@ proxmox_load() {
 proxmox_save() {
   mkdir -p "$SHARE_ROOT"
   umask 077
-  cat > "$PROXMOX_ENV" <<EOF
-# opencode-vm Proxmox integration — credentials, mode 0600.
-# Wiped automatically by: opencode-vm mcps off proxmox
-PROXMOX_HOST="${PROXMOX_HOST:-}"
-PROXMOX_PORT="${PROXMOX_PORT:-8006}"
-PROXMOX_USER="${PROXMOX_USER:-}"
-PROXMOX_TOKEN_NAME="${PROXMOX_TOKEN_NAME:-}"
-PROXMOX_TOKEN_VALUE="${PROXMOX_TOKEN_VALUE:-}"
-PROXMOX_VERIFY_SSL="${PROXMOX_VERIFY_SSL:-0}"
-PROXMOX_MCP_REPO="${PROXMOX_MCP_REPO:-$DEFAULT_PROXMOX_MCP_REPO}"
-PROXMOX_MCP_REF="${PROXMOX_MCP_REF:-$DEFAULT_PROXMOX_MCP_REF}"
-PROXMOX_MCP_COMMIT="${PROXMOX_MCP_COMMIT:-}"
-EOF
+  {
+    echo "# opencode-vm Proxmox integration — credentials, mode 0600."
+    echo "# Wiped automatically by: opencode-vm mcps off proxmox"
+    printf 'PROXMOX_HOST=%q\n'        "${PROXMOX_HOST:-}"
+    printf 'PROXMOX_PORT=%q\n'        "${PROXMOX_PORT:-8006}"
+    printf 'PROXMOX_USER=%q\n'        "${PROXMOX_USER:-}"
+    printf 'PROXMOX_TOKEN_NAME=%q\n'  "${PROXMOX_TOKEN_NAME:-}"
+    printf 'PROXMOX_TOKEN_VALUE=%q\n' "${PROXMOX_TOKEN_VALUE:-}"
+    printf 'PROXMOX_VERIFY_SSL=%q\n'  "${PROXMOX_VERIFY_SSL:-0}"
+    printf 'PROXMOX_MCP_REPO=%q\n'    "${PROXMOX_MCP_REPO:-$DEFAULT_PROXMOX_MCP_REPO}"
+    printf 'PROXMOX_MCP_REF=%q\n'     "${PROXMOX_MCP_REF:-$DEFAULT_PROXMOX_MCP_REF}"
+    printf 'PROXMOX_MCP_COMMIT=%q\n'  "${PROXMOX_MCP_COMMIT:-}"
+  } > "$PROXMOX_ENV"
   chmod 600 "$PROXMOX_ENV"
   umask 022
 }
@@ -1030,7 +1072,7 @@ vm_resolve_home() {
   [[ -n "$VM_HOME_CACHE" ]] && { printf '%s' "$VM_HOME_CACHE"; return 0; }
   local vm="${1:-$BASE_NAME}" home=""
   if is_vm_running "$vm"; then
-    home="$(limactl shell --workdir / "$vm" -- bash -lc 'printf %s "$HOME"' 2>/dev/null | tr -d '\r\n')"
+    home="$(vm_exec "$vm" 'printf %s "$HOME"' 2>/dev/null | tr -d '\r\n')"
   fi
   if [[ -z "$home" || "$home" != /home/* ]]; then
     home="/home/$(whoami).linux"
@@ -1058,7 +1100,7 @@ proxmox_ensure_installed_in_base() {
   local stamp_path="$venv_path/.ocvm-proxmox-install-v$install_stamp_version"
 
   # Skip only when the stamp for the current recipe version is present.
-  if limactl shell --workdir / "$BASE_NAME" -- bash -lc "test -f $stamp_path" 2>/dev/null; then
+  if vm_exec "$BASE_NAME" "test -f $stamp_path" 2>/dev/null; then
     return 0
   fi
 
@@ -1077,7 +1119,7 @@ proxmox_ensure_installed_in_base() {
   # which currently removes the `mcp.server.fastmcp` module ProxmoxMCP imports.
   # We force-install the last released `mcp` that still ships FastMCP.
   local mcp_sdk_pin="mcp==1.27.0"
-  limactl shell --workdir / "$BASE_NAME" -- bash -lc "
+  vm_exec "$BASE_NAME" "
     set -euo pipefail
     mkdir -p \$HOME/.local/share
     if [[ ! -d $src_path/.git ]]; then
@@ -1164,10 +1206,10 @@ searxng_ensure_installed_in_base() {
   fi
 
   # Already installed?
-  if limactl shell --workdir / "$BASE_NAME" -- bash -lc "test -f $stamp_path" 2>/dev/null; then
+  if vm_exec "$BASE_NAME" "test -f $stamp_path" 2>/dev/null; then
     # Always ensure the service is running, even if installed previously
     # (handles base-VM reboot or docker-daemon restart).
-    limactl shell --workdir / "$BASE_NAME" -- bash -lc \
+    vm_exec "$BASE_NAME" \
       'sudo systemctl is-active --quiet ocvm-searxng.service || sudo systemctl start ocvm-searxng.service' 2>/dev/null || true
     (( started_base == 1 )) && limactl stop "$BASE_NAME" 2>/dev/null || true
     return 0
@@ -1179,7 +1221,7 @@ searxng_ensure_installed_in_base() {
   # /var/lib (root-owned). stdin redirection delivers the host-side bytes.
   local f
   for f in docker-compose.yml settings.yml.template limiter.toml ocvm-searxng.service; do
-    if ! limactl shell --workdir / "$BASE_NAME" -- bash -lc \
+    if ! vm_exec "$BASE_NAME" \
       "sudo mkdir -p $SEARXNG_VM_DIR && sudo tee $SEARXNG_VM_DIR/$f >/dev/null" \
       < "$cfg_src/$f" >/dev/null; then
       echo "[searxng] Failed to write $f into base VM." >&2
@@ -1192,7 +1234,7 @@ searxng_ensure_installed_in_base() {
   # install + enable the systemd unit, then wait for the JSON API to come up.
   # The outer "..." string is HOST-side expanded for $SEARXNG_VM_DIR /
   # $SEARXNG_PORT / $stamp_path; in-VM shell vars are escaped as \$var.
-  if ! limactl shell --workdir / "$BASE_NAME" -- bash -lc "
+  if ! vm_exec "$BASE_NAME" "
     set -euo pipefail
     sudo chmod 755 $SEARXNG_VM_DIR
     if [[ ! -s $SEARXNG_VM_DIR/secret_key ]]; then
@@ -1434,21 +1476,6 @@ mcrepo_ensure_graphify_dir() {
   mkdir -p "$target"
 
   local new_link="$proj/.graphify-out"
-  local old_link="$proj/graphify-out"
-
-  # Migrate the legacy un-hidden symlink if it's still around.
-  if [[ -L "$old_link" ]]; then
-    if [[ ! -e "$new_link" && ! -L "$new_link" ]]; then
-      mv "$old_link" "$new_link"
-      echo "[mcrepo] Migrated graphify-out → .graphify-out" >&2
-    else
-      # New link already in place — drop the stale legacy link.
-      rm "$old_link"
-      echo "[mcrepo] Removed legacy graphify-out symlink (.graphify-out already present)" >&2
-    fi
-  elif [[ -e "$old_link" ]]; then
-    echo "[mcrepo] WARNING: $old_link exists and is not a symlink; leaving it untouched." >&2
-  fi
 
   if [[ -L "$new_link" ]]; then
     : # already a symlink — leave it alone (path may be relative or absolute)
@@ -1596,9 +1623,6 @@ skills_registry_defaults() {
 
 skills_load() {
   SKILLS_PACKAGES=""
-  SKILLS_MIGRATED_WEBIMG=""
-  SKILLS_MIGRATED_SSHTK=""
-  local dirty=0
   if [[ -f "$SKILLS_ENV" ]]; then
     # shellcheck disable=SC1090
     source "$SKILLS_ENV"
@@ -1610,48 +1634,8 @@ skills_load() {
       defs="${defs:+$defs }$def"
     done < <(skills_registry_defaults 2>/dev/null)
     SKILLS_PACKAGES="$defs"
-    SKILLS_MIGRATED_WEBIMG=1
-    SKILLS_MIGRATED_SSHTK=1
-    dirty=1
+    skills_save
   fi
-
-  # Legacy cleanup: 'proxmox' moved to the mcps subsystem in v0.4.4.
-  case " ${SKILLS_PACKAGES:-} " in
-    *" proxmox "*)
-      _skills_pkg_drop proxmox
-      dirty=1
-      ;;
-  esac
-
-  # Migration (v0.4.6): webimg was always_active in v0.4.2–v0.4.5. It is now a
-  # default_active package — users may turn it off. Backfill webimg once for
-  # existing state files so previous behaviour is preserved by default.
-  if [[ "${SKILLS_MIGRATED_WEBIMG:-}" != "1" ]]; then
-    case " ${SKILLS_PACKAGES:-} " in
-      *" webimg "*) ;;
-      *)
-        SKILLS_PACKAGES="${SKILLS_PACKAGES:+$SKILLS_PACKAGES }webimg"
-        ;;
-    esac
-    SKILLS_MIGRATED_WEBIMG=1
-    dirty=1
-  fi
-
-  # Migration (v0.4.14): ssh-toolkit was added as default_active. Backfill
-  # once for existing state files so the new SSH/network knowledge surfaces
-  # for upgrading users without requiring a manual `skills on ssh-toolkit`.
-  if [[ "${SKILLS_MIGRATED_SSHTK:-}" != "1" ]]; then
-    case " ${SKILLS_PACKAGES:-} " in
-      *" ssh-toolkit "*) ;;
-      *)
-        SKILLS_PACKAGES="${SKILLS_PACKAGES:+$SKILLS_PACKAGES }ssh-toolkit"
-        ;;
-    esac
-    SKILLS_MIGRATED_SSHTK=1
-    dirty=1
-  fi
-
-  (( dirty == 1 )) && skills_save
   return 0
 }
 
@@ -1661,8 +1645,6 @@ skills_save() {
 # opencode-vm skills subsystem
 # space-separated list of active package names
 SKILLS_PACKAGES="${SKILLS_PACKAGES:-}"
-SKILLS_MIGRATED_WEBIMG="${SKILLS_MIGRATED_WEBIMG:-1}"
-SKILLS_MIGRATED_SSHTK="${SKILLS_MIGRATED_SSHTK:-1}"
 EOF
 }
 
@@ -1944,7 +1926,6 @@ skills_mount_for_session() {
 
   local pkg
   for pkg in $all_pkgs; do
-    [[ "$pkg" == "proxmox" ]] && continue   # legacy v0.4.3 state; now an MCP
     local names="" rtype
     rtype="$(skills_registry_field "$pkg" ".resolver")"
     case "$rtype" in
@@ -2088,20 +2069,6 @@ mcps_load() {
     defaults="$(mcps_registry_defaults 2>/dev/null | tr '\n' ' ')"
     MCPS_PACKAGES="$(echo "${defaults}" | sed -e 's/^ *//; s/ *$//')"
     mcps_save
-  fi
-
-  # v0.4.33 migration: auto-enable searxng for existing installs whose
-  # mcps.env predates this default. Marker file prevents re-add after the
-  # user has explicitly opted out via 'opencode-vm mcps off searxng'.
-  if [[ -f "$MCPS_ENV" ]] && [[ ! -f "$SEARXNG_MIGRATION_MARKER" ]]; then
-    case " ${MCPS_PACKAGES:-} " in
-      *" searxng "*) ;;
-      *)
-        MCPS_PACKAGES="${MCPS_PACKAGES:+$MCPS_PACKAGES }searxng"
-        mcps_save
-        ;;
-    esac
-    touch "$SEARXNG_MIGRATION_MARKER" 2>/dev/null || true
   fi
 
   # Session-only overrides (e.g. mcrepo auto-activation in start_session).
@@ -2284,7 +2251,7 @@ graphify_persist_save_for_session() {
 # $1 = lima session VM name (e.g. oc-20260508-152352)
 graphify_ensure_mcp_in_vm() {
   local sess="${1:?sess}"
-  limactl shell --workdir / "$sess" -- bash -lc '
+  vm_exec "$sess" '
     set +e
     python_bin="$HOME/.local/share/pipx/venvs/graphifyy/bin/python"
     # No venv = graphify not installed in this base (older or stripped) — nothing to heal.
@@ -2572,16 +2539,16 @@ Usage:
 
   opencode-vm skills                      # skills status (alias)
   opencode-vm skills status [path]        # active skill packages + resolved skills
-  opencode-vm skills on <pkg>             # enable skill package (ecc-auto | ecc-all | webimg)
+  opencode-vm skills on <pkg>             # enable skill package (ecc-auto | ecc-all | webimg | ssh-toolkit)
   opencode-vm skills off <pkg>            # disable skill package
   opencode-vm skills list [path]          # preview what would mount (no VM touch)
 
 MCPs are servers/tools that give the agent capabilities (browser automation,
 code indexing, infra APIs). Skills are knowledge-only markdown.
 
-Built-in MCPs (v0.4.6): playwright (default on), repomapper (default off),
+Built-in MCPs: playwright (default on), searxng (default on), repomapper (default off),
 graphify (default off), proxmox (default off; requires API host + token on first enable).
-Built-in skills (v0.4.6): webimg (default on, can be disabled), ecc-auto, ecc-all.
+Built-in skills: webimg (default on), ssh-toolkit (default on), ecc-auto, ecc-all.
 
 Session MCP injection is data-driven: only MCPs in the active list end up
 in opencode.json's mcp block. MCPs can also contribute an "agents_md_snippet"
@@ -2788,7 +2755,10 @@ ports_cmd() {
           echo "$HOST_TCP_PORTS"
           ;;
         add)
-          for p in "$@"; do HOST_TCP_PORTS="$(list_add "$p" $HOST_TCP_PORTS)"; done
+          for p in "$@"; do
+            is_valid_port "$p" || { echo "Invalid port: '$p' (expected an integer 1-65535)" >&2; exit 2; }
+            HOST_TCP_PORTS="$(list_add "$p" $HOST_TCP_PORTS)"
+          done
           save_policy
           echo "HOST_TCP_PORTS: $HOST_TCP_PORTS"
           apply_policy_to_running_sessions
@@ -2800,6 +2770,9 @@ ports_cmd() {
           apply_policy_to_running_sessions
           ;;
         set)
+          for p in "$@"; do
+            is_valid_port "$p" || { echo "Invalid port: '$p' (expected an integer 1-65535)" >&2; exit 2; }
+          done
           HOST_TCP_PORTS="$*"
           save_policy
           echo "HOST_TCP_PORTS: $HOST_TCP_PORTS"
@@ -3114,7 +3087,7 @@ doctor_cmd() {
           echo "             MCP clone: $PROXMOX_MCP_DIR @ ${PROXMOX_MCP_COMMIT:-<unknown>}"
         fi
         if is_vm_running "$BASE_NAME"; then
-          if limactl shell --workdir / "$BASE_NAME" -- bash -lc 'test -x $HOME/.local/share/proxmox-mcp-venv/bin/python' 2>/dev/null; then
+          if vm_exec "$BASE_NAME" 'test -x $HOME/.local/share/proxmox-mcp-venv/bin/python' 2>/dev/null; then
             echo "             VM venv:   present"
           else
             echo "             VM venv:   missing (will install on next session start)"
@@ -3133,15 +3106,15 @@ doctor_cmd() {
           # is-active / curl / ls all exit non-zero in failure states; the
           # outer `|| true` keeps `set -euo pipefail` from aborting doctor
           # mid-run when SearXNG is stopped or unreachable.
-          _sx_status=$(limactl shell --workdir / "$BASE_NAME" -- bash -lc \
+          _sx_status=$(vm_exec "$BASE_NAME" \
             'systemctl is-active ocvm-searxng.service 2>/dev/null || true' \
             2>/dev/null | tr -d '\r\n' || true)
           echo "  service:   ${_sx_status:-inactive}"
-          _sx_http=$(limactl shell --workdir / "$BASE_NAME" -- bash -lc \
+          _sx_http=$(vm_exec "$BASE_NAME" \
             "curl -s -o /dev/null -w '%{http_code}' --max-time 3 'http://127.0.0.1:${SEARXNG_PORT}/search?q=opencode&format=json' 2>/dev/null || true" \
             2>/dev/null | tr -d '\r\n' || true)
           echo "  json api:  HTTP ${_sx_http:-000} (expect 200)"
-          _sx_stamp=$(limactl shell --workdir / "$BASE_NAME" -- bash -lc \
+          _sx_stamp=$(vm_exec "$BASE_NAME" \
             "ls $SEARXNG_VM_DIR/.installed-v* 2>/dev/null | tail -1 | awk -F/ '{print \$NF}' || true" \
             2>/dev/null | tr -d '\r\n' || true)
           echo "  base prov: ${_sx_stamp:-missing}"
@@ -3157,7 +3130,7 @@ doctor_cmd() {
       echo "[doctor] Web-UI Attachments (materialize daemon)"
       local _mat_in_base="unknown"
       if is_vm_running "$BASE_NAME"; then
-        if limactl shell --workdir / "$BASE_NAME" -- bash -lc 'test -x $HOME/.local/bin/ocvm-materialize' 2>/dev/null; then
+        if vm_exec "$BASE_NAME" 'test -x $HOME/.local/bin/ocvm-materialize' 2>/dev/null; then
           _mat_in_base="present"
         else
           _mat_in_base="missing (run: opencode-vm init)"
@@ -3797,24 +3770,18 @@ provider_cmd() {
       cp -p "$auth_file" "$backup_dir/auth.json.bak"
       cp -p "$cfg_file" "$backup_dir/$(basename "$cfg_file").bak"
 
-      local tmp_auth tmp_cfg
-      tmp_auth="$(mktemp)"
-      tmp_cfg="$(mktemp)"
-
       # OpenCode's auth.json discriminates on "type" with values oauth|api|wellknown.
       # A static API key MUST be type "api" (not "key", which OpenCode ignores ->
       # "API key not present" at runtime even though the key sits in the file).
-      jq --arg p "$provider" --arg k "$api_key" \
-        '.[$p] = {"type":"api","key":$k}' \
-        "$auth_file" > "$tmp_auth" && mv "$tmp_auth" "$auth_file"
+      jq_inplace "$auth_file" --arg p "$provider" --arg k "$api_key" \
+        '.[$p] = {"type":"api","key":$k}'
 
-      jq \
+      jq_inplace "$cfg_file" \
         --arg p "$provider" \
         --arg n "$provider_name" \
         --arg b "$base_url" \
         --argjson m "$models_json" \
-        '.provider = ((.provider // {}) + {($p): {"npm":"@ai-sdk/openai-compatible","name":$n,"options":{"baseURL":$b},"models":$m}})' \
-        "$cfg_file" > "$tmp_cfg" && mv "$tmp_cfg" "$cfg_file"
+        '.provider = ((.provider // {}) + {($p): {"npm":"@ai-sdk/openai-compatible","name":$n,"options":{"baseURL":$b},"models":$m}})'
 
       # Enrich the host config in place (fill-only): backfills limit/modalities/
       # reasoning by model-id for frontier models the name heuristic can't classify
@@ -4016,11 +3983,8 @@ provider_cmd() {
       mkdir -p "$backup_dir"
       cp -p "$cfg_file" "$backup_dir/$(basename "$cfg_file").bak"
 
-      local tmp_cfg
-      tmp_cfg="$(mktemp)"
-      jq --arg p "$provider" --argjson m "$updated_models" \
-        '.provider[$p].models = $m' \
-        "$cfg_file" > "$tmp_cfg" && mv "$tmp_cfg" "$cfg_file"
+      jq_inplace "$cfg_file" --arg p "$provider" --argjson m "$updated_models" \
+        '.provider[$p].models = $m'
 
       [[ "$quiet" == "no" ]] && {
         echo "[provider] Updated config: $cfg_file"
@@ -4094,9 +4058,7 @@ provider_cmd() {
 
       if [[ -f "$auth_file" ]]; then
         if command -v jq >/dev/null 2>&1; then
-          local tmp_auth
-          tmp_auth="$(mktemp)"
-          jq --arg p "$provider" 'del(.[$p])' "$auth_file" > "$tmp_auth" && mv "$tmp_auth" "$auth_file"
+          jq_inplace "$auth_file" --arg p "$provider" 'del(.[$p])'
         else
           echo "[provider] WARNING: jq missing, auth.json not modified." >&2
         fi
@@ -4104,9 +4066,7 @@ provider_cmd() {
 
       if [[ -f "$cfg_file" ]] && command -v jq >/dev/null 2>&1; then
         if jq -e . "$cfg_file" >/dev/null 2>&1; then
-          local tmp_cfg
-          tmp_cfg="$(mktemp)"
-          jq --arg p "$provider" 'del(.provider[$p])' "$cfg_file" > "$tmp_cfg" && mv "$tmp_cfg" "$cfg_file"
+          jq_inplace "$cfg_file" --arg p "$provider" 'del(.provider[$p])'
         else
           echo "[provider] WARNING: config file is not valid JSON, skipping provider entry removal." >&2
         fi
@@ -4114,13 +4074,11 @@ provider_cmd() {
 
       if [[ -f "$model_file" ]]; then
         if command -v jq >/dev/null 2>&1; then
-          local tmp_model
-          tmp_model="$(mktemp)"
-          jq --arg p "$provider" '
+          jq_inplace "$model_file" --arg p "$provider" '
             .recent = [(.recent // [])[] | select(.providerID != $p)]
             | .favorite = [(.favorite // [])[] | select(.providerID != $p)]
             | .variant = ((.variant // {}) | with_entries(select(.key != $p and ((.value.providerID // "") != $p))))
-          ' "$model_file" > "$tmp_model" && mv "$tmp_model" "$model_file"
+          '
         else
           echo "[provider] WARNING: jq missing, model.json not modified." >&2
         fi
@@ -4228,54 +4186,13 @@ EOF
 # Self-update commands
 # ---------------------------------------------------------------------------
 
-migrate_to_project_history() {
-  # Idempotent: seed $PROJECT_HISTORY_DIR from existing $PROJECT_STATE_DIR
-  # entries so users who had OCVM sessions before the fresh-default switch
-  # can still reach their chat history via `opencode-vm web --keep-history`.
-  [[ -f "$PROJECT_HISTORY_MIGRATED_MARKER" ]] && return 0
-  mkdir -p "$PROJECT_HISTORY_DIR"
-  if [[ -d "$PROJECT_STATE_DIR" ]]; then
-    local src dst
-    for src in "$PROJECT_STATE_DIR"/*/; do
-      [[ -d "$src" ]] || continue
-      dst="$PROJECT_HISTORY_DIR/$(basename "$src")"
-      if [[ -d "$src/xdg-data/opencode" ]] && [[ ! -e "$dst/xdg-data/opencode" ]]; then
-        mkdir -p "$dst/xdg-data/opencode" "$dst/xdg-state/opencode"
-        rsync -a "${DATA_RSYNC_EXCLUDES[@]}" "$src/xdg-data/opencode/" "$dst/xdg-data/opencode/" 2>/dev/null || true
-        rsync -a "$src/xdg-state/opencode/" "$dst/xdg-state/opencode/" 2>/dev/null || true
-      fi
-    done
-  fi
-  : > "$PROJECT_HISTORY_MIGRATED_MARKER"
-}
-
-notify_fresh_default_once() {
-  [[ -f "$FRESH_DEFAULT_NOTIFIED_MARKER" ]] && return 0
-  cat <<'EOF'
-
-───────────────────────────────────────────────────────────────
- OpenCode-VM: session handling changed
-───────────────────────────────────────────────────────────────
- `opencode-vm web` now starts with an empty session list by
- default. Your previous per-project chat history is preserved
- and still available via:
-
-     opencode-vm web --keep-history
-
- Fresh-mode sessions are archived per run under
- ~/.opencode-vm/fresh-history/<project>/<timestamp>/.
- The global ~/.local/share/opencode/opencode.db is no longer
- synced into the VM — use it only from host-side opencode.
-───────────────────────────────────────────────────────────────
-
-EOF
-  : > "$FRESH_DEFAULT_NOTIFIED_MARKER"
-}
-
 ocvm_post_update_migrate() {
   # Hook for version-to-version migrations. Args: old_version new_version
+  # 0.5.0 dropped all pre-0.5 migration shims (proxmox-as-skill state,
+  # project-history seeding, searxng auto-enable, legacy .opencode.json
+  # shadowing). Upgrading from pre-0.4.x state: upgrade through the latest
+  # 0.4.x first, or re-run `opencode-vm init`.
   [[ "$#" -eq 2 ]] || return 0
-  migrate_to_project_history
   return 0
 }
 
@@ -4352,7 +4269,7 @@ update_cmd() {
   echo "  opencode-vm start"
   echo
   skills_load
-  echo "Built-in skill: webimg (web image optimization pipeline, always active)"
+  echo "Built-in skills: webimg (web image optimization), ssh-toolkit (SSH/network workflows) — both default-active"
   if [[ -n "${SKILLS_PACKAGES:-}" ]]; then
     echo "Active skill packages: ${SKILLS_PACKAGES}"
     echo "These will be applied automatically on next 'opencode-vm start'."
@@ -5662,35 +5579,44 @@ apply_policy_in_vm() {
   LAN_ALLOW_UDP:  ${LAN_ALLOW_UDP:-<empty>}
 EOF
 
-  limactl shell --workdir / "$1" -- bash -lc "
+  # Host values travel as positional parameters (never interpolated into the
+  # remote command string) — the vm_exec injection-safe pattern.
+  vm_exec "$1" '
     set -euo pipefail
+    host_ports_csv="$1"
+    lan_tcp_elems="$2"
+    lan_udp_elems="$3"
+    lan_host_tcp_elems="$4"
+    lan_host_udp_elems="$5"
 
     # Flush + re-add sets (idempotent)
     sudo -n nft flush set inet ocfilter host_allow_tcp
-    sudo -n nft add element inet ocfilter host_allow_tcp { ${host_ports_csv} }
+    if [[ -n "$host_ports_csv" ]]; then
+      sudo -n nft add element inet ocfilter host_allow_tcp "{ $host_ports_csv }"
+    fi
 
     sudo -n nft flush set inet ocfilter lan_allow_tcp4
-    if [[ -n \"$lan_tcp_elems\" ]]; then
-      sudo -n nft add element inet ocfilter lan_allow_tcp4 { $lan_tcp_elems }
+    if [[ -n "$lan_tcp_elems" ]]; then
+      sudo -n nft add element inet ocfilter lan_allow_tcp4 "{ $lan_tcp_elems }"
     fi
 
     sudo -n nft flush set inet ocfilter lan_allow_udp4
-    if [[ -n \"$lan_udp_elems\" ]]; then
-      sudo -n nft add element inet ocfilter lan_allow_udp4 { $lan_udp_elems }
+    if [[ -n "$lan_udp_elems" ]]; then
+      sudo -n nft add element inet ocfilter lan_allow_udp4 "{ $lan_udp_elems }"
     fi
 
     sudo -n nft flush set inet ocfilter lan_allow_host_tcp4
-    if [[ -n \"$lan_host_tcp_elems\" ]]; then
-      sudo -n nft add element inet ocfilter lan_allow_host_tcp4 { $lan_host_tcp_elems }
+    if [[ -n "$lan_host_tcp_elems" ]]; then
+      sudo -n nft add element inet ocfilter lan_allow_host_tcp4 "{ $lan_host_tcp_elems }"
     fi
 
     sudo -n nft flush set inet ocfilter lan_allow_host_udp4
-    if [[ -n \"$lan_host_udp_elems\" ]]; then
-      sudo -n nft add element inet ocfilter lan_allow_host_udp4 { $lan_host_udp_elems }
+    if [[ -n "$lan_host_udp_elems" ]]; then
+      sudo -n nft add element inet ocfilter lan_allow_host_udp4 "{ $lan_host_udp_elems }"
     fi
 
     sudo -n nft list table inet ocfilter >/dev/null
-  "
+  ' "$host_ports_csv" "$lan_tcp_elems" "$lan_udp_elems" "$lan_host_tcp_elems" "$lan_host_udp_elems"
 }
 
 # Re-apply the current policy.env to every currently-running session VM.
@@ -5738,7 +5664,7 @@ setup_host_port_forwards_in_vm() {
 
   sanitize_lima_sock_dir
 
-  limactl shell --workdir / "$vm_name" -- bash -lc '
+  vm_exec "$vm_name" '
     set -euo pipefail
     local_ports="$1"
     started=""
@@ -5800,12 +5726,12 @@ UNIT
     if [[ -n "${skipped// /}" ]]; then
       echo "[fwd] localhost forwarding skipped:${skipped}"
     fi
-  ' _ "$HOST_TCP_PORTS"
+  ' "$HOST_TCP_PORTS"
 }
 
 stop_host_port_forwards_in_vm() {
   local vm_name="$1"
-  limactl shell --workdir / "$vm_name" -- bash -lc '
+  vm_exec "$vm_name" '
     set +e
     for port in $1; do
       [[ -n "$port" ]] || continue
@@ -5814,7 +5740,7 @@ stop_host_port_forwards_in_vm() {
       sudo -n rm -f "/etc/systemd/system/${unit}" 2>/dev/null || true
     done
     sudo -n systemctl daemon-reload 2>/dev/null || true
-  ' _ "$HOST_TCP_PORTS" || true
+  ' "$HOST_TCP_PORTS" || true
 }
 
 # Ports that browsers (Chrome, Firefox, Safari) refuse to connect to.
@@ -5988,7 +5914,7 @@ start_materialize_daemon() {
   # too slow for the bare `setsid X &` pattern that graphify (Go binary) uses
   # — the SSH disconnect propagates before the new session is fully detached
   # and the daemon dies silently with an empty log.
-  limactl shell --workdir / "$vm_name" -- bash -lc '
+  vm_exec "$vm_name" '
     set +e
     att="$1"; log="$2"; pidfile="$3"
     mkdir -p "$att" "$(dirname "$log")"
@@ -6003,7 +5929,7 @@ start_materialize_daemon() {
     nohup setsid "$HOME/.local/bin/ocvm-materialize" </dev/null >>"$log" 2>&1 &
     echo $! > "$pidfile"
     sleep 0.3   # give Python time to import + reach setup_logging
-  ' _ "$att_dir" "$log" "$pidfile" 2>>"$log" || {
+  ' "$att_dir" "$log" "$pidfile" 2>>"$log" || {
     echo "[materialize] WARN: daemon spawn failed; see $log" >&2
     return 1
   }
@@ -6053,7 +5979,7 @@ probe_web_tunnel_async() {
 enter_session_shell() {
   local vm_name="$1" proj_dir="$2" host_lan_ip="${3:-localhost}" sess_share="${4:-}"
   sanitize_lima_sock_dir
-  limactl shell --workdir / "$vm_name" -- bash -lc '
+  vm_exec "$vm_name" '
     export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/.config/composer/vendor/bin:/tmp/go/bin:/tmp/pnpm-store:$PATH"
     export CARGO_TARGET_DIR=/tmp/cargo-target
     export npm_config_cache=/tmp/npm-cache
@@ -6096,7 +6022,7 @@ enter_session_shell() {
       rsync -a /tmp/oc-xdg-state/opencode/ "$SESS_SHARE/xdg-state/opencode/" 2>/dev/null || true
       echo "[shell] Sync complete"
     fi
-  ' _ "$proj_dir" "$host_lan_ip" "$sess_share"
+  ' "$proj_dir" "$host_lan_ip" "$sess_share"
 }
 
 attach_session() {
@@ -6158,7 +6084,7 @@ attach_session() {
       # under /tmp/oc-xdg-data/opencode. A root-owned tree here makes opencode
       # web crash-loop with EACCES on mkdir. The leading chown heals any
       # root-owned remnant left by older versions (which did push via sudo).
-      if limactl shell --workdir / "$SESS_NAME" -- bash -lc '
+      if vm_exec "$SESS_NAME" '
         set -e
         d=/tmp/oc-xdg-data/opencode
         if [ -e "$d" ] && [ ! -O "$d" ]; then
@@ -6218,7 +6144,7 @@ attach_session() {
     start_materialize_daemon "$SESS_NAME" "$_att_sess_share" || true
   fi
 
-  limactl shell --workdir / "$SESS_NAME" -- bash -lc '
+  vm_exec "$SESS_NAME" '
     set -euo pipefail
     PROJ_DIR="$1"
     SESS_SHARE="$2"
@@ -6357,7 +6283,15 @@ attach_session() {
 
     # Sync-back happens via the EXIT trap installed above (covers Ctrl+C as
     # well as normal exit).
-  ' _ "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$sess_port" "$host_lan_ip" "${SESSION_PASSWORD:-}" "${OC_WEB_TUI:-false}" "$effective_host_port"
+  ' "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$sess_port" "$host_lan_ip" "${SESSION_PASSWORD:-}" "${OC_WEB_TUI:-false}" "$effective_host_port"
+}
+
+# Serialize session tracking state to $senv (loaded back via `source`).
+# printf '%q' safely escapes paths with spaces/special chars.
+write_senv() {
+  local senv="$1" name="$2" proj="$3" cfg_hash="$4" mode="$5" port="$6" keep="$7"
+  printf 'SESS_NAME=%q\nSESS_PROJ=%q\nCFG_HASH_AT_START=%q\nSESS_MODE=%q\nSESS_PORT=%q\nSESS_KEEP_HISTORY=%q\n' \
+    "$name" "$proj" "$cfg_hash" "$mode" "$port" "$keep" > "$senv"
 }
 
 # Update SESS_MODE / SESS_PORT in an existing session.env, preserving other
@@ -6369,8 +6303,7 @@ _update_senv_mode() {
   [[ -f "$senv" ]] || return 0
   # shellcheck disable=SC1090
   ( source "$senv"
-    printf 'SESS_NAME=%q\nSESS_PROJ=%q\nCFG_HASH_AT_START=%q\nSESS_MODE=%q\nSESS_PORT=%q\nSESS_KEEP_HISTORY=%q\n' \
-      "$SESS_NAME" "$SESS_PROJ" "${CFG_HASH_AT_START:-}" "$new_mode" "$new_port" "${SESS_KEEP_HISTORY:-0}" > "$senv"
+    write_senv "$senv" "$SESS_NAME" "$SESS_PROJ" "${CFG_HASH_AT_START:-}" "$new_mode" "$new_port" "${SESS_KEEP_HISTORY:-0}"
   )
 }
 
@@ -6616,28 +6549,25 @@ EOF
 #                    native providers get options.thinking{type,budgetTokens}.
 # Only touches providers that already exist in the config. Operates on the session
 # config file in place. Non-fatal; needs jq.
-#   OCVM_MODEL_ENRICH=0                  -> disable entirely (legacy
-#                                          OCVM_MODEL_LIMIT_FALLBACK=0 also honored)
+#   OCVM_MODEL_ENRICH=0                  -> disable entirely
 #   OCVM_MODEL_ENRICH_PROVIDERS="a,b"    -> explicit target provider ids; default
 #                                          is every @ai-sdk/openai-compatible
-#                                          provider plus "ai-gateway". Legacy
-#                                          OCVM_MODEL_LIMIT_PROVIDERS still honored.
+#                                          provider plus "ai-gateway".
 #   OCVM_REASONING_EFFORT=medium         -> reasoningEffort for openai-compatible
 #   OCVM_REASONING_BUDGET=8192           -> thinking.budgetTokens for native
 apply_model_enrichment() {
   local cfg_file="$1"
-  { [[ "${OCVM_MODEL_ENRICH:-1}" == "0" ]] || [[ "${OCVM_MODEL_LIMIT_FALLBACK:-1}" == "0" ]]; } && return 0
+  [[ "${OCVM_MODEL_ENRICH:-1}" == "0" ]] && return 0
   command -v jq >/dev/null 2>&1 || return 0
   [[ -f "$cfg_file" ]] || return 0
 
-  # Explicit override (new var preferred, legacy var honored). Empty => auto-select.
-  local providers="${OCVM_MODEL_ENRICH_PROVIDERS:-${OCVM_MODEL_LIMIT_PROVIDERS:-}}"
+  # Explicit override. Empty => auto-select.
+  local providers="${OCVM_MODEL_ENRICH_PROVIDERS:-}"
   local effort="${OCVM_REASONING_EFFORT:-medium}"
   local budget="${OCVM_REASONING_BUDGET:-8192}"
   local tbl; tbl="$(_model_enrichment_table)"
 
-  local tmp; tmp="$(mktemp)"
-  if jq \
+  if ! jq_inplace "$cfg_file" \
       --argjson tbl "$tbl" \
       --arg providers "$providers" \
       --arg effort "$effort" \
@@ -6693,10 +6623,7 @@ apply_model_enrichment() {
                           | .[$e.key] = $m3
                         end))
             else . end)
-      ' "$cfg_file" > "$tmp" 2>/dev/null; then
-    mv "$tmp" "$cfg_file"
-  else
-    rm -f "$tmp"
+      '; then
     echo "[run] WARN: model enrichment pass failed; leaving config unchanged." >&2
   fi
 }
@@ -6708,8 +6635,6 @@ start_session() {
   printf "\r[run] Starting OpenCode VM session... |"
   ensure_dirs
   ensure_host_opencode_dirs
-  migrate_to_project_history
-  notify_fresh_default_once
   printf "\r[run] Starting OpenCode VM session... /"
   backup_host_cfg
   ensure_policy_file
@@ -6776,11 +6701,6 @@ start_session() {
 
   host_cfg="$(pick_host_cfg)"
   proj_cfg="$proj_state/config/opencode/opencode.json"
-  proj_cfg_legacy="$proj_state/config/opencode/.opencode.json"
-
-  if [[ ! -f "$proj_cfg" && -f "$proj_cfg_legacy" ]]; then
-    cp -p "$proj_cfg_legacy" "$proj_cfg"
-  fi
 
   # Auto-refresh local LLM providers (LM Studio, Ollama) so newly-loaded
   # models surface in this session. Cloud providers are untouched. Failures
@@ -6832,10 +6752,6 @@ start_session() {
     cp -p "$HOST_DATA_DIR/auth.json" "$proj_state/xdg-data/opencode/auth.json"
   fi
 
-  if [[ -f "$proj_cfg" ]]; then
-    cp -p "$proj_cfg" "$proj_cfg_legacy"
-  fi
-
   # Per-session share directory for config/state
   sess_share="$(session_share_dir "$proj")"
   rm -rf "$sess_share"
@@ -6881,14 +6797,11 @@ start_session() {
     mcp_obj="$(mcps_build_config_json "$vm_home" "$sess_share" "$proj")"
     [[ -n "$mcp_obj" ]] || mcp_obj='{}'
 
-    local tmp_cfg
-    tmp_cfg="$(mktemp)"
-    # The mcp block is wholly owned by the MCPs subsystem. Any legacy mcp
-    # entries in the persisted config (e.g. from pre-v0.4.7 auto-injection
-    # or manual edits) are overwritten — we never want to leak a disabled
-    # MCP like repomapper into the session just because it was written
-    # there on a previous run.
-    jq --argjson mcp "$mcp_obj" '
+    # The mcp block is wholly owned by the MCPs subsystem. Any stale mcp
+    # entries in the persisted config (e.g. from manual edits) are
+    # overwritten — we never want to leak a disabled MCP like repomapper
+    # into the session just because it was written there on a previous run.
+    jq_inplace "$sess_cfg_file" --argjson mcp "$mcp_obj" '
       (. * {
         "permission": {
           "*": "allow",
@@ -6901,9 +6814,7 @@ start_session() {
           }
         }
       }) | .mcp = $mcp
-    ' "$sess_cfg_file" > "$tmp_cfg" \
-      && mv "$tmp_cfg" "$sess_cfg_file" \
-      || rm -f "$tmp_cfg"
+    ' || true
 
     # Enrich custom/gateway-served frontier models that surface without metadata:
     # backfills context/output limits (OpenCode would otherwise default context=0,
@@ -7055,9 +6966,8 @@ start_session() {
   trap - EXIT
   echo "[run] Clone complete, lock released $(_ts)"
 
-  # Track session (printf '%q' safely escapes paths with spaces/special chars)
-  printf 'SESS_NAME=%q\nSESS_PROJ=%q\nCFG_HASH_AT_START=%q\nSESS_MODE=%q\nSESS_PORT=%q\nSESS_KEEP_HISTORY=%q\n' \
-    "$sess" "$proj" "$cfg_hash" "$SESSION_MODE" "${SESSION_PORT:-}" "${KEEP_HISTORY:-0}" > "$senv"
+  # Track session
+  write_senv "$senv" "$sess" "$proj" "$cfg_hash" "$SESSION_MODE" "${SESSION_PORT:-}" "${KEEP_HISTORY:-0}"
 
   cleanup() {
     echo "[cleanup] Starting cleanup... $(_ts)"
@@ -7076,7 +6986,6 @@ start_session() {
     local sess_cfg_dot="$sess_share/config/opencode/.opencode.json"
     local sess_cfg="$sess_cfg_json"
     local proj_cfg_cleanup="$proj_state/config/opencode/opencode.json"
-    local proj_cfg_cleanup_legacy="$proj_state/config/opencode/.opencode.json"
 
     mkdir -p "$proj_state/config/opencode" "$proj_state/xdg-data/opencode" "$proj_state/xdg-state/opencode"
     mkdir -p "$HOST_DATA_DIR" "$HOST_STATE_DIR"
@@ -7115,7 +7024,6 @@ start_session() {
       else
         cp -p "$persist_cfg" "$proj_cfg_cleanup"
       fi
-      cp -p "$proj_cfg_cleanup" "$proj_cfg_cleanup_legacy"
 
       # Same merge-not-clobber rule for the host config write below.
       local _hmerge="$persist_cfg.host"
@@ -7319,7 +7227,7 @@ start_session() {
     # One-shot incremental update first (so the agent has *some* graph even if
     # the watcher needs a moment to settle), then long-lived watch. Both run
     # in the VM as the same user opencode runs as; PID is captured via $!.
-    limactl shell --workdir / "$sess" -- bash -lc '
+    vm_exec "$sess" '
       set +e
       proj="$1"; log="$2"; pidfile="$3"
       export PATH="$HOME/.local/bin:$PATH"
@@ -7329,7 +7237,7 @@ start_session() {
       # Long-lived watcher; daemonize via setsid so it survives this shell exit.
       setsid graphify watch "$proj" >>"$log" 2>&1 &
       echo $! > "$pidfile"
-    ' _ "$proj" "$_gfy_log" "$_gfy_pidfile" 2>>"$_gfy_log" || \
+    ' "$proj" "$_gfy_log" "$_gfy_pidfile" 2>>"$_gfy_log" || \
       echo "[run] WARN: graphify watcher spawn failed; see $_gfy_log" >&2
     if [[ -s "$_gfy_pidfile" ]]; then
       echo "[run] graphify watch started (pid $(cat "$_gfy_pidfile")) — log: $_gfy_log $(_ts)"
@@ -7361,7 +7269,7 @@ start_session() {
     start_materialize_daemon "$sess" "$sess_share" || true
   fi
 
-  if limactl shell --workdir / "$sess" -- bash -lc '
+  if vm_exec "$sess" '
     set -euo pipefail
     PROJ_DIR="$1"
     SESS_SHARE="$2"
@@ -7570,7 +7478,7 @@ EOF
 
     # Sync back happens via the EXIT trap installed above (covers both clean
     # exit and Ctrl+C-driven termination of the web server).
-  ' _ "$proj" "$sess_share" "$SESSION_MODE" "${SESSION_PORT:-0}" "${SESSION_PASSWORD:-}" "${OC_WEB_TUI:-false}" "$host_lan_ip" "$effective_host_port"; then
+  ' "$proj" "$sess_share" "$SESSION_MODE" "${SESSION_PORT:-0}" "${SESSION_PASSWORD:-}" "${OC_WEB_TUI:-false}" "$host_lan_ip" "$effective_host_port"; then
     if [[ "$SESSION_MODE" != "shell" ]]; then
     OC_SHELL_OK=1
     fi
@@ -7626,12 +7534,12 @@ skills_cmd() {
       ;;
     on)
       local pkg="${1:-}"
-      [[ -n "$pkg" ]] || { echo "Usage: opencode-vm skills on <ecc-auto|ecc-all|webimg>" >&2; exit 2; }
+      [[ -n "$pkg" ]] || { echo "Usage: opencode-vm skills on <ecc-auto|ecc-all|webimg|ssh-toolkit>" >&2; exit 2; }
       skills_pkg_on "$pkg"
       ;;
     off)
       local pkg="${1:-}"
-      [[ -n "$pkg" ]] || { echo "Usage: opencode-vm skills off <ecc-auto|ecc-all|webimg>" >&2; exit 2; }
+      [[ -n "$pkg" ]] || { echo "Usage: opencode-vm skills off <ecc-auto|ecc-all|webimg|ssh-toolkit>" >&2; exit 2; }
       skills_pkg_off "$pkg"
       ;;
     list)
@@ -7671,16 +7579,15 @@ skills_cmd() {
 Usage:
   opencode-vm skills                      # status (alias)
   opencode-vm skills status [path]        # active packages + resolved skills + token estimate
-  opencode-vm skills on <pkg>             # enable package (ecc-auto | ecc-all | webimg)
+  opencode-vm skills on <pkg>             # enable package (ecc-auto | ecc-all | webimg | ssh-toolkit)
   opencode-vm skills off <pkg>            # disable package
   opencode-vm skills list [path]          # preview what would mount (no VM touch)
 
   opencode-vm mcps                        # MCP status (alias)
   opencode-vm mcps list                   # list all MCPs (active/default markers)
-  opencode-vm mcps on <name>              # enable MCP (playwright | repomapper | proxmox)
+  opencode-vm mcps on <name>              # enable MCP (playwright | searxng | repomapper | graphify | proxmox)
   opencode-vm mcps off <name>             # disable MCP (proxmox: also wipes credentials)
-
-Note: Proxmox moved to the mcps subsystem in v0.4.4 — use 'opencode-vm mcps'.
+  opencode-vm mcps purge <name>           # wipe per-project cached state (graphify: graph cache)
 EOF
       exit 2 ;;
   esac
@@ -7725,7 +7632,7 @@ case "$cmd" in
     echo "  opencode-vm start"
     echo
     skills_load
-    echo "Built-in skill: webimg (web image optimization pipeline, always active)"
+    echo "Built-in skills: webimg (web image optimization), ssh-toolkit (SSH/network workflows) — both default-active"
     if [[ -n "${SKILLS_PACKAGES:-}" ]]; then
       echo "Active skill packages: ${SKILLS_PACKAGES}"
       echo "These will be applied automatically on next 'opencode-vm start'."
@@ -7836,6 +7743,7 @@ Usage:
   opencode-vm install                      # install script to ~/bin and configure PATH
   opencode-vm start [--keep-history] [--reconnect|--fresh|--cancel-if-exists]
                                            # start a session VM in current directory
+                                           # ('run' is an alias for 'start')
                                            # If a session already exists, prompts:
                                            #   r = reconnect (resume if stopped)
                                            #   f = fresh (destroy and recreate)
@@ -7863,20 +7771,26 @@ Usage:
   opencode-vm skills {status|on|off|list} [pkg|path]
                                            # manage skill packages (knowledge-only markdown)
                                            # packages (registry: skills/registry.json):
-                                           #   webimg    — default on; web image optimization pipeline
-                                           #               (CLI tools pre-installed in base VM)
-                                           #   ecc-auto  — ~30 skills, filtered to project languages
-                                           #               (auto-clones ECC on first enable)
-                                           #   ecc-all   — ~180 skills, every ECC skill (token-heavy)
-  opencode-vm mcps {status|list|on|off} [name]
+                                           #   webimg      — default on; web image optimization pipeline
+                                           #                 (CLI tools pre-installed in base VM)
+                                           #   ssh-toolkit — default on; SSH/network workflow knowledge
+                                           #                 (CLI tools pre-installed in base VM)
+                                           #   ecc-auto    — ~30 skills, filtered to project languages
+                                           #                 (auto-clones ECC on first enable)
+                                           #   ecc-all     — ~180 skills, every ECC skill (token-heavy)
+  opencode-vm mcps {status|list|on|off|purge} [name]
                                            # manage MCP servers (tools the agent can call)
                                            # MCPs (registry: mcps/registry.json):
                                            #   playwright — default on; headless browser automation
+                                           #   searxng    — default on; account-free metasearch (SearXNG)
                                            #   repomapper — default off; PageRank codebase maps
+                                           #   graphify   — default off; code knowledge-graph
+                                           #                ('purge' wipes the per-project graph cache)
                                            #   proxmox    — default off; Proxmox VE API via ProxmoxMCP
                                            #                'on' prompts interactively for host + API token;
                                            #                'off' disables AND wipes stored credentials.
   opencode-vm ports show                   # show current firewall policy
+  opencode-vm ports reload                 # re-push policy.env to running sessions
   opencode-vm ports host {show|add|rm|set} [PORT...]
   opencode-vm ports hostfwd {show|enable|disable}
   opencode-vm ports lan tcp {show|add|rm|clear} IP[:PORT]
@@ -7884,6 +7798,8 @@ Usage:
   opencode-vm doctor [show]                # inspect local sync/auth/model/db state
   opencode-vm provider list                # list configured providers
   opencode-vm provider new                 # add new openai-compatible provider (interactive)
+  opencode-vm provider add <id> --base-url <url> [--api-key <key>] [--name <n>] [--dry-run]
+                                           # add provider non-interactively
   opencode-vm provider refresh <id>        # re-discover models from /v1/models (auto-runs at session start
                                            #   for local providers; OCVM_PROVIDER_AUTOREFRESH=0 disables)
   opencode-vm provider rm <id> [--dry-run] # remove provider from auth/config/model state
