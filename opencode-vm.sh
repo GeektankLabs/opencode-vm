@@ -61,11 +61,12 @@ SEARXNG_PORT=8888                         # browser-safe; not in BROWSER_UNSAFE_
 SEARXNG_MIGRATION_MARKER="$SHARE_ROOT/.searxng-default-migrated"
 SEARXNG_MCP_NPM_VERSION="1.0.3"           # pin for reproducible installs in provision_base
 # Script location (for resolving bundled skills/proxmox/mcps when running from
-# repo). Must follow symlinks: `opencode-vm install` puts a symlink at
-# ~/bin/opencode-vm pointing at the repo's opencode-vm.sh, and a naive
-# `dirname "${BASH_SOURCE[0]}"` would resolve to ~/bin — making the bundled
-# mcps/registry.json invisible and forcing a fall-back to a stale on-disk
-# cache that may pre-date recently-added MCPs (graphify lived this exact bug).
+# repo). Must follow symlinks: `opencode-vm install` copies the script to
+# ~/bin/opencode-vm, but users who instead symlink ~/bin/opencode-vm at the
+# repo's opencode-vm.sh would hit a naive `dirname "${BASH_SOURCE[0]}"`
+# resolving to ~/bin — making the bundled mcps/registry.json invisible and
+# forcing a fall-back to a stale on-disk cache that may pre-date recently-added
+# MCPs (graphify lived this exact bug).
 # Portable across macOS (BSD readlink, no -f) and Linux (GNU readlink).
 _ocvm_resolve_script_dir() {
   local src="${BASH_SOURCE[0]}"
@@ -104,7 +105,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.4.53"
+OCVM_VERSION="0.4.54"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -6572,7 +6573,7 @@ EOF
 #   pdf              : accepts pdf input     -> appends "pdf" to modalities.input
 #   reasoning        : supports thinking/reasoning -> options.reasoningEffort
 #                      (openai-compatible providers) or options.thinking (native)
-# Edit here to add/adjust models. _model_limit_fallback_table is kept as an alias.
+# Edit here to add/adjust models.
 _model_enrichment_table() {
   cat <<'EOF'
 {
@@ -6602,9 +6603,6 @@ _model_enrichment_table() {
 }
 EOF
 }
-
-# Back-compat alias: older call sites / external scripts may reference this name.
-_model_limit_fallback_table() { _model_enrichment_table; }
 
 # Enrich the same-id models that custom/gateway providers surface dynamically with
 # the metadata from _model_enrichment_table. Three additive passes, each FILL-ONLY
@@ -6702,9 +6700,6 @@ apply_model_enrichment() {
     echo "[run] WARN: model enrichment pass failed; leaving config unchanged." >&2
   fi
 }
-
-# Back-compat alias for the old function name.
-apply_model_limit_fallback() { apply_model_enrichment "$@"; }
 
 start_session() {
   need limactl
@@ -7710,12 +7705,7 @@ case "$cmd" in
     need limactl
     sanitize_lima_sock_dir
 
-    # init no longer takes ECC-specific flags; ECC is managed via `skills on/off ecc-*`.
-    while [[ "$#" -gt 0 ]]; do
-      case "$1" in
-        *) echo "[init] Unknown option: $1" >&2; exit 2 ;;
-      esac
-    done
+    [[ "$#" -eq 0 ]] || { echo "[init] Unknown option: $1" >&2; exit 2; }
 
     cleanup_sessions
     if base_exists; then
