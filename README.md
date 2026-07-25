@@ -241,6 +241,52 @@ This reports, among other things:
 - recent/favorite provider+model selections (from `model.json`),
 - provider usage markers found in `opencode.db` message metadata.
 
+## Per-Project VM Sizing (RAM + CPUs)
+
+Every session VM is a clone of the shared base VM and inherits its **8 GiB / 6 CPUs**. A project that needs more (large builds, heavy test suites, local models) can carry its own size:
+
+```bash
+cd /path/to/heavy-project
+opencode-vm ram 32        # remembered for this project
+opencode-vm cpu 12        # likewise
+opencode-vm ram show      # full picture (both commands print the same table)
+opencode-vm ram default   # drop just the RAM override
+opencode-vm cpu default   # drop just the CPU override
+```
+
+`show` always reports both resources next to what the machine actually has:
+
+```
+Project:  /path/to/heavy-project
+Setting:  /Users/you/.opencode-vm/project-state/a4488b22.../vm.env
+
+  Resource   This project     Default    Host total
+  RAM        32 GiB (set)     8 GiB      128 GiB
+  CPUs       12 (set)         6          18
+
+  Session VM oc-20260722-235140: 8 GiB, 6 CPUs
+    -> differs from the table above; applied on the next VM start.
+
+Set:    opencode-vm ram <GiB>        opencode-vm cpu <N>
+Reset:  opencode-vm ram default      opencode-vm cpu default
+```
+
+How it behaves:
+
+- The settings are **per project**, keyed by project path, and stored on the host at `~/.opencode-vm/project-state/<hash>/vm.env` — not in your repo, so they never reach the VM's mount and never show up in `git status`.
+- They are applied when the session VM is **cloned**, and re-applied when a kept VM is **resumed** (`start` / `attach`), so they survive across sessions without an `init`.
+- The **base VM is never modified**. One heavyweight project cannot inflate every other project's VM.
+- Every `start` prints a reminder while an override is active, together with how to change or clear it:
+
+  ```
+  [run] Sizing override for this project: 32 GiB RAM, 12 CPUs (defaults: 8 GiB, 6 CPUs)
+  [run]   change: 'opencode-vm ram <GiB>' / 'opencode-vm cpu <N>'   reset: append 'default'
+  ```
+
+- RAM and CPUs are independent: clearing one leaves the other in place.
+- A **running** VM cannot be resized. Change the setting, exit the session, and the next `start` applies it — the commands tell you when that is the case.
+- Accepted ranges: RAM from 2 GiB, CPUs from 1, each capped at what the host physically has. Anything above 75% of the host total is flagged as a warning but allowed.
+
 ## Provider Commands
 
 Provider management is a first-class top-level command — no `doctor` prefix needed:
@@ -460,6 +506,10 @@ opencode-vm attach       # reconnect to a running/kept session (e.g. after a ter
 opencode-vm shell        # shell into session VM (auto-starts if none is running)
 opencode-vm base         # shell into base VM
 opencode-vm prune        # cleanup sessions, keep base
+opencode-vm ram show     # per-project VM sizing + host totals (run inside the project)
+opencode-vm ram 16       # give this project 16 GiB — remembered across sessions
+opencode-vm cpu 12       # give this project 12 CPUs — remembered across sessions
+opencode-vm ram default  # drop the RAM override (8 GiB); 'cpu default' likewise (6 CPUs)
 opencode-vm ports show   # show host/LAN policy and localhost-forwarding status
 opencode-vm doctor       # inspect synced local auth/model/db state
 opencode-vm provider list

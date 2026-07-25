@@ -24,6 +24,17 @@ PROJECT_HISTORY_DIR="$SHARE_ROOT/project-history"   # loaded only with --keep-hi
 FRESH_HISTORY_DIR="$SHARE_ROOT/fresh-history"       # per-run snapshots from default fresh mode
 KEPT_SESSION_NOTIFIED_MARKER="$SHARE_ROOT/.kept-session-notified"
 
+# Per-project VM sizing. The shared base VM is always provisioned at these
+# values; a project that needs more (or less) stores an override in its own
+# project-state dir, applied at clone time. Keeping the override off the base VM
+# means one heavyweight project can't inflate every other project's session VM.
+# provision_base() uses these same constants, so the base VM and the "default"
+# column of 'opencode-vm ram|cpu show' can never drift apart.
+DEFAULT_VM_MEMORY_GIB=8
+MIN_VM_MEMORY_GIB=2
+DEFAULT_VM_CPUS=6
+MIN_VM_CPUS=1
+
 # Policy persistiert am Host (wird pro Session in der VM angewendet)
 POLICY_ENV="$SHARE_ROOT/policy.env"
 
@@ -102,7 +113,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.5.0"
+OCVM_VERSION="0.5.1"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -264,6 +275,13 @@ project_history_dir() {
 
 fresh_history_dir() {
   echo "$FRESH_HISTORY_DIR/$(proj_hash "$1")"
+}
+
+# Per-project VM sizing overrides. Lives inside the project-state dir so it is
+# keyed by project path like every other per-project artefact, and stays out of
+# the project's own working tree (and therefore out of the VM's mount).
+project_vm_env() {
+  echo "$(project_state_dir "$1")/vm.env"
 }
 
 is_vm_running() {
@@ -2728,6 +2746,374 @@ ocvm_notify_if_new_version_available() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# Per-project VM sizing (RAM + CPUs)
+#
+# The base VM is provisioned once at DEFAULT_VM_MEMORY_GIB / DEFAULT_VM_CPUS and
+# shared by every project. A project that needs a different size records it in
+# its project-state dir; the values are passed to `limactl clone` when the
+# session VM is created and re-applied to a stopped session VM on resume. The
+# base VM is never mutated.
+#
+# RAM and CPUs deliberately share one storage file, one load/save pair and one
+# command implementation — they differ only in bounds, unit and which variable
+# they write, so splitting them would just create two things to keep in sync.
+# ---------------------------------------------------------------------------
+
+# Physical RAM of the host in whole GiB (0 when it can't be determined, which
+# disables the upper bound rather than blocking the user).
+_host_mem_gib() {
+  local bytes
+  bytes="$(sysctl -n hw.memsize 2>/dev/null || echo 0)"
+  [[ "$bytes" =~ ^[0-9]+$ ]] || bytes=0
+  echo $(( bytes / 1024 / 1024 / 1024 ))
+}
+
+# Logical CPUs of the host (0 when it can't be determined).
+_host_cpus() {
+  local n
+  n="$(sysctl -n hw.ncpu 2>/dev/null || echo 0)"
+  [[ "$n" =~ ^[0-9]+$ ]] || n=0
+  echo "$n"
+}
+
+# True when $1 is a whole number within [$2, $3]; $3 == 0 means "no upper bound".
+_vm_size_valid() {
+  local v="$1" min="$2" max="$3"
+  [[ "$v" =~ ^[0-9]+$ ]] || return 1
+  (( v >= min )) || return 1
+  (( max == 0 || v <= max ))
+}
+
+# RAM of an existing Lima instance in whole GiB; empty when the instance is
+# unknown. Lima reports bytes.
+_vm_instance_mem_gib() {
+  local bytes
+  bytes="$(limactl list "$1" --format '{{.Memory}}' 2>/dev/null | head -1)"
+  [[ "$bytes" =~ ^[0-9]+$ ]] || return 0
+  echo $(( bytes / 1024 / 1024 / 1024 ))
+}
+
+# CPU count of an existing Lima instance; empty when the instance is unknown.
+_vm_instance_cpus() {
+  local n
+  n="$(limactl list "$1" --format '{{.CPUs}}' 2>/dev/null | head -1)"
+  [[ "$n" =~ ^[0-9]+$ ]] || return 0
+  echo "$n"
+}
+
+# Load the project's overrides into VM_MEMORY_GIB / VM_CPUS. Empty means "no
+# override — inherit the base VM's size". A stored value that no longer
+# validates (hand-edited, or the machine shrank) is reported and dropped rather
+# than clamped: silently booting a VM at a size the user never asked for is
+# worse than falling back to the documented default.
+vmcfg_load() {
+  VM_MEMORY_GIB=""
+  VM_CPUS=""
+  local f
+  f="$(project_vm_env "$1")"
+  [[ -f "$f" ]] || return 0
+  # shellcheck disable=SC1090
+  source "$f"
+  if [[ -n "${VM_MEMORY_GIB:-}" ]] && ! _vm_size_valid "$VM_MEMORY_GIB" "$MIN_VM_MEMORY_GIB" "$(_host_mem_gib)"; then
+    echo "[vmsize] WARN: ignoring invalid VM_MEMORY_GIB='$VM_MEMORY_GIB' in $f" >&2
+    echo "[vmsize]       falling back to the default (${DEFAULT_VM_MEMORY_GIB} GiB). Fix with 'opencode-vm ram <GiB>'." >&2
+    VM_MEMORY_GIB=""
+  fi
+  if [[ -n "${VM_CPUS:-}" ]] && ! _vm_size_valid "$VM_CPUS" "$MIN_VM_CPUS" "$(_host_cpus)"; then
+    echo "[vmsize] WARN: ignoring invalid VM_CPUS='$VM_CPUS' in $f" >&2
+    echo "[vmsize]       falling back to the default (${DEFAULT_VM_CPUS} CPUs). Fix with 'opencode-vm cpu <N>'." >&2
+    VM_CPUS=""
+  fi
+}
+
+# Persist the current VM_MEMORY_GIB / VM_CPUS globals for project $1. With both
+# empty the file is removed, so "no override" leaves no residue behind.
+vmcfg_save() {
+  local proj="$1" f
+  f="$(project_vm_env "$proj")"
+  if [[ -z "${VM_MEMORY_GIB:-}" && -z "${VM_CPUS:-}" ]]; then
+    rm -f "$f"
+    return 0
+  fi
+  mkdir -p "$(dirname "$f")"
+  {
+    echo "# opencode-vm per-project VM sizing"
+    echo "# Project: $proj"
+    echo "# Applied when this project's session VM is cloned from the base VM."
+    echo "# Manage with: opencode-vm ram <GiB> | opencode-vm cpu <N> | ... default"
+    if [[ -n "${VM_MEMORY_GIB:-}" ]]; then
+      echo "VM_MEMORY_GIB=\"$VM_MEMORY_GIB\""
+    fi
+    if [[ -n "${VM_CPUS:-}" ]]; then
+      echo "VM_CPUS=\"$VM_CPUS\""
+    fi
+  } > "$f"
+}
+
+# Standing reminder that this project deviates from the defaults. Emitted on
+# every session start so an override set months ago can't be forgotten. Worded
+# in one place so 'start', 'web' and 'attach' stay consistent.
+vmcfg_print_override_notice() {
+  local prefix="$1" what=""
+  if [[ -n "${VM_MEMORY_GIB:-}" ]]; then
+    what="${VM_MEMORY_GIB} GiB RAM"
+  fi
+  if [[ -n "${VM_CPUS:-}" ]]; then
+    what="${what:+$what, }${VM_CPUS} CPUs"
+  fi
+  [[ -n "$what" ]] || return 0
+  echo "$prefix Sizing override for this project: ${what} (defaults: ${DEFAULT_VM_MEMORY_GIB} GiB, ${DEFAULT_VM_CPUS} CPUs)"
+  echo "$prefix   change: 'opencode-vm ram <GiB>' / 'opencode-vm cpu <N>'   reset: append 'default'"
+}
+
+# Shared status table for 'ram show' and 'cpu show'. Always prints both
+# resources next to the host's totals — sizing decisions are made against what
+# the machine actually has, so showing only the one resource you asked about
+# would force a second lookup every time.
+vmcfg_show() {
+  local proj="$1"
+  vmcfg_load "$proj"
+
+  local host_mem host_cpu host_mem_s host_cpu_s proj_mem_s proj_cpu_s
+  host_mem="$(_host_mem_gib)"
+  host_cpu="$(_host_cpus)"
+  if (( host_mem > 0 )); then host_mem_s="${host_mem} GiB"; else host_mem_s="unknown"; fi
+  if (( host_cpu > 0 )); then host_cpu_s="${host_cpu}"; else host_cpu_s="unknown"; fi
+
+  if [[ -n "${VM_MEMORY_GIB:-}" ]]; then
+    proj_mem_s="${VM_MEMORY_GIB} GiB (set)"
+  else
+    proj_mem_s="${DEFAULT_VM_MEMORY_GIB} GiB"
+  fi
+  if [[ -n "${VM_CPUS:-}" ]]; then
+    proj_cpu_s="${VM_CPUS} (set)"
+  else
+    proj_cpu_s="${DEFAULT_VM_CPUS}"
+  fi
+
+  echo "Project:  $proj"
+  echo "Setting:  $(project_vm_env "$proj")"
+  echo
+  printf "  %-10s %-16s %-10s %s\n" "Resource" "This project" "Default" "Host total"
+  printf "  %-10s %-16s %-10s %s\n" "RAM" "$proj_mem_s" "${DEFAULT_VM_MEMORY_GIB} GiB" "$host_mem_s"
+  printf "  %-10s %-16s %-10s %s\n" "CPUs" "$proj_cpu_s" "$DEFAULT_VM_CPUS" "$host_cpu_s"
+  echo
+
+  # Report the live VM too: the settings only reach a session VM when that VM is
+  # created or resumed, so a stale running VM would otherwise contradict the table.
+  local senv sess_mem sess_cpu
+  senv="$(session_env "$proj")"
+  if [[ -f "$senv" ]]; then
+    # shellcheck disable=SC1090
+    source "$senv"
+    sess_mem="$(_vm_instance_mem_gib "$SESS_NAME")"
+    sess_cpu="$(_vm_instance_cpus "$SESS_NAME")"
+    if [[ -n "$sess_mem" || -n "$sess_cpu" ]]; then
+      echo "  Session VM $SESS_NAME: ${sess_mem:-?} GiB, ${sess_cpu:-?} CPUs"
+      if [[ "${sess_mem:-}" != "${VM_MEMORY_GIB:-$DEFAULT_VM_MEMORY_GIB}" || "${sess_cpu:-}" != "${VM_CPUS:-$DEFAULT_VM_CPUS}" ]]; then
+        echo "    -> differs from the table above; applied on the next VM start."
+      fi
+      echo
+    fi
+  fi
+
+  echo "Set:    opencode-vm ram <GiB>        opencode-vm cpu <N>"
+  echo "Reset:  opencode-vm ram default      opencode-vm cpu default"
+}
+
+# Shared implementation behind 'ram' and 'cpu'. $1 is the resource key; the rest
+# are the user's arguments.
+_vmcfg_resource_cmd() {
+  local res="$1"; shift
+  need limactl
+  local proj sub
+  proj="$(pwd)"
+  sub="${1:-show}"
+
+  # Per-resource attributes. Held as plain locals because bash 3.2 (the /bin/bash
+  # this script runs under on macOS) has no associative arrays.
+  local var def min host unit noun cmd
+  case "$res" in
+    ram)
+      var=VM_MEMORY_GIB; def="$DEFAULT_VM_MEMORY_GIB"; min="$MIN_VM_MEMORY_GIB"
+      host="$(_host_mem_gib)"; unit="GiB"; noun="RAM"; cmd="ram"
+      ;;
+    cpu)
+      var=VM_CPUS; def="$DEFAULT_VM_CPUS"; min="$MIN_VM_CPUS"
+      host="$(_host_cpus)"; unit="CPUs"; noun="CPUs"; cmd="cpu"
+      ;;
+    *)
+      echo "[vmsize] Internal error: unknown resource '$res'" >&2
+      return 1
+      ;;
+  esac
+
+  case "$sub" in
+    show|status)
+      vmcfg_show "$proj"
+      ;;
+
+    default|reset|off)
+      vmcfg_load "$proj"
+      local cur="${!var}"
+      if [[ -z "$cur" ]]; then
+        echo "[$cmd] No ${noun} override set for this project — already at the default (${def} ${unit})."
+        return 0
+      fi
+      printf -v "$var" '%s' ""
+      vmcfg_save "$proj"
+      echo "[$cmd] ${noun} override removed (was ${cur} ${unit}) — back to the default ${def} ${unit}."
+      _vmcfg_report_pending_restart "$proj"
+      ;;
+
+    -h|--help|help)
+      echo "Usage: opencode-vm ${cmd} [show|<value>|default]"
+      ;;
+
+    *)
+      if ! [[ "$sub" =~ ^[0-9]+$ ]]; then
+        echo "[$cmd] Not a whole number: '$sub'" >&2
+        echo "[$cmd] Usage: opencode-vm ${cmd} [show|<value>|default]" >&2
+        return 2
+      fi
+      if ! _vm_size_valid "$sub" "$min" "$host"; then
+        if (( sub < min )); then
+          if [[ "$res" == "ram" ]]; then
+            echo "[$cmd] ${sub} ${unit} is below the ${min} ${unit} minimum — the VM needs headroom for Docker and the agent." >&2
+          else
+            echo "[$cmd] ${sub} is below the ${min} CPU minimum." >&2
+          fi
+        else
+          echo "[$cmd] ${sub} exceeds the host's ${host} ${unit}." >&2
+        fi
+        return 2
+      fi
+      # Not an error — the host still has to run macOS — but worth flagging.
+      if (( host > 0 && sub * 4 > host * 3 )); then
+        echo "[$cmd] NOTE: ${sub} ${unit} is over 75% of the host's ${host} ${unit} — leave room for macOS." >&2
+      fi
+      vmcfg_load "$proj"
+      printf -v "$var" '%s' "$sub"
+      vmcfg_save "$proj"
+      echo "[$cmd] This project's session VM will use ${sub} ${unit} (default: ${def} ${unit})."
+      echo "[$cmd]   stored in: $(project_vm_env "$proj")"
+      echo "[$cmd]   reset with: opencode-vm ${cmd} default"
+      _vmcfg_report_pending_restart "$proj"
+      ;;
+  esac
+}
+
+ram_cmd() {
+  _vmcfg_resource_cmd ram "$@"
+}
+
+cpu_cmd() {
+  _vmcfg_resource_cmd cpu "$@"
+}
+
+# After a setting change, say whether an existing session VM still runs at the
+# old size and what it takes to pick the new one up. Expects VM_MEMORY_GIB /
+# VM_CPUS to already hold the new values.
+_vmcfg_report_pending_restart() {
+  local proj="$1" senv sess_mem sess_cpu want_mem want_cpu drift=""
+  senv="$(session_env "$proj")"
+  [[ -f "$senv" ]] || return 0
+  # shellcheck disable=SC1090
+  source "$senv"
+  sess_mem="$(_vm_instance_mem_gib "$SESS_NAME")"
+  sess_cpu="$(_vm_instance_cpus "$SESS_NAME")"
+  want_mem="$(_effective_vm_mem_gib)"
+  want_cpu="$(_effective_vm_cpus)"
+  if [[ -n "$sess_mem" && "$sess_mem" != "$want_mem" ]]; then
+    drift="${sess_mem} -> ${want_mem} GiB"
+  fi
+  if [[ -n "$sess_cpu" && "$sess_cpu" != "$want_cpu" ]]; then
+    drift="${drift:+$drift, }${sess_cpu} -> ${want_cpu} CPUs"
+  fi
+  [[ -n "$drift" ]] || return 0
+  if is_vm_running "$SESS_NAME"; then
+    echo "[vmsize] Session VM '$SESS_NAME' is running — resizing needs a stop ($drift)."
+    echo "[vmsize]   Exit the session, then 'opencode-vm start' applies it."
+  else
+    echo "[vmsize] Stopped session VM '$SESS_NAME' still has the old size — 'opencode-vm start' applies it ($drift)."
+  fi
+}
+
+# Size a session VM should have right now: the project override when set,
+# otherwise whatever the base VM actually carries (not the constant — a base
+# provisioned by an older version or resized by hand must still win over a
+# stale default, or every resume would fight it).
+_effective_vm_mem_gib() {
+  if [[ -n "${VM_MEMORY_GIB:-}" ]]; then
+    echo "$VM_MEMORY_GIB"
+    return 0
+  fi
+  local base_gib
+  base_gib="$(_vm_instance_mem_gib "$BASE_NAME")"
+  echo "${base_gib:-$DEFAULT_VM_MEMORY_GIB}"
+}
+
+_effective_vm_cpus() {
+  if [[ -n "${VM_CPUS:-}" ]]; then
+    echo "$VM_CPUS"
+    return 0
+  fi
+  local base_cpus
+  base_cpus="$(_vm_instance_cpus "$BASE_NAME")"
+  echo "${base_cpus:-$DEFAULT_VM_CPUS}"
+}
+
+# Resize a stopped session VM in place so a setting changed between sessions
+# takes effect without discarding the VM. Verified to rewrite only the affected
+# lines of the instance's lima.yaml. Non-fatal: a failed resize keeps the old
+# size rather than blocking the session.
+_apply_vm_sizing_to_stopped() {
+  local vm="$1" prefix="${2:-[start]}" want_mem want_cpu cur_mem cur_cpu what=""
+  want_mem="$(_effective_vm_mem_gib)"
+  want_cpu="$(_effective_vm_cpus)"
+  cur_mem="$(_vm_instance_mem_gib "$vm")"
+  cur_cpu="$(_vm_instance_cpus "$vm")"
+
+  local -a edit_args
+  edit_args=()
+  if [[ -n "$cur_mem" && -n "$want_mem" && "$cur_mem" != "$want_mem" ]]; then
+    edit_args+=( --memory "$want_mem" )
+    what="RAM ${cur_mem} -> ${want_mem} GiB"
+  fi
+  if [[ -n "$cur_cpu" && -n "$want_cpu" && "$cur_cpu" != "$want_cpu" ]]; then
+    edit_args+=( --cpus "$want_cpu" )
+    what="${what:+$what, }CPUs ${cur_cpu} -> ${want_cpu}"
+  fi
+  # Guard the empty case explicitly: bash 3.2 errors on "${arr[@]}" for an empty
+  # array under 'set -u'.
+  (( ${#edit_args[@]} > 0 )) || return 0
+
+  echo "$prefix Resizing session VM: $what"
+  if ! limactl edit "$vm" "${edit_args[@]}" --tty=false >/dev/null 2>&1; then
+    echo "$prefix WARN: could not resize '$vm' — continuing at the old size." >&2
+    echo "$prefix       'opencode-vm start --fresh' recreates it at the configured size." >&2
+  fi
+}
+
+# A running VM can't be resized; say so instead of silently ignoring the settings.
+_warn_vm_sizing_mismatch() {
+  local vm="$1" want_mem want_cpu cur_mem cur_cpu what=""
+  want_mem="$(_effective_vm_mem_gib)"
+  want_cpu="$(_effective_vm_cpus)"
+  cur_mem="$(_vm_instance_mem_gib "$vm")"
+  cur_cpu="$(_vm_instance_cpus "$vm")"
+  if [[ -n "$cur_mem" && -n "$want_mem" && "$cur_mem" != "$want_mem" ]]; then
+    what="${cur_mem} GiB (want ${want_mem})"
+  fi
+  if [[ -n "$cur_cpu" && -n "$want_cpu" && "$cur_cpu" != "$want_cpu" ]]; then
+    what="${what:+$what, }${cur_cpu} CPUs (want ${want_cpu})"
+  fi
+  [[ -n "$what" ]] || return 0
+  echo "[start] NOTE: running session VM '$vm' has $what."
+  echo "[start]       Exit the session, then 'opencode-vm start' applies the settings."
+}
+
 ports_cmd() {
   load_policy
   local area="${1:-show}"; shift || true
@@ -4569,7 +4955,7 @@ provision_base() {
   tmpl_file="${tmpl_file}.yaml"
   limactl tmpl yq 'template:docker-rootful' 'del(.probes) | del(.param)' > "$tmpl_file"
 
-  limactl start --cpus 6 --memory 8 --name "$BASE_NAME" --vm-type vz --mount-none --mount-type virtiofs --timeout 20m --tty=false "$tmpl_file" || {
+  limactl start --cpus "$DEFAULT_VM_CPUS" --memory "$DEFAULT_VM_MEMORY_GIB" --name "$BASE_NAME" --vm-type vz --mount-none --mount-type virtiofs --timeout 20m --tty=false "$tmpl_file" || {
     if limactl list -q 2>/dev/null | grep -qx "$BASE_NAME"; then
       echo "[init] Lima start returned non-zero, but VM is running — continuing..."
     else
@@ -6045,6 +6431,11 @@ attach_session() {
     # Session was kept on a previous exit (stop-but-keep). Resume it.
     if limactl list -q 2>/dev/null | grep -qx "$SESS_NAME"; then
       echo "[attach] Session VM '$SESS_NAME' is stopped — resuming..."
+      # Same resize-on-resume as 'start': attaching to a kept VM must not be a
+      # back door that silently keeps the old RAM size.
+      vmcfg_load "$proj"
+      vmcfg_print_override_notice "[attach]"
+      _apply_vm_sizing_to_stopped "$SESS_NAME" "[attach]"
       if ! run_with_spinner "[attach] Starting session VM..." limactl start "$SESS_NAME" --tty=false; then
         echo "[attach] Failed to resume VM '$SESS_NAME'." >&2
         echo "[attach] Start a fresh session with: opencode-vm start --fresh" >&2
@@ -6642,6 +7033,11 @@ start_session() {
 
   proj="$(pwd)"
 
+  # Per-project RAM override (empty = inherit the base VM's size). Loaded before
+  # the reconnect branch so a resumed VM can be resized too, not just a fresh clone.
+  vmcfg_load "$proj"
+  vmcfg_print_override_notice "[run]"
+
   # A session already exists for this project: prompt the user — never auto-destroy.
   senv="$(session_env "$proj")"
   if [[ -f "$senv" ]]; then
@@ -6656,10 +7052,13 @@ start_session() {
     case "$_action" in
       reconnect)
         if ! is_vm_running "$SESS_NAME"; then
+          _apply_vm_sizing_to_stopped "$SESS_NAME"
           if ! run_with_spinner "[start] Resuming session VM..." limactl start "$SESS_NAME" --tty=false; then
             echo "[start] Failed to resume VM '$SESS_NAME'. Use 'opencode-vm start --fresh' to recreate." >&2
             exit 1
           fi
+        else
+          _warn_vm_sizing_mismatch "$SESS_NAME"
         fi
         # The launch verb (`opencode-vm web`) overrides the persisted mode
         # from the prior session — otherwise attach_session re-sources
@@ -6950,18 +7349,24 @@ start_session() {
     echo "[run] Clean mount symlink: $clean_link -> $proj"
   fi
 
+  # Build the clone args incrementally: the optional Desktop share and the
+  # per-project RAM/CPU overrides are independent, and spelling out every
+  # combination as its own limactl line does not scale.
+  local -a clone_args
+  clone_args=( --mount-only "${mount_proj}:w" --mount-only "${sess_share}:w" )
   if [[ -n "$share_mount" ]]; then
-    run_with_spinner "[run] Cloning session VM: $sess..." limactl clone "$BASE_NAME" "$sess" \
-      --mount-only "${mount_proj}:w" \
-      --mount-only "${sess_share}:w" \
-      --mount-only "${share_dir}:w" \
-      --tty=false --start
-  else
-    run_with_spinner "[run] Cloning session VM: $sess..." limactl clone "$BASE_NAME" "$sess" \
-      --mount-only "${mount_proj}:w" \
-      --mount-only "${sess_share}:w" \
-      --tty=false --start
+    clone_args+=( --mount-only "${share_dir}:w" )
   fi
+  if [[ -n "${VM_MEMORY_GIB:-}" ]]; then
+    clone_args+=( --memory "$VM_MEMORY_GIB" )
+    echo "[run] Session VM RAM: ${VM_MEMORY_GIB} GiB (project override)"
+  fi
+  if [[ -n "${VM_CPUS:-}" ]]; then
+    clone_args+=( --cpus "$VM_CPUS" )
+    echo "[run] Session VM CPUs: ${VM_CPUS} (project override)"
+  fi
+  run_with_spinner "[run] Cloning session VM: $sess..." limactl clone "$BASE_NAME" "$sess" \
+    "${clone_args[@]}" --tty=false --start
   rm -f "$lockfile"
   trap - EXIT
   echo "[run] Clone complete, lock released $(_ts)"
@@ -7663,6 +8068,14 @@ case "$cmd" in
     ports_cmd "$@"
     ;;
 
+  ram)
+    ram_cmd "$@"
+    ;;
+
+  cpu|cpus)
+    cpu_cmd "$@"
+    ;;
+
   doctor)
     doctor_cmd "$@"
     ;;
@@ -7789,6 +8202,13 @@ Usage:
                                            #   proxmox    — default off; Proxmox VE API via ProxmoxMCP
                                            #                'on' prompts interactively for host + API token;
                                            #                'off' disables AND wipes stored credentials.
+  opencode-vm ram [show|<GiB>|default]     # per-project session VM RAM (run inside the project)
+  opencode-vm cpu [show|<N>|default]       # per-project session VM CPU count
+                                           # defaults: 8 GiB / 6 CPUs, inherited from the base VM.
+                                           # An override is remembered for this project and
+                                           # re-applied on every 'start'. 'show' prints both
+                                           # resources next to the host's totals;
+                                           # '<cmd> default' clears that override.
   opencode-vm ports show                   # show current firewall policy
   opencode-vm ports reload                 # re-push policy.env to running sessions
   opencode-vm ports host {show|add|rm|set} [PORT...]
