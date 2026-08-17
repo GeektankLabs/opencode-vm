@@ -194,17 +194,39 @@ What you get from a single command:
 
 All clients share the same sessions and state, so you can switch between browser and terminal seamlessly.
 
-**Use the URL exactly as printed.** The `Browser/Web UI` line ends in a long base64url segment — that's your project path, and OpenCode's web UI only opens a project through that route. The bare root URL (printed as `All projects`) deliberately shows the project launcher listing every project the server knows, with a file picker that starts in the VM's home directory — not in your project.
+**About the project URL.** OpenCode's web UI only opens a project through the route `/<base64url(path)>` — its bare root URL renders a project launcher whose list is browser-local state, so in a fresh browser it reaches no project at all. Two things handle this:
+
+- The `Browser/Web UI` line ends in that base64url segment, so the printed link goes straight into your project.
+- The short root URL works too: a small redirector inside the VM answers browser navigation to `/` with a 302 to the project link. It sits on the port the tunnel forwards to and passes everything else through untouched as raw TCP, so the SSE event stream, assets and the REST API are unaffected. The redirect is gated on `Accept: text/html`, so `curl`, the REST API and `opencode attach` still see the real root — only a browser gets redirected. If it can't start, opencode simply serves the port directly and you use the long link.
+
+`All projects` in the banner is the launcher itself, reachable via any non-browser client or by navigating back inside the UI.
 
 Options:
 
 ```bash
 opencode-vm web --port 3000         # use a custom port
 opencode-vm web --password secret   # set a server password
+opencode-vm web --no-tls            # serve plain HTTP instead of HTTPS
 opencode-vm web --tui               # also start TUI in terminal (experimental)
 ```
 
 The `--tui` flag starts the web server in the background, then lets you press Enter to launch a terminal TUI that connects to the same server — giving you both interfaces at once.
+
+### HTTPS by default, and why (`--no-tls`)
+
+`opencode-vm web` serves **HTTPS** by default, using a self-signed certificate generated inside the VM.
+
+The reason is attachments. OpenCode's web UI hashes them through `crypto.subtle`, and browsers expose the Web Crypto API **only to secure contexts**. Over a plain-HTTP LAN address that API is `undefined`, so the "Add images and files" button opens the file dialog, accepts your selection, and then silently produces nothing — no preview, no attachment. That is an open OpenCode bug ([#11452](https://github.com/anomalyco/opencode/issues/11452), [#12989](https://github.com/anomalyco/opencode/issues/12989)) which the server cannot work around from its side; serving a secure origin is what fixes it.
+
+Each device shows a certificate warning once and then keeps trusting it: the certificate lives per project under the session share and is reused, regenerated only when your host IP changes or it nears expiry. It covers your host's LAN IP, `127.0.0.1` and `localhost`.
+
+TLS is terminated in the redirector and affects the browser path only. opencode itself keeps serving plain HTTP on a VM-internal loopback port, and the banner points `opencode attach` and REST clients there, so they never have to trust the certificate. The setting is remembered in the session record, so `opencode-vm attach` resumes an HTTPS session as HTTPS.
+
+Start with `--no-tls` when you want plain HTTP — for example for an API client that should talk to `http://<ip>:4096` directly. Attachments then only work through the printed `Loopback also:` URL, because `127.0.0.1` counts as a secure context on its own. If `openssl` is missing or the certificate cannot be generated, opencode-vm says so and falls back to plain HTTP by itself.
+
+### Showing the agent switcher
+
+The composer hides the agent selector by default and falls back to the Build agent. Turn it on under **Settings → General → Show agent**. This is a browser-side preference (`localStorage`), so it sticks per browser — and note that `http://<lan-ip>:4096` and `https://<lan-ip>:4096` and `http://127.0.0.1:4096` are separate origins, each with its own copy.
 
 ### Web-UI Attachments (the "+" upload button)
 

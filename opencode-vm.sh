@@ -113,7 +113,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.5.2"
+OCVM_VERSION="0.5.3"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -203,6 +203,10 @@ parse_web_flags() {
   SESSION_PORT="$DEFAULT_OC_PORT"
   SESSION_PASSWORD=""
   OC_WEB_TUI=false
+  # HTTPS by default: opencode hashes attachments via crypto.subtle, which
+  # browsers expose only to secure origins, so plain HTTP over a LAN address
+  # silently breaks file/image uploads. --no-tls opts back out.
+  SESSION_TLS=1
   KEEP_HISTORY=0
   ON_EXISTING=""   # "", "reconnect", "fresh", "cancel"
   while [[ "$#" -gt 0 ]]; do
@@ -212,6 +216,8 @@ parse_web_flags() {
       --password)   shift; SESSION_PASSWORD="${1:?Missing password value}" ;;
       --password=*) SESSION_PASSWORD="${1#*=}" ;;
       --tui) OC_WEB_TUI=true ;;
+      --tls) SESSION_TLS=1 ;;
+      --no-tls) SESSION_TLS=0 ;;
       --keep-history) KEEP_HISTORY=1 ;;
       --reconnect) ON_EXISTING="reconnect" ;;
       --fresh) ON_EXISTING="fresh" ;;
@@ -6179,6 +6185,145 @@ warn_if_browser_unsafe_port() {
 WEB_TUNNEL_HOST_PORT=""
 WEB_TUNNEL_LOOPBACK_OK=""
 
+# ---------------------------------------------------------------------------
+# In-VM web redirector
+#
+# Why this exists: opencode's web UI only opens a project via the route
+# /<base64url(dir)>. Its root URL renders a project launcher whose list is
+# client-side state — in a fresh browser it is empty, so the bare host:port URL
+# reaches no project at all. opencode web has no project argument and no
+# redirect setting, so the only lever is an HTTP hop in front of it.
+#
+# Design: opencode moves to a VM-internal port; this listens on the port the
+# SSH tunnel forwards to, so every host-side URL, tunnel and firewall rule
+# stays exactly as before. A browser navigating to "/" gets a 302 to the
+# project deep link; everything else is spliced through as raw TCP, which
+# keeps the UI's WebSocket upgrade (and keep-alive, and chunked bodies)
+# untouched — we never parse or re-emit them.
+#
+# The redirect is gated on "Accept: text/html" so only browser navigation is
+# rewritten. API clients, the host-side tunnel probe (curl /) and
+# `opencode attach` do not send that, so they pass straight through to
+# opencode and still see the real root.
+#
+# Kept free of single quotes: this is embedded in the single-quoted in-VM
+# script as a positional argument.
+read -r -d '' OCVM_WEB_REDIRECT_PY <<'PYSRC' || true
+import socket, sys, threading, select, ssl
+
+LISTEN_PORT = int(sys.argv[1])
+TARGET_PORT = int(sys.argv[2])
+KEY = sys.argv[3]
+# Optional TLS: opencode's web UI hashes attachments via crypto.subtle, which
+# browsers expose only in secure contexts. Over a LAN IP that is undefined and
+# attaching files fails (opencode issues 11452 / 12989). Terminating TLS here
+# makes the origin a secure context; upstream stays plain HTTP on loopback.
+CERT_FILE = sys.argv[4] if len(sys.argv) > 4 else ""
+KEY_FILE = sys.argv[5] if len(sys.argv) > 5 else ""
+
+REDIRECT = (
+    "HTTP/1.1 302 Found\r\n"
+    "Location: /" + KEY + "\r\n"
+    "Cache-Control: no-store\r\n"
+    "Content-Length: 0\r\n"
+    "Connection: close\r\n"
+    "\r\n"
+).encode()
+
+
+def wants_redirect(head):
+    # Browser navigation to the bare root only.
+    line, _, rest = head.partition(b"\r\n")
+    parts = line.split(b" ")
+    if len(parts) < 2 or parts[0] != b"GET":
+        return False
+    if parts[1].split(b"?")[0] != b"/":
+        return False
+    for header in rest.split(b"\r\n"):
+        name, sep, value = header.partition(b":")
+        if sep and name.strip().lower() == b"accept":
+            return b"text/html" in value.lower()
+    return False
+
+
+def splice(a, b):
+    try:
+        while True:
+            ready, _, _ = select.select([a, b], [], [])
+            for src in ready:
+                dst = b if src is a else a
+                chunk = src.recv(65536)
+                if not chunk:
+                    return
+                dst.sendall(chunk)
+    except OSError:
+        return
+
+
+def close_all(*socks):
+    for s in socks:
+        try:
+            s.close()
+        except OSError:
+            pass
+
+
+def handle(client):
+    head = b""
+    try:
+        client.settimeout(10)
+        while b"\r\n\r\n" not in head and len(head) < 32768:
+            chunk = client.recv(8192)
+            if not chunk:
+                break
+            head += chunk
+        client.settimeout(None)
+    except OSError:
+        close_all(client)
+        return
+
+    if wants_redirect(head):
+        # Full request head is drained, so this closes with FIN, not RST.
+        try:
+            client.sendall(REDIRECT)
+            client.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+        close_all(client)
+        return
+
+    try:
+        upstream = socket.create_connection(("127.0.0.1", TARGET_PORT))
+    except OSError:
+        close_all(client)
+        return
+    try:
+        if head:
+            upstream.sendall(head)
+        splice(client, upstream)
+    except OSError:
+        pass
+    finally:
+        close_all(client, upstream)
+
+
+server = socket.socket()
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.bind(("127.0.0.1", LISTEN_PORT))
+server.listen(128)
+if CERT_FILE and KEY_FILE:
+    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls.load_cert_chain(CERT_FILE, KEY_FILE)
+    server = tls.wrap_socket(server, server_side=True)
+while True:
+    try:
+        conn, _ = server.accept()
+    except (OSError, ssl.SSLError):
+        # A failed TLS handshake must not take the listener down.
+        continue
+    threading.Thread(target=handle, args=(conn,), daemon=True).start()
+PYSRC
+
 start_web_tunnel() {
   local vm_name="$1" requested_port="$2"
   [[ -n "$vm_name" && -n "$requested_port" ]] || return 1
@@ -6349,14 +6494,18 @@ stop_materialize_daemon() {
 # booting inside the VM when we call it. Used for human-readable diagnostics
 # only; tunnel teardown decisions are not made from this.
 probe_web_tunnel_async() {
-  local host_port="$1" lan_ip="$2"
+  local host_port="$1" lan_ip="$2" tls="${3:-0}"
   [[ -n "$host_port" ]] || return 0
   (
     sleep 4
+    # -k: with --tls the redirector presents a self-signed certificate. The
+    # probe only checks that something answers, so cert validation is noise.
+    local scheme="http" insecure=""
+    if [[ "$tls" == "1" ]]; then scheme="https"; insecure="-k"; fi
     local rc=""
-    rc="$(curl -fsS --max-time 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${host_port}/" 2>/dev/null || echo "000")"
+    rc="$(curl -fsS $insecure --max-time 3 -o /dev/null -w '%{http_code}' "${scheme}://127.0.0.1:${host_port}/" 2>/dev/null || echo "000")"
     if [[ "$rc" == "000" ]]; then
-      echo "[tunnel] WARNING: probe http://127.0.0.1:${host_port}/ did not respond — opencode may still be starting or has crashed in VM."
+      echo "[tunnel] WARNING: probe ${scheme}://127.0.0.1:${host_port}/ did not respond — opencode may still be starting or has crashed in VM."
     fi
   ) &
   return 0
@@ -6492,6 +6641,20 @@ attach_session() {
 
   local sess_mode="${SESS_MODE:-tui}"
   local sess_port="${SESS_PORT:-$DEFAULT_OC_PORT}"
+  # TLS is a property of the session, not of the attach invocation, so a bare
+  # `opencode-vm attach` resumes HTTPS without the user repeating --tls. An
+  # explicit `opencode-vm web [--tls]` wins and is written back, otherwise a
+  # later bare attach would silently revert to the stale setting.
+  local sess_tls="${SESSION_TLS:-${SESS_TLS:-0}}"
+  if [[ "$sess_tls" != "${SESS_TLS:-0}" ]]; then
+    local _tls_senv
+    _tls_senv="$(session_env "$proj")"
+    if [[ -f "$_tls_senv" ]]; then
+      write_senv "$_tls_senv" "$SESS_NAME" "${SESS_PROJ:-$proj}" "${CFG_HASH_AT_START:-}" \
+        "${SESS_MODE:-tui}" "${SESS_PORT:-$DEFAULT_OC_PORT}" "${SESS_KEEP_HISTORY:-0}" "$sess_tls"
+      SESS_TLS="$sess_tls"
+    fi
+  fi
   local host_lan_ip
   host_lan_ip="$(get_host_ip)"
 
@@ -6523,7 +6686,7 @@ attach_session() {
         stop_web_tunnel '$SESS_NAME' '$WEB_TUNNEL_HOST_PORT'
         echo '[opencode-vm] Tunnel closed. Session paused — resume with: opencode-vm web'
       " EXIT
-      probe_web_tunnel_async "$WEB_TUNNEL_HOST_PORT" "$host_lan_ip"
+      probe_web_tunnel_async "$WEB_TUNNEL_HOST_PORT" "$host_lan_ip" "$sess_tls"
     else
       echo "[attach] WARNING: SSH tunnel for LAN access could not be set up." >&2
       echo "[attach]   Session continues. Loopback-only fallback may be available via http://127.0.0.1:${sess_port}/ (Lima auto-forward)." >&2
@@ -6545,6 +6708,115 @@ attach_session() {
     OC_PASSWORD="$6"
     OC_WEB_TUI="$7"
     OC_HOST_PORT="${8:-$OC_PORT}"
+    OC_REDIRECT_PY="${9:-}"
+    OC_TLS="${10:-0}"
+
+    # Redirector in front of opencode: it takes over $OC_PORT (the port the SSH
+    # tunnel forwards to) and opencode moves to $OC_PORT_INTERNAL, so no
+    # host-side URL, tunnel or firewall rule changes. Fails safe: if the
+    # redirector does not come up, opencode goes back on $OC_PORT directly and
+    # web mode behaves exactly as before.
+    OC_PORT_INTERNAL="$OC_PORT"
+    OC_REDIRECT_SUP_PID=""
+    OC_SCHEME=http
+    OC_TLS_CERT=""
+    OC_TLS_KEY=""
+    # --tls terminates TLS in the redirector so the origin is a secure context.
+    # The opencode web UI hashes attachments through crypto.subtle, which browsers
+    # withhold from insecure origins, so over a LAN IP attaching files fails
+    # (opencode issues 11452 / 12989). Upstream stays plain HTTP on loopback.
+    # The certificate lives in the session share and is reused as long as it
+    # still covers the current host IP, so a browser exception survives session
+    # restarts instead of prompting every time.
+    ensure_web_tls() {
+      [ "$OC_TLS" = "1" ] || return 0
+      if ! command -v openssl >/dev/null 2>&1; then
+        echo "[web] openssl missing — staying on plain HTTP."
+        return 0
+      fi
+      local dir="$SESS_SHARE/tls"
+      local crt="$dir/cert.pem"
+      local key="$dir/key.pem"
+      mkdir -p "$dir"
+      local need=1
+      if [ -f "$crt" ] && [ -f "$key" ]; then
+        if openssl x509 -in "$crt" -noout -checkend 86400 >/dev/null 2>&1 &&
+           openssl x509 -in "$crt" -noout -ext subjectAltName 2>/dev/null | grep -q "IP Address:$OC_HOST_IP"; then
+          need=0
+        fi
+      fi
+      if [ "$need" = "1" ]; then
+        echo "[web] Generating self-signed certificate for $OC_HOST_IP ..."
+        if ! openssl req -x509 -newkey rsa:2048 -nodes -days 825 \
+             -keyout "$key" -out "$crt" -subj "/CN=opencode-vm" \
+             -addext "subjectAltName=IP:$OC_HOST_IP,IP:127.0.0.1,DNS:localhost" \
+             >/dev/null 2>&1; then
+          echo "[web] Certificate generation failed — staying on plain HTTP."
+          return 0
+        fi
+        chmod 600 "$key" 2>/dev/null || true
+      fi
+      OC_TLS_CERT="$crt"
+      OC_TLS_KEY="$key"
+      OC_SCHEME=https
+      return 0
+    }
+    stop_web_redirector() {
+      # PID files, never pkill -f. The entire in-VM script is a single bash -lc
+      # argument, so it shows up in this shell own /proc cmdline — any pattern
+      # naming the redirector also matches this very shell and kills the session.
+      # Supervisor first, then its python child, so the loop cannot respawn it.
+      local pidf pid
+      for pidf in /tmp/ocvm-web-redirect.sup.pid /tmp/ocvm-web-redirect.run.pid; do
+        [ -f "$pidf" ] || continue
+        pid="$(cat "$pidf" 2>/dev/null || true)"
+        # Confirm the PID is still ours before signalling it: a stale file from
+        # an earlier run in this VM could otherwise name a recycled, unrelated
+        # process. A forked subshell keeps the parent argv, so both supervisor
+        # and python child carry the name in their cmdline.
+        if [ -n "$pid" ] && grep -qs ocvm-web-redirect "/proc/$pid/cmdline"; then
+          kill "$pid" 2>/dev/null || true
+        fi
+        rm -f "$pidf"
+      done
+      OC_REDIRECT_SUP_PID=""
+      return 0
+    }
+    start_web_redirector() {
+      if [ -z "$OC_REDIRECT_PY" ] || ! command -v python3 >/dev/null 2>&1; then
+        echo "[web] No redirector available — root URL will show the project launcher."
+        return 0
+      fi
+      ensure_web_tls
+      OC_PORT_INTERNAL=$(( OC_PORT + 1000 ))
+      if [ "$OC_PORT_INTERNAL" -ge 64000 ]; then
+        OC_PORT_INTERNAL=$(( OC_PORT - 1000 ))
+      fi
+      stop_web_redirector
+      printf %s "$OC_REDIRECT_PY" > /tmp/ocvm-web-redirect.py
+      ( while true; do
+          python3 /tmp/ocvm-web-redirect.py "$OC_PORT" "$OC_PORT_INTERNAL" "$OC_DIR_KEY" \
+            "$OC_TLS_CERT" "$OC_TLS_KEY" >>/tmp/ocvm-web-redirect.log 2>&1 &
+          echo $! > /tmp/ocvm-web-redirect.run.pid
+          wait $! || true
+          sleep 1
+        done ) &
+      OC_REDIRECT_SUP_PID=$!
+      echo "$OC_REDIRECT_SUP_PID" > /tmp/ocvm-web-redirect.sup.pid
+      local waited=0
+      while [ "$waited" -lt 20 ]; do
+        if ss -ltn "sport = :$OC_PORT" 2>/dev/null | grep -q LISTEN; then
+          return 0
+        fi
+        sleep 0.2
+        waited=$(( waited + 1 ))
+      done
+      echo "[web] Redirector did not bind port $OC_PORT — falling back to opencode on $OC_PORT directly."
+      stop_web_redirector
+      OC_PORT_INTERNAL="$OC_PORT"
+      OC_SCHEME=http
+      return 0
+    }
 
     export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/.config/composer/vendor/bin:/tmp/go/bin:/tmp/pnpm-store:$PATH"
     export CARGO_TARGET_DIR=/tmp/cargo-target
@@ -6575,12 +6847,10 @@ attach_session() {
 
     cd "$PROJ_DIR"
 
-    # The opencode web UI opens a project only via the route /<base64url(dir)>.
-    # The bare root URL lands on the project launcher instead, which is why the
-    # browser showed no open project and its file picker started in $HOME.
-    # Encode the *physical* cwd: that is what opencode process.cwd() reports and
-    # what the /:dir route is matched against. Matters for the clean-symlink case
-    # (non-ASCII project paths resolve to /tmp/oc-mount-<sha12>).
+    # Project key for the web UI route /<base64url(dir)>. Encodes the *physical*
+    # cwd: that is what opencode process.cwd() reports and what the /:dir route
+    # is matched against. Matters for the clean-symlink case, where a non-ASCII
+    # project path resolves to /tmp/oc-mount-<sha12>.
     OC_DIR_KEY="$(printf %s "$(pwd -P)" | base64 -w0 | sed "s/+/-/g; s|/|_|g; s/=//g")"
 
     # Merge persisted session history from the host share into VM /tmp so
@@ -6602,6 +6872,7 @@ attach_session() {
     # exits on SIGINT (rc=130) — `set -e` propagates the signal exit.
     sync_vm_to_share() {
       echo ""
+      stop_web_redirector
       echo "[attach] Stopping session — syncing data back to host..."
       rsync -a --exclude="bin/" --exclude="log/" --exclude="tool-output/" \
         /tmp/oc-xdg-data/opencode/ "$SESS_SHARE/xdg-data/opencode/" 2>/dev/null || true
@@ -6620,6 +6891,7 @@ attach_session() {
     trap on_signal INT TERM
 
     if [ "$OC_MODE" = "web" ]; then
+      start_web_redirector
       echo ""
       echo "=============================================="
       echo "  OpenCode Web Server (VM port $OC_PORT) — resumed"
@@ -6627,15 +6899,34 @@ attach_session() {
       echo ""
       echo "Connect via:"
       echo ""
-      echo "  Browser/Web UI:  http://${OC_HOST_IP}:${OC_HOST_PORT}/${OC_DIR_KEY}"
-      echo "  All projects:    http://${OC_HOST_IP}:${OC_HOST_PORT}"
-      echo "  API docs:        http://${OC_HOST_IP}:${OC_HOST_PORT}/doc"
-      echo "  TUI attach:      opencode attach http://${OC_HOST_IP}:${OC_HOST_PORT}"
+      echo "  Browser/Web UI:  ${OC_SCHEME}://${OC_HOST_IP}:${OC_HOST_PORT}/${OC_DIR_KEY}"
+      echo "  All projects:    ${OC_SCHEME}://${OC_HOST_IP}:${OC_HOST_PORT}"
+      echo "  API docs:        ${OC_SCHEME}://${OC_HOST_IP}:${OC_HOST_PORT}/doc"
+      if [ "$OC_SCHEME" = "https" ]; then
+        # TLS terminates in the redirector; opencode itself stays plain HTTP on
+        # loopback, which Lima forwards to the host. Point non-browser clients
+        # there so they never have to trust the self-signed certificate.
+        echo "  TUI attach:      opencode attach http://127.0.0.1:${OC_PORT_INTERNAL}  (plain HTTP, host-local)"
+      else
+        echo "  TUI attach:      opencode attach http://${OC_HOST_IP}:${OC_HOST_PORT}"
+      fi
       if [ "$OC_HOST_PORT" != "$OC_PORT" ]; then
         echo ""
         echo "  Note: requested port ${OC_PORT} was busy; LAN tunnel uses ${OC_HOST_PORT}."
       fi
-      echo "  Loopback also: http://127.0.0.1:${OC_PORT}/${OC_DIR_KEY} (via Lima auto-forward)"
+      echo "  Loopback also: ${OC_SCHEME}://127.0.0.1:${OC_PORT}/${OC_DIR_KEY} (via Lima auto-forward)"
+      if [ "$OC_SCHEME" = "https" ]; then
+        echo ""
+        echo "  TLS: self-signed certificate — each device warns once, then trusts it."
+        echo "       Required for file/image attachments: opencode hashes them via"
+        echo "       crypto.subtle, which browsers withhold from plain-HTTP origins."
+        echo "       Need plain HTTP instead? Start with: opencode-vm web --no-tls"
+      else
+        echo ""
+        echo "  Plain HTTP: file/image attachments stay broken from other devices —"
+        echo "       browsers withhold crypto.subtle from insecure origins. Use the"
+        echo "       127.0.0.1 URL above, or restart without --no-tls."
+      fi
       echo ""
       if [ -n "$OC_PASSWORD" ]; then
         echo "  Username:        opencode"
@@ -6647,13 +6938,13 @@ attach_session() {
         echo ""
       fi
       if [ "$OC_WEB_TUI" = "true" ]; then
-        aa-exec -p opencode-sandbox -- opencode web --hostname 127.0.0.1 --port "$OC_PORT" &
+        aa-exec -p opencode-sandbox -- opencode web --hostname 127.0.0.1 --port "$OC_PORT_INTERNAL" &
         OC_WEB_PID=$!
         sleep 2
         echo ""
         echo "Press Enter to start TUI (web server continues running)..."
         read -r
-        aa-exec -p opencode-sandbox -- opencode attach "http://localhost:$OC_PORT" || true
+        aa-exec -p opencode-sandbox -- opencode attach "http://localhost:$OC_PORT_INTERNAL" || true
         kill "$OC_WEB_PID" 2>/dev/null || true
         wait "$OC_WEB_PID" 2>/dev/null || true
       else
@@ -6665,7 +6956,7 @@ attach_session() {
         # loop and trigger the EXIT-trap sync.
         while [ "$shutdown_requested" = "0" ]; do
           set +e
-          aa-exec -p opencode-sandbox -- opencode web --hostname 127.0.0.1 --port "$OC_PORT"
+          aa-exec -p opencode-sandbox -- opencode web --hostname 127.0.0.1 --port "$OC_PORT_INTERNAL"
           rc=$?
           set -e
           [ "$shutdown_requested" = "1" ] && break
@@ -6683,15 +6974,15 @@ attach_session() {
 
     # Sync-back happens via the EXIT trap installed above (covers Ctrl+C as
     # well as normal exit).
-  ' "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$sess_port" "$host_lan_ip" "${SESSION_PASSWORD:-}" "${OC_WEB_TUI:-false}" "$effective_host_port"
+  ' "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$sess_port" "$host_lan_ip" "${SESSION_PASSWORD:-}" "${OC_WEB_TUI:-false}" "$effective_host_port" "$OCVM_WEB_REDIRECT_PY" "$sess_tls"
 }
 
 # Serialize session tracking state to $senv (loaded back via `source`).
 # printf '%q' safely escapes paths with spaces/special chars.
 write_senv() {
-  local senv="$1" name="$2" proj="$3" cfg_hash="$4" mode="$5" port="$6" keep="$7"
-  printf 'SESS_NAME=%q\nSESS_PROJ=%q\nCFG_HASH_AT_START=%q\nSESS_MODE=%q\nSESS_PORT=%q\nSESS_KEEP_HISTORY=%q\n' \
-    "$name" "$proj" "$cfg_hash" "$mode" "$port" "$keep" > "$senv"
+  local senv="$1" name="$2" proj="$3" cfg_hash="$4" mode="$5" port="$6" keep="$7" tls="${8:-0}"
+  printf 'SESS_NAME=%q\nSESS_PROJ=%q\nCFG_HASH_AT_START=%q\nSESS_MODE=%q\nSESS_PORT=%q\nSESS_KEEP_HISTORY=%q\nSESS_TLS=%q\n' \
+    "$name" "$proj" "$cfg_hash" "$mode" "$port" "$keep" "$tls" > "$senv"
 }
 
 # Update SESS_MODE / SESS_PORT in an existing session.env, preserving other
@@ -6703,7 +6994,7 @@ _update_senv_mode() {
   [[ -f "$senv" ]] || return 0
   # shellcheck disable=SC1090
   ( source "$senv"
-    write_senv "$senv" "$SESS_NAME" "$SESS_PROJ" "${CFG_HASH_AT_START:-}" "$new_mode" "$new_port" "${SESS_KEEP_HISTORY:-0}"
+    write_senv "$senv" "$SESS_NAME" "$SESS_PROJ" "${CFG_HASH_AT_START:-}" "$new_mode" "$new_port" "${SESS_KEEP_HISTORY:-0}" "${SESS_TLS:-0}"
   )
 }
 
@@ -7381,7 +7672,7 @@ start_session() {
   echo "[run] Clone complete, lock released $(_ts)"
 
   # Track session
-  write_senv "$senv" "$sess" "$proj" "$cfg_hash" "$SESSION_MODE" "${SESSION_PORT:-}" "${KEEP_HISTORY:-0}"
+  write_senv "$senv" "$sess" "$proj" "$cfg_hash" "$SESSION_MODE" "${SESSION_PORT:-}" "${KEEP_HISTORY:-0}" "${SESSION_TLS:-0}"
 
   cleanup() {
     echo "[cleanup] Starting cleanup... $(_ts)"
@@ -7672,7 +7963,7 @@ start_session() {
   if [[ "$SESSION_MODE" == "web" ]]; then
     if start_web_tunnel "$sess" "${SESSION_PORT:-0}"; then
       effective_host_port="$WEB_TUNNEL_HOST_PORT"
-      probe_web_tunnel_async "$WEB_TUNNEL_HOST_PORT" "$host_lan_ip"
+      probe_web_tunnel_async "$WEB_TUNNEL_HOST_PORT" "$host_lan_ip" "${SESSION_TLS:-0}"
     else
       echo "[run] WARNING: SSH tunnel for LAN access could not be set up." >&2
       echo "[run]   Session continues. Loopback fallback may work via http://127.0.0.1:${SESSION_PORT}/ (Lima auto-forward)." >&2
@@ -7693,9 +7984,118 @@ start_session() {
     OC_WEB_TUI="$6"
     OC_HOST_IP="$7"
     OC_HOST_PORT="${8:-$OC_PORT}"
+    OC_REDIRECT_PY="${9:-}"
+    OC_TLS="${10:-0}"
     export OCVM_HOST_LAN_IP="$OC_HOST_IP"
     export HOST_LAN_IP="$OC_HOST_IP"
     export LANIP="$OC_HOST_IP"
+
+    # Redirector in front of opencode: it takes over $OC_PORT (the port the SSH
+    # tunnel forwards to) and opencode moves to $OC_PORT_INTERNAL, so no
+    # host-side URL, tunnel or firewall rule changes. Fails safe: if the
+    # redirector does not come up, opencode goes back on $OC_PORT directly and
+    # web mode behaves exactly as before.
+    OC_PORT_INTERNAL="$OC_PORT"
+    OC_REDIRECT_SUP_PID=""
+    OC_SCHEME=http
+    OC_TLS_CERT=""
+    OC_TLS_KEY=""
+    # --tls terminates TLS in the redirector so the origin is a secure context.
+    # The opencode web UI hashes attachments through crypto.subtle, which browsers
+    # withhold from insecure origins, so over a LAN IP attaching files fails
+    # (opencode issues 11452 / 12989). Upstream stays plain HTTP on loopback.
+    # The certificate lives in the session share and is reused as long as it
+    # still covers the current host IP, so a browser exception survives session
+    # restarts instead of prompting every time.
+    ensure_web_tls() {
+      [ "$OC_TLS" = "1" ] || return 0
+      if ! command -v openssl >/dev/null 2>&1; then
+        echo "[web] openssl missing — staying on plain HTTP."
+        return 0
+      fi
+      local dir="$SESS_SHARE/tls"
+      local crt="$dir/cert.pem"
+      local key="$dir/key.pem"
+      mkdir -p "$dir"
+      local need=1
+      if [ -f "$crt" ] && [ -f "$key" ]; then
+        if openssl x509 -in "$crt" -noout -checkend 86400 >/dev/null 2>&1 &&
+           openssl x509 -in "$crt" -noout -ext subjectAltName 2>/dev/null | grep -q "IP Address:$OC_HOST_IP"; then
+          need=0
+        fi
+      fi
+      if [ "$need" = "1" ]; then
+        echo "[web] Generating self-signed certificate for $OC_HOST_IP ..."
+        if ! openssl req -x509 -newkey rsa:2048 -nodes -days 825 \
+             -keyout "$key" -out "$crt" -subj "/CN=opencode-vm" \
+             -addext "subjectAltName=IP:$OC_HOST_IP,IP:127.0.0.1,DNS:localhost" \
+             >/dev/null 2>&1; then
+          echo "[web] Certificate generation failed — staying on plain HTTP."
+          return 0
+        fi
+        chmod 600 "$key" 2>/dev/null || true
+      fi
+      OC_TLS_CERT="$crt"
+      OC_TLS_KEY="$key"
+      OC_SCHEME=https
+      return 0
+    }
+    stop_web_redirector() {
+      # PID files, never pkill -f. The entire in-VM script is a single bash -lc
+      # argument, so it shows up in this shell own /proc cmdline — any pattern
+      # naming the redirector also matches this very shell and kills the session.
+      # Supervisor first, then its python child, so the loop cannot respawn it.
+      local pidf pid
+      for pidf in /tmp/ocvm-web-redirect.sup.pid /tmp/ocvm-web-redirect.run.pid; do
+        [ -f "$pidf" ] || continue
+        pid="$(cat "$pidf" 2>/dev/null || true)"
+        # Confirm the PID is still ours before signalling it: a stale file from
+        # an earlier run in this VM could otherwise name a recycled, unrelated
+        # process. A forked subshell keeps the parent argv, so both supervisor
+        # and python child carry the name in their cmdline.
+        if [ -n "$pid" ] && grep -qs ocvm-web-redirect "/proc/$pid/cmdline"; then
+          kill "$pid" 2>/dev/null || true
+        fi
+        rm -f "$pidf"
+      done
+      OC_REDIRECT_SUP_PID=""
+      return 0
+    }
+    start_web_redirector() {
+      if [ -z "$OC_REDIRECT_PY" ] || ! command -v python3 >/dev/null 2>&1; then
+        echo "[web] No redirector available — root URL will show the project launcher."
+        return 0
+      fi
+      ensure_web_tls
+      OC_PORT_INTERNAL=$(( OC_PORT + 1000 ))
+      if [ "$OC_PORT_INTERNAL" -ge 64000 ]; then
+        OC_PORT_INTERNAL=$(( OC_PORT - 1000 ))
+      fi
+      stop_web_redirector
+      printf %s "$OC_REDIRECT_PY" > /tmp/ocvm-web-redirect.py
+      ( while true; do
+          python3 /tmp/ocvm-web-redirect.py "$OC_PORT" "$OC_PORT_INTERNAL" "$OC_DIR_KEY" \
+            "$OC_TLS_CERT" "$OC_TLS_KEY" >>/tmp/ocvm-web-redirect.log 2>&1 &
+          echo $! > /tmp/ocvm-web-redirect.run.pid
+          wait $! || true
+          sleep 1
+        done ) &
+      OC_REDIRECT_SUP_PID=$!
+      echo "$OC_REDIRECT_SUP_PID" > /tmp/ocvm-web-redirect.sup.pid
+      local waited=0
+      while [ "$waited" -lt 20 ]; do
+        if ss -ltn "sport = :$OC_PORT" 2>/dev/null | grep -q LISTEN; then
+          return 0
+        fi
+        sleep 0.2
+        waited=$(( waited + 1 ))
+      done
+      echo "[web] Redirector did not bind port $OC_PORT — falling back to opencode on $OC_PORT directly."
+      stop_web_redirector
+      OC_PORT_INTERNAL="$OC_PORT"
+      OC_SCHEME=http
+      return 0
+    }
 
     export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/.config/composer/vendor/bin:/tmp/go/bin:/tmp/pnpm-store:$PATH"
 
@@ -7776,6 +8176,7 @@ EOF
     # sessions) back to the share — without this, provider logins made via
     # the web UI are lost when the user stops the server with Ctrl+C.
     sync_vm_to_share() {
+      stop_web_redirector
       echo "[$(date +%T)] Syncing session data back to host..."
       check_sqlite_dbs "$VM_DATA/opencode" 2>/dev/null || true
       check_sqlite_dbs "$VM_STATE/opencode" 2>/dev/null || true
@@ -7816,12 +8217,10 @@ EOF
 
     cd "$PROJ_DIR"
 
-    # The opencode web UI opens a project only via the route /<base64url(dir)>.
-    # The bare root URL lands on the project launcher instead, which is why the
-    # browser showed no open project and its file picker started in $HOME.
-    # Encode the *physical* cwd: that is what opencode process.cwd() reports and
-    # what the /:dir route is matched against. Matters for the clean-symlink case
-    # (non-ASCII project paths resolve to /tmp/oc-mount-<sha12>).
+    # Project key for the web UI route /<base64url(dir)>. Encodes the *physical*
+    # cwd: that is what opencode process.cwd() reports and what the /:dir route
+    # is matched against. Matters for the clean-symlink case, where a non-ASCII
+    # project path resolves to /tmp/oc-mount-<sha12>.
     OC_DIR_KEY="$(printf %s "$(pwd -P)" | base64 -w0 | sed "s/+/-/g; s|/|_|g; s/=//g")"
 
     case "$OC_MODE" in
@@ -7831,6 +8230,7 @@ EOF
         bash
         ;;
       web)
+        start_web_redirector
         echo ""
         echo "=============================================="
         echo "  OpenCode Web Server (VM port $OC_PORT)"
@@ -7838,15 +8238,34 @@ EOF
         echo ""
         echo "Connect via:"
         echo ""
-        echo "  Browser/Web UI:  http://${OC_HOST_IP}:${OC_HOST_PORT}/${OC_DIR_KEY}"
-        echo "  All projects:    http://${OC_HOST_IP}:${OC_HOST_PORT}"
-        echo "  API docs:        http://${OC_HOST_IP}:${OC_HOST_PORT}/doc"
-        echo "  TUI attach:      opencode attach http://${OC_HOST_IP}:${OC_HOST_PORT}"
+        echo "  Browser/Web UI:  ${OC_SCHEME}://${OC_HOST_IP}:${OC_HOST_PORT}/${OC_DIR_KEY}"
+        echo "  All projects:    ${OC_SCHEME}://${OC_HOST_IP}:${OC_HOST_PORT}"
+        echo "  API docs:        ${OC_SCHEME}://${OC_HOST_IP}:${OC_HOST_PORT}/doc"
+        if [ "$OC_SCHEME" = "https" ]; then
+          # TLS terminates in the redirector; opencode itself stays plain HTTP on
+          # loopback, which Lima forwards to the host. Point non-browser clients
+          # there so they never have to trust the self-signed certificate.
+          echo "  TUI attach:      opencode attach http://127.0.0.1:${OC_PORT_INTERNAL}  (plain HTTP, host-local)"
+        else
+          echo "  TUI attach:      opencode attach http://${OC_HOST_IP}:${OC_HOST_PORT}"
+        fi
         if [ "$OC_HOST_PORT" != "$OC_PORT" ]; then
           echo ""
           echo "  Note: requested port ${OC_PORT} was busy; LAN tunnel uses ${OC_HOST_PORT}."
         fi
-        echo "  Loopback also: http://127.0.0.1:${OC_PORT}/${OC_DIR_KEY} (via Lima auto-forward)"
+        echo "  Loopback also: ${OC_SCHEME}://127.0.0.1:${OC_PORT}/${OC_DIR_KEY} (via Lima auto-forward)"
+        if [ "$OC_SCHEME" = "https" ]; then
+          echo ""
+          echo "  TLS: self-signed certificate — each device warns once, then trusts it."
+          echo "       Required for file/image attachments: opencode hashes them via"
+          echo "       crypto.subtle, which browsers withhold from plain-HTTP origins."
+          echo "       Need plain HTTP instead? Start with: opencode-vm web --no-tls"
+        else
+          echo ""
+          echo "  Plain HTTP: file/image attachments stay broken from other devices —"
+          echo "       browsers withhold crypto.subtle from insecure origins. Use the"
+          echo "       127.0.0.1 URL above, or restart without --no-tls."
+        fi
         echo ""
         if [ -n "$OC_PASSWORD" ]; then
           echo "  Username:        opencode"
@@ -7867,13 +8286,13 @@ EOF
           echo ""
         fi
         if [ "$OC_WEB_TUI" = "true" ]; then
-          aa-exec -p opencode-sandbox -- opencode web --hostname 127.0.0.1 --port "$OC_PORT" &
+          aa-exec -p opencode-sandbox -- opencode web --hostname 127.0.0.1 --port "$OC_PORT_INTERNAL" &
           OC_WEB_PID=$!
           sleep 2
           echo ""
           echo "Press Enter to start TUI (web server continues running)..."
           read -r
-          aa-exec -p opencode-sandbox -- opencode attach "http://localhost:$OC_PORT" || true
+          aa-exec -p opencode-sandbox -- opencode attach "http://localhost:$OC_PORT_INTERNAL" || true
           kill "$OC_WEB_PID" 2>/dev/null || true
           wait "$OC_WEB_PID" 2>/dev/null || true
         else
@@ -7883,7 +8302,7 @@ EOF
           # and is stable across these in-VM restarts. Clean exits (0/130/143)
           # end the loop.
           while true; do
-            aa-exec -p opencode-sandbox -- opencode web --hostname 127.0.0.1 --port "$OC_PORT"
+            aa-exec -p opencode-sandbox -- opencode web --hostname 127.0.0.1 --port "$OC_PORT_INTERNAL"
             rc=$?
             case "$rc" in
               0|130|143) break ;;
@@ -7901,7 +8320,7 @@ EOF
 
     # Sync back happens via the EXIT trap installed above (covers both clean
     # exit and Ctrl+C-driven termination of the web server).
-  ' "$proj" "$sess_share" "$SESSION_MODE" "${SESSION_PORT:-0}" "${SESSION_PASSWORD:-}" "${OC_WEB_TUI:-false}" "$host_lan_ip" "$effective_host_port"; then
+  ' "$proj" "$sess_share" "$SESSION_MODE" "${SESSION_PORT:-0}" "${SESSION_PASSWORD:-}" "${OC_WEB_TUI:-false}" "$host_lan_ip" "$effective_host_port" "$OCVM_WEB_REDIRECT_PY" "${SESSION_TLS:-0}"; then
     if [[ "$SESSION_MODE" != "shell" ]]; then
     OC_SHELL_OK=1
     fi
@@ -8186,10 +8605,16 @@ Usage:
                                            #   from ~/.opencode-vm/project-history/
                                            # --reconnect/--fresh/--cancel-if-exists:
                                            #   non-interactive override of the prompt
-  opencode-vm web [--port PORT] [--password PW] [--tui] [--keep-history] [--reconnect|--fresh|--cancel-if-exists]
+  opencode-vm web [--port PORT] [--password PW] [--no-tls] [--tui] [--keep-history] [--reconnect|--fresh|--cancel-if-exists]
                                            # start web server session (default port 4096)
                                            # provides: web UI, REST API, TUI attach
                                            # Session prompt/exit behavior matches 'start'.
+                                           # Serves HTTPS by default (self-signed cert):
+                                           #   file/image attachments need a secure origin,
+                                           #   opencode hashes them via crypto.subtle, which
+                                           #   browsers withhold from plain-HTTP origins.
+                                           # --no-tls: serve plain HTTP instead (attachments
+                                           #   then only work via the 127.0.0.1 URL)
                                            # --tui: also start TUI in terminal (experimental)
                                            # --keep-history: load project-specific history
                                            #   (default starts with empty session list)
