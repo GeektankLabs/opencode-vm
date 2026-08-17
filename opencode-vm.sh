@@ -113,7 +113,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.5.1"
+OCVM_VERSION="0.5.2"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -6575,6 +6575,14 @@ attach_session() {
 
     cd "$PROJ_DIR"
 
+    # The opencode web UI opens a project only via the route /<base64url(dir)>.
+    # The bare root URL lands on the project launcher instead, which is why the
+    # browser showed no open project and its file picker started in $HOME.
+    # Encode the *physical* cwd: that is what opencode process.cwd() reports and
+    # what the /:dir route is matched against. Matters for the clean-symlink case
+    # (non-ASCII project paths resolve to /tmp/oc-mount-<sha12>).
+    OC_DIR_KEY="$(printf %s "$(pwd -P)" | base64 -w0 | sed "s/+/-/g; s|/|_|g; s/=//g")"
+
     # Merge persisted session history from the host share into VM /tmp so
     # sessions started in a different mode (e.g. TUI) show up after resume.
     # rsync --update preserves any newer in-VM data (live session that has
@@ -6619,14 +6627,15 @@ attach_session() {
       echo ""
       echo "Connect via:"
       echo ""
-      echo "  Browser/Web UI:  http://${OC_HOST_IP}:${OC_HOST_PORT}"
+      echo "  Browser/Web UI:  http://${OC_HOST_IP}:${OC_HOST_PORT}/${OC_DIR_KEY}"
+      echo "  All projects:    http://${OC_HOST_IP}:${OC_HOST_PORT}"
       echo "  API docs:        http://${OC_HOST_IP}:${OC_HOST_PORT}/doc"
       echo "  TUI attach:      opencode attach http://${OC_HOST_IP}:${OC_HOST_PORT}"
       if [ "$OC_HOST_PORT" != "$OC_PORT" ]; then
         echo ""
         echo "  Note: requested port ${OC_PORT} was busy; LAN tunnel uses ${OC_HOST_PORT}."
       fi
-      echo "  Loopback also: http://127.0.0.1:${OC_PORT} (via Lima auto-forward)"
+      echo "  Loopback also: http://127.0.0.1:${OC_PORT}/${OC_DIR_KEY} (via Lima auto-forward)"
       echo ""
       if [ -n "$OC_PASSWORD" ]; then
         echo "  Username:        opencode"
@@ -7807,6 +7816,14 @@ EOF
 
     cd "$PROJ_DIR"
 
+    # The opencode web UI opens a project only via the route /<base64url(dir)>.
+    # The bare root URL lands on the project launcher instead, which is why the
+    # browser showed no open project and its file picker started in $HOME.
+    # Encode the *physical* cwd: that is what opencode process.cwd() reports and
+    # what the /:dir route is matched against. Matters for the clean-symlink case
+    # (non-ASCII project paths resolve to /tmp/oc-mount-<sha12>).
+    OC_DIR_KEY="$(printf %s "$(pwd -P)" | base64 -w0 | sed "s/+/-/g; s|/|_|g; s/=//g")"
+
     case "$OC_MODE" in
       shell)
         echo "[shell] Interactive shell started in session VM."
@@ -7821,14 +7838,15 @@ EOF
         echo ""
         echo "Connect via:"
         echo ""
-        echo "  Browser/Web UI:  http://${OC_HOST_IP}:${OC_HOST_PORT}"
+        echo "  Browser/Web UI:  http://${OC_HOST_IP}:${OC_HOST_PORT}/${OC_DIR_KEY}"
+        echo "  All projects:    http://${OC_HOST_IP}:${OC_HOST_PORT}"
         echo "  API docs:        http://${OC_HOST_IP}:${OC_HOST_PORT}/doc"
         echo "  TUI attach:      opencode attach http://${OC_HOST_IP}:${OC_HOST_PORT}"
         if [ "$OC_HOST_PORT" != "$OC_PORT" ]; then
           echo ""
           echo "  Note: requested port ${OC_PORT} was busy; LAN tunnel uses ${OC_HOST_PORT}."
         fi
-        echo "  Loopback also: http://127.0.0.1:${OC_PORT} (via Lima auto-forward)"
+        echo "  Loopback also: http://127.0.0.1:${OC_PORT}/${OC_DIR_KEY} (via Lima auto-forward)"
         echo ""
         if [ -n "$OC_PASSWORD" ]; then
           echo "  Username:        opencode"

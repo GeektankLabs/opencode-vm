@@ -194,6 +194,8 @@ What you get from a single command:
 
 All clients share the same sessions and state, so you can switch between browser and terminal seamlessly.
 
+**Use the URL exactly as printed.** The `Browser/Web UI` line ends in a long base64url segment — that's your project path, and OpenCode's web UI only opens a project through that route. The bare root URL (printed as `All projects`) deliberately shows the project launcher listing every project the server knows, with a file picker that starts in the VM's home directory — not in your project.
+
 Options:
 
 ```bash
