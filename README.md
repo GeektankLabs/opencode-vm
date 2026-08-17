@@ -194,12 +194,19 @@ What you get from a single command:
 
 All clients share the same sessions and state, so you can switch between browser and terminal seamlessly.
 
-**About the project URL.** OpenCode's web UI only opens a project through the route `/<base64url(path)>` — its bare root URL renders a project launcher whose list is browser-local state, so in a fresh browser it reaches no project at all. Two things handle this:
+**About the entry URL.** Use the short root URL exactly as printed — it is the one that makes everything work.
 
-- The `Browser/Web UI` line ends in that base64url segment, so the printed link goes straight into your project.
-- The short root URL works too: a small redirector inside the VM answers browser navigation to `/` with a 302 to the project link. It sits on the port the tunnel forwards to and passes everything else through untouched as raw TCP, so the SSE event stream, assets and the REST API are unaffected. The redirect is gated on `Accept: text/html`, so `curl`, the REST API and `opencode attach` still see the real root — only a browser gets redirected. If it can't start, opencode simply serves the port directly and you use the long link.
+OpenCode's web UI opens a project only through the route `/<base64url(path)>`, and it keeps the list of known projects in browser-local storage. A browser that has never seen this server therefore reaches no project at all. Worse, the UI asks the server for *every* session and then filters the answer against that same local project list — so on a second machine the chat sessions you started elsewhere are fetched but discarded, and the view looks empty.
 
-`All projects` in the banner is the launcher itself, reachable via any non-browser client or by navigating back inside the UI.
+A small redirector inside the VM handles this. It sits on the port the tunnel forwards to and, for browser navigation to `/`, serves a one-line bootstrap page that:
+
+- registers this server's project in the browser, which is what makes **all chat sessions of the project visible on every device** that opens the URL;
+- sets first-run defaults — dark color scheme, visible agent switcher, visible session sidebar — and suppresses the onboarding overlay that otherwise covers the interface;
+- forwards into the project.
+
+Each of those is written **only if the key is still absent**, so anything you change later is never overwritten. The project entry is merged into an existing list rather than replacing it.
+
+Everything other than that one navigation is passed through untouched as raw TCP, so the SSE event stream, assets and the REST API are unaffected. The bootstrap is gated on `Accept: text/html`, so `curl`, the REST API and `opencode attach` still see the real root. If the redirector cannot start, opencode serves the port directly and the printed `Direct project:` link still works.
 
 Options:
 
@@ -222,11 +229,23 @@ Each device shows a certificate warning once and then keeps trusting it: the cer
 
 TLS is terminated in the redirector and affects the browser path only. opencode itself keeps serving plain HTTP on a VM-internal loopback port, and the banner points `opencode attach` and REST clients there, so they never have to trust the certificate. The setting is remembered in the session record, so `opencode-vm attach` resumes an HTTPS session as HTTPS.
 
+Plain `http://` requests to the HTTPS port are answered with a redirect to `https://` instead of a failed handshake, so mistyping the scheme no longer produces a browser error page.
+
 Start with `--no-tls` when you want plain HTTP — for example for an API client that should talk to `http://<ip>:4096` directly. Attachments then only work through the printed `Loopback also:` URL, because `127.0.0.1` counts as a secure context on its own. If `openssl` is missing or the certificate cannot be generated, opencode-vm says so and falls back to plain HTTP by itself.
 
-### Showing the agent switcher
+### Browser defaults
 
-The composer hides the agent selector by default and falls back to the Build agent. Turn it on under **Settings → General → Show agent**. This is a browser-side preference (`localStorage`), so it sticks per browser — and note that `http://<lan-ip>:4096` and `https://<lan-ip>:4096` and `http://127.0.0.1:4096` are separate origins, each with its own copy.
+The bootstrap page seeds these on a browser's first visit to the root URL, and never touches them again:
+
+| Setting | Seeded value | Why |
+|---|---|---|
+| Known project | this server's worktree | without it the UI filters every chat session out of the view |
+| Color scheme | `dark` | opencode defaults to following the OS |
+| Show agent | on | the composer otherwise hides the agent selector and silently uses Build |
+| Session sidebar | on | this is where the project's chat sessions are listed |
+| Onboarding overlay | dismissed | it otherwise covers the interface on first load |
+
+To change any of them afterwards use **Settings → General** (or the theme command) — your choice wins from then on. Note that `http://<lan-ip>:4096`, `https://<lan-ip>:4096` and `https://127.0.0.1:4096` are separate origins as far as the browser is concerned, each with its own copy of these preferences.
 
 ### Web-UI Attachments (the "+" upload button)
 

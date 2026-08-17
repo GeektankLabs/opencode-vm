@@ -113,7 +113,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.5.3"
+OCVM_VERSION="0.5.4"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -6209,7 +6209,7 @@ WEB_TUNNEL_LOOPBACK_OK=""
 # Kept free of single quotes: this is embedded in the single-quoted in-VM
 # script as a positional argument.
 read -r -d '' OCVM_WEB_REDIRECT_PY <<'PYSRC' || true
-import socket, sys, threading, select, ssl
+import socket, sys, threading, select, ssl, base64, json
 
 LISTEN_PORT = int(sys.argv[1])
 TARGET_PORT = int(sys.argv[2])
@@ -6220,36 +6220,159 @@ KEY = sys.argv[3]
 # makes the origin a secure context; upstream stays plain HTTP on loopback.
 CERT_FILE = sys.argv[4] if len(sys.argv) > 4 else ""
 KEY_FILE = sys.argv[5] if len(sys.argv) > 5 else ""
+TLS_ENABLED = bool(CERT_FILE and KEY_FILE)
 
-REDIRECT = (
-    "HTTP/1.1 302 Found\r\n"
-    "Location: /" + KEY + "\r\n"
-    "Cache-Control: no-store\r\n"
-    "Content-Length: 0\r\n"
-    "Connection: close\r\n"
-    "\r\n"
-).encode()
+TLS_CONTEXT = None
+if TLS_ENABLED:
+    TLS_CONTEXT = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    TLS_CONTEXT.load_cert_chain(CERT_FILE, KEY_FILE)
 
 
-def wants_redirect(head):
-    # Browser navigation to the bare root only.
+def decode_key(key):
+    try:
+        return base64.urlsafe_b64decode(key + "=" * (-len(key) % 4)).decode("utf-8")
+    except Exception:
+        return ""
+
+
+WORKTREE = decode_key(KEY)
+
+# Seeded once per browser, and only where the key is still absent, so anything
+# the user changes later survives untouched.
+#
+# The project entry is what makes chat sessions visible at all: the UI asks the
+# server for every session, then filters the answer against the project list it
+# keeps in localStorage. A browser that has never opened this project has an
+# empty list, so every session is discarded and the view looks empty — which is
+# why sessions started on one machine were invisible on another.
+#
+# showCustomAgents needs agentVisibilityInitialized alongside it, otherwise the
+# app's own initializer overwrites the value on first boot. app-version.v1 marks
+# the install as not-brand-new so the onboarding overlay does not cover the UI;
+# the app rewrites that key with its real version as soon as it loads.
+SEED_JS = """
+(function () {
+  var dir = %s, key = %s;
+  function get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+  function put(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+  function seed(k, v) { if (get(k) === null) put(k, v); }
+  if (dir) {
+    var store = null;
+    try { store = JSON.parse(get("opencode.global.dat:server")); } catch (e) { store = null; }
+    if (!store || typeof store !== "object") store = {};
+    if (!Array.isArray(store.list)) store.list = [];
+    if (!store.projects || typeof store.projects !== "object") store.projects = {};
+    if (!store.lastProject || typeof store.lastProject !== "object") store.lastProject = {};
+    if (!store.recentlyClosed || typeof store.recentlyClosed !== "object") store.recentlyClosed = {};
+    var open = Array.isArray(store.projects.local) ? store.projects.local : [];
+    var known = false;
+    for (var i = 0; i < open.length; i++) {
+      if (open[i] && open[i].worktree === dir) { known = true; break; }
+    }
+    if (!known) open.unshift({ worktree: dir, expanded: true });
+    store.projects.local = open;
+    if (!store.lastProject.local) store.lastProject.local = dir;
+    put("opencode.global.dat:server", JSON.stringify(store));
+  }
+  seed("settings.v3", JSON.stringify({
+    general: { showCustomAgents: true, agentVisibilityInitialized: true, showNavigation: true }
+  }));
+  seed("opencode-color-scheme", "dark");
+  seed("app-version.v1", JSON.stringify({ version: "1.18.18" }));
+  location.replace("/" + key);
+})();
+""" % (json.dumps(WORKTREE), json.dumps(KEY))
+
+SEED_HTML = (
+    "<!doctype html><html><head><meta charset=\"utf-8\">"
+    "<title>opencode</title>"
+    "<noscript><meta http-equiv=\"refresh\" content=\"0;url=/" + KEY + "\"></noscript>"
+    "<script>" + SEED_JS + "</script></head><body></body></html>"
+).encode("utf-8")
+
+SEED_RESPONSE = (
+    b"HTTP/1.1 200 OK\r\n"
+    b"Content-Type: text/html; charset=utf-8\r\n"
+    b"Cache-Control: no-store\r\n"
+    b"Content-Length: " + str(len(SEED_HTML)).encode() + b"\r\n"
+    b"Connection: close\r\n"
+    b"\r\n" + SEED_HTML
+)
+
+
+def header_value(rest, wanted):
+    for header in rest.split(b"\r\n"):
+        name, sep, value = header.partition(b":")
+        if sep and name.strip().lower() == wanted:
+            return value.strip()
+    return b""
+
+
+def wants_seed_page(head):
+    # Browser navigation to the bare root only. Everything else — the REST API,
+    # the host-side tunnel probe, opencode attach — passes straight through.
     line, _, rest = head.partition(b"\r\n")
     parts = line.split(b" ")
     if len(parts) < 2 or parts[0] != b"GET":
         return False
     if parts[1].split(b"?")[0] != b"/":
         return False
-    for header in rest.split(b"\r\n"):
-        name, sep, value = header.partition(b":")
-        if sep and name.strip().lower() == b"accept":
-            return b"text/html" in value.lower()
-    return False
+    return b"text/html" in header_value(rest, b"accept").lower()
+
+
+def https_redirect(head):
+    # Plain HTTP spoke to the TLS port. Answering with a redirect beats letting
+    # the handshake fail, which the browser shows as a connection error.
+    line, _, rest = head.partition(b"\r\n")
+    parts = line.split(b" ")
+    path = parts[1] if len(parts) > 1 else b"/"
+    if not path.startswith(b"/"):
+        path = b"/"
+    host = header_value(rest, b"host")
+    if not host:
+        host = ("127.0.0.1:" + str(LISTEN_PORT)).encode()
+    return (
+        b"HTTP/1.1 301 Moved Permanently\r\n"
+        b"Location: https://" + host + path + b"\r\n"
+        b"Cache-Control: no-store\r\n"
+        b"Content-Length: 0\r\n"
+        b"Connection: close\r\n"
+        b"\r\n"
+    )
+
+
+def read_head(sock):
+    head = b""
+    try:
+        while b"\r\n\r\n" not in head and len(head) < 32768:
+            chunk = sock.recv(8192)
+            if not chunk:
+                break
+            head += chunk
+    except OSError:
+        pass
+    return head
+
+
+def reply_and_close(sock, payload):
+    # The request head is fully drained by now, so this closes with FIN, not a
+    # RST that would lose the response.
+    try:
+        sock.sendall(payload)
+        sock.shutdown(socket.SHUT_WR)
+    except OSError:
+        pass
+    close_all(sock)
 
 
 def splice(a, b):
     try:
         while True:
-            ready, _, _ = select.select([a, b], [], [])
+            # A TLS socket can hold already-decrypted bytes that select() cannot
+            # see, so drain those before blocking on kernel readability.
+            ready = [s for s in (a, b) if getattr(s, "pending", None) and s.pending()]
+            if not ready:
+                ready, _, _ = select.select([a, b], [], [])
             for src in ready:
                 dst = b if src is a else a
                 chunk = src.recv(65536)
@@ -6268,28 +6391,38 @@ def close_all(*socks):
             pass
 
 
-def handle(client):
-    head = b""
+def handle(conn):
+    client = conn
     try:
-        client.settimeout(10)
-        while b"\r\n\r\n" not in head and len(head) < 32768:
-            chunk = client.recv(8192)
-            if not chunk:
-                break
-            head += chunk
+        conn.settimeout(15)
+        if TLS_ENABLED:
+            # Sniff instead of assuming TLS: 0x16 is a TLS handshake record,
+            # anything else is someone talking plain HTTP to this port.
+            try:
+                first = conn.recv(1, socket.MSG_PEEK)
+            except OSError:
+                close_all(conn)
+                return
+            if not first:
+                close_all(conn)
+                return
+            if first[0] == 0x16:
+                try:
+                    client = TLS_CONTEXT.wrap_socket(conn, server_side=True)
+                except (OSError, ssl.SSLError, ValueError):
+                    close_all(conn)
+                    return
+            else:
+                reply_and_close(conn, https_redirect(read_head(conn)))
+                return
+        head = read_head(client)
         client.settimeout(None)
     except OSError:
-        close_all(client)
+        close_all(conn, client)
         return
 
-    if wants_redirect(head):
-        # Full request head is drained, so this closes with FIN, not RST.
-        try:
-            client.sendall(REDIRECT)
-            client.shutdown(socket.SHUT_WR)
-        except OSError:
-            pass
-        close_all(client)
+    if wants_seed_page(head):
+        reply_and_close(client, SEED_RESPONSE)
         return
 
     try:
@@ -6311,15 +6444,13 @@ server = socket.socket()
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind(("127.0.0.1", LISTEN_PORT))
 server.listen(128)
-if CERT_FILE and KEY_FILE:
-    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    tls.load_cert_chain(CERT_FILE, KEY_FILE)
-    server = tls.wrap_socket(server, server_side=True)
 while True:
+    # The handshake happens per connection in the worker thread. Wrapping the
+    # listening socket instead would run it here, where one client that opens a
+    # socket and then says nothing stalls every other connection.
     try:
         conn, _ = server.accept()
-    except (OSError, ssl.SSLError):
-        # A failed TLS handshake must not take the listener down.
+    except OSError:
         continue
     threading.Thread(target=handle, args=(conn,), daemon=True).start()
 PYSRC
@@ -6899,8 +7030,11 @@ attach_session() {
       echo ""
       echo "Connect via:"
       echo ""
-      echo "  Browser/Web UI:  ${OC_SCHEME}://${OC_HOST_IP}:${OC_HOST_PORT}/${OC_DIR_KEY}"
-      echo "  All projects:    ${OC_SCHEME}://${OC_HOST_IP}:${OC_HOST_PORT}"
+      # The short root URL is the one to hand out: it seeds this browser with the
+      # project (without which the UI filters every chat session out of view),
+      # sets sane defaults, and forwards into the project.
+      echo "  Browser/Web UI:  ${OC_SCHEME}://${OC_HOST_IP}:${OC_HOST_PORT}"
+      echo "  Direct project:  ${OC_SCHEME}://${OC_HOST_IP}:${OC_HOST_PORT}/${OC_DIR_KEY}"
       echo "  API docs:        ${OC_SCHEME}://${OC_HOST_IP}:${OC_HOST_PORT}/doc"
       if [ "$OC_SCHEME" = "https" ]; then
         # TLS terminates in the redirector; opencode itself stays plain HTTP on
@@ -6914,12 +7048,13 @@ attach_session() {
         echo ""
         echo "  Note: requested port ${OC_PORT} was busy; LAN tunnel uses ${OC_HOST_PORT}."
       fi
-      echo "  Loopback also: ${OC_SCHEME}://127.0.0.1:${OC_PORT}/${OC_DIR_KEY} (via Lima auto-forward)"
+      echo "  Loopback also: ${OC_SCHEME}://127.0.0.1:${OC_PORT} (via Lima auto-forward)"
       if [ "$OC_SCHEME" = "https" ]; then
         echo ""
         echo "  TLS: self-signed certificate — each device warns once, then trusts it."
         echo "       Required for file/image attachments: opencode hashes them via"
         echo "       crypto.subtle, which browsers withhold from plain-HTTP origins."
+        echo "       Plain http:// on this port is answered with a redirect to https."
         echo "       Need plain HTTP instead? Start with: opencode-vm web --no-tls"
       else
         echo ""
@@ -8238,8 +8373,11 @@ EOF
         echo ""
         echo "Connect via:"
         echo ""
-        echo "  Browser/Web UI:  ${OC_SCHEME}://${OC_HOST_IP}:${OC_HOST_PORT}/${OC_DIR_KEY}"
-        echo "  All projects:    ${OC_SCHEME}://${OC_HOST_IP}:${OC_HOST_PORT}"
+        # The short root URL is the one to hand out: it seeds this browser with the
+        # project (without which the UI filters every chat session out of view),
+        # sets sane defaults, and forwards into the project.
+        echo "  Browser/Web UI:  ${OC_SCHEME}://${OC_HOST_IP}:${OC_HOST_PORT}"
+        echo "  Direct project:  ${OC_SCHEME}://${OC_HOST_IP}:${OC_HOST_PORT}/${OC_DIR_KEY}"
         echo "  API docs:        ${OC_SCHEME}://${OC_HOST_IP}:${OC_HOST_PORT}/doc"
         if [ "$OC_SCHEME" = "https" ]; then
           # TLS terminates in the redirector; opencode itself stays plain HTTP on
@@ -8253,12 +8391,13 @@ EOF
           echo ""
           echo "  Note: requested port ${OC_PORT} was busy; LAN tunnel uses ${OC_HOST_PORT}."
         fi
-        echo "  Loopback also: ${OC_SCHEME}://127.0.0.1:${OC_PORT}/${OC_DIR_KEY} (via Lima auto-forward)"
+        echo "  Loopback also: ${OC_SCHEME}://127.0.0.1:${OC_PORT} (via Lima auto-forward)"
         if [ "$OC_SCHEME" = "https" ]; then
           echo ""
           echo "  TLS: self-signed certificate — each device warns once, then trusts it."
           echo "       Required for file/image attachments: opencode hashes them via"
           echo "       crypto.subtle, which browsers withhold from plain-HTTP origins."
+          echo "       Plain http:// on this port is answered with a redirect to https."
           echo "       Need plain HTTP instead? Start with: opencode-vm web --no-tls"
         else
           echo ""
