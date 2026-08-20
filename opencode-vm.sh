@@ -113,7 +113,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.5.4"
+OCVM_VERSION="0.5.5"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -192,11 +192,38 @@ run_with_spinner() {
 
 check_port_available() {
   local port="$1"
-  if lsof -i :"$port" -sTCP:LISTEN >/dev/null 2>&1; then
-    echo "Port $port is already in use on the host." >&2
-    echo "Use --port <PORT> to specify a different port." >&2
-    exit 1
+  lsof -i :"$port" -sTCP:LISTEN >/dev/null 2>&1 || return 0
+
+  # A web session that ends without running its EXIT trap — closed terminal
+  # window, SIGHUP, a laptop that slept — leaves its SSH tunnel behind. The
+  # forward keeps holding the host port but leads into a VM where opencode is
+  # gone, so every browser on the LAN hits a dead port, and the next start
+  # refuses to run on the very port the user always uses. Reclaim that case:
+  # the tunnel is ours, and a probe through it says whether anything still
+  # answers behind it.
+  local own_pids
+  own_pids="$(pgrep -f "ssh -f -N .*-L 0\.0\.0\.0:${port}:127\.0\.0\.1:" 2>/dev/null || true)"
+  if [[ -n "$own_pids" ]]; then
+    if curl -fsSk -o /dev/null --max-time 3 "https://127.0.0.1:${port}/" 2>/dev/null ||
+       curl -fsS  -o /dev/null --max-time 3 "http://127.0.0.1:${port}/"  2>/dev/null; then
+      echo "Port $port is serving a live opencode-vm session." >&2
+      echo "Reconnect with 'opencode-vm attach', or pick another port with --port <PORT>." >&2
+      exit 1
+    fi
+    echo "[run] Port $port was held by a stale web tunnel from an earlier session — reclaiming it."
+    local _tp
+    for _tp in $own_pids; do kill "$_tp" 2>/dev/null || true; done
+    rm -f /tmp/ocvm-tunnel-*-"${port}".pid
+    local _wait
+    for _wait in 1 2 3 4 5 6 7 8 9 10; do
+      lsof -i :"$port" -sTCP:LISTEN >/dev/null 2>&1 || return 0
+      sleep 0.3
+    done
   fi
+
+  echo "Port $port is already in use on the host." >&2
+  echo "Use --port <PORT> to specify a different port." >&2
+  exit 1
 }
 
 parse_web_flags() {
@@ -6816,7 +6843,7 @@ attach_session() {
         echo '[opencode-vm] Web session ended — closing LAN tunnel...'
         stop_web_tunnel '$SESS_NAME' '$WEB_TUNNEL_HOST_PORT'
         echo '[opencode-vm] Tunnel closed. Session paused — resume with: opencode-vm web'
-      " EXIT
+      " EXIT HUP TERM
       probe_web_tunnel_async "$WEB_TUNNEL_HOST_PORT" "$host_lan_ip" "$sess_tls"
     else
       echo "[attach] WARNING: SSH tunnel for LAN access could not be set up." >&2
@@ -8002,7 +8029,10 @@ start_session() {
     # Remove clean mount symlink if created
     [[ -n "${clean_link:-}" ]] && rm -f "$clean_link"
   }
-  trap cleanup EXIT
+  # HUP/TERM as well as EXIT: a closed terminal window kills the shell without
+  # running an EXIT-only trap, which is how a web session can leave its SSH
+  # tunnel holding the host port with nothing behind it any more.
+  trap cleanup EXIT HUP TERM
 
   run_with_spinner "[run] Starting session VM..." limactl start "$sess" --tty=false
 
