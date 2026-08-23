@@ -128,7 +128,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.5.11"
+OCVM_VERSION="0.5.12"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -8205,8 +8205,20 @@ start_session() {
     rsync -a "$ph_dir/xdg-state/opencode/" "$proj_state/xdg-state/opencode/"
     echo "[run] Loaded project history $(_ts)"
   else
+    # model.json (recent/favorite models) is a UI preference, not history:
+    # wiping it makes every fresh session fall back to a provider-default
+    # model instead of the one last used in this project.
+    local _model_keep=""
+    if [[ -f "$proj_state/xdg-state/opencode/model.json" ]]; then
+      _model_keep="$(mktemp)"
+      cp -p "$proj_state/xdg-state/opencode/model.json" "$_model_keep"
+    fi
     rm -rf "$proj_state/xdg-data/opencode" "$proj_state/xdg-state/opencode"
     mkdir -p "$proj_state/xdg-data/opencode" "$proj_state/xdg-state/opencode"
+    if [[ -n "$_model_keep" ]]; then
+      cp -p "$_model_keep" "$proj_state/xdg-state/opencode/model.json"
+      rm -f "$_model_keep"
+    fi
     echo "[run] Fresh session (no history loaded) $(_ts)"
   fi
 
