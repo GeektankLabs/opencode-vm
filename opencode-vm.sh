@@ -128,7 +128,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.5.14"
+OCVM_VERSION="0.5.15"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -225,17 +225,32 @@ run_with_spinner() {
 # port are now the same number.
 validate_web_port() {
   local p="$1"
-  if is_valid_port "$p" && (( p >= 1026 && p <= 65532 )); then
-    return 0
+  if ! is_valid_port "$p" || (( p < 1026 || p > 65532 )); then
+    echo "Invalid --port value: $p" >&2
+    echo "opencode-vm web reserves a block around the base port:" >&2
+    echo "  P-2  opencode-a2a      (VM-internal)" >&2
+    echo "  P-1  opencode backend  (VM-internal)" >&2
+    echo "  P    web HTTPS         P+1  web HTTP" >&2
+    echo "  P+2  a2a HTTPS         P+3  a2a HTTP" >&2
+    echo "so the base port must be between 1026 and 65532." >&2
+    exit 2
   fi
-  echo "Invalid --port value: $p" >&2
-  echo "opencode-vm web reserves a block around the base port:" >&2
-  echo "  P-2  opencode-a2a      (VM-internal)" >&2
-  echo "  P-1  opencode backend  (VM-internal)" >&2
-  echo "  P    web HTTPS         P+1  web HTTP" >&2
-  echo "  P+2  a2a HTTPS         P+3  a2a HTTP" >&2
-  echo "so the base port must be between 1026 and 65532." >&2
-  exit 2
+  # Refuse, don't warn: web mode exists for browsers, and browsers refuse
+  # these ports outright (ERR_UNSAFE_PORT) no matter what listens there. A
+  # mid-scroll warning gets missed while the closing banner still advertises
+  # the dead URLs — so an explicit --port must fail loudly instead.
+  local u
+  for u in "$p" $((p + 1)) $((p + 2)) $((p + 3)); do
+    if is_browser_unsafe_port "$u"; then
+      echo "Browser-blocked --port value: $p" >&2
+      echo "Port $u of the public block $p..$((p + 3)) is on the browsers' hardcoded" >&2
+      echo "unsafe-port list — Chrome/Firefox/Safari refuse to connect (ERR_UNSAFE_PORT)," >&2
+      echo "so the web UI and the A2A agent card would be unreachable from any browser." >&2
+      echo "Browser-safe alternatives: 4096 (default), 5555, 7777, 8080, 8888, 9000+" >&2
+      exit 2
+    fi
+  done
+  return 0
 }
 
 # True when something already holds 0.0.0.0:<port>. Listeners bound only to
@@ -6807,17 +6822,6 @@ is_browser_unsafe_port() {
   return 1
 }
 
-warn_if_browser_unsafe_port() {
-  local port="$1"
-  is_browser_unsafe_port "$port" || return 0
-  echo ""
-  echo "[!] WARNING: port $port is on the browser hardcoded UNSAFE list."
-  echo "    Chrome/Firefox/Safari refuse to connect (ERR_UNSAFE_PORT) regardless"
-  echo "    of what listens there. Curl and API clients still work."
-  echo "    Browser-safe alternatives: 4096 (default), 5555, 7777, 8080, 8888, 9000+"
-  echo ""
-}
-
 # Web-mode forwarding: one SSH process carrying all four public forwards of the
 # port block, host(0.0.0.0:X) -> VM(127.0.0.1:X).
 #
@@ -6860,6 +6864,21 @@ start_web_tunnels() {
 
   local base p ok pid
   for base in $(seq "$req" $((req + 9))); do
+    # Never bind a block that touches the browser unsafe-port list: browsers
+    # refuse those outright (ERR_UNSAFE_PORT), so the banner would advertise
+    # URLs no browser can open. Reached with a port persisted in session.env
+    # before validate_web_port checked this, or when the shift below would
+    # otherwise walk into the range.
+    ok=1
+    for p in "$base" $((base + 1)) $((base + 2)) $((base + 3)); do
+      if is_browser_unsafe_port "$p"; then
+        if [[ "$base" == "$req" ]]; then
+          echo "[tunnel] Base port ${req}: port ${p} of block ${req}..$((req + 3)) is browser-blocked (ERR_UNSAFE_PORT) — moving to a browser-safe block."
+        fi
+        ok=0; break
+      fi
+    done
+    (( ok )) || continue
     # Sweep any tunnel of ours left on this base before probing it.
     stop_web_tunnels "$vm" "$base" >/dev/null 2>&1 || true
     ok=1
@@ -6892,15 +6911,11 @@ start_web_tunnels() {
         echo "[tunnel] Requested base port ${req} was unavailable — the block moved to ${base}."
       fi
       echo "[tunnel] LAN tunnels up (pid ${pid:-?}): ${base} web/https, $((base + 1)) web/http, $((base + 2)) a2a/https, $((base + 3)) a2a/http"
-      # Both browser-facing ports, since an unsafe number on P+1 is otherwise
-      # invisible until a browser silently refuses to connect.
-      warn_if_browser_unsafe_port "$base"
-      warn_if_browser_unsafe_port "$((base + 1))"
       return 0
     fi
   done
 
-  echo "[tunnel] ERROR: no free block of four consecutive host ports in ${req}..$((req + 12))." >&2
+  echo "[tunnel] ERROR: no free browser-safe block of four consecutive host ports in ${req}..$((req + 12))." >&2
   echo "[tunnel]   web mode needs P (web https), P+1 (web http), P+2 (a2a https), P+3 (a2a http)." >&2
   echo "[tunnel]   Diagnose: lsof -nP -iTCP:${req}-$((req + 12)) -sTCP:LISTEN" >&2
   echo "[tunnel]   Pick another base: opencode-vm web --port 8080" >&2
@@ -7605,8 +7620,13 @@ a2a_watch_ready() {
   [ "${OC_A2A:-1}" = "1" ] || return 0
   [ -x "$A2A_BIN" ] || return 0
   ( if wait_for_a2a; then
+      # Same honesty rule as print_web_banner: no LAN URL while the LAN
+      # tunnel is down — Lima's loopback forward is what actually answers.
+      # Runs in a subshell, so the plain assignment cannot leak.
+      host="$OC_HOST_IP"
+      [ "${OC_LAN_UP:-1}" = "1" ] || host="127.0.0.1"
       echo ""
-      echo "[a2a] Ready — agent card: http://${OC_HOST_IP}:$(( OC_PORT + 3 ))/.well-known/agent-card.json"
+      echo "[a2a] Ready — agent card: http://${host}:$(( OC_PORT + 3 ))/.well-known/agent-card.json"
     else
       echo ""
       echo "[a2a] WARNING: the sidecar did not become ready."
@@ -7639,19 +7659,31 @@ wait_for_a2a() {
 }
 
 print_web_banner() {
-  local plain="http://${OC_HOST_IP}"
+  # An advertised URL is a promise the tunnel has to keep. When the LAN
+  # forwards are down, the only working host-side listeners are Lima's
+  # loopback auto-forwards — so print those, never LAN URLs that would just
+  # be refused.
+  local host="$OC_HOST_IP"
+  [ "${OC_LAN_UP:-1}" = "1" ] || host="127.0.0.1"
+  local plain="http://${host}"
   echo ""
   echo "=============================================="
   echo "  OpenCode Web + A2A (base port $OC_PORT)${OC_BANNER_SUFFIX:-}"
   echo "=============================================="
   echo ""
+  if [ "${OC_LAN_UP:-1}" != "1" ]; then
+    echo "[!] LAN access is DOWN — the SSH port tunnel could not be set up."
+    echo "    The URLs below work on the host machine only; other devices cannot"
+    echo "    reach this session. To retry the tunnel: opencode-vm attach"
+    echo ""
+  fi
   echo "Web UI / REST"
   # The short root URL is the one to hand out: it seeds this browser with the
   # project (without which the UI filters every chat session out of view),
   # sets sane defaults, and forwards into the project.
-  echo "  Browser:       ${OC_SCHEME}://${OC_HOST_IP}:${OC_PORT}"
-  echo "  Direct project ${OC_SCHEME}://${OC_HOST_IP}:${OC_PORT}/${OC_DIR_KEY}"
-  echo "  REST / OpenAPI ${OC_SCHEME}://${OC_HOST_IP}:${OC_PORT}/doc"
+  echo "  Browser:       ${OC_SCHEME}://${host}:${OC_PORT}"
+  echo "  Direct project ${OC_SCHEME}://${host}:${OC_PORT}/${OC_DIR_KEY}"
+  echo "  REST / OpenAPI ${OC_SCHEME}://${host}:${OC_PORT}/doc"
   if [ "$OC_SCHEME" = "https" ]; then
     echo "  Plain HTTP:    ${plain}:$(( OC_PORT + 1 ))    (no certificate to trust)"
   fi
@@ -7664,7 +7696,7 @@ print_web_banner() {
       echo "  Agent name:    OpenCode: ${OC_A2A_PROJECT}"
     fi
     if [ "$OC_SCHEME" = "https" ]; then
-      echo "  HTTPS:         ${OC_SCHEME}://${OC_HOST_IP}:$(( OC_PORT + 2 ))"
+      echo "  HTTPS:         ${OC_SCHEME}://${host}:$(( OC_PORT + 2 ))"
     fi
     echo "  HTTP:          ${plain}:$(( OC_PORT + 3 ))"
     echo "  Agent Card:    ${plain}:$(( OC_PORT + 3 ))/.well-known/agent-card.json"
@@ -8007,6 +8039,7 @@ attach_session() {
   # still runs, and opencode stays reachable via Lima's loopback auto-forward.
   # See start_web_tunnels for the block rationale.
   local effective_base="$sess_port"
+  local lan_up=1
   if [[ "$sess_mode" == "web" ]]; then
     if start_web_tunnels "$SESS_NAME" "$sess_port"; then
       effective_base="$WEB_PORT_BASE"
@@ -8019,6 +8052,7 @@ attach_session() {
       trap _attach_tunnel_cleanup EXIT HUP TERM
       probe_web_tunnel_async "$effective_base" "$host_lan_ip" "$sess_tls"
     else
+      lan_up=0
       echo "[attach] WARNING: SSH tunnel for LAN access could not be set up." >&2
       echo "[attach]   Session continues. Loopback-only fallback may be available via http://127.0.0.1:${sess_port}/ (Lima auto-forward)." >&2
       echo "[attach]   To enable LAN access: stop+restart the VM, then 'opencode-vm attach'." >&2
@@ -8047,6 +8081,7 @@ attach_session() {
     OC_A2A="${8:-1}"
     OC_REQUIRE_A2A="${9:-0}"
     OC_A2A_DEFAULT_SECRET="${10:-opencode-vm}"
+    OC_LAN_UP="${11:-1}"
 
     # Shared in-VM web library (materialized into the session share by
     # install_web_lib on the host, and mounted here at the same path). It owns
@@ -8069,7 +8104,7 @@ attach_session() {
       stop_a2a()          { return 0; }
       wait_for_a2a()      { return 1; }
       a2a_watch_ready()   { return 0; }
-      print_web_banner()  { echo "  Browser/Web UI:  http://${OC_HOST_IP}:${OC_PORT}"; return 0; }
+      print_web_banner()  { local h="$OC_HOST_IP"; [ "${OC_LAN_UP:-1}" = "1" ] || h="127.0.0.1"; echo "  Browser/Web UI:  http://${h}:${OC_PORT}"; return 0; }
     fi
 
     export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/.config/composer/vendor/bin:/tmp/go/bin:/tmp/pnpm-store:$PATH"
@@ -8187,7 +8222,7 @@ attach_session() {
 
     # Sync-back happens via the EXIT trap installed above (covers Ctrl+C as
     # well as normal exit).
-  ' "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$effective_base" "$host_lan_ip" "${OC_WEB_TUI:-false}" "$sess_tls" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET"
+  ' "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$effective_base" "$host_lan_ip" "${OC_WEB_TUI:-false}" "$sess_tls" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up"
 }
 
 # --- Session Basic-auth secret -------------------------------------------
@@ -9264,11 +9299,13 @@ start_session() {
   # (127.0.0.1:OC_PORT) coexists with our tunnel — different bind addresses.
   # Tunnel failure is non-fatal: opencode is still reachable via loopback.
   local effective_base="${SESSION_PORT:-0}"
+  local lan_up=1
   if [[ "$SESSION_MODE" == "web" ]]; then
     if start_web_tunnels "$sess" "${SESSION_PORT:-0}"; then
       effective_base="$WEB_PORT_BASE"
       probe_web_tunnel_async "$WEB_PORT_BASE" "$host_lan_ip" "${SESSION_TLS:-0}"
     else
+      lan_up=0
       echo "[run] WARNING: SSH tunnel for LAN access could not be set up." >&2
       echo "[run]   Session continues. Loopback fallback may work via http://127.0.0.1:${SESSION_PORT}/ (Lima auto-forward)." >&2
       echo "[run]   To enable LAN access: 'limactl stop ${sess} && limactl start ${sess}', then 'opencode-vm attach'." >&2
@@ -9294,6 +9331,7 @@ start_session() {
     OC_A2A="${8:-1}"
     OC_REQUIRE_A2A="${9:-0}"
     OC_A2A_DEFAULT_SECRET="${10:-opencode-vm}"
+    OC_LAN_UP="${11:-1}"
 
     # Shared in-VM web library (materialized into the session share by
     # install_web_lib on the host, and mounted here at the same path). It owns
@@ -9316,7 +9354,7 @@ start_session() {
       stop_a2a()          { return 0; }
       wait_for_a2a()      { return 1; }
       a2a_watch_ready()   { return 0; }
-      print_web_banner()  { echo "  Browser/Web UI:  http://${OC_HOST_IP}:${OC_PORT}"; return 0; }
+      print_web_banner()  { local h="$OC_HOST_IP"; [ "${OC_LAN_UP:-1}" = "1" ] || h="127.0.0.1"; echo "  Browser/Web UI:  http://${h}:${OC_PORT}"; return 0; }
     fi
 
     export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/.config/composer/vendor/bin:/tmp/go/bin:/tmp/pnpm-store:$PATH"
@@ -9492,7 +9530,7 @@ EOF
 
     # Sync back happens via the EXIT trap installed above (covers both clean
     # exit and Ctrl+C-driven termination of the web server).
-  ' "$proj" "$sess_share" "$SESSION_MODE" "$effective_base" "${OC_WEB_TUI:-false}" "$host_lan_ip" "${SESSION_TLS:-0}" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET"; then
+  ' "$proj" "$sess_share" "$SESSION_MODE" "$effective_base" "${OC_WEB_TUI:-false}" "$host_lan_ip" "${SESSION_TLS:-0}" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up"; then
     if [[ "$SESSION_MODE" != "shell" ]]; then
     OC_SHELL_OK=1
     fi

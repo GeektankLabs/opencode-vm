@@ -210,6 +210,8 @@ A web session owns a small contiguous block around the base port `P` you pass to
 
 With the default `--port 4096` that is `4094`–`4099`. Valid base ports are `1026`–`65532`.
 
+Browsers additionally hardcode an unsafe-port list (Chromium's `kRestrictedPorts` — e.g. `6000`, `6665`–`6669`, `6697`, `10080`) and refuse such ports with `ERR_UNSAFE_PORT` no matter what listens there. A `--port` whose public block `P`–`P+3` touches that list is therefore rejected, and if a stored session port would land the block on one, the whole block shifts to the next browser-safe base instead.
+
 The offsets are a fixed contract, because the A2A agent card has to advertise an absolute URL. If any port in the block is taken, the **whole block** moves to the next free one — the relationships never drift apart. The host port and the VM port are always the same number.
 
 The plain-HTTP twins exist for clients that cannot be taught to trust the session's self-signed certificate — OpenCode Desktop, `opencode attach`, and most A2A clients. They are exposed on the LAN on purpose; use them only on a network you trust.
