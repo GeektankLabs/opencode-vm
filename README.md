@@ -224,22 +224,66 @@ Agent Card:  http://<ip>:4099/.well-known/agent-card.json
 
 The card advertises the **HTTP** endpoint deliberately: `opencode-a2a` bakes exactly one public URL into the card at startup, and a client that cannot verify our self-signed certificate would otherwise be redirected somewhere it cannot reach. Both endpoints front the same process.
 
+**The agent is named after its project.** The card's `name` is `OpenCode: <project-dir-name>`, and the project also appears in the description — so running one session per project gives each a card that identifies itself:
+
+```
+name:  OpenCode: raspiblitz-mcrepo
+desc:  OpenCode coding agent for project 'raspiblitz-mcrepo', running in an
+       opencode-vm session on 192.168.1.20. … Deployment project: raspiblitz-mcrepo.
+```
+
+Note that the Agent Card is served **unauthenticated** — the A2A spec requires that, and discovery tools fetch it without credentials. The project *directory name* is therefore readable by anyone who can reach the port. The full workspace path is not: it stays suppressed. If a directory name is itself sensitive, run that session with `--no-a2a`.
+
 **A2A always requires a credential** — `opencode-a2a` refuses to start without one. So:
 
 - with `--password PW`, all four public endpoints use those credentials (Basic for web/REST, Basic *or* Bearer for A2A);
 - without one, A2A uses the fixed default `opencode-vm`, which is printed in the startup banner. It is a documented constant, not a secret — a hidden generated token would be worse, since nobody could find it and it would rotate on every restart.
 
-Both a Basic and a Bearer credential are registered, because A2A clients differ in what they send. Example for an orchestrator that speaks Bearer:
+Both a Basic and a Bearer credential are registered, because A2A clients differ in what they send. Example for Hermes, which speaks Bearer only:
 
 ```yaml
 a2a_agents:
-  - url: http://192.168.1.20:4099
+  opencode-raspiblitz:                        # this key is how you address the agent
+    url: http://192.168.1.20:4099
+    auth: { type: bearer, token: opencode-vm }
+  opencode-bi:
+    url: http://192.168.1.20:4103
     auth: { type: bearer, token: opencode-vm }
 ```
+
+`a2a_agents` is a **mapping, not a list** — the key is the local name Hermes resolves, prints and labels replies with. The card's `name` is only shown by discovery, so pick keys that mean something to you. Two caveats when registering several sessions:
+
+- `capabilities:` in that config is a free-form local tag list, unrelated to the card's skills. `a2a_orchestrate(capability=…)` sends the **same message to every matching peer in parallel** — so tagging several OpenCode sessions alike means one instruction runs in every project. Give each a distinct tag, or omit `capabilities`.
+- Card skills are ignored for routing. Every instance exposes `opencode.chat`; that is spec-conformant and cannot be used to tell agents apart.
 
 The adapter is confined to the project the VM was started in: directory override is disabled, as are session shell and workspace mutations. It reaches OpenCode over loopback only, and the VM's existing firewall already blocks outbound access to your LAN.
 
 Opt out with `--no-a2a` (or `OCVM_A2A=0`). By default a sidecar that fails to start is a loud warning and the web UI keeps running; `--require-a2a` makes it fatal instead.
+
+#### Working with the A2A interface
+
+```bash
+opencode-vm a2a                  # which agents are live here, and under which URL
+opencode-vm a2a --json           # same, machine-readable
+opencode-vm a2a card             # the served Agent Card
+opencode-vm a2a check            # verify the interface end to end
+```
+
+`opencode-vm a2a` is what you hand to whoever configures the orchestrator — it resolves each live
+session to its effective A2A URL by reading the served card, so a shifted port block cannot mislead
+you.
+
+`opencode-vm a2a check` is the test suite for this interface: discovery, card validation, the three
+authentication outcomes, the JSON-RPC method surface, extension negotiation, the error paths, a live
+`SendMessage` round trip, session binding across two turns, and a self-check that the credential
+never appeared in its own output. The round trip sends two real prompts, so it costs tokens and
+creates a session in the target project.
+
+**The protocol contract a client is built against is [docs/A2A-INTERFACE.md](docs/A2A-INTERFACE.md)** —
+exact payloads, session binding, error shapes, limits, and what the agent is and is not allowed to
+do. Read that before writing a client; several details (where the answer actually lives in the
+response, Bearer vs Basic being different session identities, the absence of webhooks) are easy to
+get wrong.
 
 ### Passwords
 
@@ -598,7 +642,9 @@ opencode-vm skills on ecc-auto             # opt into ECC skills (auto-clones EC
 opencode-vm mcps on proxmox                # opt into Proxmox MCP (interactive credential prompt)
 opencode-vm mcps list                      # show all MCPs + their active state
 opencode-vm start        # start TUI session (same as opencode-vm run)
-opencode-vm web          # start web server session (browser, API, TUI attach)
+opencode-vm web          # start web server session (browser, API, TUI attach, A2A agent)
+opencode-vm a2a          # live A2A agents on this host + how to reach them
+opencode-vm a2a check    # verify an agent's A2A interface end to end
 opencode-vm attach       # reconnect to a running/kept session (e.g. after a terminal crash)
 opencode-vm shell        # shell into session VM (auto-starts if none is running)
 opencode-vm base         # shell into base VM

@@ -128,7 +128,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.5.12"
+OCVM_VERSION="0.5.14"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -2761,6 +2761,481 @@ EOF
       ;;
     *)
       echo "Usage: opencode-vm mcps {status|list|on <name>|off <name>|purge <name>}" >&2
+      return 2
+      ;;
+  esac
+}
+
+
+# ---------------------------------------------------------------------------
+# A2A interface (host side) — since v0.5.14
+#
+# `opencode-vm web` exposes each session's OpenCode runtime as an A2A 1.0 agent.
+# These verbs are the counterpart an orchestrator's operator needs: which agents
+# are live and under which URL (`a2a`), and does the interface actually behave
+# the way docs/A2A-INTERFACE.md claims (`a2a check`).
+#
+# Deliberately stateless: there is nothing to register on this side. The session
+# records are the source of truth for "what is running", and the served Agent
+# Card is the truth for "where" — the effective port can differ from the
+# requested one when a port block had to move on a collision.
+# ---------------------------------------------------------------------------
+
+# The smoke-test prompt is deliberately trivial and deterministic: it proves the
+# round trip without asking the model to do work in the user's project.
+A2A_CHECK_PROMPT="Reply with exactly OPENCODE_A2A_OK and nothing else."
+A2A_CHECK_TOKEN="OPENCODE_A2A_OK"
+A2A_EXT_SESSION_BINDING="urn:opencode-a2a:extension:session-binding:v1"
+
+_a2a_need_tools() {
+  local missing=""
+  command -v curl >/dev/null 2>&1 || missing="curl"
+  command -v jq   >/dev/null 2>&1 || missing="${missing:+$missing, }jq"
+  if [[ -n "$missing" ]]; then
+    echo "[a2a] Missing required tool(s): $missing" >&2
+    echo "[a2a]   Install with: brew install ${missing//,/}" >&2
+    return 1
+  fi
+  return 0
+}
+
+# Emit one TAB-separated record per live web session:
+#   <vm-name> \t <project-dir> \t <requested-a2a_base-port> \t <project-basename>
+_a2a_sessions() {
+  local f
+  [[ -d "$SESSIONS_DIR" ]] || return 0
+  for f in "$SESSIONS_DIR"/*.env; do
+    [[ -f "$f" ]] || continue
+    ( # shellcheck disable=SC1090
+      source "$f" 2>/dev/null || exit 0
+      [[ "${SESS_MODE:-}" == "web" ]] || exit 0
+      [[ -n "${SESS_NAME:-}" && -n "${SESS_PROJ:-}" && -n "${SESS_PORT:-}" ]] || exit 0
+      printf '%s\t%s\t%s\t%s\n' "$SESS_NAME" "$SESS_PROJ" "$SESS_PORT" "$(basename "$SESS_PROJ")" )
+  done
+}
+
+# The A2A credential for a session: whatever `--password` stored, else the
+# documented default. Never echoed by the caller unless it IS the default.
+_a2a_secret_for_project() {
+  local proj="$1" share pw
+  share="$(session_share_dir "$proj")"
+  pw="$(read_session_auth "$share" 2>/dev/null || true)"
+  printf '%s' "${pw:-$OCVM_A2A_DEFAULT_SECRET}"
+}
+
+_a2a_user_for_project() {
+  local proj="$1" share f user="opencode"
+  share="$(session_share_dir "$proj")"
+  f="$share/auth.env"
+  if [[ -f "$f" ]]; then
+    # Subshell so the sourced assignments cannot leak into this process.
+    user="$( set +u
+             OPENCODE_SERVER_USERNAME=""
+             # shellcheck disable=SC1090
+             . "$f" 2>/dev/null || true
+             printf '%s' "${OPENCODE_SERVER_USERNAME:-opencode}" )"
+  fi
+  printf '%s' "${user:-opencode}"
+}
+
+_a2a_fetch_card() {
+  local a2a_base="$1" out="$2"
+  curl -fsS --max-time 6 -o "$out" "${a2a_base%/}/.well-known/agent-card.json" 2>/dev/null
+}
+
+# Structural validation of an Agent Card. Prints one reason per failure.
+_a2a_card_validate() {
+  local file="$1" bad=0
+  jq -e . "$file" >/dev/null 2>&1 || { echo "    not valid JSON"; return 1; }
+  jq -e '.name           | type == "string" and length > 0' "$file" >/dev/null 2>&1 || { echo "    missing: name"; bad=1; }
+  jq -e '.supportedInterfaces | type == "array" and length > 0' "$file" >/dev/null 2>&1 || { echo "    missing: supportedInterfaces[]"; bad=1; }
+  jq -e '[.supportedInterfaces[]?.url] | all(type == "string" and length > 0)' "$file" >/dev/null 2>&1 || { echo "    missing: supportedInterfaces[].url"; bad=1; }
+  jq -e '[.supportedInterfaces[]?.protocolVersion] | index("1.0")' "$file" >/dev/null 2>&1 || { echo "    no interface advertises protocolVersion 1.0"; bad=1; }
+  jq -e '.securitySchemes  | type == "object"' "$file" >/dev/null 2>&1 || { echo "    missing: securitySchemes"; bad=1; }
+  jq -e '.skills           | type == "array" and length > 0' "$file" >/dev/null 2>&1 || { echo "    missing: skills[]"; bad=1; }
+  return "$bad"
+}
+
+# JSON-RPC call. $1 a2a_base url, $2 bearer secret, $3 request json file,
+# $4 optional A2A-Extensions value, $5 optional --max-time (default 20).
+_a2a_rpc() {
+  local a2a_base="$1" secret="$2" reqfile="$3" ext="${4:-}" tmo="${5:-20}"
+  if [[ -n "$ext" ]]; then
+    curl -sS --max-time "$tmo" -X POST "${a2a_base%/}/" \
+      -H "Authorization: Bearer $secret" \
+      -H 'Content-Type: application/json' \
+      -H "A2A-Extensions: $ext" \
+      --data @"$reqfile" 2>/dev/null
+  else
+    curl -sS --max-time "$tmo" -X POST "${a2a_base%/}/" \
+      -H "Authorization: Bearer $secret" \
+      -H 'Content-Type: application/json' \
+      --data @"$reqfile" 2>/dev/null
+  fi
+}
+
+# No array for the optional header: macOS ships bash 3.2, where expanding an
+# empty array under `set -u` is an "unbound variable" error.
+_a2a_http_code() {
+  local url="$1" secret="${2:-}"
+  if [[ -n "$secret" ]]; then
+    curl -s -o /dev/null -w '%{http_code}' --max-time 6 \
+      -H "Authorization: Bearer $secret" "$url" 2>/dev/null || echo "000"
+  else
+    curl -s -o /dev/null -w '%{http_code}' --max-time 6 "$url" 2>/dev/null || echo "000"
+  fi
+}
+
+# Resolve a target to "<a2a_base-url>\t<secret>\t<label>".
+# Accepts: nothing (the single live session), a project/VM name, or a URL.
+_a2a_resolve_target() {
+  local want="${1:-}" ip name proj port pname a2a_base
+  if [[ "$want" == http://* || "$want" == https://* ]]; then
+    printf '%s\t%s\t%s\n' "${want%/}" "${OCVM_A2A_TOKEN:-$OCVM_A2A_DEFAULT_SECRET}" "$want"
+    return 0
+  fi
+  ip="$(get_host_ip)"
+  local matches=0 result=""
+  while IFS=$'\t' read -r name proj port pname; do
+    [[ -n "$name" ]] || continue
+    if [[ -n "$want" && "$want" != "$pname" && "$want" != "$name" ]]; then
+      continue
+    fi
+    a2a_base="http://${ip}:$((port + 3))"
+    result="$(printf '%s\t%s\t%s' "$a2a_base" "$(_a2a_secret_for_project "$proj")" "$pname")"
+    matches=$((matches + 1))
+  done < <(_a2a_sessions)
+
+  if (( matches == 0 )); then
+    if [[ -n "$want" ]]; then
+      echo "[a2a] No live web session named '$want'." >&2
+    else
+      echo "[a2a] No live web session on this host. Start one with: opencode-vm web" >&2
+    fi
+    return 1
+  fi
+  if (( matches > 1 )); then
+    echo "[a2a] Several live sessions — name one: opencode-vm a2a check <project>" >&2
+    return 1
+  fi
+  printf '%s\n' "$result"
+}
+
+a2a_status_cmd() {
+  local as_json=0
+  [[ "${1:-}" == "--json" ]] && as_json=1
+  _a2a_need_tools || return 1
+
+  local ip card rows=0 json_rows=""
+  ip="$(get_host_ip)"
+  card="$(mktemp)"
+
+  local name proj port pname a2a_base cardname health effective secret user
+  if (( as_json == 0 )); then
+    echo "[a2a] Live web sessions on this host"
+    echo ""
+    printf "  %-20s %-6s %-30s %-32s %s\n" "PROJECT" "BASE" "A2A (HTTP)" "CARD NAME" "HEALTH"
+  fi
+
+  while IFS=$'\t' read -r name proj port pname; do
+    [[ -n "$name" ]] || continue
+    rows=$((rows + 1))
+    a2a_base="http://${ip}:$((port + 3))"
+    secret="$(_a2a_secret_for_project "$proj")"
+    user="$(_a2a_user_for_project "$proj")"
+    cardname="-"; health="unreachable"; effective="$a2a_base"
+    if _a2a_fetch_card "$a2a_base" "$card"; then
+      cardname="$(jq -r '.name // "-"' "$card" 2>/dev/null || echo "-")"
+      # The card is authoritative: a shifted port block moves the real URL.
+      effective="$(jq -r '[.supportedInterfaces[]? | select(.protocolBinding=="JSONRPC") | .url][0] // empty' "$card" 2>/dev/null || true)"
+      [[ -n "$effective" ]] || effective="$a2a_base"
+      [[ "$(_a2a_http_code "${effective%/}/health" "$secret")" == "200" ]] && health="ok" || health="auth-fail"
+    fi
+    if (( as_json == 1 )); then
+      json_rows="$json_rows$(jq -cn --arg p "$pname" --arg d "$proj" --arg v "$name" \
+        --argjson b "$port" --arg u "$effective" --arg c "$cardname" --arg h "$health" --arg us "$user" \
+        '{project:$p,directory:$d,vm:$v,basePort:$b,a2aHttp:$u,agentCard:($u+"/.well-known/agent-card.json"),cardName:$c,username:$us,health:$h}')
+"
+    else
+      printf "  %-20s %-6s %-30s %-32s %s\n" "$pname" "$port" "$effective" "$cardname" "$health"
+      if [[ "$effective" != "$a2a_base" ]]; then
+        printf "  %-20s %s\n" "" "(port block moved; card URL wins over the requested a2a_base)"
+      fi
+    fi
+  done < <(_a2a_sessions)
+
+  rm -f "$card"
+
+  if (( as_json == 1 )); then
+    printf '%s' "$json_rows" | jq -s '.'
+    return 0
+  fi
+
+  if (( rows == 0 )); then
+    echo "  <none — start one with: opencode-vm web>"
+    return 0
+  fi
+  echo ""
+  # Printing the default is deliberate: it is a documented constant, not a
+  # secret. A session password is never printed. See docs/A2A-INTERFACE.md.
+  local anydefault=0 anycustom=0
+  while IFS=$'\t' read -r name proj port pname; do
+    [[ -n "$name" ]] || continue
+    if [[ "$(_a2a_secret_for_project "$proj")" == "$OCVM_A2A_DEFAULT_SECRET" ]]; then
+      anydefault=1
+    else
+      anycustom=1
+    fi
+  done < <(_a2a_sessions)
+  echo "  Auth:       HTTP Basic or Bearer, username 'opencode'"
+  if (( anydefault == 1 )); then
+    echo "  Token:      $OCVM_A2A_DEFAULT_SECRET   (session default — documented constant)"
+  fi
+  if (( anycustom == 1 )); then
+    echo "  Token:      the session --password (not printed)"
+  fi
+  echo "  Agent Card: <a2a-url>/.well-known/agent-card.json"
+  echo "  Contract:   docs/A2A-INTERFACE.md"
+  echo ""
+  echo "  Verify an agent end to end:  opencode-vm a2a check [<project>]"
+  return 0
+}
+
+# Failures are recorded in a file, not a variable: the check body runs inside a
+# `| tee` pipeline, so it is a subshell and any counter it increments would be
+# discarded on return — the suite would report success while printing FAILs.
+A2A_CHECK_FAILFILE=""
+_a2a_ok()   { printf "  ok:   %s%s\n" "$1" "${2:+  ($2)}"; }
+_a2a_fail() {
+  printf "  FAIL: %s%s\n" "$1" "${2:+  ($2)}"
+  [[ -n "$A2A_CHECK_FAILFILE" ]] && printf '%s\n' "$1" >> "$A2A_CHECK_FAILFILE"
+  return 0
+}
+
+# The whole acceptance catalogue against one agent. Tests 8 and 9 send real
+# prompts — they cost tokens and create a session in the target project.
+_a2a_check_body() {
+  local a2a_base="$1" secret="$2" label="$3"
+  local tmp card req resp code state answer ctx ses1 ses2
+
+  tmp="$(mktemp -d)"
+  card="$tmp/card.json"; req="$tmp/req.json"; resp="$tmp/resp.json"
+
+  echo "[a2a] Checking $label"
+  echo "      endpoint: $a2a_base"
+  echo ""
+
+  echo "  -- discovery --"
+  code="$(_a2a_http_code "${a2a_base%/}/.well-known/agent-card.json")"
+  if [[ "$code" == "200" ]]; then _a2a_ok "Agent Card reachable without auth" "HTTP $code"
+  else _a2a_fail "Agent Card reachable without auth" "HTTP $code"; fi
+
+  if _a2a_fetch_card "$a2a_base" "$card"; then
+    local reasons
+    if reasons="$(_a2a_card_validate "$card")"; then
+      _a2a_ok "Agent Card is structurally valid" "$(jq -r '.name' "$card" 2>/dev/null)"
+    else
+      _a2a_fail "Agent Card is structurally valid"
+      printf '%s\n' "$reasons"
+    fi
+  else
+    _a2a_fail "Agent Card is structurally valid" "could not fetch"
+  fi
+
+  echo ""
+  echo "  -- authentication --"
+  code="$(_a2a_http_code "${a2a_base%/}/health")"
+  if [[ "$code" == "401" ]]; then _a2a_ok "/health rejects a request with no credentials" "HTTP 401"
+  else _a2a_fail "/health rejects a request with no credentials" "HTTP $code"; fi
+
+  code="$(_a2a_http_code "${a2a_base%/}/health" "$secret")"
+  if [[ "$code" == "200" ]]; then _a2a_ok "/health accepts the session credential" "HTTP 200"
+  else _a2a_fail "/health accepts the session credential" "HTTP $code"; fi
+
+  code="$(_a2a_http_code "${a2a_base%/}/health" "definitely-not-the-token")"
+  if [[ "$code" == "401" ]]; then _a2a_ok "/health rejects a wrong credential" "HTTP 401"
+  else _a2a_fail "/health rejects a wrong credential" "HTTP $code"; fi
+
+  echo ""
+  echo "  -- protocol surface --"
+  jq -n '{jsonrpc:"2.0",id:1,method:"NoSuchMethod_ocvm_check",params:{}}' > "$req"
+  _a2a_rpc "$a2a_base" "$secret" "$req" "" 10 > "$resp" 2>/dev/null || true
+  if jq -e '.error.code == -32601' "$resp" >/dev/null 2>&1 \
+     && jq -e '[.error.data.supportedMethods[]?] | index("SendMessage")' "$resp" >/dev/null 2>&1; then
+    _a2a_ok "unknown method returns -32601 and advertises SendMessage"
+  else
+    _a2a_fail "unknown method returns -32601 and advertises SendMessage" "$(jq -c '.error // .' "$resp" 2>/dev/null | head -c 120)"
+  fi
+
+  jq -n '{jsonrpc:"2.0",id:1,method:"opencode.sessions.list",params:{}}' > "$req"
+  _a2a_rpc "$a2a_base" "$secret" "$req" "" 10 > "$resp" 2>/dev/null || true
+  if jq -e '.error.code == -32004' "$resp" >/dev/null 2>&1; then
+    _a2a_ok "extension method without A2A-Extensions returns -32004"
+  else
+    _a2a_fail "extension method without A2A-Extensions returns -32004" "$(jq -c '.error.code // .' "$resp" 2>/dev/null | head -c 80)"
+  fi
+
+  echo ""
+  echo "  -- error handling --"
+  if curl -fsS --max-time 4 "http://127.0.0.1:1/.well-known/agent-card.json" >/dev/null 2>&1; then
+    _a2a_fail "unreachable agent fails cleanly" "something answered on 127.0.0.1:1"
+  else
+    _a2a_ok "unreachable agent fails cleanly" "no hang, non-zero exit"
+  fi
+
+  jq -n '{name:"Broken",skills:[]}' > "$tmp/bad-card.json"
+  if _a2a_card_validate "$tmp/bad-card.json" >/dev/null 2>&1; then
+    _a2a_fail "invalid Agent Card is rejected" "validator accepted a card with no interfaces"
+  else
+    _a2a_ok "invalid Agent Card is rejected"
+  fi
+
+  echo ""
+  echo "  -- live round trip (sends real prompts) --"
+  ctx="ocvm-check-$(date +%s)-$RANDOM"
+  jq -n --arg t "$A2A_CHECK_PROMPT" --arg c "$ctx" --arg m "m-$ctx-1" \
+    '{jsonrpc:"2.0",id:1,method:"SendMessage",params:{message:{messageId:$m,role:"ROLE_USER",parts:[{text:$t}],contextId:$c}}}' > "$req"
+  _a2a_rpc "$a2a_base" "$secret" "$req" "$A2A_EXT_SESSION_BINDING" 180 > "$resp" 2>/dev/null || true
+
+  state="$(jq -r '.result.task.status.state // empty' "$resp" 2>/dev/null || true)"
+  # The answer lives in the "response" artifact. status.message is always the
+  # literal string "Completed." — reading it would never yield a result.
+  answer="$(jq -r '[.result.task.artifacts[]? | select(.name=="response") | .parts[]?.text] | join("")' "$resp" 2>/dev/null || true)"
+  ses1="$(jq -r '.result.task.metadata.shared.session.id // empty' "$resp" 2>/dev/null || true)"
+
+  if [[ "$state" == "TASK_STATE_COMPLETED" ]]; then
+    _a2a_ok "SendMessage completes" "$state"
+  else
+    _a2a_fail "SendMessage completes" "state=${state:-<none>} $(jq -c '.error // .result.task.metadata.opencode.error // empty' "$resp" 2>/dev/null | head -c 140)"
+    # Distinguish "the A2A interface is broken" from "the agent could not get an
+    # answer from its model". Everything above this point is the interface; an
+    # UPSTREAM_* error means the interface delivered the prompt correctly and
+    # OpenCode failed behind it. Worth saying out loud, because the two look
+    # identical from the outside.
+    local uptype
+    uptype="$(jq -r '.result.task.metadata.opencode.error.type // empty' "$resp" 2>/dev/null || true)"
+    case "$uptype" in
+      UPSTREAM_*)
+        echo "        The A2A transport is fine — every check above it passed. OpenCode"
+        echo "        itself did not return an answer ($uptype). Check the session's"
+        echo "        model and provider credentials:"
+        echo "          opencode-vm shell     then:  opencode auth list"
+        echo "          agent log in the VM:  /tmp/ocvm-a2a.log"
+        ;;
+    esac
+  fi
+  if [[ "$answer" == *"$A2A_CHECK_TOKEN"* ]]; then
+    _a2a_ok "reply contains $A2A_CHECK_TOKEN"
+  else
+    _a2a_fail "reply contains $A2A_CHECK_TOKEN" "got: $(printf '%s' "$answer" | head -c 80)"
+  fi
+  if [[ -n "$ses1" ]]; then
+    _a2a_ok "OpenCode session id returned" "$ses1"
+  else
+    _a2a_fail "OpenCode session id returned" "negotiate $A2A_EXT_SESSION_BINDING to receive it"
+  fi
+
+  jq -n --arg c "$ctx" --arg m "m-$ctx-2" \
+    '{jsonrpc:"2.0",id:2,method:"SendMessage",params:{message:{messageId:$m,role:"ROLE_USER",parts:[{text:"Reply with exactly OPENCODE_A2A_OK again."}],contextId:$c}}}' > "$req"
+  _a2a_rpc "$a2a_base" "$secret" "$req" "$A2A_EXT_SESSION_BINDING" 180 > "$resp" 2>/dev/null || true
+  ses2="$(jq -r '.result.task.metadata.shared.session.id // empty' "$resp" 2>/dev/null || true)"
+  if [[ -n "$ses1" && "$ses1" == "$ses2" ]]; then
+    _a2a_ok "same contextId continues the same OpenCode session" "$ses2"
+  else
+    _a2a_fail "same contextId continues the same OpenCode session" "first=${ses1:-<none>} second=${ses2:-<none>}"
+  fi
+
+  rm -rf "$tmp"
+  return 0
+}
+
+a2a_check_cmd() {
+  _a2a_need_tools || return 1
+  local target a2a_base secret label resolved buf rc
+  resolved="$(_a2a_resolve_target "${1:-}")" || return 1
+  IFS=$'\t' read -r a2a_base secret label <<< "$resolved"
+
+  buf="$(mktemp)"
+  A2A_CHECK_FAILFILE="$(mktemp)"
+  # Buffered *and* streamed: the redaction check below needs the full output,
+  # but the live round trip takes long enough that silence would be unhelpful.
+  _a2a_check_body "$a2a_base" "$secret" "$label" 2>&1 | tee "$buf"
+
+  echo ""
+  echo "  -- secret handling --"
+  # Only meaningful for a real session password. The documented default is the
+  # string "opencode-vm", which is also this tool's own name and appears all
+  # over its output — grepping for it would prove nothing either way, and the
+  # default is published on purpose (see docs/A2A-INTERFACE.md §4).
+  if [[ "$secret" == "$OCVM_A2A_DEFAULT_SECRET" ]]; then
+    echo "  skip: credential redaction — this session uses the published default"
+    echo "        (start a session with --password to exercise this check)"
+  elif grep -qF -- "$secret" "$buf" 2>/dev/null; then
+    echo "  FAIL: the session password never appears in this command's output"
+    printf 'credential redaction\n' >> "$A2A_CHECK_FAILFILE"
+  else
+    echo "  ok:   the session password never appears in this command's output"
+  fi
+  rm -f "$buf"
+
+  rc="$(wc -l < "$A2A_CHECK_FAILFILE" | tr -d ' ')"
+  local failed_names
+  failed_names="$(cat "$A2A_CHECK_FAILFILE")"
+  rm -f "$A2A_CHECK_FAILFILE"
+  A2A_CHECK_FAILFILE=""
+
+  echo ""
+  if [[ "${rc:-0}" == "0" ]]; then
+    echo "[a2a] All checks passed."
+    return 0
+  fi
+  echo "[a2a] $rc check(s) failed:" >&2
+  printf '%s\n' "$failed_names" | sed 's/^/  - /' >&2
+  return 1
+}
+
+a2a_cmd() {
+  local sub="${1:-status}"
+  [[ $# -gt 0 ]] && shift || true
+  case "$sub" in
+    status|"")
+      a2a_status_cmd "$@"
+      ;;
+    --json)
+      # `a2a --json` is the status verb with a flag, not a verb of its own.
+      a2a_status_cmd --json
+      ;;
+    check)
+      a2a_check_cmd "${1:-}"
+      ;;
+    card)
+      _a2a_need_tools || return 1
+      local resolved a2a_base secret label
+      resolved="$(_a2a_resolve_target "${1:-}")" || return 1
+      IFS=$'\t' read -r a2a_base secret label <<< "$resolved"
+      curl -fsS --max-time 6 "${a2a_base%/}/.well-known/agent-card.json" | jq .
+      ;;
+    help|-h|--help)
+      cat <<'EOF'
+opencode-vm a2a — the A2A interface every web session exposes
+
+Usage:
+  opencode-vm a2a                          # live agents on this host + how to reach them
+  opencode-vm a2a --json                   # same, machine-readable
+  opencode-vm a2a card [<project>]         # print the served Agent Card
+  opencode-vm a2a check [<project>|<url>]  # verify the interface end to end
+
+`check` runs the full contract suite: discovery, Agent Card validation, the three
+authentication outcomes, the JSON-RPC method surface, extension negotiation, the
+error paths, and a live round trip that proves SendMessage and session binding.
+The round trip sends two real prompts — it costs tokens and creates a session in
+the target project.
+
+The protocol contract a client is built against: docs/A2A-INTERFACE.md
+EOF
+      ;;
+    *)
+      echo "Usage: opencode-vm a2a {status|card|check} [project|url]" >&2
       return 2
       ;;
   esac
@@ -7067,6 +7542,22 @@ start_a2a() {
   # certificate straight into a handshake failure. Both endpoints reach the same
   # process either way.
   export A2A_PUBLIC_URL="http://${OC_HOST_IP}:$(( OC_PORT + 3 ))"
+
+  # Card identity. Clients resolve an agent by its URL, not by this name — but
+  # discovery tools print name and description verbatim, and with several
+  # opencode-vm sessions registered against one orchestrator, cards that all
+  # read "OpenCode A2A" and differ only in their URL are indistinguishable. The
+  # project directory name is what the user actually thinks of the agent as.
+  #
+  # $PROJ_DIR is the host project path, so basename stays correct even for the
+  # non-ASCII case where the mount goes through /tmp/oc-mount-<sha12>: the VM
+  # carries a symlink at the real path. Do not use `pwd -P` here (that is what
+  # OC_DIR_KEY needs) — it would yield the mount hash.
+  OC_A2A_PROJECT="$(basename "$PROJ_DIR")"
+  export A2A_TITLE="OpenCode: $OC_A2A_PROJECT"
+  export A2A_DESCRIPTION="OpenCode coding agent for project '$OC_A2A_PROJECT', running in an opencode-vm session on $OC_HOST_IP."
+  export A2A_PROJECT="$OC_A2A_PROJECT"
+
   local creds
   if ! creds="$(a2a_credentials_json "$A2A_SECRET" "$OC_USERNAME")" || [ -z "$creds" ]; then
     echo "[a2a] Could not build the credential registry (is jq present?) — A2A not started."
@@ -7167,6 +7658,11 @@ print_web_banner() {
   echo ""
   if [ "${OC_A2A:-1}" = "1" ]; then
     echo "A2A  (protocol 1.0)"
+    # Empty when the sidecar bailed out before naming itself (not installed, or
+    # no internal port to attach to) — then there is no identity to report.
+    if [ -n "${OC_A2A_PROJECT:-}" ]; then
+      echo "  Agent name:    OpenCode: ${OC_A2A_PROJECT}"
+    fi
     if [ "$OC_SCHEME" = "https" ]; then
       echo "  HTTPS:         ${OC_SCHEME}://${OC_HOST_IP}:$(( OC_PORT + 2 ))"
     fi
@@ -9126,6 +9622,10 @@ case "$cmd" in
     mcps_cmd "$@"
     ;;
 
+  a2a)
+    a2a_cmd "$@"
+    ;;
+
   init)
     need limactl
     sanitize_lima_sock_dir
@@ -9325,6 +9825,14 @@ Usage:
                                            #   ecc-auto    — ~30 skills, filtered to project languages
                                            #                 (auto-clones ECC on first enable)
                                            #   ecc-all     — ~180 skills, every ECC skill (token-heavy)
+  opencode-vm a2a {status|card|check} [project|url]
+                                           # the A2A interface every web session exposes
+                                           #   status — live agents + their effective URLs
+                                           #            (--json for machine consumption)
+                                           #   card   — print the served Agent Card
+                                           #   check  — verify one agent end to end; sends two
+                                           #            real prompts, so it costs tokens
+                                           # Client contract: docs/A2A-INTERFACE.md
   opencode-vm mcps {status|list|on|off|purge} [name]
                                            # manage MCP servers (tools the agent can call)
                                            # MCPs (registry: mcps/registry.json):
