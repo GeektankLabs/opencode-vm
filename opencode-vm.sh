@@ -68,6 +68,21 @@ DEFAULT_PROXMOX_MCP_REF="main"
 SEARXNG_VM_DIR='/var/lib/ocvm-searxng'   # path inside oc-base; holds compose, settings, secret_key
 SEARXNG_PORT=8888                         # browser-safe; not in BROWSER_UNSAFE_PORTS
 SEARXNG_MCP_NPM_VERSION="1.0.3"           # pin for reproducible installs in provision_base
+
+# A2A adapter (Intelligent-Internet/opencode-a2a). Pinned, not floating: a base
+# image is cloned for months, and this speaks a versioned wire protocol to
+# external orchestrators. 1.2.0 is the release this integration was built and
+# tested against — later versions add Origin/Host enforcement that has to be
+# re-checked against our proxy before the pin moves.
+OCVM_A2A_SPEC="opencode-a2a==1.2.0"
+OCVM_A2A_VENV='$HOME/.local/share/opencode-a2a-venv'
+# Bump when the install recipe changes, so existing bases re-provision.
+OCVM_A2A_STAMP_VERSION="1"
+# Fixed default credential when the session has no --password. Deliberately a
+# documented constant rather than a generated secret: opencode-a2a refuses to
+# start without a credential, and a hidden random token would be worse than a
+# known one — nobody could find it, and it would rotate on every restart.
+OCVM_A2A_DEFAULT_SECRET="opencode-vm"
 # Script location (for resolving bundled skills/proxmox/mcps when running from
 # repo). Must follow symlinks: `opencode-vm install` copies the script to
 # ~/bin/opencode-vm, but users who instead symlink ~/bin/opencode-vm at the
@@ -113,7 +128,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.5.5"
+OCVM_VERSION="0.5.11"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -143,7 +158,11 @@ need() {
 vm_exec() {
   local vm="$1" script="$2"
   shift 2
-  limactl shell --workdir / "$vm" -- bash -lc "$script" _ "$@"
+  # --tty=false: never let Lima open a TUI prompt (e.g. "Do you want to start
+  # the instance now?" against a stopped VM since Lima 2.x) — fail fast
+  # instead. Does not affect ssh PTY allocation, which Lima decides via
+  # isatty(stdout), so interactive sessions through here are unaffected.
+  limactl shell --workdir / --tty=false "$vm" -- bash -lc "$script" _ "$@"
 }
 
 sanitize_lima_sock_dir() {
@@ -190,45 +209,81 @@ run_with_spinner() {
   return "$status"
 }
 
-check_port_available() {
-  local port="$1"
-  lsof -i :"$port" -sTCP:LISTEN >/dev/null 2>&1 || return 0
-
-  # A web session that ends without running its EXIT trap — closed terminal
-  # window, SIGHUP, a laptop that slept — leaves its SSH tunnel behind. The
-  # forward keeps holding the host port but leads into a VM where opencode is
-  # gone, so every browser on the LAN hits a dead port, and the next start
-  # refuses to run on the very port the user always uses. Reclaim that case:
-  # the tunnel is ours, and a probe through it says whether anything still
-  # answers behind it.
-  local own_pids
-  own_pids="$(pgrep -f "ssh -f -N .*-L 0\.0\.0\.0:${port}:127\.0\.0\.1:" 2>/dev/null || true)"
-  if [[ -n "$own_pids" ]]; then
-    if curl -fsSk -o /dev/null --max-time 3 "https://127.0.0.1:${port}/" 2>/dev/null ||
-       curl -fsS  -o /dev/null --max-time 3 "http://127.0.0.1:${port}/"  2>/dev/null; then
-      echo "Port $port is serving a live opencode-vm session." >&2
-      echo "Reconnect with 'opencode-vm attach', or pick another port with --port <PORT>." >&2
-      exit 1
-    fi
-    echo "[run] Port $port was held by a stale web tunnel from an earlier session — reclaiming it."
-    local _tp
-    for _tp in $own_pids; do kill "$_tp" 2>/dev/null || true; done
-    rm -f /tmp/ocvm-tunnel-*-"${port}".pid
-    local _wait
-    for _wait in 1 2 3 4 5 6 7 8 9 10; do
-      lsof -i :"$port" -sTCP:LISTEN >/dev/null 2>&1 || return 0
-      sleep 0.3
-    done
+# A web session owns a contiguous block of ports. Externally:
+#
+#   P      web  HTTPS      P+2    a2a HTTPS
+#   P+1    web  HTTP       P+3    a2a HTTP
+#
+# and inside the VM, never tunnelled to the LAN:
+#
+#   P-1    opencode backend
+#   P-2    opencode-a2a
+#
+# The offsets are a public contract — the A2A agent card has to advertise an
+# absolute URL, so they can never be allowed to drift apart. That is why the
+# whole block moves together on a collision, and why the host port and the VM
+# port are now the same number.
+validate_web_port() {
+  local p="$1"
+  if is_valid_port "$p" && (( p >= 1026 && p <= 65532 )); then
+    return 0
   fi
+  echo "Invalid --port value: $p" >&2
+  echo "opencode-vm web reserves a block around the base port:" >&2
+  echo "  P-2  opencode-a2a      (VM-internal)" >&2
+  echo "  P-1  opencode backend  (VM-internal)" >&2
+  echo "  P    web HTTPS         P+1  web HTTP" >&2
+  echo "  P+2  a2a HTTPS         P+3  a2a HTTP" >&2
+  echo "so the base port must be between 1026 and 65532." >&2
+  exit 2
+}
 
-  echo "Port $port is already in use on the host." >&2
-  echo "Use --port <PORT> to specify a different port." >&2
-  exit 1
+# True when something already holds 0.0.0.0:<port>. Listeners bound only to
+# 127.0.0.1 are not a conflict — that is how our tunnels coexist with Lima's
+# own loopback auto-forward.
+_port_wildcard_busy() {
+  lsof -nP -iTCP:"$1" -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {print $9}' \
+    | grep -qE '(^\*|^0\.0\.0\.0|^\[::\]|^\[::0\]):'
+}
+
+# Can we bind 0.0.0.0:<port> for <vm>? Reclaims a dead tunnel of our own on the
+# way — a web session that ends without its EXIT trap (closed terminal, SIGHUP,
+# a laptop that slept) leaves the forward holding the port with nothing behind
+# it, and the next start would otherwise refuse the very port the user always
+# uses. Returns, never exits: the caller shifts the whole block instead.
+_port_free_for_bind() {
+  local port="$1" own_pids _tp _wait
+  if ! _port_wildcard_busy "$port"; then
+    # The policy socat units bind these same numbers on 127.0.0.1 inside the
+    # VM, where they would silently shadow a proxy of ours.
+    case " ${HOST_TCP_PORTS:-} " in *" $port "*) return 1 ;; esac
+    return 0
+  fi
+  own_pids="$(pgrep -f "ssh -f -N .*-L 0\.0\.0\.0:${port}:127\.0\.0\.1:" 2>/dev/null || true)"
+  [[ -n "$own_pids" ]] || return 1
+  if curl -fsSk -o /dev/null --max-time 3 "https://127.0.0.1:${port}/" 2>/dev/null ||
+     curl -fsS  -o /dev/null --max-time 3 "http://127.0.0.1:${port}/"  2>/dev/null; then
+    return 1   # a live session — another project. Shift.
+  fi
+  echo "[tunnel] Port $port was held by a stale tunnel from an earlier session — reclaiming it."
+  for _tp in $own_pids; do kill "$_tp" 2>/dev/null || true; done
+  rm -f /tmp/ocvm-tunnel-*-"${port}".pid
+  for _wait in 1 2 3 4 5 6 7 8 9 10; do
+    _port_wildcard_busy "$port" || return 0
+    sleep 0.3
+  done
+  return 1
 }
 
 parse_web_flags() {
   SESSION_PORT="$DEFAULT_OC_PORT"
   SESSION_PASSWORD=""
+  # "" = keep whatever the session already has (so a bare reconnect does not
+  # silently unprotect it), "set" = adopt SESSION_PASSWORD, "clear" = --no-auth.
+  SESSION_AUTH_MODE=""
+  SESSION_REQUIRE_A2A=0
+  SESSION_A2A="${OCVM_A2A:-1}"
+  local _saw_password="" _saw_no_auth=""
   OC_WEB_TUI=false
   # HTTPS by default: opencode hashes attachments via crypto.subtle, which
   # browsers expose only to secure origins, so plain HTTP over a LAN address
@@ -240,8 +295,11 @@ parse_web_flags() {
     case "$1" in
       --port)   shift; SESSION_PORT="${1:?Missing port value}" ;;
       --port=*) SESSION_PORT="${1#*=}" ;;
-      --password)   shift; SESSION_PASSWORD="${1:?Missing password value}" ;;
-      --password=*) SESSION_PASSWORD="${1#*=}" ;;
+      --password)   shift; SESSION_PASSWORD="${1:?Missing password value}"; SESSION_AUTH_MODE="set"; _saw_password=1 ;;
+      --password=*) SESSION_PASSWORD="${1#*=}"; SESSION_AUTH_MODE="set"; _saw_password=1 ;;
+      --no-auth) SESSION_AUTH_MODE="clear"; SESSION_PASSWORD=""; _saw_no_auth=1 ;;
+      --require-a2a) SESSION_REQUIRE_A2A=1 ;;
+      --no-a2a) SESSION_A2A=0 ;;
       --tui) OC_WEB_TUI=true ;;
       --tls) SESSION_TLS=1 ;;
       --no-tls) SESSION_TLS=0 ;;
@@ -253,6 +311,24 @@ parse_web_flags() {
     esac
     shift
   done
+
+  # --password and --no-auth say opposite things about the same session.
+  if [[ -n "${_saw_password:-}" && -n "${_saw_no_auth:-}" ]]; then
+    echo "--password and --no-auth are mutually exclusive." >&2
+    exit 2
+  fi
+
+  # Host environment as a fallback source of the secret, so it never has to
+  # appear on a command line (where it lands in the shell history and in ps).
+  if [[ -z "$SESSION_AUTH_MODE" ]]; then
+    if [[ -n "${OCVM_WEB_PASSWORD:-}" ]]; then
+      SESSION_PASSWORD="$OCVM_WEB_PASSWORD"
+      SESSION_AUTH_MODE="set"
+    elif [[ -n "${OPENCODE_SERVER_PASSWORD:-}" ]]; then
+      SESSION_PASSWORD="$OPENCODE_SERVER_PASSWORD"
+      SESSION_AUTH_MODE="set"
+    fi
+  fi
 }
 
 parse_start_flags() {
@@ -1150,25 +1226,33 @@ proxmox_ensure_installed_in_base() {
   local install_stamp_version="2"
   local stamp_path="$venv_path/.ocvm-proxmox-install-v$install_stamp_version"
 
-  # Skip only when the stamp for the current recipe version is present.
-  if vm_exec "$BASE_NAME" "test -f $stamp_path" 2>/dev/null; then
-    return 0
-  fi
-
-  # Need the base VM running for the install. Start if stopped.
+  # Need the base VM running even for the stamp probe — `limactl shell`
+  # against a stopped instance can't check the disk, and Lima >=2.x would
+  # interactively ask to start it.
   local started_base=0
   if ! is_vm_running "$BASE_NAME"; then
-    run_with_spinner "[proxmox] Starting base VM to install MCP server..." limactl start "$BASE_NAME" --tty=false || {
+    run_with_spinner "[proxmox] Starting base VM to check/install MCP server..." limactl start "$BASE_NAME" --tty=false || {
       echo "[proxmox] Could not start base VM; MCP will not be available this session." >&2
       return 1
     }
     started_base=1
   fi
 
+  # Skip only when the stamp for the current recipe version is present.
+  # Deliberately leave the base running even if we started it: start_session
+  # stops the base before cloning regardless, and searxng's ensure-step may
+  # need it up next — stopping here would just force a second boot.
+  if vm_exec "$BASE_NAME" "test -f $stamp_path" 2>/dev/null; then
+    return 0
+  fi
+
   echo "[proxmox] Installing ProxmoxMCP into base VM (first-run only, ~20-40s)..."
-  # ProxmoxMCP's pyproject.toml pins `mcp @ git+.../python-sdk.git` (main),
-  # which currently removes the `mcp.server.fastmcp` module ProxmoxMCP imports.
-  # We force-install the last released `mcp` that still ships FastMCP.
+  # ProxmoxMCP's pyproject.toml pins `mcp @ git+.../python-sdk.git` — the
+  # unpinned main branch, which is no longer pip-installable: it depends on an
+  # unpublished `mcp-types` dev version and partly requires Python >=3.14, so
+  # dependency resolution fails before anything installs. Rewrite the pin to
+  # the last released `mcp` that still ships the `mcp.server.fastmcp` module
+  # ProxmoxMCP imports, BEFORE pip ever sees the pyproject.
   local mcp_sdk_pin="mcp==1.27.0"
   vm_exec "$BASE_NAME" "
     set -euo pipefail
@@ -1177,13 +1261,13 @@ proxmox_ensure_installed_in_base() {
       git clone --depth=1 --branch '$ref' '$repo' $src_path
     else
       git -C $src_path fetch --depth=1 origin '$ref' >/dev/null 2>&1 || true
-      git -C $src_path checkout -q FETCH_HEAD 2>/dev/null || true
+      git -C $src_path checkout -q -f FETCH_HEAD 2>/dev/null || true
     fi
+    sed -i 's|\"mcp @ git+[^\"]*\"|\"$mcp_sdk_pin\"|' $src_path/pyproject.toml
     rm -rf $venv_path
     python3 -m venv $venv_path
     $venv_path/bin/pip install --quiet --upgrade pip
     $venv_path/bin/pip install --quiet -e $src_path
-    $venv_path/bin/pip install --quiet --force-reinstall '$mcp_sdk_pin'
     $venv_path/bin/python -c 'from mcp.server.fastmcp import FastMCP'
     touch $stamp_path
   " || {
@@ -2300,6 +2384,73 @@ graphify_persist_save_for_session() {
 # at all is one short limactl shell roundtrip — negligible vs. session start.
 # Called from both start_session (fresh) and attach_session (reconnect/resume).
 # $1 = lima session VM name (e.g. oc-20260508-152352)
+# --- opencode-a2a runtime -------------------------------------------------
+#
+# Installed into the base image so session clones inherit it, and re-checked per
+# session because a VM cloned before this feature existed never saw that
+# install. Same stamp-file shape as proxmox_ensure_installed_in_base and
+# searxng_ensure_installed_in_base.
+#
+# pipx, not `uv tool install` (which is what upstream documents): pipx is
+# already in the base image and is how graphify is installed, and the package is
+# an ordinary wheel, so there is nothing to gain from adding a second Python
+# tool installer.
+_a2a_install_snippet() {
+  cat <<A2ASNIP
+set -e
+venv="$OCVM_A2A_VENV"
+stamp="\$venv/.ocvm-a2a-install-v$OCVM_A2A_STAMP_VERSION"
+if [ -f "\$stamp" ]; then exit 0; fi
+rm -rf "\$venv"
+python3 -m venv "\$venv"
+"\$venv/bin/pip" install --quiet --upgrade pip
+"\$venv/bin/pip" install --quiet "$OCVM_A2A_SPEC"
+touch "\$stamp"
+A2ASNIP
+}
+
+a2a_ensure_installed_in_base() {
+  [[ "${OCVM_A2A:-1}" != "0" ]] || return 0
+  local stamp="$OCVM_A2A_VENV/.ocvm-a2a-install-v$OCVM_A2A_STAMP_VERSION"
+  if vm_exec "$BASE_NAME" "test -f $stamp" 2>/dev/null; then
+    return 0
+  fi
+  local started_base=0
+  if ! is_vm_running "$BASE_NAME"; then
+    run_with_spinner "[a2a] Starting base VM to install opencode-a2a..." limactl start "$BASE_NAME" --tty=false || {
+      echo "[a2a] Could not start base VM; A2A will be installed per-session instead." >&2
+      return 1
+    }
+    started_base=1
+  fi
+  if run_with_spinner "[a2a] Installing $OCVM_A2A_SPEC into base VM..." \
+       vm_exec "$BASE_NAME" "$(_a2a_install_snippet)"; then
+    echo "[a2a] opencode-a2a installed in base VM."
+  else
+    echo "[a2a] WARNING: install in base VM failed; will retry per-session." >&2
+  fi
+  if (( started_base == 1 )); then
+    limactl stop "$BASE_NAME" 2>/dev/null || true
+  fi
+  return 0
+}
+
+# Session-level self-heal. Non-fatal by design: a missing sidecar must never
+# cost the user the web UI (see --require-a2a for the opposite policy).
+a2a_ensure_installed_in_vm() {
+  local vm="$1"
+  [[ "${OCVM_A2A:-1}" != "0" ]] || return 0
+  [[ -n "$vm" ]] || return 0
+  local stamp="$OCVM_A2A_VENV/.ocvm-a2a-install-v$OCVM_A2A_STAMP_VERSION"
+  if vm_exec "$vm" "test -f $stamp" 2>/dev/null; then
+    return 0
+  fi
+  run_with_spinner "[a2a] Installing $OCVM_A2A_SPEC in session VM (one-time)..." \
+    vm_exec "$vm" "$(_a2a_install_snippet)" ||
+    echo "[a2a] WARNING: could not install opencode-a2a; the A2A endpoints will be unavailable." >&2
+  return 0
+}
+
 graphify_ensure_mcp_in_vm() {
   local sess="${1:?sess}"
   vm_exec "$sess" '
@@ -6192,25 +6343,118 @@ warn_if_browser_unsafe_port() {
   echo ""
 }
 
-# Web-mode forwarding: SSH tunnel from host(0.0.0.0:hostPort) → VM(127.0.0.1:vmPort).
+# Web-mode forwarding: one SSH process carrying all four public forwards of the
+# port block, host(0.0.0.0:X) -> VM(127.0.0.1:X).
 #
-# Layered design — co-existence with Lima's auto-port-forward:
-#   - opencode binds 127.0.0.1 inside the VM (not 0.0.0.0). Lima still creates
-#     an auto-forward via the second portForwards rule (guestIPMustBeZero:
-#     false → host-IP 127.0.0.1), so the host gets a loopback-only listener
-#     "for free" — a second path to opencode if our tunnel ever dies.
-#   - Our SSH tunnel binds 0.0.0.0:hostPort — different bind address, no
-#     conflict with Lima's 127.0.0.1:hostPort listener. The LAN/NetBird path
-#     is exclusively the tunnel.
+# One ssh, not four:
+#   - ExitOnForwardFailure=yes makes the whole block bind atomically. Either all
+#     four ports are reserved or none are, so there is no window in which the
+#     P/P+1/P+2/P+3 relationship is half-established, and no TOCTOU gap between
+#     probing a port and binding it.
+#   - One PID, one pidfile, one teardown. Nothing here ever needs to drop a
+#     single forward: the offsets are a public contract, so if P+2 is taken the
+#     whole block has to move anyway.
 #
-# Robustness:
-#   - On bind conflict (e.g. stale Lima auto-forward on 0.0.0.0 from a prior
-#     session that used --hostname 0.0.0.0), we try hostPort+1..hostPort+9 and
-#     surface the actually-bound port via WEB_TUNNEL_HOST_PORT.
-#   - VM-side port stays the user-requested one — opencode --port doesn't
-#     change. Only the externally-visible host port may shift.
-WEB_TUNNEL_HOST_PORT=""
-WEB_TUNNEL_LOOPBACK_OK=""
+# Co-existence with Lima's auto-port-forward:
+#   - The proxies bind 127.0.0.1 inside the VM. Lima still creates an
+#     auto-forward (guestIPMustBeZero: false -> host-IP 127.0.0.1), so the host
+#     gets loopback-only listeners for free.
+#   - These forwards bind 0.0.0.0 — a different bind address, no conflict. The
+#     LAN/NetBird path is exclusively this tunnel.
+#
+# Host port == VM port. Before the A2A work only the host port shifted on a
+# collision, which is unrepresentable now that the agent card must advertise an
+# absolute URL: the effective base is chosen here and then handed to the VM.
+WEB_PORT_BASE=""
+
+# $1 vm name, $2 requested base port. On success WEB_PORT_BASE holds the base
+# that was actually reserved.
+start_web_tunnels() {
+  local vm="$1" req="$2"
+  [[ -n "$vm" && -n "$req" ]] || return 1
+  WEB_PORT_BASE=""
+
+  local ssh_port
+  ssh_port="$(limactl list -f '{{.SSHLocalPort}}' "$vm" 2>/dev/null)"
+  if [[ -z "$ssh_port" || "$ssh_port" == "0" || ! "$ssh_port" =~ ^[0-9]+$ ]]; then
+    echo "[tunnel] ERROR: could not determine SSH port for $vm (got: '$ssh_port')" >&2
+    return 1
+  fi
+
+  load_policy 2>/dev/null || true   # for the HOST_TCP_PORTS overlap check
+
+  local base p ok pid
+  for base in $(seq "$req" $((req + 9))); do
+    # Sweep any tunnel of ours left on this base before probing it.
+    stop_web_tunnels "$vm" "$base" >/dev/null 2>&1 || true
+    ok=1
+    for p in "$base" $((base + 1)) $((base + 2)) $((base + 3)); do
+      if ! _port_free_for_bind "$p"; then ok=0; break; fi
+    done
+    (( ok )) || continue
+
+    if ssh -f -N -F /dev/null \
+        -o IdentityFile="$HOME/.lima/_config/user" \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o NoHostAuthenticationForLocalhost=yes \
+        -o IdentitiesOnly=yes \
+        -o ExitOnForwardFailure=yes \
+        -o ServerAliveInterval=30 \
+        -o ControlMaster=no \
+        -L "0.0.0.0:${base}:127.0.0.1:${base}" \
+        -L "0.0.0.0:$((base + 1)):127.0.0.1:$((base + 1))" \
+        -L "0.0.0.0:$((base + 2)):127.0.0.1:$((base + 2))" \
+        -L "0.0.0.0:$((base + 3)):127.0.0.1:$((base + 3))" \
+        -p "$ssh_port" "${USER}@127.0.0.1" 2>/dev/null; then
+      pid="$(pgrep -f "ssh -f -N .*-L 0\.0\.0\.0:${base}:127\.0\.0\.1:${base} .*-p ${ssh_port} " | head -1)"
+      # The Lima SSH port goes in as line 2: after `limactl delete` the instance
+      # can no longer be looked up, and without it the fallback sweep below
+      # would not be able to tell this VM's tunnel from another VM's.
+      [[ -n "$pid" ]] && printf '%s\n%s\n' "$pid" "$ssh_port" > "/tmp/ocvm-tunnel-${vm}-${base}.pid"
+      WEB_PORT_BASE="$base"
+      if [[ "$base" != "$req" ]]; then
+        echo "[tunnel] Requested base port ${req} was unavailable — the block moved to ${base}."
+      fi
+      echo "[tunnel] LAN tunnels up (pid ${pid:-?}): ${base} web/https, $((base + 1)) web/http, $((base + 2)) a2a/https, $((base + 3)) a2a/http"
+      # Both browser-facing ports, since an unsafe number on P+1 is otherwise
+      # invisible until a browser silently refuses to connect.
+      warn_if_browser_unsafe_port "$base"
+      warn_if_browser_unsafe_port "$((base + 1))"
+      return 0
+    fi
+  done
+
+  echo "[tunnel] ERROR: no free block of four consecutive host ports in ${req}..$((req + 12))." >&2
+  echo "[tunnel]   web mode needs P (web https), P+1 (web http), P+2 (a2a https), P+3 (a2a http)." >&2
+  echo "[tunnel]   Diagnose: lsof -nP -iTCP:${req}-$((req + 12)) -sTCP:LISTEN" >&2
+  echo "[tunnel]   Pick another base: opencode-vm web --port 8080" >&2
+  echo "[tunnel]   If a limactl process holds one, stop & restart the VM to clear it:" >&2
+  echo "[tunnel]     limactl stop ${vm} && limactl start ${vm}" >&2
+  return 1
+}
+
+# Idempotent, and safe for a base that was never bound. One call tears down all
+# four forwards, because they share a single ssh process.
+stop_web_tunnels() {
+  local vm="$1" base="$2" pidfile pid ssh_port
+  [[ -n "$vm" && -n "$base" ]] || return 0
+  pidfile="/tmp/ocvm-tunnel-${vm}-${base}.pid"
+  if [[ -f "$pidfile" ]]; then
+    pid="$(sed -n 1p "$pidfile" 2>/dev/null || true)"
+    ssh_port="$(sed -n 2p "$pidfile" 2>/dev/null || true)"
+    [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+    rm -f "$pidfile"
+  fi
+  # Fallback for a torn pidfile. Scoped by the Lima SSH port, which is the only
+  # per-VM token in the ssh argv — without it this would kill another VM's
+  # tunnel on the same host port.
+  [[ -z "${ssh_port:-}" ]] && ssh_port="$(limactl list -f '{{.SSHLocalPort}}' "$vm" 2>/dev/null || true)"
+  if [[ -n "${ssh_port:-}" && "$ssh_port" != "0" ]]; then
+    pkill -f "ssh -f -N .*-L 0\.0\.0\.0:${base}:127\.0\.0\.1:${base} .*-p ${ssh_port} " 2>/dev/null || true
+  fi
+  return 0
+}
 
 # ---------------------------------------------------------------------------
 # In-VM web redirector
@@ -6275,8 +6519,10 @@ WORKTREE = decode_key(KEY)
 #
 # showCustomAgents needs agentVisibilityInitialized alongside it, otherwise the
 # app's own initializer overwrites the value on first boot. app-version.v1 marks
-# the install as not-brand-new so the onboarding overlay does not cover the UI;
-# the app rewrites that key with its real version as soon as it loads.
+# the install as not-brand-new so the onboarding overlay does not cover the UI.
+# Note the app does NOT rewrite that key afterwards, so the pinned value stays
+# put: the cost is that one future "what is new" panel may be skipped, which is
+# preferable to an overlay covering the session list on every new device.
 SEED_JS = """
 (function () {
   var dir = %s, key = %s;
@@ -6336,6 +6582,11 @@ def header_value(rest, wanted):
 
 
 def wants_seed_page(head):
+    # No project key means this listener fronts something that is not the web UI
+    # (the a2a endpoints). Without this guard the seed page would be served with
+    # an empty key and bounce the client back to "/" forever.
+    if not KEY:
+        return False
     # Browser navigation to the bare root only. Everything else — the REST API,
     # the host-side tunnel probe, opencode attach — passes straight through.
     line, _, rest = head.partition(b"\r\n")
@@ -6482,95 +6733,506 @@ while True:
     threading.Thread(target=handle, args=(conn,), daemon=True).start()
 PYSRC
 
-start_web_tunnel() {
-  local vm_name="$1" requested_port="$2"
-  [[ -n "$vm_name" && -n "$requested_port" ]] || return 1
-  WEB_TUNNEL_HOST_PORT=""
-  WEB_TUNNEL_LOOPBACK_OK=""
+# ---------------------------------------------------------------------------
+# In-VM web library
+#
+# start_session and attach_session each drive opencode inside the VM through a
+# single-quoted `bash -lc` script, and both carried the same ~110 lines of
+# TLS/redirector/banner plumbing. Two copies is how they drifted apart in the
+# first place, so the shared part lives here once and is materialized into the
+# session share by install_web_lib(); the in-VM scripts source it.
+#
+# A file rather than another argv element, because the share is virtiofs-mounted
+# into the VM at the same absolute path: the "no single quotes anywhere" rule
+# that governs the in-VM script does not apply in here, the result can be linted
+# and run in place (bash -n ~/.opencode-vm/sessions/<md5>/lib/web.sh), and the
+# `limactl shell` command line stays short.
+#
+# Contract. The caller sets these before sourcing:
+#   PROJ_DIR SESS_SHARE OC_PORT OC_HOST_IP OC_TLS
+#   OC_DIR_KEY        (needed by start_web_proxies, may be set after sourcing)
+#   OC_BANNER_SUFFIX  appended to the banner title, e.g. " — resumed"
+#   OC_BANNER_VERBOSE 1 to include the REST-API paragraph
+# and reads these back:
+#   OC_PORT_INTERNAL OC_A2A_INTERNAL OC_SCHEME OC_TLS_CERT OC_TLS_KEY
+#   OC_PASSWORD OC_USERNAME
+#
+# Sourced under `set -euo pipefail`, so nothing here may exit non-zero on a
+# path the caller tolerates, and the shared globals above must never be
+# declared `local`.
+read -r -d '' OCVM_WEB_LIB_SH <<'WEBLIB' || true
+OC_PORT_INTERNAL=$(( OC_PORT - 1 ))
+OC_A2A_INTERNAL=$(( OC_PORT - 2 ))
+OC_SCHEME=http
+OC_TLS_CERT=""
+OC_TLS_KEY=""
+OC_PROXY_PY=/tmp/ocvm-proxy.py
 
-  local ssh_port
-  ssh_port="$(limactl list -f '{{.SSHLocalPort}}' "$vm_name" 2>/dev/null)"
-  if [[ -z "$ssh_port" || "$ssh_port" == "0" || ! "$ssh_port" =~ ^[0-9]+$ ]]; then
-    echo "[tunnel] ERROR: could not determine SSH port for $vm_name (got: '$ssh_port')" >&2
-    return 1
+# Every proxy this library knows how to start. stop_all_proxies sweeps it, so
+# adding a listener means adding its name here and nowhere else.
+OC_PROXY_NAMES="web-tls web-plain a2a-tls a2a-plain"
+
+# A pidfile is only acted on when the process it names still carries the marker
+# we launched it with. Every supervisor is started as `bash -c ... <marker>`, so
+# the marker is its $0 and lands in its own /proc cmdline, and every child gets
+# the same marker as an argument it ignores. Deliberately independent of the
+# caller: an earlier version matched the parent shell's argv instead, which
+# fails silently — the pidfile is removed and the process is left running,
+# holding its port forever.
+#
+# pkill -f is not an option and must not be reintroduced: the entire in-VM
+# script is one `bash -lc` argument, so any pattern naming a proxy also matches
+# the session shell itself and would take the whole session down with it,
+# skipping the EXIT trap that syncs provider logins and chat history back.
+_pid_has_marker() {
+  [ -n "${1:-}" ] || return 1
+  grep -qsF "$2" "/proc/$1/cmdline"
+}
+
+# TLS terminates in the proxy so the browser origin is a secure context: the
+# opencode web UI hashes attachments through crypto.subtle, which browsers
+# withhold from insecure origins, so over a LAN IP attaching files fails
+# (opencode issues 11452 / 12989). Upstream stays plain HTTP on loopback.
+# The certificate lives in the session share and is reused as long as it still
+# covers the current host IP, so a browser exception survives session restarts
+# instead of prompting every time.
+ensure_web_tls() {
+  [ "$OC_TLS" = "1" ] || return 0
+  if ! command -v openssl >/dev/null 2>&1; then
+    echo "[web] openssl missing — staying on plain HTTP."
+    return 0
   fi
-
-  # Sweep any stale tunnel of ours for this VM+requested port (and adjacent
-  # fallback ports) before trying to bind. Idempotent.
-  local p
-  for p in $(seq "$requested_port" $((requested_port + 9))); do
-    stop_web_tunnel "$vm_name" "$p" >/dev/null 2>&1 || true
-  done
-
-  local try_port offset pid bound_pid
-  for offset in 0 1 2 3 4 5 6 7 8 9; do
-    try_port=$((requested_port + offset))
-
-    # Pre-flight: is 0.0.0.0:try_port (or *:try_port) already bound by
-    # someone else (e.g. a stale Lima 0.0.0.0 auto-forward)? We accept
-    # 127.0.0.1-only listeners — those don't conflict with 0.0.0.0 binds.
-    if lsof -nP -iTCP:"$try_port" -sTCP:LISTEN 2>/dev/null \
-         | awk 'NR>1 {print $9}' \
-         | grep -qE '(^\*|^0\.0\.0\.0|^\[::\]|^\[::0\]):'; then
-      if [[ $offset -eq 0 ]]; then
-        echo "[tunnel] Host port $try_port is already bound on 0.0.0.0 (likely a stale auto-forward)."
-      else
-        echo "[tunnel]   ...port $try_port also busy, trying next..."
-      fi
-      continue
+  local dir="$SESS_SHARE/tls"
+  local crt="$dir/cert.pem"
+  local key="$dir/key.pem"
+  mkdir -p "$dir"
+  local need=1
+  if [ -f "$crt" ] && [ -f "$key" ]; then
+    if openssl x509 -in "$crt" -noout -checkend 86400 >/dev/null 2>&1 &&
+       openssl x509 -in "$crt" -noout -ext subjectAltName 2>/dev/null | grep -q "IP Address:$OC_HOST_IP"; then
+      need=0
     fi
-
-    if ssh -f -N -F /dev/null \
-        -o IdentityFile="$HOME/.lima/_config/user" \
-        -o StrictHostKeyChecking=no \
-        -o UserKnownHostsFile=/dev/null \
-        -o NoHostAuthenticationForLocalhost=yes \
-        -o IdentitiesOnly=yes \
-        -o ExitOnForwardFailure=yes \
-        -o ServerAliveInterval=30 \
-        -o ControlMaster=no \
-        -L "0.0.0.0:${try_port}:127.0.0.1:${requested_port}" \
-        -p "$ssh_port" "${USER}@127.0.0.1" 2>/dev/null; then
-      bound_pid="$(pgrep -f "ssh -f -N .*-L 0\.0\.0\.0:${try_port}:127\.0\.0\.1:${requested_port}" | head -1)"
-      [[ -n "$bound_pid" ]] && echo "$bound_pid" > "/tmp/ocvm-tunnel-${vm_name}-${try_port}.pid"
-      WEB_TUNNEL_HOST_PORT="$try_port"
-      if [[ "$try_port" == "$requested_port" ]]; then
-        echo "[tunnel] SSH tunnel up: host 0.0.0.0:${try_port} → VM 127.0.0.1:${requested_port} (pid ${bound_pid:-?})"
-      else
-        echo "[tunnel] SSH tunnel up on FALLBACK port: host 0.0.0.0:${try_port} → VM 127.0.0.1:${requested_port}"
-        echo "[tunnel]   (requested ${requested_port} was unavailable; use port ${try_port} in browser/NetBird)"
-      fi
-      warn_if_browser_unsafe_port "$try_port"
-      # Lima's parallel loopback path? Probe 127.0.0.1:requested_port.
-      # (Won't block tunnel success — informational only.)
-      if (sleep 0.5; curl -fsS --max-time 2 -o /dev/null "http://127.0.0.1:${requested_port}/" 2>/dev/null) &
-      then
-        :
-      fi
+  fi
+  if [ "$need" = "1" ]; then
+    echo "[web] Generating self-signed certificate for $OC_HOST_IP ..."
+    if ! openssl req -x509 -newkey rsa:2048 -nodes -days 825 \
+         -keyout "$key" -out "$crt" -subj "/CN=opencode-vm" \
+         -addext "subjectAltName=IP:$OC_HOST_IP,IP:127.0.0.1,DNS:localhost" \
+         >/dev/null 2>&1; then
+      echo "[web] Certificate generation failed — staying on plain HTTP."
       return 0
     fi
-  done
+    chmod 600 "$key" 2>/dev/null || true
+  fi
+  OC_TLS_CERT="$crt"
+  OC_TLS_KEY="$key"
+  OC_SCHEME=https
+  return 0
+}
 
-  echo "[tunnel] ERROR: could not establish SSH tunnel on any host port in ${requested_port}..$((requested_port + 9))" >&2
-  echo "[tunnel]   Diagnose: lsof -nP -iTCP:${requested_port} -sTCP:LISTEN" >&2
-  echo "[tunnel]   If a 'limactl' process holds the port, stop & restart the VM to clear it:" >&2
-  echo "[tunnel]     limactl stop ${vm_name} && limactl start ${vm_name}" >&2
+# Supervisor first, then its python child, so the loop cannot respawn it.
+stop_proxy() {
+  local name="$1" pidf pid marker="ocvm-proxy-$1"
+  for pidf in "/tmp/ocvm-proxy-$name.sup.pid" "/tmp/ocvm-proxy-$name.run.pid"; do
+    [ -f "$pidf" ] || continue
+    pid="$(cat "$pidf" 2>/dev/null || true)"
+    if _pid_has_marker "$pid" "$marker"; then
+      kill "$pid" 2>/dev/null || true
+    fi
+    rm -f "$pidf"
+  done
+  return 0
+}
+
+stop_all_proxies() {
+  local n
+  for n in $OC_PROXY_NAMES; do
+    stop_proxy "$n"
+  done
+  _stop_legacy_redirector
+  return 0
+}
+
+# Up to 0.5.5 the proxy was a single "redirector" with its own pidfile names and
+# its own /proc marker. Attaching to a session that is still running one has to
+# stop it here, or it keeps holding $OC_PORT and every new proxy fails to bind.
+# Uses the old marker deliberately: with --no-tls that process carries no path
+# under the session share, so the newer share-path check would not match it.
+# Can be dropped once no 0.5.5 session can still be live.
+_stop_legacy_redirector() {
+  local pidf pid
+  for pidf in /tmp/ocvm-web-redirect.sup.pid /tmp/ocvm-web-redirect.run.pid; do
+    [ -f "$pidf" ] || continue
+    pid="$(cat "$pidf" 2>/dev/null || true)"
+    if [ -n "$pid" ] && grep -qs ocvm-web-redirect "/proc/$pid/cmdline"; then
+      kill "$pid" 2>/dev/null || true
+    fi
+    rm -f "$pidf"
+  done
+  return 0
+}
+
+# start_proxy <name> <listen-port> <target-port> <seed-key> <cert> <key>
+# Idempotent. Silent on failure — the caller owns the message, because what a
+# dead listener means differs per service. Returns non-zero if nothing is
+# listening after ~4s.
+start_proxy() {
+  local name="$1" listen="$2" target="$3" seedkey="$4" crt="$5" keyf="$6"
+  local waited=0 marker="ocvm-proxy-$1"
+  stop_proxy "$name"
+  # `bash -c <loop> <marker> ...` rather than a forked subshell, so the marker
+  # is the supervisor's own $0 and stop_proxy can identify it without knowing
+  # anything about who started it. Detached from the terminal because a
+  # background job holding stdout keeps `limactl shell` from ever returning.
+  setsid bash -c '
+    marker="$0"; name="$1"; py="$2"; listen="$3"; target="$4"
+    key="$5"; crt="$6"; keyf="$7"
+    while true; do
+      python3 "$py" "$listen" "$target" "$key" "$crt" "$keyf" "$marker" \
+        >>"/tmp/ocvm-proxy-$name.log" 2>&1 &
+      echo $! > "/tmp/ocvm-proxy-$name.run.pid"
+      wait $! || true
+      sleep 1
+    done' "$marker" "$name" "$OC_PROXY_PY" "$listen" "$target" "$seedkey" "$crt" "$keyf" \
+    </dev/null >/dev/null 2>&1 &
+  echo $! > "/tmp/ocvm-proxy-$name.sup.pid"
+  while [ "$waited" -lt 20 ]; do
+    if ss -ltn "sport = :$listen" 2>/dev/null | grep -q LISTEN; then
+      return 0
+    fi
+    sleep 0.2
+    waited=$(( waited + 1 ))
+  done
+  stop_proxy "$name"
   return 1
 }
 
-stop_web_tunnel() {
-  local vm_name="$1" port="$2"
-  [[ -n "$vm_name" && -n "$port" ]] || return 0
-  local pidfile="/tmp/ocvm-tunnel-${vm_name}-${port}.pid"
-  if [[ -f "$pidfile" ]]; then
-    local pid
-    pid="$(cat "$pidfile" 2>/dev/null)"
-    [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
-    rm -f "$pidfile"
+# The Basic-auth secret arrives through a 0600 file in the session share, not
+# through argv — see write_session_auth() on the host for why. Sets OC_PASSWORD
+# and OC_USERNAME for the banner and exports what opencode itself reads.
+load_session_auth() {
+  OC_PASSWORD=""
+  OC_USERNAME=opencode
+  if [ -f "$SESS_SHARE/auth.env" ]; then
+    . "$SESS_SHARE/auth.env"
+    OC_PASSWORD="${OPENCODE_SERVER_PASSWORD:-}"
+    OC_USERNAME="${OPENCODE_SERVER_USERNAME:-opencode}"
   fi
-  # Belt-and-suspenders: kill anything matching the same -L spec, regardless
-  # of pidfile presence (covers manual cleanups and torn pidfiles).
-  pkill -f "ssh -f -N .*-L 0\.0\.0\.0:${port}:127\.0\.0\.1:" 2>/dev/null || true
+  if [ -n "$OC_PASSWORD" ]; then
+    export OPENCODE_SERVER_USERNAME="$OC_USERNAME"
+    export OPENCODE_SERVER_PASSWORD="$OC_PASSWORD"
+  else
+    unset OPENCODE_SERVER_PASSWORD 2>/dev/null || true
+  fi
+  return 0
+}
+
+# Puts the proxy in front of opencode: it takes over $OC_PORT (the port the SSH
+# tunnel forwards to) and opencode moves to $OC_PORT_INTERNAL, so no host-side
+# URL, tunnel or firewall rule changes. Fails safe: if the proxy does not come
+# up, opencode goes back on $OC_PORT directly and web mode behaves exactly as
+# it did before the redirector existed.
+start_web_proxies() {
+  load_session_auth
+  # Before binding anything: a pre-0.5.6 redirector may still own $OC_PORT.
+  _stop_legacy_redirector
+  if [ ! -f "$SESS_SHARE/lib/proxy.py" ] || ! command -v python3 >/dev/null 2>&1; then
+    echo "[web] No redirector available — root URL will show the project launcher."
+    return 0
+  fi
+  ensure_web_tls
+  # The block is contiguous and relative to the effective base, so the internal
+  # ports move with it. The host reserved P..P+3 before handing P down here.
+  OC_PORT_INTERNAL=$(( OC_PORT - 1 ))
+  OC_A2A_INTERNAL=$(( OC_PORT - 2 ))
+  # Run from /tmp rather than straight off the share: the supervisor re-reads
+  # the script on every respawn, and a stalled virtiofs mount would turn one
+  # proxy crash into a permanently dead listener.
+  if ! cp -f "$SESS_SHARE/lib/proxy.py" "$OC_PROXY_PY"; then
+    echo "[web] Could not stage the proxy — root URL will show the project launcher."
+    OC_PORT_INTERNAL="$OC_PORT"
+    OC_SCHEME=http
+    return 0
+  fi
+  if ! start_proxy web-tls "$OC_PORT" "$OC_PORT_INTERNAL" "$OC_DIR_KEY" "$OC_TLS_CERT" "$OC_TLS_KEY"; then
+    echo "[web] Redirector did not bind port $OC_PORT — falling back to opencode on $OC_PORT directly."
+    stop_all_proxies
+    OC_PORT_INTERNAL="$OC_PORT"
+    OC_SCHEME=http
+    return 0
+  fi
+
+  # The plain-HTTP twins are not a --no-tls thing: they exist so clients that
+  # cannot be taught to trust a self-signed certificate (OpenCode Desktop,
+  # `opencode attach`, and every A2A client tested so far) still have a way in.
+  # The listener set deliberately does not branch on $OC_TLS — when TLS is off
+  # OC_TLS_CERT is empty and the "tls" listeners simply run plain, so P+1 is
+  # always the plain web port and P+3 always the plain a2a port. Mirroring that
+  # rule host-side would be a second source of truth, and ensure_web_tls can
+  # degrade at runtime (missing openssl, cert failure) in ways the host cannot
+  # predict — which would leave LAN ports tunnelled to nothing.
+  start_proxy web-plain "$(( OC_PORT + 1 ))" "$OC_PORT_INTERNAL" "$OC_DIR_KEY" "" "" ||
+    echo "[web] WARNING: plain-HTTP web endpoint on $(( OC_PORT + 1 )) did not come up."
+
+  # The a2a listeners come up here too, even though the sidecar behind them is
+  # not running yet. A proxy splices per connection, so it does not need its
+  # upstream at bind time — and it cannot wait for one: `opencode web` is
+  # started after this function returns, the sidecar waits for `opencode web`,
+  # so anything gated on sidecar readiness here could never be satisfied.
+  # Until the sidecar answers, these ports refuse connections rather than
+  # accepting and hanging, which is the honest failure mode.
+  if [ "${OC_A2A:-1}" = "1" ]; then
+    start_proxy a2a-tls   "$(( OC_PORT + 2 ))" "$OC_A2A_INTERNAL" "" "$OC_TLS_CERT" "$OC_TLS_KEY" ||
+      echo "[a2a] WARNING: HTTPS endpoint on $(( OC_PORT + 2 )) did not come up."
+    start_proxy a2a-plain "$(( OC_PORT + 3 ))" "$OC_A2A_INTERNAL" "" "" "" ||
+      echo "[a2a] WARNING: HTTP endpoint on $(( OC_PORT + 3 )) did not come up."
+  fi
+  return 0
+}
+
+# --- A2A sidecar ----------------------------------------------------------
+#
+# One OpenCode runtime, two protocol surfaces: the adapter talks to the very
+# same `opencode web` over loopback, never back through the TLS proxy, so A2A
+# tasks land in the same sessions and the same workspace the browser sees.
+#
+# The credential registry is never empty — opencode-a2a refuses to start without
+# one. With a session password both a basic and a bearer entry carry it; without
+# one they carry OC_A2A_DEFAULT_SECRET. Both schemes are registered because
+# A2A clients differ: some send Basic, and the orchestrators tested (Hermes)
+# only ever send Bearer.
+a2a_credentials_json() {
+  local secret="$1" user="$2"
+  jq -cn --arg u "$user" --arg p "$secret" '[
+    {scheme:"basic",  username:$u, password:$p},
+    {scheme:"bearer", token:$p,    principal:$u}
+  ]'
+}
+
+stop_a2a() {
+  local pid pidf marker pidf_marker
+  # Supervisor first so it cannot respawn the child, then the child. They carry
+  # different markers: the supervisor is launched with an explicit $0, while the
+  # child is the adapter itself and is recognised by its own binary path. Same
+  # marker-based ownership check as the proxies, and for the same reason:
+  # pkill -f would match the session shell's own argv.
+  for pidf_marker in "/tmp/ocvm-a2a.sup.pid:ocvm-a2a-supervisor" "/tmp/ocvm-a2a.run.pid:opencode-a2a"; do
+    pidf="${pidf_marker%%:*}"
+    marker="${pidf_marker##*:}"
+    [ -f "$pidf" ] || continue
+    pid="$(cat "$pidf" 2>/dev/null || true)"
+    if _pid_has_marker "$pid" "$marker"; then
+      kill "$pid" 2>/dev/null || true
+    fi
+    rm -f "$pidf"
+  done
+  return 0
+}
+
+# Backgrounded end to end: waits for the opencode backend, then supervises the
+# adapter. Never blocks session startup and never fails it.
+start_a2a() {
+  A2A_SECRET=""
+  if [ "${OC_A2A:-1}" != "1" ]; then
+    return 0
+  fi
+  A2A_BIN="$HOME/.local/share/opencode-a2a-venv/bin/opencode-a2a"
+  if [ ! -x "$A2A_BIN" ]; then
+    echo "[a2a] opencode-a2a is not installed in this VM — A2A endpoints unavailable."
+    echo "[a2a]   Install it with: opencode-vm init   (or re-run: opencode-vm web)"
+    return 0
+  fi
+  if [ "$OC_PORT_INTERNAL" = "$OC_PORT" ]; then
+    echo "[a2a] Skipped: the web proxy is not running, so there is no internal port to attach to."
+    return 0
+  fi
+
+  A2A_SECRET="${OC_PASSWORD:-$OC_A2A_DEFAULT_SECRET}"
+  stop_a2a
+  mkdir -p /tmp/ocvm-a2a
+
+  # Environment, not argv: a credential on a command line is readable by every
+  # process in the VM through /proc.
+  export OPENCODE_BASE_URL="http://127.0.0.1:${OC_PORT_INTERNAL}"
+  export OPENCODE_WORKSPACE_ROOT="$PROJ_DIR"
+  if [ -n "${OC_PASSWORD:-}" ]; then
+    export OPENCODE_AUTH_USERNAME="$OC_USERNAME"
+    export OPENCODE_AUTH_PASSWORD="$OC_PASSWORD"
+  fi
+  export A2A_HOST=127.0.0.1
+  export A2A_PORT="$OC_A2A_INTERNAL"
+  # The card advertises the plain-HTTP endpoint. opencode-a2a bakes exactly one
+  # public URL into the card at startup, and A2A clients follow it — advertising
+  # the HTTPS port would send every client that cannot verify our self-signed
+  # certificate straight into a handshake failure. Both endpoints reach the same
+  # process either way.
+  export A2A_PUBLIC_URL="http://${OC_HOST_IP}:$(( OC_PORT + 3 ))"
+  local creds
+  if ! creds="$(a2a_credentials_json "$A2A_SECRET" "$OC_USERNAME")" || [ -z "$creds" ]; then
+    echo "[a2a] Could not build the credential registry (is jq present?) — A2A not started."
+    return 0
+  fi
+  export A2A_STATIC_AUTH_CREDENTIALS="$creds"
+  # The project VM is the security boundary; the adapter must not be able to
+  # widen it. Directory override defaults to true upstream, so setting it false
+  # is the load-bearing line here.
+  export A2A_ALLOW_DIRECTORY_OVERRIDE=false
+  export A2A_ENABLE_SESSION_SHELL=false
+  export A2A_ENABLE_WORKSPACE_MUTATIONS=false
+  export A2A_EXPOSE_WORKSPACE_ROOT_IN_CARD=false
+  # VM-local, never on the virtiofs share: this is a live SQLite WAL workload,
+  # and the upstream default would drop opencode-a2a.db into the project dir.
+  export A2A_TASK_STORE_BACKEND=database
+  export A2A_TASK_STORE_DATABASE_URL="sqlite+aiosqlite:////tmp/ocvm-a2a/opencode-a2a.db"
+
+  # Same self-identifying supervisor shape as start_proxy. The A2A_* settings
+  # above are exported, so the child inherits them without any of them ever
+  # appearing on a command line.
+  setsid bash -c '
+    marker="$0"; bin="$1"; backend="$2"
+    waited=0
+    while [ "$waited" -lt 120 ]; do
+      if ss -ltn "sport = :$backend" 2>/dev/null | grep -q LISTEN; then break; fi
+      sleep 0.5
+      waited=$(( waited + 1 ))
+    done
+    while true; do
+      aa-exec -p opencode-sandbox -- "$bin" serve >>/tmp/ocvm-a2a.log 2>&1 &
+      echo $! > /tmp/ocvm-a2a.run.pid
+      wait $! || true
+      sleep 2
+    done' "ocvm-a2a-supervisor" "$A2A_BIN" "$OC_PORT_INTERNAL" \
+    </dev/null >/dev/null 2>&1 &
+  echo $! > /tmp/ocvm-a2a.sup.pid
+  return 0
+}
+
+# Reports readiness once `opencode web` is up and the sidecar has followed it.
+# Backgrounded because the caller goes on to run `opencode web` in the
+# foreground — this is the only place that can observe the end state.
+a2a_watch_ready() {
+  [ "${OC_A2A:-1}" = "1" ] || return 0
+  [ -x "$A2A_BIN" ] || return 0
+  ( if wait_for_a2a; then
+      echo ""
+      echo "[a2a] Ready — agent card: http://${OC_HOST_IP}:$(( OC_PORT + 3 ))/.well-known/agent-card.json"
+    else
+      echo ""
+      echo "[a2a] WARNING: the sidecar did not become ready."
+      echo "[a2a]   log: /tmp/ocvm-a2a.log (in the VM)   backend: http://127.0.0.1:${OC_PORT_INTERNAL}   a2a: ${OC_A2A_INTERNAL}"
+      if [ "${OC_REQUIRE_A2A:-0}" = "1" ]; then
+        echo "[a2a]   --require-a2a was given — stopping the session."
+        kill -TERM $$ 2>/dev/null || true
+      else
+        echo "[a2a]   Web mode continues without A2A. Use --require-a2a to make this fatal."
+      fi
+    fi ) &
+  return 0
+}
+
+# Polls the sidecar's own card on the VM-internal port. Generous, because it is
+# waiting on two startups in sequence: opencode, then the adapter.
+wait_for_a2a() {
+  local waited=0
+  [ "${OC_A2A:-1}" = "1" ] || return 1
+  [ -x "$HOME/.local/share/opencode-a2a-venv/bin/opencode-a2a" ] || return 1
+  while [ "$waited" -lt 400 ]; do
+    if curl -fsS -o /dev/null --max-time 2 \
+         "http://127.0.0.1:${OC_A2A_INTERNAL}/.well-known/agent-card.json" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.3
+    waited=$(( waited + 1 ))
+  done
+  return 1
+}
+
+print_web_banner() {
+  local plain="http://${OC_HOST_IP}"
+  echo ""
+  echo "=============================================="
+  echo "  OpenCode Web + A2A (base port $OC_PORT)${OC_BANNER_SUFFIX:-}"
+  echo "=============================================="
+  echo ""
+  echo "Web UI / REST"
+  # The short root URL is the one to hand out: it seeds this browser with the
+  # project (without which the UI filters every chat session out of view),
+  # sets sane defaults, and forwards into the project.
+  echo "  Browser:       ${OC_SCHEME}://${OC_HOST_IP}:${OC_PORT}"
+  echo "  Direct project ${OC_SCHEME}://${OC_HOST_IP}:${OC_PORT}/${OC_DIR_KEY}"
+  echo "  REST / OpenAPI ${OC_SCHEME}://${OC_HOST_IP}:${OC_PORT}/doc"
+  if [ "$OC_SCHEME" = "https" ]; then
+    echo "  Plain HTTP:    ${plain}:$(( OC_PORT + 1 ))    (no certificate to trust)"
+  fi
+  echo ""
+  if [ "${OC_A2A:-1}" = "1" ]; then
+    echo "A2A  (protocol 1.0)"
+    if [ "$OC_SCHEME" = "https" ]; then
+      echo "  HTTPS:         ${OC_SCHEME}://${OC_HOST_IP}:$(( OC_PORT + 2 ))"
+    fi
+    echo "  HTTP:          ${plain}:$(( OC_PORT + 3 ))"
+    echo "  Agent Card:    ${plain}:$(( OC_PORT + 3 ))/.well-known/agent-card.json"
+  else
+    echo "A2A"
+    echo "  disabled for this session (--no-a2a)"
+  fi
+  echo ""
+  echo "Internal (VM loopback only, not on the LAN)"
+  echo "  opencode:      http://127.0.0.1:${OC_PORT_INTERNAL}"
+  if [ "${OC_A2A:-1}" = "1" ]; then
+    echo "  opencode-a2a:  http://127.0.0.1:${OC_A2A_INTERNAL}"
+  fi
+  echo "  TUI attach:    opencode attach http://127.0.0.1:${OC_PORT_INTERNAL}"
+  echo ""
+  echo "Authentication"
+  if [ -n "${OC_PASSWORD:-}" ]; then
+    echo "  Web / REST:    HTTP Basic — enabled"
+    echo "  Username:      ${OC_USERNAME:-opencode}"
+    echo "  Password:      (the one you set; not printed)"
+    if [ "${OC_A2A:-1}" = "1" ]; then
+      echo "  A2A:           Basic or Bearer, same credentials"
+      echo "                 Bearer token = your web password"
+    fi
+  else
+    echo "  Web / REST:    none — anyone on the LAN can use this server"
+    if [ "${OC_A2A:-1}" = "1" ]; then
+      # Printing it is the point: opencode-a2a cannot run without a credential,
+      # so this is a documented constant rather than a secret.
+      echo "  A2A:           Basic or Bearer (opencode-a2a always requires one)"
+      echo "  Username:      ${OC_USERNAME:-opencode}"
+      echo "  Password:      ${A2A_SECRET:-$OC_A2A_DEFAULT_SECRET}   <- default, not a secret"
+      echo "  Bearer token:  ${A2A_SECRET:-$OC_A2A_DEFAULT_SECRET}"
+    fi
+    echo ""
+    echo "  Set one with: opencode-vm web --password <pw>   (or \$OCVM_WEB_PASSWORD)"
+  fi
+  if [ "$OC_SCHEME" = "https" ]; then
+    if [ -n "${OC_PASSWORD:-}" ]; then
+      echo ""
+      echo "  Credentials sent to the plain-HTTP endpoints are NOT protected by TLS."
+    fi
+  else
+    echo ""
+    echo "  Plain HTTP everywhere (--no-tls): file/image attachments stay broken"
+    echo "       from other devices — browsers withhold crypto.subtle from"
+    echo "       insecure origins. Use the 127.0.0.1 URL, or drop --no-tls."
+  fi
+  echo ""
+  return 0
+}
+WEBLIB
+
+# Materialize the in-VM web library and the proxy into the session share, which
+# is mounted into the VM at this same absolute path. Call before every vm_exec
+# that runs web mode, so a session created by an older version is healed on its
+# next start or attach.
+install_web_lib() {
+  local share="$1"
+  [[ -n "$share" ]] || return 1
+  local dir="$share/lib"
+  mkdir -p "$dir" || return 1
+  printf '%s\n' "$OCVM_WEB_LIB_SH"      > "$dir/web.sh"   || return 1
+  printf '%s\n' "$OCVM_WEB_REDIRECT_PY" > "$dir/proxy.py" || return 1
   return 0
 }
 
@@ -6718,6 +7380,17 @@ enter_session_shell() {
   ' "$proj_dir" "$host_lan_ip" "$sess_share"
 }
 
+_ATTACH_TUNNEL_VM=""
+_ATTACH_TUNNEL_BASE=""
+_attach_tunnel_cleanup() {
+  [[ -n "$_ATTACH_TUNNEL_VM" && -n "$_ATTACH_TUNNEL_BASE" ]] || return 0
+  echo ""
+  echo "[opencode-vm] Web session ended — closing LAN tunnels..."
+  stop_web_tunnels "$_ATTACH_TUNNEL_VM" "$_ATTACH_TUNNEL_BASE"
+  echo "[opencode-vm] Tunnels closed. Session paused — resume with: opencode-vm web"
+  return 0
+}
+
 attach_session() {
   need limactl
   sanitize_lima_sock_dir
@@ -6829,22 +7502,26 @@ attach_session() {
   # Self-heal graphify venv before OpenCode tries to launch its MCP server.
   # No-op when graphify isn't installed; injects mcp extras when missing.
   graphify_ensure_mcp_in_vm "$SESS_NAME"
-
-  # Web mode: open SSH tunnel host(0.0.0.0:hostPort) → VM(127.0.0.1:sess_port)
-  # and tear it down when this attach ends. Tunnel failure is non-fatal: the
-  # session still runs, and opencode is reachable via Lima's loopback
-  # auto-forward at 127.0.0.1:sess_port. See start_web_tunnel for rationale.
-  local effective_host_port="$sess_port"
   if [[ "$sess_mode" == "web" ]]; then
-    if start_web_tunnel "$SESS_NAME" "$sess_port"; then
-      effective_host_port="$WEB_TUNNEL_HOST_PORT"
-      trap "
-        echo ''
-        echo '[opencode-vm] Web session ended — closing LAN tunnel...'
-        stop_web_tunnel '$SESS_NAME' '$WEB_TUNNEL_HOST_PORT'
-        echo '[opencode-vm] Tunnel closed. Session paused — resume with: opencode-vm web'
-      " EXIT HUP TERM
-      probe_web_tunnel_async "$WEB_TUNNEL_HOST_PORT" "$host_lan_ip" "$sess_tls"
+    a2a_ensure_installed_in_vm "$SESS_NAME"
+  fi
+
+  # Web mode: open the four LAN forwards for this session's port block and tear
+  # them down when this attach ends. Tunnel failure is non-fatal: the session
+  # still runs, and opencode stays reachable via Lima's loopback auto-forward.
+  # See start_web_tunnels for the block rationale.
+  local effective_base="$sess_port"
+  if [[ "$sess_mode" == "web" ]]; then
+    if start_web_tunnels "$SESS_NAME" "$sess_port"; then
+      effective_base="$WEB_PORT_BASE"
+      # A named function, not an interpolated trap body: the old form spliced
+      # $SESS_NAME straight into the trap string, which breaks on anything the
+      # shell would re-parse. The operands are globals because an EXIT trap
+      # fires after attach_session's locals have gone out of scope.
+      _ATTACH_TUNNEL_VM="$SESS_NAME"
+      _ATTACH_TUNNEL_BASE="$effective_base"
+      trap _attach_tunnel_cleanup EXIT HUP TERM
+      probe_web_tunnel_async "$effective_base" "$host_lan_ip" "$sess_tls"
     else
       echo "[attach] WARNING: SSH tunnel for LAN access could not be set up." >&2
       echo "[attach]   Session continues. Loopback-only fallback may be available via http://127.0.0.1:${sess_port}/ (Lima auto-forward)." >&2
@@ -6856,6 +7533,12 @@ attach_session() {
     start_materialize_daemon "$SESS_NAME" "$_att_sess_share" || true
   fi
 
+  # Refresh the in-VM web library on every attach, so a session created by an
+  # older opencode-vm picks it up without being destroyed and recreated.
+  install_web_lib "$(session_share_dir "$proj")" ||
+    echo "[attach] WARNING: could not write the web library into the session share." >&2
+  resolve_session_auth "$(session_share_dir "$proj")"
+
   vm_exec "$SESS_NAME" '
     set -euo pipefail
     PROJ_DIR="$1"
@@ -6863,118 +7546,35 @@ attach_session() {
     OC_MODE="$3"
     OC_PORT="$4"
     OC_HOST_IP="$5"
-    OC_PASSWORD="$6"
-    OC_WEB_TUI="$7"
-    OC_HOST_PORT="${8:-$OC_PORT}"
-    OC_REDIRECT_PY="${9:-}"
-    OC_TLS="${10:-0}"
+    OC_WEB_TUI="$6"
+    OC_TLS="${7:-0}"
+    OC_A2A="${8:-1}"
+    OC_REQUIRE_A2A="${9:-0}"
+    OC_A2A_DEFAULT_SECRET="${10:-opencode-vm}"
 
-    # Redirector in front of opencode: it takes over $OC_PORT (the port the SSH
-    # tunnel forwards to) and opencode moves to $OC_PORT_INTERNAL, so no
-    # host-side URL, tunnel or firewall rule changes. Fails safe: if the
-    # redirector does not come up, opencode goes back on $OC_PORT directly and
-    # web mode behaves exactly as before.
+    # Shared in-VM web library (materialized into the session share by
+    # install_web_lib on the host, and mounted here at the same path). It owns
+    # the TLS material, the proxy in front of opencode and the connect banner —
+    # all of which start_session needs identically. Fails safe: without it,
+    # opencode serves $OC_PORT directly, exactly as it did before the
+    # redirector existed.
+    OC_BANNER_SUFFIX=" — resumed"
+    OC_BANNER_VERBOSE=0
     OC_PORT_INTERNAL="$OC_PORT"
-    OC_REDIRECT_SUP_PID=""
     OC_SCHEME=http
-    OC_TLS_CERT=""
-    OC_TLS_KEY=""
-    # --tls terminates TLS in the redirector so the origin is a secure context.
-    # The opencode web UI hashes attachments through crypto.subtle, which browsers
-    # withhold from insecure origins, so over a LAN IP attaching files fails
-    # (opencode issues 11452 / 12989). Upstream stays plain HTTP on loopback.
-    # The certificate lives in the session share and is reused as long as it
-    # still covers the current host IP, so a browser exception survives session
-    # restarts instead of prompting every time.
-    ensure_web_tls() {
-      [ "$OC_TLS" = "1" ] || return 0
-      if ! command -v openssl >/dev/null 2>&1; then
-        echo "[web] openssl missing — staying on plain HTTP."
-        return 0
-      fi
-      local dir="$SESS_SHARE/tls"
-      local crt="$dir/cert.pem"
-      local key="$dir/key.pem"
-      mkdir -p "$dir"
-      local need=1
-      if [ -f "$crt" ] && [ -f "$key" ]; then
-        if openssl x509 -in "$crt" -noout -checkend 86400 >/dev/null 2>&1 &&
-           openssl x509 -in "$crt" -noout -ext subjectAltName 2>/dev/null | grep -q "IP Address:$OC_HOST_IP"; then
-          need=0
-        fi
-      fi
-      if [ "$need" = "1" ]; then
-        echo "[web] Generating self-signed certificate for $OC_HOST_IP ..."
-        if ! openssl req -x509 -newkey rsa:2048 -nodes -days 825 \
-             -keyout "$key" -out "$crt" -subj "/CN=opencode-vm" \
-             -addext "subjectAltName=IP:$OC_HOST_IP,IP:127.0.0.1,DNS:localhost" \
-             >/dev/null 2>&1; then
-          echo "[web] Certificate generation failed — staying on plain HTTP."
-          return 0
-        fi
-        chmod 600 "$key" 2>/dev/null || true
-      fi
-      OC_TLS_CERT="$crt"
-      OC_TLS_KEY="$key"
-      OC_SCHEME=https
-      return 0
-    }
-    stop_web_redirector() {
-      # PID files, never pkill -f. The entire in-VM script is a single bash -lc
-      # argument, so it shows up in this shell own /proc cmdline — any pattern
-      # naming the redirector also matches this very shell and kills the session.
-      # Supervisor first, then its python child, so the loop cannot respawn it.
-      local pidf pid
-      for pidf in /tmp/ocvm-web-redirect.sup.pid /tmp/ocvm-web-redirect.run.pid; do
-        [ -f "$pidf" ] || continue
-        pid="$(cat "$pidf" 2>/dev/null || true)"
-        # Confirm the PID is still ours before signalling it: a stale file from
-        # an earlier run in this VM could otherwise name a recycled, unrelated
-        # process. A forked subshell keeps the parent argv, so both supervisor
-        # and python child carry the name in their cmdline.
-        if [ -n "$pid" ] && grep -qs ocvm-web-redirect "/proc/$pid/cmdline"; then
-          kill "$pid" 2>/dev/null || true
-        fi
-        rm -f "$pidf"
-      done
-      OC_REDIRECT_SUP_PID=""
-      return 0
-    }
-    start_web_redirector() {
-      if [ -z "$OC_REDIRECT_PY" ] || ! command -v python3 >/dev/null 2>&1; then
-        echo "[web] No redirector available — root URL will show the project launcher."
-        return 0
-      fi
-      ensure_web_tls
-      OC_PORT_INTERNAL=$(( OC_PORT + 1000 ))
-      if [ "$OC_PORT_INTERNAL" -ge 64000 ]; then
-        OC_PORT_INTERNAL=$(( OC_PORT - 1000 ))
-      fi
-      stop_web_redirector
-      printf %s "$OC_REDIRECT_PY" > /tmp/ocvm-web-redirect.py
-      ( while true; do
-          python3 /tmp/ocvm-web-redirect.py "$OC_PORT" "$OC_PORT_INTERNAL" "$OC_DIR_KEY" \
-            "$OC_TLS_CERT" "$OC_TLS_KEY" >>/tmp/ocvm-web-redirect.log 2>&1 &
-          echo $! > /tmp/ocvm-web-redirect.run.pid
-          wait $! || true
-          sleep 1
-        done ) &
-      OC_REDIRECT_SUP_PID=$!
-      echo "$OC_REDIRECT_SUP_PID" > /tmp/ocvm-web-redirect.sup.pid
-      local waited=0
-      while [ "$waited" -lt 20 ]; do
-        if ss -ltn "sport = :$OC_PORT" 2>/dev/null | grep -q LISTEN; then
-          return 0
-        fi
-        sleep 0.2
-        waited=$(( waited + 1 ))
-      done
-      echo "[web] Redirector did not bind port $OC_PORT — falling back to opencode on $OC_PORT directly."
-      stop_web_redirector
-      OC_PORT_INTERNAL="$OC_PORT"
-      OC_SCHEME=http
-      return 0
-    }
+    if [ -f "$SESS_SHARE/lib/web.sh" ]; then
+      . "$SESS_SHARE/lib/web.sh"
+    else
+      echo "[attach] web library missing from the session share — running without the redirector."
+      echo "[web] WARNING: without it the session also has no application password."
+      start_web_proxies() { return 0; }
+      stop_all_proxies()  { return 0; }
+      start_a2a()         { return 0; }
+      stop_a2a()          { return 0; }
+      wait_for_a2a()      { return 1; }
+      a2a_watch_ready()   { return 0; }
+      print_web_banner()  { echo "  Browser/Web UI:  http://${OC_HOST_IP}:${OC_PORT}"; return 0; }
+    fi
 
     export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/.config/composer/vendor/bin:/tmp/go/bin:/tmp/pnpm-store:$PATH"
     export CARGO_TARGET_DIR=/tmp/cargo-target
@@ -7030,7 +7630,8 @@ attach_session() {
     # exits on SIGINT (rc=130) — `set -e` propagates the signal exit.
     sync_vm_to_share() {
       echo ""
-      stop_web_redirector
+      stop_all_proxies
+      stop_a2a
       echo "[attach] Stopping session — syncing data back to host..."
       rsync -a --exclude="bin/" --exclude="log/" --exclude="tool-output/" \
         /tmp/oc-xdg-data/opencode/ "$SESS_SHARE/xdg-data/opencode/" 2>/dev/null || true
@@ -7049,56 +7650,10 @@ attach_session() {
     trap on_signal INT TERM
 
     if [ "$OC_MODE" = "web" ]; then
-      start_web_redirector
-      echo ""
-      echo "=============================================="
-      echo "  OpenCode Web Server (VM port $OC_PORT) — resumed"
-      echo "=============================================="
-      echo ""
-      echo "Connect via:"
-      echo ""
-      # The short root URL is the one to hand out: it seeds this browser with the
-      # project (without which the UI filters every chat session out of view),
-      # sets sane defaults, and forwards into the project.
-      echo "  Browser/Web UI:  ${OC_SCHEME}://${OC_HOST_IP}:${OC_HOST_PORT}"
-      echo "  Direct project:  ${OC_SCHEME}://${OC_HOST_IP}:${OC_HOST_PORT}/${OC_DIR_KEY}"
-      echo "  API docs:        ${OC_SCHEME}://${OC_HOST_IP}:${OC_HOST_PORT}/doc"
-      if [ "$OC_SCHEME" = "https" ]; then
-        # TLS terminates in the redirector; opencode itself stays plain HTTP on
-        # loopback, which Lima forwards to the host. Point non-browser clients
-        # there so they never have to trust the self-signed certificate.
-        echo "  TUI attach:      opencode attach http://127.0.0.1:${OC_PORT_INTERNAL}  (plain HTTP, host-local)"
-      else
-        echo "  TUI attach:      opencode attach http://${OC_HOST_IP}:${OC_HOST_PORT}"
-      fi
-      if [ "$OC_HOST_PORT" != "$OC_PORT" ]; then
-        echo ""
-        echo "  Note: requested port ${OC_PORT} was busy; LAN tunnel uses ${OC_HOST_PORT}."
-      fi
-      echo "  Loopback also: ${OC_SCHEME}://127.0.0.1:${OC_PORT} (via Lima auto-forward)"
-      if [ "$OC_SCHEME" = "https" ]; then
-        echo ""
-        echo "  TLS: self-signed certificate — each device warns once, then trusts it."
-        echo "       Required for file/image attachments: opencode hashes them via"
-        echo "       crypto.subtle, which browsers withhold from plain-HTTP origins."
-        echo "       Plain http:// on this port is answered with a redirect to https."
-        echo "       Need plain HTTP instead? Start with: opencode-vm web --no-tls"
-      else
-        echo ""
-        echo "  Plain HTTP: file/image attachments stay broken from other devices —"
-        echo "       browsers withhold crypto.subtle from insecure origins. Use the"
-        echo "       127.0.0.1 URL above, or restart without --no-tls."
-      fi
-      echo ""
-      if [ -n "$OC_PASSWORD" ]; then
-        echo "  Username:        opencode"
-        echo "  Password:        $OC_PASSWORD"
-        echo ""
-        export OPENCODE_SERVER_PASSWORD="$OC_PASSWORD"
-      else
-        echo "Tip: pass --password <pw> to opencode-vm web to secure the server."
-        echo ""
-      fi
+      start_web_proxies
+      start_a2a
+      print_web_banner
+      a2a_watch_ready
       if [ "$OC_WEB_TUI" = "true" ]; then
         aa-exec -p opencode-sandbox -- opencode web --hostname 127.0.0.1 --port "$OC_PORT_INTERNAL" &
         OC_WEB_PID=$!
@@ -7136,7 +7691,68 @@ attach_session() {
 
     # Sync-back happens via the EXIT trap installed above (covers Ctrl+C as
     # well as normal exit).
-  ' "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$sess_port" "$host_lan_ip" "${SESSION_PASSWORD:-}" "${OC_WEB_TUI:-false}" "$effective_host_port" "$OCVM_WEB_REDIRECT_PY" "$sess_tls"
+  ' "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$effective_base" "$host_lan_ip" "${OC_WEB_TUI:-false}" "$sess_tls" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET"
+}
+
+# --- Session Basic-auth secret -------------------------------------------
+#
+# The secret lives in $SESS_SHARE/auth.env at 0600, deliberately NOT in
+# session.env (which doctor prints and cleanup copies around) and never as a
+# positional to vm_exec — `limactl shell` puts positionals in the host process
+# list, where the password stayed visible for the whole session.
+#
+# The session share is the right home rather than a sibling file: it is mounted
+# into the VM at this same absolute path, so no transport is needed at all, and
+# both `--fresh` (_destroy_prev_session) and session destroy already `rm -rf`
+# it — so the secret cannot outlive the session it belongs to.
+write_session_auth() {
+  local share="$1" pw="$2" user="${3:-opencode}"
+  [[ -n "$share" ]] || return 1
+  local f="$share/auth.env"
+  if [[ -z "$pw" ]]; then
+    rm -f "$f"
+    return 0
+  fi
+  mkdir -p "$share" || return 1
+  ( umask 077
+    printf 'OPENCODE_SERVER_USERNAME=%q\nOPENCODE_SERVER_PASSWORD=%q\n' "$user" "$pw" > "$f"
+  ) || return 1
+  chmod 600 "$f" 2>/dev/null || true
+  return 0
+}
+
+read_session_auth() {
+  local f="$1/auth.env"
+  [[ -f "$f" ]] || return 0
+  # Subshell: the sourced assignments must not leak into the caller, which
+  # would otherwise re-export a stale password into unrelated child processes.
+  ( set +u
+    OPENCODE_SERVER_PASSWORD=""
+    # shellcheck disable=SC1090
+    . "$f" 2>/dev/null || true
+    printf '%s' "$OPENCODE_SERVER_PASSWORD" )
+}
+
+# Precedence: explicit --password / --no-auth on this invocation, then the host
+# environment (handled in parse_web_flags), then whatever the session already
+# had. The last step is what makes a bare `opencode-vm attach` keep a protected
+# session protected — before this, attach silently resumed it wide open.
+resolve_session_auth() {
+  local share="$1"
+  case "${SESSION_AUTH_MODE:-}" in
+    set)
+      write_session_auth "$share" "$SESSION_PASSWORD" ||
+        echo "[run] WARNING: could not persist the session password." >&2
+      ;;
+    clear)
+      write_session_auth "$share" ""
+      SESSION_PASSWORD=""
+      ;;
+    *)
+      SESSION_PASSWORD="$(read_session_auth "$share")"
+      ;;
+  esac
+  return 0
 }
 
 # Serialize session tracking state to $senv (loaded back via `source`).
@@ -7762,6 +8378,12 @@ start_session() {
   # service is fully provisioned in the base disk inherited by session VMs.
   searxng_ensure_installed_in_base || echo "[run] SearXNG install skipped; session will start without web-search MCP." >&2
 
+  # Install the A2A adapter into the base VM so every session clone inherits it
+  # (idempotent, web mode only). Same BEFORE-stop-for-clone placement as above.
+  if [[ "$SESSION_MODE" == "web" ]]; then
+    a2a_ensure_installed_in_base || echo "[run] A2A install skipped; session will start without A2A." >&2
+  fi
+
   # Ensure base VM is stopped for clone — always attempt stop defensively
   if is_vm_running "$BASE_NAME"; then
     run_with_spinner "[run] Stopping base VM before clone..." limactl stop "$BASE_NAME"
@@ -7839,12 +8461,18 @@ start_session() {
   cleanup() {
     echo "[cleanup] Starting cleanup... $(_ts)"
     # Tear down web-mode SSH tunnel (no-op if not web mode or already gone).
-    # Sweep the requested port plus the fallback range used by start_web_tunnel.
-    if [[ "${SESSION_MODE:-}" == "web" && -n "${sess:-}" && -n "${SESSION_PORT:-}" ]]; then
+    # Sweep the actual base first, then the search window start_web_tunnels uses.
+    if [[ "${SESSION_MODE:-}" == "web" && -n "${sess:-}" ]]; then
       local _p
-      for _p in $(seq "$SESSION_PORT" $((SESSION_PORT + 9))); do
-        stop_web_tunnel "$sess" "$_p" >/dev/null 2>&1 || true
-      done
+      # The effective base first — it can sit outside the window below if the
+      # block had to move — then the window itself, for tunnels a crashed run
+      # left behind.
+      [[ -n "${WEB_PORT_BASE:-}" ]] && stop_web_tunnels "$sess" "$WEB_PORT_BASE" >/dev/null 2>&1
+      if [[ -n "${SESSION_PORT:-}" ]]; then
+        for _p in $(seq "$SESSION_PORT" $((SESSION_PORT + 9))); do
+          stop_web_tunnels "$sess" "$_p" >/dev/null 2>&1 || true
+        done
+      fi
     fi
     # Sync config back with conflict detection
     local dst
@@ -8085,6 +8713,9 @@ start_session() {
   # graphify self-heal (mcp module): runs in every session, no-op when graphify
   # isn't installed in the base. Defined near graphify_persist_*.
   graphify_ensure_mcp_in_vm "$sess"
+  if [[ "$SESSION_MODE" == "web" ]]; then
+    a2a_ensure_installed_in_vm "$sess"
+  fi
 
   # mcrepo: spawn the graphify watcher inside the session VM so the graph
   # rebuilds incrementally as files change. Best-effort: failures are logged
@@ -8124,11 +8755,11 @@ start_session() {
   # opencode binds 127.0.0.1 inside the VM. Lima's loopback auto-forward
   # (127.0.0.1:OC_PORT) coexists with our tunnel — different bind addresses.
   # Tunnel failure is non-fatal: opencode is still reachable via loopback.
-  local effective_host_port="${SESSION_PORT:-0}"
+  local effective_base="${SESSION_PORT:-0}"
   if [[ "$SESSION_MODE" == "web" ]]; then
-    if start_web_tunnel "$sess" "${SESSION_PORT:-0}"; then
-      effective_host_port="$WEB_TUNNEL_HOST_PORT"
-      probe_web_tunnel_async "$WEB_TUNNEL_HOST_PORT" "$host_lan_ip" "${SESSION_TLS:-0}"
+    if start_web_tunnels "$sess" "${SESSION_PORT:-0}"; then
+      effective_base="$WEB_PORT_BASE"
+      probe_web_tunnel_async "$WEB_PORT_BASE" "$host_lan_ip" "${SESSION_TLS:-0}"
     else
       echo "[run] WARNING: SSH tunnel for LAN access could not be set up." >&2
       echo "[run]   Session continues. Loopback fallback may work via http://127.0.0.1:${SESSION_PORT}/ (Lima auto-forward)." >&2
@@ -8139,128 +8770,46 @@ start_session() {
     start_materialize_daemon "$sess" "$sess_share" || true
   fi
 
+  install_web_lib "$sess_share" ||
+    echo "[run] WARNING: could not write the web library into the session share." >&2
+  resolve_session_auth "$sess_share"
+
   if vm_exec "$sess" '
     set -euo pipefail
     PROJ_DIR="$1"
     SESS_SHARE="$2"
     OC_MODE="$3"
     OC_PORT="$4"
-    OC_PASSWORD="$5"
-    OC_WEB_TUI="$6"
-    OC_HOST_IP="$7"
-    OC_HOST_PORT="${8:-$OC_PORT}"
-    OC_REDIRECT_PY="${9:-}"
-    OC_TLS="${10:-0}"
-    export OCVM_HOST_LAN_IP="$OC_HOST_IP"
-    export HOST_LAN_IP="$OC_HOST_IP"
-    export LANIP="$OC_HOST_IP"
+    OC_WEB_TUI="$5"
+    OC_HOST_IP="$6"
+    OC_TLS="${7:-0}"
+    OC_A2A="${8:-1}"
+    OC_REQUIRE_A2A="${9:-0}"
+    OC_A2A_DEFAULT_SECRET="${10:-opencode-vm}"
 
-    # Redirector in front of opencode: it takes over $OC_PORT (the port the SSH
-    # tunnel forwards to) and opencode moves to $OC_PORT_INTERNAL, so no
-    # host-side URL, tunnel or firewall rule changes. Fails safe: if the
-    # redirector does not come up, opencode goes back on $OC_PORT directly and
-    # web mode behaves exactly as before.
+    # Shared in-VM web library (materialized into the session share by
+    # install_web_lib on the host, and mounted here at the same path). It owns
+    # the TLS material, the proxy in front of opencode and the connect banner —
+    # all of which attach_session needs identically. Fails safe: without it,
+    # opencode serves $OC_PORT directly, exactly as it did before the
+    # redirector existed.
+    OC_BANNER_SUFFIX=""
+    OC_BANNER_VERBOSE=1
     OC_PORT_INTERNAL="$OC_PORT"
-    OC_REDIRECT_SUP_PID=""
     OC_SCHEME=http
-    OC_TLS_CERT=""
-    OC_TLS_KEY=""
-    # --tls terminates TLS in the redirector so the origin is a secure context.
-    # The opencode web UI hashes attachments through crypto.subtle, which browsers
-    # withhold from insecure origins, so over a LAN IP attaching files fails
-    # (opencode issues 11452 / 12989). Upstream stays plain HTTP on loopback.
-    # The certificate lives in the session share and is reused as long as it
-    # still covers the current host IP, so a browser exception survives session
-    # restarts instead of prompting every time.
-    ensure_web_tls() {
-      [ "$OC_TLS" = "1" ] || return 0
-      if ! command -v openssl >/dev/null 2>&1; then
-        echo "[web] openssl missing — staying on plain HTTP."
-        return 0
-      fi
-      local dir="$SESS_SHARE/tls"
-      local crt="$dir/cert.pem"
-      local key="$dir/key.pem"
-      mkdir -p "$dir"
-      local need=1
-      if [ -f "$crt" ] && [ -f "$key" ]; then
-        if openssl x509 -in "$crt" -noout -checkend 86400 >/dev/null 2>&1 &&
-           openssl x509 -in "$crt" -noout -ext subjectAltName 2>/dev/null | grep -q "IP Address:$OC_HOST_IP"; then
-          need=0
-        fi
-      fi
-      if [ "$need" = "1" ]; then
-        echo "[web] Generating self-signed certificate for $OC_HOST_IP ..."
-        if ! openssl req -x509 -newkey rsa:2048 -nodes -days 825 \
-             -keyout "$key" -out "$crt" -subj "/CN=opencode-vm" \
-             -addext "subjectAltName=IP:$OC_HOST_IP,IP:127.0.0.1,DNS:localhost" \
-             >/dev/null 2>&1; then
-          echo "[web] Certificate generation failed — staying on plain HTTP."
-          return 0
-        fi
-        chmod 600 "$key" 2>/dev/null || true
-      fi
-      OC_TLS_CERT="$crt"
-      OC_TLS_KEY="$key"
-      OC_SCHEME=https
-      return 0
-    }
-    stop_web_redirector() {
-      # PID files, never pkill -f. The entire in-VM script is a single bash -lc
-      # argument, so it shows up in this shell own /proc cmdline — any pattern
-      # naming the redirector also matches this very shell and kills the session.
-      # Supervisor first, then its python child, so the loop cannot respawn it.
-      local pidf pid
-      for pidf in /tmp/ocvm-web-redirect.sup.pid /tmp/ocvm-web-redirect.run.pid; do
-        [ -f "$pidf" ] || continue
-        pid="$(cat "$pidf" 2>/dev/null || true)"
-        # Confirm the PID is still ours before signalling it: a stale file from
-        # an earlier run in this VM could otherwise name a recycled, unrelated
-        # process. A forked subshell keeps the parent argv, so both supervisor
-        # and python child carry the name in their cmdline.
-        if [ -n "$pid" ] && grep -qs ocvm-web-redirect "/proc/$pid/cmdline"; then
-          kill "$pid" 2>/dev/null || true
-        fi
-        rm -f "$pidf"
-      done
-      OC_REDIRECT_SUP_PID=""
-      return 0
-    }
-    start_web_redirector() {
-      if [ -z "$OC_REDIRECT_PY" ] || ! command -v python3 >/dev/null 2>&1; then
-        echo "[web] No redirector available — root URL will show the project launcher."
-        return 0
-      fi
-      ensure_web_tls
-      OC_PORT_INTERNAL=$(( OC_PORT + 1000 ))
-      if [ "$OC_PORT_INTERNAL" -ge 64000 ]; then
-        OC_PORT_INTERNAL=$(( OC_PORT - 1000 ))
-      fi
-      stop_web_redirector
-      printf %s "$OC_REDIRECT_PY" > /tmp/ocvm-web-redirect.py
-      ( while true; do
-          python3 /tmp/ocvm-web-redirect.py "$OC_PORT" "$OC_PORT_INTERNAL" "$OC_DIR_KEY" \
-            "$OC_TLS_CERT" "$OC_TLS_KEY" >>/tmp/ocvm-web-redirect.log 2>&1 &
-          echo $! > /tmp/ocvm-web-redirect.run.pid
-          wait $! || true
-          sleep 1
-        done ) &
-      OC_REDIRECT_SUP_PID=$!
-      echo "$OC_REDIRECT_SUP_PID" > /tmp/ocvm-web-redirect.sup.pid
-      local waited=0
-      while [ "$waited" -lt 20 ]; do
-        if ss -ltn "sport = :$OC_PORT" 2>/dev/null | grep -q LISTEN; then
-          return 0
-        fi
-        sleep 0.2
-        waited=$(( waited + 1 ))
-      done
-      echo "[web] Redirector did not bind port $OC_PORT — falling back to opencode on $OC_PORT directly."
-      stop_web_redirector
-      OC_PORT_INTERNAL="$OC_PORT"
-      OC_SCHEME=http
-      return 0
-    }
+    if [ -f "$SESS_SHARE/lib/web.sh" ]; then
+      . "$SESS_SHARE/lib/web.sh"
+    else
+      echo "[run] web library missing from the session share — running without the redirector."
+      echo "[web] WARNING: without it the session also has no application password."
+      start_web_proxies() { return 0; }
+      stop_all_proxies()  { return 0; }
+      start_a2a()         { return 0; }
+      stop_a2a()          { return 0; }
+      wait_for_a2a()      { return 1; }
+      a2a_watch_ready()   { return 0; }
+      print_web_banner()  { echo "  Browser/Web UI:  http://${OC_HOST_IP}:${OC_PORT}"; return 0; }
+    fi
 
     export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/.config/composer/vendor/bin:/tmp/go/bin:/tmp/pnpm-store:$PATH"
 
@@ -8341,7 +8890,8 @@ EOF
     # sessions) back to the share — without this, provider logins made via
     # the web UI are lost when the user stops the server with Ctrl+C.
     sync_vm_to_share() {
-      stop_web_redirector
+      stop_all_proxies
+      stop_a2a
       echo "[$(date +%T)] Syncing session data back to host..."
       check_sqlite_dbs "$VM_DATA/opencode" 2>/dev/null || true
       check_sqlite_dbs "$VM_STATE/opencode" 2>/dev/null || true
@@ -8395,65 +8945,10 @@ EOF
         bash
         ;;
       web)
-        start_web_redirector
-        echo ""
-        echo "=============================================="
-        echo "  OpenCode Web Server (VM port $OC_PORT)"
-        echo "=============================================="
-        echo ""
-        echo "Connect via:"
-        echo ""
-        # The short root URL is the one to hand out: it seeds this browser with the
-        # project (without which the UI filters every chat session out of view),
-        # sets sane defaults, and forwards into the project.
-        echo "  Browser/Web UI:  ${OC_SCHEME}://${OC_HOST_IP}:${OC_HOST_PORT}"
-        echo "  Direct project:  ${OC_SCHEME}://${OC_HOST_IP}:${OC_HOST_PORT}/${OC_DIR_KEY}"
-        echo "  API docs:        ${OC_SCHEME}://${OC_HOST_IP}:${OC_HOST_PORT}/doc"
-        if [ "$OC_SCHEME" = "https" ]; then
-          # TLS terminates in the redirector; opencode itself stays plain HTTP on
-          # loopback, which Lima forwards to the host. Point non-browser clients
-          # there so they never have to trust the self-signed certificate.
-          echo "  TUI attach:      opencode attach http://127.0.0.1:${OC_PORT_INTERNAL}  (plain HTTP, host-local)"
-        else
-          echo "  TUI attach:      opencode attach http://${OC_HOST_IP}:${OC_HOST_PORT}"
-        fi
-        if [ "$OC_HOST_PORT" != "$OC_PORT" ]; then
-          echo ""
-          echo "  Note: requested port ${OC_PORT} was busy; LAN tunnel uses ${OC_HOST_PORT}."
-        fi
-        echo "  Loopback also: ${OC_SCHEME}://127.0.0.1:${OC_PORT} (via Lima auto-forward)"
-        if [ "$OC_SCHEME" = "https" ]; then
-          echo ""
-          echo "  TLS: self-signed certificate — each device warns once, then trusts it."
-          echo "       Required for file/image attachments: opencode hashes them via"
-          echo "       crypto.subtle, which browsers withhold from plain-HTTP origins."
-          echo "       Plain http:// on this port is answered with a redirect to https."
-          echo "       Need plain HTTP instead? Start with: opencode-vm web --no-tls"
-        else
-          echo ""
-          echo "  Plain HTTP: file/image attachments stay broken from other devices —"
-          echo "       browsers withhold crypto.subtle from insecure origins. Use the"
-          echo "       127.0.0.1 URL above, or restart without --no-tls."
-        fi
-        echo ""
-        if [ -n "$OC_PASSWORD" ]; then
-          echo "  Username:        opencode"
-          echo "  Password:        $OC_PASSWORD"
-          echo ""
-          echo "The REST API can be used for custom integrations,"
-          echo "IDE extensions, or programmatic access to OpenCode."
-          echo "See: https://opencode.ai/docs/server/"
-          echo ""
-          export OPENCODE_SERVER_PASSWORD="$OC_PASSWORD"
-        else
-          echo "The REST API can be used for custom integrations,"
-          echo "IDE extensions, or programmatic access to OpenCode."
-          echo "See: https://opencode.ai/docs/server/"
-          echo ""
-          echo "Tip: To secure the server with a password, start with:"
-          echo "  opencode-vm web --password <your-password>"
-          echo ""
-        fi
+        start_web_proxies
+        start_a2a
+        print_web_banner
+        a2a_watch_ready
         if [ "$OC_WEB_TUI" = "true" ]; then
           aa-exec -p opencode-sandbox -- opencode web --hostname 127.0.0.1 --port "$OC_PORT_INTERNAL" &
           OC_WEB_PID=$!
@@ -8489,7 +8984,7 @@ EOF
 
     # Sync back happens via the EXIT trap installed above (covers both clean
     # exit and Ctrl+C-driven termination of the web server).
-  ' "$proj" "$sess_share" "$SESSION_MODE" "${SESSION_PORT:-0}" "${SESSION_PASSWORD:-}" "${OC_WEB_TUI:-false}" "$host_lan_ip" "$effective_host_port" "$OCVM_WEB_REDIRECT_PY" "${SESSION_TLS:-0}"; then
+  ' "$proj" "$sess_share" "$SESSION_MODE" "$effective_base" "${OC_WEB_TUI:-false}" "$host_lan_ip" "${SESSION_TLS:-0}" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET"; then
     if [[ "$SESSION_MODE" != "shell" ]]; then
     OC_SHELL_OK=1
     fi
@@ -8665,8 +9160,7 @@ case "$cmd" in
   web)
     SESSION_MODE="web"
     parse_web_flags "$@"
-    check_port_available "$SESSION_PORT"
-    warn_if_browser_unsafe_port "$SESSION_PORT"
+    validate_web_port "$SESSION_PORT"
     start_session
     ;;
 
@@ -8774,9 +9268,25 @@ Usage:
                                            #   from ~/.opencode-vm/project-history/
                                            # --reconnect/--fresh/--cancel-if-exists:
                                            #   non-interactive override of the prompt
-  opencode-vm web [--port PORT] [--password PW] [--no-tls] [--tui] [--keep-history] [--reconnect|--fresh|--cancel-if-exists]
+  opencode-vm web [--port PORT] [--password PW|--no-auth] [--no-tls] [--tui]
+                  [--no-a2a|--require-a2a] [--keep-history] [--reconnect|--fresh|--cancel-if-exists]
                                            # start web server session (default port 4096)
-                                           # provides: web UI, REST API, TUI attach
+                                           # provides: web UI, REST API, TUI attach, A2A agent
+                                           # Reserves a block around the base port P:
+                                           #   P-2  opencode-a2a     (VM-internal)
+                                           #   P-1  opencode backend (VM-internal)
+                                           #   P    web HTTPS        P+1  web HTTP
+                                           #   P+2  a2a HTTPS        P+3  a2a HTTP
+                                           #   valid range for P: 1026-65532
+                                           # --password PW: HTTP Basic on all four
+                                           #   public endpoints (also \$OCVM_WEB_PASSWORD).
+                                           #   Persisted per session, so 'attach' keeps it.
+                                           # --no-auth: drop a stored session password
+                                           # A2A always needs a credential (opencode-a2a
+                                           #   refuses to start without one); with no
+                                           #   --password it uses the printed default.
+                                           # --no-a2a: web only (also \$OCVM_A2A=0)
+                                           # --require-a2a: fail the session if A2A is not ready
                                            # Session prompt/exit behavior matches 'start'.
                                            # Serves HTTPS by default (self-signed cert):
                                            #   file/image attachments need a secure origin,

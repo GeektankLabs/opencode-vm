@@ -190,9 +190,60 @@ What you get from a single command:
 
 - **Web UI** — full OpenCode interface in your browser
 - **REST API** — programmatic access with OpenAPI docs at `/doc`
-- **TUI attach** — connect a terminal TUI from the host via `opencode attach http://<ip>:4096`
+- **TUI attach** — connect a terminal TUI from the host via `opencode attach http://<ip>:4097`
+- **A2A agent** — the same OpenCode, drivable by an A2A 1.0 orchestrator
 
-All clients share the same sessions and state, so you can switch between browser and terminal seamlessly.
+All clients share the same sessions and state, so you can switch between browser, terminal and orchestrator seamlessly.
+
+### Port layout
+
+A web session owns a small contiguous block around the base port `P` you pass to `--port`:
+
+| Port | Service | On the LAN? |
+|---|---|---|
+| `P-2` | `opencode-a2a` | no — VM loopback only |
+| `P-1` | OpenCode backend | no — VM loopback only |
+| `P` | Web UI / REST, **HTTPS** | yes |
+| `P+1` | Web UI / REST, **HTTP** | yes |
+| `P+2` | A2A, **HTTPS** | yes |
+| `P+3` | A2A, **HTTP** | yes |
+
+With the default `--port 4096` that is `4094`–`4099`. Valid base ports are `1026`–`65532`.
+
+The offsets are a fixed contract, because the A2A agent card has to advertise an absolute URL. If any port in the block is taken, the **whole block** moves to the next free one — the relationships never drift apart. The host port and the VM port are always the same number.
+
+The plain-HTTP twins exist for clients that cannot be taught to trust the session's self-signed certificate — OpenCode Desktop, `opencode attach`, and most A2A clients. They are exposed on the LAN on purpose; use them only on a network you trust.
+
+### A2A
+
+Every web session also runs [`opencode-a2a`](https://github.com/Intelligent-Internet/opencode-a2a) as a sidecar, pinned and installed into the base VM. It talks to the *same* OpenCode process over VM loopback — there is no second runtime, and A2A tasks land in the same sessions and the same workspace the browser sees.
+
+```
+Agent Card:  http://<ip>:4099/.well-known/agent-card.json
+```
+
+The card advertises the **HTTP** endpoint deliberately: `opencode-a2a` bakes exactly one public URL into the card at startup, and a client that cannot verify our self-signed certificate would otherwise be redirected somewhere it cannot reach. Both endpoints front the same process.
+
+**A2A always requires a credential** — `opencode-a2a` refuses to start without one. So:
+
+- with `--password PW`, all four public endpoints use those credentials (Basic for web/REST, Basic *or* Bearer for A2A);
+- without one, A2A uses the fixed default `opencode-vm`, which is printed in the startup banner. It is a documented constant, not a secret — a hidden generated token would be worse, since nobody could find it and it would rotate on every restart.
+
+Both a Basic and a Bearer credential are registered, because A2A clients differ in what they send. Example for an orchestrator that speaks Bearer:
+
+```yaml
+a2a_agents:
+  - url: http://192.168.1.20:4099
+    auth: { type: bearer, token: opencode-vm }
+```
+
+The adapter is confined to the project the VM was started in: directory override is disabled, as are session shell and workspace mutations. It reaches OpenCode over loopback only, and the VM's existing firewall already blocks outbound access to your LAN.
+
+Opt out with `--no-a2a` (or `OCVM_A2A=0`). By default a sidecar that fails to start is a loud warning and the web UI keeps running; `--require-a2a` makes it fatal instead.
+
+### Passwords
+
+`--password PW` protects every public endpoint with HTTP Basic (username `opencode`). The secret is stored per session at `~/.opencode-vm/sessions/<hash>/auth.env` with mode `0600`, so `opencode-vm attach` resumes a protected session as protected — it previously came back wide open. It is never printed, never written to `session.env`, and never passed on a command line. `--no-auth` removes a stored password; `$OCVM_WEB_PASSWORD` sets one without it appearing in your shell history.
 
 **About the entry URL.** Use the short root URL exactly as printed — it is the one that makes everything work.
 
@@ -211,9 +262,12 @@ Everything other than that one navigation is passed through untouched as raw TCP
 Options:
 
 ```bash
-opencode-vm web --port 3000         # use a custom port
-opencode-vm web --password secret   # set a server password
+opencode-vm web --port 3000         # use a custom port (reserves 2998-3003)
+opencode-vm web --password secret   # protect all four public endpoints
+opencode-vm web --no-auth           # drop a previously stored password
 opencode-vm web --no-tls            # serve plain HTTP instead of HTTPS
+opencode-vm web --no-a2a            # web only, no A2A sidecar
+opencode-vm web --require-a2a       # fail the session if A2A is not ready
 opencode-vm web --tui               # also start TUI in terminal (experimental)
 ```
 
