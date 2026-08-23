@@ -128,7 +128,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.5.15"
+OCVM_VERSION="0.5.16"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -1209,6 +1209,17 @@ proxmox_mcp_clone_or_update() {
   echo "[proxmox] MCP server ready at commit ${PROXMOX_MCP_COMMIT:-unknown}"
 }
 
+# Guest username Lima created inside <vm> — not always the host user: Lima
+# falls back to guest user "lima" when the host name is reserved in the guest
+# image (macOS "admin" is the canonical case). Authoritative source is the
+# per-instance ssh.config, which persists for stopped instances too.
+lima_guest_user() {
+  local vm="$1" u
+  u="$(awk '$1 == "User" {print $2; exit}' "$HOME/.lima/$vm/ssh.config" 2>/dev/null)"
+  [[ -n "$u" ]] || u="$(limactl show-ssh --format=config "$vm" 2>/dev/null | awk '$1 == "User" {print $2; exit}')"
+  printf '%s' "$u"
+}
+
 VM_HOME_CACHE=""
 vm_resolve_home() {
   [[ -n "$VM_HOME_CACHE" ]] && { printf '%s' "$VM_HOME_CACHE"; return 0; }
@@ -1217,8 +1228,19 @@ vm_resolve_home() {
     home="$(vm_exec "$vm" 'printf %s "$HOME"' 2>/dev/null | tr -d '\r\n')"
   fi
   if [[ -z "$home" || "$home" != /home/* ]]; then
-    home="/home/$(whoami).linux"
-    echo "[vm] Warning: could not resolve VM \$HOME; falling back to $home" >&2
+    # The VM is usually stopped here (base VMs only run for installs), so
+    # derive the home from the guest username instead of querying it. The
+    # host username is not a substitute — with guest user "lima" that baked
+    # a nonexistent /home/admin.linux into {VM_HOME} paths (proxmox MCP
+    # ENOENT). The .linux suffix holds on both Lima generations: real home
+    # on older instances, compat symlink to <user>.guest on newer ones.
+    local guest_user; guest_user="$(lima_guest_user "$vm")"
+    if [[ -n "$guest_user" ]]; then
+      home="/home/${guest_user}.linux"
+    else
+      home="/home/$(whoami).linux"
+      echo "[vm] Warning: could not resolve VM \$HOME; falling back to $home" >&2
+    fi
   fi
   VM_HOME_CACHE="$home"
   printf '%s' "$home"
@@ -6862,7 +6884,35 @@ start_web_tunnels() {
 
   load_policy 2>/dev/null || true   # for the HOST_TCP_PORTS overlap check
 
-  local base p ok pid
+  # The forward authenticates as the *guest* user, which is not always the
+  # host user (see lima_guest_user) — ${USER}@ would lock those hosts out of
+  # every LAN tunnel.
+  local guest_user
+  guest_user="$(lima_guest_user "$vm")"
+  [[ -n "$guest_user" ]] || guest_user="$USER"
+
+  # Fail fast on anything that is not a port collision. Without this, an
+  # unreachable sshd or a rejected login walks all ten candidate blocks and
+  # then reports "no free ports" — pointing the user at lsof when the real
+  # problem was SSH itself.
+  local ssh_err
+  if ! ssh_err="$(ssh -F /dev/null \
+        -o IdentityFile="$HOME/.lima/_config/user" \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o NoHostAuthenticationForLocalhost=yes \
+        -o IdentitiesOnly=yes \
+        -o BatchMode=yes \
+        -o ConnectTimeout=10 \
+        -o ControlMaster=no \
+        -p "$ssh_port" "${guest_user}@127.0.0.1" true 2>&1)"; then
+    echo "[tunnel] ERROR: SSH into $vm failed (${guest_user}@127.0.0.1:${ssh_port}) — LAN tunnels unavailable." >&2
+    [[ -n "$ssh_err" ]] && echo "[tunnel]   ssh: $(printf '%s\n' "$ssh_err" | tail -1)" >&2
+    return 1
+  fi
+
+  local base p ok pid err_file
+  err_file="$(mktemp 2>/dev/null || echo "/tmp/ocvm-tunnel-$$.err")"
   for base in $(seq "$req" $((req + 9))); do
     # Never bind a block that touches the browser unsafe-port list: browsers
     # refuse those outright (ERR_UNSAFE_PORT), so the banner would advertise
@@ -6895,12 +6945,14 @@ start_web_tunnels() {
         -o IdentitiesOnly=yes \
         -o ExitOnForwardFailure=yes \
         -o ServerAliveInterval=30 \
+        -o BatchMode=yes \
+        -o ConnectTimeout=10 \
         -o ControlMaster=no \
         -L "0.0.0.0:${base}:127.0.0.1:${base}" \
         -L "0.0.0.0:$((base + 1)):127.0.0.1:$((base + 1))" \
         -L "0.0.0.0:$((base + 2)):127.0.0.1:$((base + 2))" \
         -L "0.0.0.0:$((base + 3)):127.0.0.1:$((base + 3))" \
-        -p "$ssh_port" "${USER}@127.0.0.1" 2>/dev/null; then
+        -p "$ssh_port" "${guest_user}@127.0.0.1" 2>"$err_file"; then
       pid="$(pgrep -f "ssh -f -N .*-L 0\.0\.0\.0:${base}:127\.0\.0\.1:${base} .*-p ${ssh_port} " | head -1)"
       # The Lima SSH port goes in as line 2: after `limactl delete` the instance
       # can no longer be looked up, and without it the fallback sweep below
@@ -6911,10 +6963,15 @@ start_web_tunnels() {
         echo "[tunnel] Requested base port ${req} was unavailable — the block moved to ${base}."
       fi
       echo "[tunnel] LAN tunnels up (pid ${pid:-?}): ${base} web/https, $((base + 1)) web/http, $((base + 2)) a2a/https, $((base + 3)) a2a/http"
+      rm -f "$err_file"
       return 0
     fi
   done
 
+  if [[ -s "$err_file" ]]; then
+    echo "[tunnel] ERROR: last ssh attempt said: $(tail -1 "$err_file")" >&2
+  fi
+  rm -f "$err_file"
   echo "[tunnel] ERROR: no free browser-safe block of four consecutive host ports in ${req}..$((req + 12))." >&2
   echo "[tunnel]   web mode needs P (web https), P+1 (web http), P+2 (a2a https), P+3 (a2a http)." >&2
   echo "[tunnel]   Diagnose: lsof -nP -iTCP:${req}-$((req + 12)) -sTCP:LISTEN" >&2
@@ -8179,6 +8236,20 @@ attach_session() {
     shutdown_requested=0
     on_signal() { shutdown_requested=1; }
     trap on_signal INT TERM
+
+    # Same guard as in start_session: config-dir deps (ECC custom tools)
+    # must be installed before opencode boots, or its resolver caches the
+    # empty node_modules and every prompt fails until the next restart.
+    OC_CFG_DIR="$XDG_CONFIG_HOME/opencode"
+    if [ -f "$OC_CFG_DIR/package.json" ] && command -v npm >/dev/null 2>&1; then
+      if [ ! -f "$OC_CFG_DIR/node_modules/.package-lock.json" ] ||
+         [ "$OC_CFG_DIR/package.json" -nt "$OC_CFG_DIR/node_modules/.package-lock.json" ]; then
+        echo "[attach] Installing opencode config dependencies (custom tools/plugins)..."
+        ( cd "$OC_CFG_DIR" && npm install --no-audit --no-fund --loglevel=error ) ||
+          echo "[attach] WARNING: config dependency install failed — custom tools may not load."
+        echo "[attach] Config dependencies ready."
+      fi
+    fi
 
     if [ "$OC_MODE" = "web" ]; then
       start_web_proxies
@@ -9483,6 +9554,25 @@ EOF
     # is matched against. Matters for the clean-symlink case, where a non-ASCII
     # project path resolves to /tmp/oc-mount-<sha12>.
     OC_DIR_KEY="$(printf %s "$(pwd -P)" | base64 -w0 | sed "s/+/-/g; s|/|_|g; s/=//g")"
+
+    # ECC/custom tools ship a package.json in the config share. opencode does
+    # install those deps itself, but only mid-bootstrap — by then its module
+    # resolver has already scanned the empty node_modules and keeps that miss
+    # cached for the whole server lifetime, so every prompt dies silently with
+    # "Cannot find module @opencode-ai/plugin/tool" until a restart. Installing
+    # up front removes the race. In-VM on purpose: native deps need linux
+    # builds; on the share on purpose: later sessions reuse the result and this
+    # becomes a no-op.
+    OC_CFG_DIR="$XDG_CONFIG_HOME/opencode"
+    if [ -f "$OC_CFG_DIR/package.json" ] && command -v npm >/dev/null 2>&1; then
+      if [ ! -f "$OC_CFG_DIR/node_modules/.package-lock.json" ] ||
+         [ "$OC_CFG_DIR/package.json" -nt "$OC_CFG_DIR/node_modules/.package-lock.json" ]; then
+        echo "[$(date +%T)] Installing opencode config dependencies (custom tools/plugins)..."
+        ( cd "$OC_CFG_DIR" && npm install --no-audit --no-fund --loglevel=error ) ||
+          echo "[run] WARNING: config dependency install failed — custom tools may not load on first start."
+        echo "[$(date +%T)] Config dependencies ready."
+      fi
+    fi
 
     case "$OC_MODE" in
       shell)
