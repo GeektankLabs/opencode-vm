@@ -128,7 +128,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.5.16"
+OCVM_VERSION="0.5.17"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -535,6 +535,14 @@ check_sqlite_integrity() {
     [[ -f "$db" ]] || continue
     local result
     result="$(sqlite3 "$db" 'PRAGMA integrity_check;' 2>/dev/null || echo 'error')"
+    if [[ "$result" == "error" || -z "$result" ]]; then
+      # Could not read the db at all — usually a live writer holding the lock
+      # (an active or orphaned session). The .dump recovery would fail the
+      # same way and end in deleting a healthy live database, so leave it
+      # untouched. Only an explicit integrity verdict may trigger recovery.
+      echo "[sqlite] Skipping integrity check (busy or unreadable): $db"
+      continue
+    fi
     if [[ "$result" != "ok" ]]; then
       echo "[sqlite] Corrupt database detected: $db"
       # Attempt recovery via .dump
@@ -585,6 +593,12 @@ check_and_backup_sqlite_dbs() {
     # Integrity check
     local result
     result="$(sqlite3 "$db" 'PRAGMA integrity_check;' 2>/dev/null || echo 'error')"
+    if [[ "$result" == "error" || -z "$result" ]]; then
+      # Unreadable (usually locked by a live writer) — see
+      # check_sqlite_integrity: never treat that as corruption.
+      echo "[sqlite] Skipping integrity check (busy or unreadable): $db"
+      continue
+    fi
     if [[ "$result" != "ok" ]]; then
       echo "[sqlite] Corrupt database detected: $db"
       local recovered="${db}.recovered"
@@ -7474,6 +7488,27 @@ load_session_auth() {
   return 0
 }
 
+# Kill a leftover `opencode web` from an earlier run of this session whose
+# connection died without the EXIT trap (closed terminal, SIGHUP, host sleep).
+# The orphan still holds the internal port, so a fresh server dies with
+# ServeError on every respawn while the browser silently keeps talking to the
+# orphan — sessions land in a process nothing manages any more. Scoped tightly
+# to this session's internal port; a normal start finds nothing to do.
+reap_stale_opencode() {
+  local port="$1" pid waited=0
+  for pid in $(pgrep -f "opencode web --hostname 127\.0\.0\.1 --port ${port}\$" 2>/dev/null); do
+    echo "[web] Reaping orphaned opencode web (pid $pid) from a previous run — it held port ${port}."
+    kill "$pid" 2>/dev/null || true
+  done
+  # Give the listener a moment to vanish so the fresh server can bind.
+  while [ "$waited" -lt 20 ]; do
+    ss -ltn "sport = :$port" 2>/dev/null | grep -q LISTEN || return 0
+    sleep 0.2
+    waited=$(( waited + 1 ))
+  done
+  return 0
+}
+
 # Puts the proxy in front of opencode: it takes over $OC_PORT (the port the SSH
 # tunnel forwards to) and opencode moves to $OC_PORT_INTERNAL, so no host-side
 # URL, tunnel or firewall rule changes. Fails safe: if the proxy does not come
@@ -8161,6 +8196,7 @@ attach_session() {
       stop_a2a()          { return 0; }
       wait_for_a2a()      { return 1; }
       a2a_watch_ready()   { return 0; }
+      reap_stale_opencode() { return 0; }
       print_web_banner()  { local h="$OC_HOST_IP"; [ "${OC_LAN_UP:-1}" = "1" ] || h="127.0.0.1"; echo "  Browser/Web UI:  http://${h}:${OC_PORT}"; return 0; }
     fi
 
@@ -8217,10 +8253,18 @@ attach_session() {
     # branch never runs because bash terminates as soon as `opencode web`
     # exits on SIGINT (rc=130) — `set -e` propagates the signal exit.
     sync_vm_to_share() {
+      # After a hangup the pty is gone and every echo fails — under the
+      # scripts set -e that aborted this trap before the rsync, silently
+      # losing the history sync. Nothing below may die on a write error.
+      set +e
       echo ""
       stop_all_proxies
       stop_a2a
       echo "[attach] Stopping session — syncing data back to host..."
+      # The rsync excludes log/, which made server-side failures undebuggable
+      # from the host — keep the tail of the opencode log in the share.
+      mkdir -p "$SESS_SHARE/log" 2>/dev/null || true
+      tail -n 400 /tmp/oc-xdg-data/opencode/log/opencode.log > "$SESS_SHARE/log/opencode-last.log" 2>/dev/null || true
       rsync -a --exclude="bin/" --exclude="log/" --exclude="tool-output/" \
         /tmp/oc-xdg-data/opencode/ "$SESS_SHARE/xdg-data/opencode/" 2>/dev/null || true
       rsync -a /tmp/oc-xdg-state/opencode/ "$SESS_SHARE/xdg-state/opencode/" 2>/dev/null || true
@@ -8234,8 +8278,9 @@ attach_session() {
     # inherit as "ignore" to opencode web on execve and kill its ability to
     # respond to Ctrl+C; an active handler does not.
     shutdown_requested=0
-    on_signal() { shutdown_requested=1; }
-    trap on_signal INT TERM
+    OC_WEB_PID=""
+    on_signal() { shutdown_requested=1; [ -n "$OC_WEB_PID" ] && kill "$OC_WEB_PID" 2>/dev/null; return 0; }
+    trap on_signal INT TERM HUP
 
     # Same guard as in start_session: config-dir deps (ECC custom tools)
     # must be installed before opencode boots, or its resolver caches the
@@ -8256,6 +8301,7 @@ attach_session() {
       start_a2a
       print_web_banner
       a2a_watch_ready
+      reap_stale_opencode "$OC_PORT_INTERNAL"
       if [ "$OC_WEB_TUI" = "true" ]; then
         aa-exec -p opencode-sandbox -- opencode web --hostname 127.0.0.1 --port "$OC_PORT_INTERNAL" &
         OC_WEB_PID=$!
@@ -8273,15 +8319,31 @@ attach_session() {
         # 127.0.0.1:$OC_PORT and stays valid across restarts. Clean exits
         # (0 / SIGINT 130 / SIGTERM 143) and signal-driven shutdown end the
         # loop and trigger the EXIT-trap sync.
+        # Background job + `wait` for the same reason as in start_session:
+        # only a trapped signal (INT/TERM/HUP) can interrupt `wait`, kill the
+        # server and reach the EXIT-trap sync — a hangup on a foreground
+        # child would skip the trap, lose the history sync and orphan the
+        # server on its port.
+        serve_fails=0
         while [ "$shutdown_requested" = "0" ]; do
           set +e
-          aa-exec -p opencode-sandbox -- opencode web --hostname 127.0.0.1 --port "$OC_PORT_INTERNAL"
+          aa-exec -p opencode-sandbox -- opencode web --hostname 127.0.0.1 --port "$OC_PORT_INTERNAL" &
+          OC_WEB_PID=$!
+          wait "$OC_WEB_PID"
           rc=$?
           set -e
+          OC_WEB_PID=""
           [ "$shutdown_requested" = "1" ] && break
           case "$rc" in
             0|130|143) break ;;
           esac
+          serve_fails=$(( serve_fails + 1 ))
+          if [ "$serve_fails" -ge 5 ]; then
+            echo ""
+            echo "[attach] opencode web keeps dying (rc=$rc, ${serve_fails}x) — giving up."
+            echo "[attach]   A ServeError here means port $OC_PORT_INTERNAL is held by another process."
+            break
+          fi
           echo ""
           echo "[attach] opencode web exited unexpectedly (rc=$rc) — restarting in 2s. Press Ctrl+C to abort."
           sleep 2 || break
@@ -9425,6 +9487,7 @@ start_session() {
       stop_a2a()          { return 0; }
       wait_for_a2a()      { return 1; }
       a2a_watch_ready()   { return 0; }
+      reap_stale_opencode() { return 0; }
       print_web_banner()  { local h="$OC_HOST_IP"; [ "${OC_LAN_UP:-1}" = "1" ] || h="127.0.0.1"; echo "  Browser/Web UI:  http://${h}:${OC_PORT}"; return 0; }
     fi
 
@@ -9483,6 +9546,14 @@ EOF
         [ -f "$f" ] || continue
         local result
         result="$(sqlite3 "$f" "PRAGMA integrity_check;" 2>/dev/null || echo "error")"
+        if [ "$result" = "error" ] || [ -z "$result" ]; then
+          # Unreadable — usually a live writer (active or orphaned opencode)
+          # holding the lock. The dump below would fail the same way and end
+          # in deleting a healthy live database plus its WAL, which is how
+          # session history silently vanished. Never treat busy as corrupt.
+          echo "[sqlite] Skipping integrity check (busy or unreadable): $f"
+          continue
+        fi
         if [ "$result" != "ok" ]; then
           echo "[sqlite] Corrupt database detected: $f"
           local recovered="${f}.recovered"
@@ -9507,9 +9578,17 @@ EOF
     # sessions) back to the share — without this, provider logins made via
     # the web UI are lost when the user stops the server with Ctrl+C.
     sync_vm_to_share() {
+      # After a hangup the pty is gone and every echo fails — under the
+      # scripts set -e that aborted this trap before the rsync, silently
+      # losing the history sync. Nothing below may die on a write error.
+      set +e
       stop_all_proxies
       stop_a2a
       echo "[$(date +%T)] Syncing session data back to host..."
+      # The rsync excludes log/, which made server-side failures undebuggable
+      # from the host — keep the tail of the opencode log in the share.
+      mkdir -p "$SESS_SHARE/log" 2>/dev/null || true
+      tail -n 400 /tmp/oc-xdg-data/opencode/log/opencode.log > "$SESS_SHARE/log/opencode-last.log" 2>/dev/null || true
       check_sqlite_dbs "$VM_DATA/opencode" 2>/dev/null || true
       check_sqlite_dbs "$VM_STATE/opencode" 2>/dev/null || true
       rsync -a --exclude="bin/" --exclude="log/" --exclude="tool-output/" \
@@ -9585,6 +9664,7 @@ EOF
         start_a2a
         print_web_banner
         a2a_watch_ready
+        reap_stale_opencode "$OC_PORT_INTERNAL"
         if [ "$OC_WEB_TUI" = "true" ]; then
           aa-exec -p opencode-sandbox -- opencode web --hostname 127.0.0.1 --port "$OC_PORT_INTERNAL" &
           OC_WEB_PID=$!
@@ -9601,16 +9681,45 @@ EOF
           # The host-side SSH tunnel forwards to 127.0.0.1:$OC_PORT in the VM
           # and is stable across these in-VM restarts. Clean exits (0/130/143)
           # end the loop.
-          while true; do
-            aa-exec -p opencode-sandbox -- opencode web --hostname 127.0.0.1 --port "$OC_PORT_INTERNAL"
+          #
+          # The server runs as a background job under `wait` because only a
+          # trapped signal can interrupt `wait` — a foreground child would
+          # leave bash blocked, and a hangup (closed terminal, dropped SSH,
+          # host sleep) would kill bash WITHOUT the EXIT trap: no sync back
+          # (history lost) and opencode web orphaned on its port, where it
+          # shadows every later session (ServeError respawn loop while the
+          # browser silently talks to the unmanaged orphan). The set -e wrap
+          # matters too: without set +e a crash exits the script at the
+          # aa-exec line and the restart loop can never run.
+          shutdown_requested=0
+          OC_WEB_PID=""
+          on_signal() { shutdown_requested=1; [ -n "$OC_WEB_PID" ] && kill "$OC_WEB_PID" 2>/dev/null; return 0; }
+          trap on_signal INT TERM HUP
+          serve_fails=0
+          while [ "$shutdown_requested" = "0" ]; do
+            set +e
+            aa-exec -p opencode-sandbox -- opencode web --hostname 127.0.0.1 --port "$OC_PORT_INTERNAL" &
+            OC_WEB_PID=$!
+            wait "$OC_WEB_PID"
             rc=$?
+            set -e
+            OC_WEB_PID=""
+            [ "$shutdown_requested" = "1" ] && break
             case "$rc" in
               0|130|143) break ;;
             esac
+            serve_fails=$(( serve_fails + 1 ))
+            if [ "$serve_fails" -ge 5 ]; then
+              echo ""
+              echo "[run] opencode web keeps dying (rc=$rc, ${serve_fails}x) — giving up."
+              echo "[run]   A ServeError here means port $OC_PORT_INTERNAL is held by another process."
+              break
+            fi
             echo ""
             echo "[run] opencode web exited unexpectedly (rc=$rc) — restarting in 2s. Press Ctrl+C to abort."
             sleep 2 || break
           done
+          trap - INT TERM HUP
         fi
         ;;
       *)
