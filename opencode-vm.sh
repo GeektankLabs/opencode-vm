@@ -128,7 +128,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.5.17"
+OCVM_VERSION="0.5.21"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -1684,50 +1684,6 @@ mcrepo_ensure_graphify_dir() {
 }
 
 # ---------------------------------------------------------------------------
-# Rules auto-inject (ECC-gated) — appends per-language rules to session AGENTS.md
-# ---------------------------------------------------------------------------
-
-# Stage ECC rules matching detected languages into a separate sidecar file.
-# Host-side: writes to $sess_share/config/opencode/AGENTS.ecc-rules.md — the
-# VM-side AGENTS.md composition block then appends it after its own content,
-# so this doesn't get overwritten by the VM's cp -p of $HOME/AGENTS.md.
-ecc_inject_rules() {
-  local proj="$1"
-  local sess_share="$2"
-  ecc_enabled || return 0
-  [[ -d "$ECC_DIR/rules" ]] || return 0
-
-  local langs
-  langs="$(detect_project_languages "$proj")"
-  [[ -n "$langs" ]] || return 0
-
-  local sidecar="$sess_share/config/opencode/AGENTS.ecc-rules.md"
-  mkdir -p "$(dirname "$sidecar")"
-
-  {
-    echo ""
-    echo "## ECC Rules (auto-injected: $langs)"
-    echo ""
-    local lang
-    for lang in $langs; do
-      local dir="$ECC_DIR/rules/$lang"
-      [[ -d "$dir" ]] || continue
-      local f
-      for f in "$dir"/*.md; do
-        [[ -f "$f" ]] || continue
-        echo "<!-- rules/$lang/$(basename "$f") -->"
-        cat "$f"
-        echo ""
-      done
-    done
-  } > "$sidecar"
-
-  # Cache detected languages per session (reused by skills mount + doctor)
-  echo "$langs" > "$sess_share/ecc-langs"
-  echo "[ecc] Rules prepared for: $langs"
-}
-
-# ---------------------------------------------------------------------------
 # Skills subsystem — registry-driven since v0.4.5
 # Source of truth: skills/registry.json (bundled alongside the script, or
 # fetched from upstream on demand).
@@ -2099,11 +2055,7 @@ skills_mount_for_session() {
   [[ -n "$all_pkgs" ]] || return 0
 
   local langs
-  if [[ -f "$sess_share/ecc-langs" ]]; then
-    langs="$(cat "$sess_share/ecc-langs")"
-  else
-    langs="$(detect_project_languages "$proj")"
-  fi
+  langs="$(detect_project_languages "$proj")"
 
   local dest_root="$sess_share/config/opencode/skills"
   local manifest="$sess_share/skills-manifest.txt"
@@ -2625,10 +2577,22 @@ mcps_mount_skill_docs_for_session() {
         src_dir="$(proxmox_skill_ensure 2>/dev/null)"
         ;;
       *)
+        # Prefer bundled next to the script; in a single-file install fall back
+        # to the registry sparse-clone cache, materializing the directory on
+        # demand (the cache is a blob:none clone of the whole OCVM repo, so
+        # sparse-checkout add can pull paths outside mcps/, e.g. skills/…).
         if [[ -d "$SCRIPT_DIR/$doc_rel" ]]; then
           src_dir="$SCRIPT_DIR/$doc_rel"
         else
           src_dir=""
+          if [[ -d "$MCPS_REGISTRY_CACHE/.git" ]]; then
+            if [[ ! -d "$MCPS_REGISTRY_CACHE/$doc_rel" ]]; then
+              git -C "$MCPS_REGISTRY_CACHE" sparse-checkout add "$doc_rel" >/dev/null 2>&1 || true
+            fi
+            if [[ -d "$MCPS_REGISTRY_CACHE/$doc_rel" ]]; then
+              src_dir="$MCPS_REGISTRY_CACHE/$doc_rel"
+            fi
+          fi
         fi
         ;;
     esac
@@ -2663,7 +2627,12 @@ _mcps_resolve_snippet() {
       fi
       [[ -n "${path:-}" ]] || path="$(jq -r --arg n "$pkg" '.mcps[$n].agents_md_snippet.path // empty' "$reg" 2>/dev/null)"
       [[ -n "$path" ]] || return 0
-      local abs="$SCRIPT_DIR/$path"
+      # Resolve relative to the registry actually in use: bundled repo checkout
+      # or the sparse-clone cache of a single-file install — the snippet files
+      # live in the same mcps/ tree as registry.json either way.
+      local base
+      base="$(dirname "$(dirname "$reg")")"
+      local abs="$base/$path"
       [[ -f "$abs" ]] || {
         echo "[mcps] $pkg agents_md_snippet path not found: $abs" >&2
         return 0
@@ -2686,7 +2655,7 @@ _mcps_resolve_snippet() {
 
 # Build the per-session AGENTS.mcps.md sidecar from active MCPs' snippets.
 # Truncates first so a deactivated MCP cannot leak from a previous session.
-# Composes after Host LAN IP and before ECC rules in the VM-side AGENTS.md.
+# Composes after the Host LAN IP block in the VM-side AGENTS.md.
 # $1=sess_share $2=vm_home $3=proj
 mcps_build_agents_sidecar() {
   local sess_share="$1" vm_home="$2" proj="$3"
@@ -4116,19 +4085,6 @@ doctor_cmd() {
           fi
         else
           echo "    instincts:    <none yet — run /learn inside a session>"
-        fi
-
-        # Rules auto-inject preview
-        local _rules_langs
-        _rules_langs="$(detect_project_languages "$_hom_proj")"
-        echo "  rules (cwd):   langs: $_rules_langs"
-        if [[ -d "$ECC_DIR/rules" ]]; then
-          local _rlang _rfiles
-          for _rlang in $_rules_langs; do
-            [[ -d "$ECC_DIR/rules/$_rlang" ]] || continue
-            _rfiles=$(find "$ECC_DIR/rules/$_rlang" -maxdepth 1 -name '*.md' 2>/dev/null | wc -l | tr -d ' ')
-            echo "                 $_rlang: $_rfiles files"
-          done
         fi
       else
         echo "  enabled:   no  (enable with: opencode-vm skills on ecc-auto)"
@@ -6320,11 +6276,21 @@ cat > ~/AGENTS.md <<'AGENTSMD'
 
 You are running inside an isolated Lima VM managed by opencode-vm. The project directory is mounted read-write from the host. You have full freedom to install, configure, and run tools. You have passwordless sudo — use it whenever needed.
 
+## Coding Principles
+
+1. **Think before coding.** State your assumptions explicitly. If the request is ambiguous or you see multiple reasonable interpretations, surface them and ask before implementing. If no user is available to ask (autonomous or A2A runs), choose the most minimal interpretation consistent with the request and state the assumption in your report.
+2. **Simplicity first (YAGNI).** Deliver the minimal code that solves the stated problem. **Follow YAGNI** ("You Aren't Gonna Need It"): no speculative features, unrequested abstractions, or flexibility for imagined future needs. If a need is real, add it when it arrives.
+3. **Surgical changes.** Modify only what's required for the request. Preserve existing style and structure; don't fold in unrelated refactors or "while I'm here" cleanups.
+4. **Stay in scope.** A finding discovered during implementation or testing may enter the current implementation cycle only if it is required to (a) make the agreed goal functional, (b) fix a regression caused by the current patch, or (c) pass a mandatory validation of the current scope. Everything else — improvement ideas, side issues, additional hardening — is documented and reported at the end, never implemented.
+5. **Goal-driven execution.** Turn vague tasks into verifiable success criteria. Validate each step (build, test, run) before declaring the task done.
+6. **User-facing work follows POLA.** For UI/UX, CLI output, prompts, messages, and errors, balance YAGNI with the **Principle of Least Astonishment**: the interface must behave the way users already expect, honoring established conventions and the context of the interaction. YAGNI governs the *feature set* (don't build what isn't needed); POLA governs *behavior* (whatever you do build must not surprise). Reconcile the two with **progressive disclosure** (minimal default surface, depth revealed when needed) and **sensible defaults over configuration**.
+
 ## System Privileges
 
 - **sudo**: available without password. Use freely for installing packages, configuring services, changing system settings, inspecting processes, etc.
 - **root access**: `sudo -i` or `sudo bash` for a root shell if needed.
 - **Service management**: `sudo systemctl start/stop/restart <service>`.
+- **Only restriction**: firewall and security-policy management are controlled by the host and cannot be modified from within the VM.
 
 ## Languages & Version Managers
 
@@ -6361,23 +6327,22 @@ pipx install <package>
 All of these are installed and available:
 
 - **HTTP/downloads**: `curl`, `wget`
-- **DNS**: `dig`, `nslookup`, `host` (bind9-dnsutils)
-- **TCP/IP connectivity**: `nc` (netcat-openbsd), `ncat` (nmap, with TLS/SSL), `socat`, `telnet` (inetutils-telnet, real telnet)
-- **Packet capture**: `sudo tcpdump` (requires sudo for raw sockets)
-- **Routing & latency**: `ping`, `traceroute`, `mtr` (mtr-tiny), `ip` (iproute2)
-- **Bandwidth**: `iperf3`
-- **Domain lookups**: `whois`
+- **DNS**: `dig`, `nslookup`, `host` (bind9-dnsutils); `drill <name>` — alternative resolver (DNSSEC trace, CH-class)
+- **TCP/IP connectivity**: `nc` (netcat-openbsd), `ncat` (from nmap, with TLS/SSL), `socat`, `telnet` (inetutils-telnet, real telnet)
 - **Port scanning/testing**: `nc -zv <host> <port>` for a single port; `nmap -p 1-1000 <host>` for ranges; `nmap -sn 192.168.1.0/24` for ping-sweep
-- **SSL/TLS inspection**: `openssl s_client -connect <host>:<port>`
+- **LAN discovery**: `sudo arp-scan --localnet` (use `--interface` if multi-iface); `arping <ip>` — single-host ARP reachability
+- **Routing & latency**: `ping`, `traceroute`, `tracepath <host>`, `tcptraceroute <host> <port>` (TCP-based, gets through firewalls), `mtr` (mtr-tiny), `ip` (iproute2); `ipcalc 192.168.1.0/24` — subnet math
+- **Packet capture & analysis**: `sudo tcpdump` (requires sudo for raw sockets); `tshark` — CLI Wireshark for protocol-level inspection (run with `sudo`); `hping3` — crafted-packet probes (use carefully — can stress LANs)
+- **Bandwidth & interface diagnostics**: `iperf3`; `iftop -i <iface>` — live bandwidth per connection (TUI); `nethogs <iface>` — live bandwidth per process (TUI); `ethtool <iface>` — link/PHY/driver info; `brctl show` — bridge topology (bridge-utils); `vconfig` — VLAN inspection
+- **SSL/TLS inspection**: `openssl s_client -connect <host>:<port>`; `gnutls-cli host:443` — alternative TLS client (different stack, useful for cross-checks)
+- **Domain lookups**: `whois`
+- **Bulk transfers**: `lftp` — sftp/http/ftp client with `mirror`, scriptable
 
 ### Examples
 
 ```bash
 # Test if a service is reachable on a specific port
 nc -zv host.lima.internal 1234
-
-# DNS lookup
-dig example.com
 
 # Trace route to a host
 mtr --report example.com
@@ -6393,12 +6358,6 @@ curl -sI https://example.com
 
 # SSH with non-interactive password (when key auth not set up)
 SSHPASS="$REMOTE_PW" sshpass -e ssh -o StrictHostKeyChecking=accept-new user@host uptime
-
-# Discover LAN hosts
-sudo arp-scan --localnet
-
-# Find which TCP ports are open on a host
-nmap -p 1-1000 192.168.1.10
 ```
 
 ## SSH & Remote Access
@@ -6418,35 +6377,6 @@ If you need to SSH somewhere, the user must provide the credentials per session
 (env var, paste key into `~/.ssh/`, or use sshpass with a password). Never
 attempt to reach the user's git origin from inside the VM — that boundary is
 enforced at the firewall level.
-
-## Network Discovery
-
-- `nmap` — port/host scanning. `nmap -sn 192.168.1.0/24` for ping-sweep
-- `ncat` — netcat with TLS/SSL support (from nmap package)
-- `arp-scan --localnet` — LAN host discovery via ARP (use `--interface` if multi-iface)
-- `arping <ip>` — single-host ARP reachability
-- `tracepath <host>` / `tcptraceroute <host> <port>` — path tracing without root, TCP-based traceroute through firewalls
-- `ipcalc 192.168.1.0/24` — subnet math
-- `drill <name>` — alternative DNS resolver (DNSSEC trace, CH-class)
-
-## Deep Packet Analysis
-
-- `tshark` — CLI Wireshark for protocol-level inspection (run with `sudo`)
-- `hping3` — crafted-packet probes (use carefully — can stress LANs)
-
-## Performance & Interface Diagnostics
-
-- `ethtool <iface>` — link/PHY/driver info
-- `iftop -i <iface>` — live bandwidth per connection (TUI)
-- `nethogs <iface>` — live bandwidth per process (TUI)
-- `brctl show` — bridge topology (bridge-utils)
-- `vconfig` — VLAN inspection
-
-## TLS / Secure Transport
-
-- `openssl s_client -connect host:443` — TLS handshake & cert inspection
-- `gnutls-cli host:443` — alternative TLS client (different stack, useful for cross-checks)
-- `lftp` — sftp/http/ftp client with `mirror`, scriptable bulk transfers
 
 ## Docker
 
@@ -6492,7 +6422,7 @@ Pre-installed CLI tools for web image optimization and graphics conversion:
 - **SVGO** (`svgo`): SVG optimization and cleanup
 - **ExifTool** (`exiftool`): image metadata inspection and removal
 
-The `web-image-pipeline` skill is mounted by default and provides detailed workflows, quality defaults, and reporting format for production web image optimization.
+If mounted, the `web-image-pipeline` skill provides detailed workflows, quality defaults, and reporting format for production web image optimization.
 
 ## Network Configuration
 
@@ -6506,11 +6436,7 @@ The `web-image-pipeline` skill is mounted by default and provides detailed workf
 
 ## Host LAN IP Variable
 
-For each started session, opencode-vm injects the host LAN IP into the environment and into the session-local AGENTS instructions file.
-
-- Canonical variable: `OCVM_HOST_LAN_IP`
-- Aliases: `HOST_LAN_IP`, `LANIP`
-- Use this value when suggesting URLs for services bound to `0.0.0.0` in the VM (prefer `http://$OCVM_HOST_LAN_IP:<port>` over `localhost`).
+Each session exports the host's LAN IP as `OCVM_HOST_LAN_IP` (aliases: `HOST_LAN_IP`, `LANIP`). The current value and URL guidance are in the "Host LAN IP (Session)" section appended below.
 
 ## Build Caches
 
@@ -6521,7 +6447,7 @@ All build caches are redirected to VM-local `/tmp/` for performance. They do not
 The host user can place files or folders in a directory called **opencode-share** on their
 macOS Desktop. When this directory exists at session start, it is mounted **read-write**
 into the VM and accessible at two paths:
-- \`~/Desktop/opencode-share\` (symlinked for convenience)
+- `~/Desktop/opencode-share` (symlinked for convenience)
 - The original host path (for compatibility with pasted file paths from macOS)
 
 This is useful for sharing images, documents, or other reference files that are not part
@@ -6533,114 +6459,39 @@ of the project repository.
    (if it doesn't exist yet), place the file there, and **restart the session**.
 3. The file will then be accessible at its original host path.
 
-## Web-UI Attachments (uploaded via the "+" button)
-
-When a user uploads a file via the OpenCode web UI's "+" button, the file is
-delivered to the model as an inline base64 \`data:\` URI — it has **no real
-filesystem path**, so your tools (Read, Bash, \`convert\`, \`pdftotext\`,
-\`webimg\`-pipeline, MCPs, …) cannot operate on it directly.
-
-opencode-vm runs a background daemon (\`ocvm-materialize\`) in web sessions that
-detects such uploads and writes them to disk so your tools get a real path.
-
-**Location:** the directory is exposed as the env var \`$OCVM_ATTACHMENTS_DIR\`
-(a subpath of the session share, with one subfolder per OpenCode session id).
-Each session subfolder also contains an \`index.json\` mapping part-IDs to
-filenames + MIME types.
-
-**Convention** — whenever the user's prompt refers to an uploaded file, an
-image they "just sent", or you receive a \`FilePart\` you cannot otherwise act
-on, **list the directory first**:
-
-\`\`\`bash
-ls -la "\$OCVM_ATTACHMENTS_DIR"/*/ 2>/dev/null
-\`\`\`
-
-Then pass the concrete filesystem path of the newest matching file to your tool
-(e.g. \`convert "\$OCVM_ATTACHMENTS_DIR/<sid>/foo.png" -resize 800x out.png\`).
-
-Notes:
-- The daemon polls (~0.5 s); allow a beat after the user sends the message
-  before the file appears.
-- Files are **ephemeral** — the whole directory is deleted at session end.
-- This is independent of \`~/Desktop/opencode-share/\` (that one is for
-  *user-curated* material shared from the host).
-
 ## Screenshot Capture
 
 The user can share browser screenshots with you via a Chrome extension that saves
 PNG files into the shared Desktop folder.
 
-**Location:** \`~/Desktop/opencode-share/\`
-**Filename pattern:** \`Screenshot Capture - YYYY-MM-DD - HH-MM-SS.png\`
+**Location:** `~/Desktop/opencode-share/`
+**Filename pattern:** `Screenshot Capture - YYYY-MM-DD - HH-MM-SS.png`
 
 When the user mentions a "screenshot" in their prompt:
-1. List all files matching \`Screenshot Capture - *.png\` in \`~/Desktop/opencode-share/\`
+1. List all files matching `Screenshot Capture - *.png` in `~/Desktop/opencode-share/`
 2. Identify the newest file by its filename timestamp
 3. Analyze that image file
-4. After analysis, delete **all** \`Screenshot Capture - *.png\` files in that directory
+4. After analysis, delete **all** `Screenshot Capture - *.png` files in that directory
    (the one you just analyzed and any older ones) to keep the folder clean
 
 If no matching screenshot file is found:
 - The screenshot feature may not be configured yet
-- Tell the user to exit this session, run \`opencode-vm screenshot\` in a host terminal,
+- Tell the user to exit this session, run `opencode-vm screenshot` in a host terminal,
   follow the setup instructions, and then start a new session
 
 ## Web Search
 
-The `websearch` tool is available. Use it proactively to look up documentation, find API references, research error messages, or discover how others have solved similar problems. When debugging or implementing unfamiliar features, searching the web often saves significant time.
-
-## Browser Automation (Playwright)
-
-Playwright MCP is available as a tool for headless browser automation. Use it for:
-- Testing UI flows end-to-end (navigation, form submission, clicking)
-- Taking screenshots to verify visual state
-- Inspecting page content and accessibility trees
-- Debugging frontend issues by interacting with the running application
-
-Start a dev server first (e.g. \`npm run dev\`), then use the Playwright tools to navigate to \`http://localhost:<port>\` and interact with the UI.
-
-**Important:** Chrome for Testing is **already pre-installed** as an ARM64-native binary, bundled with the Playwright MCP. Everything is configured and works out of the box. Do **NOT** run \`npx playwright install\` or \`playwright-mcp install-browser\` — just use the MCP tools directly.
-
-Pre-installed paths (do not change):
-- MCP server binary: \`~/.local/bin/playwright-mcp\` (stable symlink, works with any NVM Node version)
-- Browser cache:     \`~/.cache/ms-playwright/chromium-<rev>/chrome-linux/chrome\`
-                     \`~/.cache/ms-playwright/chromium_headless_shell-<rev>/chrome-linux/headless_shell\`
-                     (\`<rev>\` floats with the bundled Playwright MCP version)
-
-There is no Chrome at \`/opt/google/chrome/\` — ignore that path. The bundled Chrome for Testing above is used automatically by the MCP tools (\`browser_navigate\`, \`browser_click\`, \`browser_screenshot\`, etc.).
-
-## Codebase Structure Maps (RepoMapper)
-
-RepoMapper MCP is available for generating ranked structural overviews of codebases. Use it when:
-- First exploring a large or unfamiliar codebase to understand its architecture
-- You need to identify the most important/interconnected files before diving in
-- You want symbol-aware code search (definitions vs references)
-
-**Tools:**
-- \`repo_map\` — generates a PageRank-ranked map of the codebase, showing the most important files and their key symbols. Pass \`project_root\` (absolute path) and optionally \`token_limit\` (default 8192).
-- \`search_identifiers\` — searches for code identifiers across the codebase with context. Returns definitions and references with file locations and line numbers.
-
-Pre-installed at: \`~/.local/share/repomapper/\`
+The built-in `websearch` tool is available for online research (documentation, API references, error messages). If an active MCP section later in this file documents a preferred search tool (e.g. SearXNG metasearch), follow that preference.
 
 ## Important Notes
 
 - The project directory is shared with the host. File changes are immediately visible on both sides.
 - Session VMs are ephemeral — anything outside the project directory or OpenCode state is lost when the session ends.
 - Globally installed tools (via apt, npm -g, pip, go install) persist only within the current session.
-- You can freely modify system configuration, install packages, start services, and use sudo. The only restriction is on firewall and security-policy management, which are controlled by the host.
 
 ## Project Design References
 
 For any frontend, UI, or visual-design task, check the project root (and the root of any relevant sub-project, e.g. a mono-repo package) for a `DESIGN.md` file. If present, treat it as authoritative for design system, colors, typography, and component conventions. One public source of such files is [awesome-design-md](https://github.com/VoltAgent/awesome-design-md).
-
-## Coding Principles
-
-1. **Think before coding.** State your assumptions explicitly. If the request is ambiguous or you see multiple reasonable interpretations, surface them and ask before implementing.
-2. **Simplicity first (YAGNI).** Deliver the minimal code that solves the stated problem. **Follow YAGNI** ("You Aren't Gonna Need It"): no speculative features, unrequested abstractions, or flexibility for imagined future needs. If a need is real, add it when it arrives.
-3. **Surgical changes.** Modify only what's required for the request. Preserve existing style and structure; don't fold in unrelated refactors or "while I'm here" cleanups.
-4. **Goal-driven execution.** Turn vague tasks into verifiable success criteria. Validate each step (build, test, run) before declaring the task done.
-5. **User-facing work follows POLA.** For UI/UX, CLI output, prompts, messages, and errors, balance YAGNI with the **Principle of Least Astonishment**: the interface must behave the way users already expect, honoring established conventions and the context of the interaction. YAGNI governs the *feature set* (don't build what isn't needed); POLA governs *behavior* (whatever you do build must not surprise). Reconcile the two with **progressive disclosure** (minimal default surface, depth revealed when needed) and **sensible defaults over configuration**.
 AGENTSMD
 
 echo "[init] Base ready. OpenCode: $(command -v opencode || true)"
@@ -7856,6 +7707,50 @@ install_web_lib() {
   return 0
 }
 
+# Write the web-mode AGENTS notes sidecar (materialized web-UI attachments).
+# The VM-side AGENTS.md composition appends it after the MCP snippets, so
+# terminal sessions never advertise the web-only daemon.
+# $1 = session share dir on host
+web_build_agents_sidecar() {
+  local sess_share="$1"
+  mkdir -p "$sess_share/config/opencode"
+  cat > "$sess_share/config/opencode/AGENTS.web.md" <<'WEBMD'
+
+## Web-UI Attachments (uploaded via the "+" button)
+
+When a user uploads a file via the OpenCode web UI's "+" button, the file is
+delivered to the model as an inline base64 `data:` URI — it has **no real
+filesystem path**, so your tools (Read, Bash, `convert`, `pdftotext`,
+`webimg`-pipeline, MCPs, …) cannot operate on it directly.
+
+opencode-vm runs a background daemon (`ocvm-materialize`) in web sessions that
+detects such uploads and writes them to disk so your tools get a real path.
+
+**Location:** the directory is exposed as the env var `$OCVM_ATTACHMENTS_DIR`
+(a subpath of the session share, with one subfolder per OpenCode session id).
+Each session subfolder also contains an `index.json` mapping part-IDs to
+filenames + MIME types.
+
+**Convention** — whenever the user's prompt refers to an uploaded file, an
+image they "just sent", or you receive a `FilePart` you cannot otherwise act
+on, **list the directory first**:
+
+```bash
+ls -la "$OCVM_ATTACHMENTS_DIR"/*/ 2>/dev/null
+```
+
+Then pass the concrete filesystem path of the newest matching file to your tool
+(e.g. `convert "$OCVM_ATTACHMENTS_DIR/<sid>/foo.png" -resize 800x out.png`).
+
+Notes:
+- The daemon polls (~0.5 s); allow a beat after the user sends the message
+  before the file appears.
+- Files are **ephemeral** — the whole directory is deleted at session end.
+- This is independent of `~/Desktop/opencode-share/` (that one is for
+  *user-curated* material shared from the host).
+WEBMD
+}
+
 # Spawn the ocvm-materialize daemon inside the session VM so any FilePart
 # with a data: URI (web-UI "+" upload) is dumped to disk under
 # $sess_share/attachments/<oc-session-id>/. PID is written to a pidfile in
@@ -8983,17 +8878,23 @@ start_session() {
 
   # Build the AGENTS.mcps.md sidecar from active MCPs' agents_md_snippet
   # declarations. The VM-side AGENTS.md composition appends this after the
-  # Host LAN IP block and before any ECC rules sidecar.
+  # Host LAN IP block.
   mcps_build_agents_sidecar "$sess_share" "$vm_home" "$proj" 2>/dev/null || true
 
+  # Web-mode AGENTS notes (materialized attachments daemon). Removed for
+  # terminal sessions so a stale copy can't leak from a previous web session.
+  if [[ "$SESSION_MODE" == "web" ]]; then
+    web_build_agents_sidecar "$sess_share"
+  else
+    rm -f "$sess_share/config/opencode/AGENTS.web.md"
+  fi
+
   # ECC (opt-in): copy plugin payload + optional MCP pack into session config,
-  # seed homunculus learning store from persistent project state, auto-inject
-  # language-specific rules into AGENTS.md.
+  # seed homunculus learning store from persistent project state.
   if ecc_enabled; then
     ecc_apply_to_session "$sess_share"
     ecc_apply_mcp_pack "$sess_cfg_file"
     ecc_seed_homunculus "$proj_state" "$sess_share"
-    ecc_inject_rules "$proj" "$sess_share"
     cp -p "$sess_cfg_file" "$sess_share/config/opencode/.opencode.json"
   fi
 
@@ -9518,9 +9419,9 @@ EOF
       if [ -s "$SESS_SHARE/config/opencode/AGENTS.mcps.md" ]; then
         cat "$SESS_SHARE/config/opencode/AGENTS.mcps.md" >> "$SESS_SHARE/config/opencode/AGENTS.md"
       fi
-      # Append ECC rules sidecar if host-side injector produced one
-      if [ -f "$SESS_SHARE/config/opencode/AGENTS.ecc-rules.md" ]; then
-        cat "$SESS_SHARE/config/opencode/AGENTS.ecc-rules.md" >> "$SESS_SHARE/config/opencode/AGENTS.md"
+      # Append web-mode notes sidecar (web sessions only)
+      if [ -s "$SESS_SHARE/config/opencode/AGENTS.web.md" ]; then
+        cat "$SESS_SHARE/config/opencode/AGENTS.web.md" >> "$SESS_SHARE/config/opencode/AGENTS.md"
       fi
     fi
 

@@ -12,6 +12,10 @@
       "mcp_config": {
         "type": "local",
         "command": ["playwright-mcp", "--headless", "--browser", "chromium"]
+      },
+      "agents_md_snippet": {
+        "source": "file",
+        "path": "mcps/playwright/AGENTS-snippet.md"
       }
     },
     "repomapper": {
@@ -25,6 +29,10 @@
       "mcp_config": {
         "type": "local",
         "command": ["python3", "{VM_HOME}/.local/share/repomapper/repomap_server.py"]
+      },
+      "agents_md_snippet": {
+        "source": "file",
+        "path": "mcps/repomapper/AGENTS-snippet.md"
       }
     },
     "graphify": {

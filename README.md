@@ -91,11 +91,11 @@ opencode-vm skills on ecc-all    # every ECC skill (token-heavy)
 opencode-vm skills off ecc-auto  # disable; ECC plugin payload stays off when no ecc-* skill is active
 ```
 
-On `opencode-vm start` while an ECC skill is active, the `.opencode/` payload (commands, agents, plugins, tools) is copied into the session config, language-specific rules are appended to `AGENTS.md`, and the per-project learning store is mounted into the VM.
+On `opencode-vm start` while an ECC skill is active, the `.opencode/` payload (commands, agents, plugins, tools) is copied into the session config and the per-project learning store is mounted into the VM.
 
-### Coding rules (auto-inject)
+### Language detection (skill filtering)
 
-While ECC is active, opencode-vm auto-detects the languages of your project (via `go.mod`, `package.json`, `Cargo.toml`, `pyproject.toml`, `pom.xml`, etc.) and appends the matching per-language rule sets from ECC's `rules/` directory into the session's `AGENTS.md`. Covers ~15 languages; `common/` rules are always included.
+The `ecc-auto` package auto-detects the languages of your project (via `go.mod`, `package.json`, `Cargo.toml`, `pyproject.toml`, `pom.xml`, etc.) and mounts only the matching ECC skills.
 
 **Monorepo support (`mcrepo.yaml`):** if the project root contains an `mcrepo.yaml` file with a `repos:` list, each listed repo's `name` is treated as a subdirectory and scanned individually in addition to the root. Results are merged.
 
@@ -103,7 +103,7 @@ While ECC is active, opencode-vm auto-detects the languages of your project (via
 
 ECC's `continuous-learning-v2` skill (commands `/learn` and `/instinct-status`) builds up a per-project store of patterns the agent picks up during sessions. While any ECC skill is active, opencode-vm persists this store under `~/.opencode-vm/project-state/<hash>/homunculus/` and syncs it in/out of the session VM automatically.
 
-`opencode-vm doctor` lists detected languages, applied rule files, and a summary of the learning store for the current working directory.
+`opencode-vm doctor` shows a summary of the learning store for the current working directory.
 
 ## Skills (opt-in, knowledge only)
 
