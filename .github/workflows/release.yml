@@ -1,0 +1,83 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Verify release metadata
+        run: |
+          script_version="$(awk -F'\"' '/^OCVM_VERSION=/ {print $2; exit}' opencode-vm.sh)"
+          adapter_version="$(awk -F'\"' '/^OPENLIVE_ADAPTER_VERSION=/ {print $2; exit}' opencode-vm.sh)"
+          adapter_tag="$(awk -F'\"' '/^OPENLIVE_ADAPTER_TAG=/ {print $2; exit}' opencode-vm.sh)"
+          asset="$(awk -F'\"' '/^OPENLIVE_ADAPTER_FILENAME=/ {print $2; exit}' opencode-vm.sh)"
+          test "$GITHUB_REF_NAME" = "v$script_version"
+          test "$adapter_tag" = "$GITHUB_REF_NAME"
+          test "$adapter_version" = "$(jq -r '.version' adapters/openlive-acp/package.json)"
+          test "$asset" = "opencode-vm-openlive-adapter-$adapter_version.tar"
+          grep -qF "const ADAPTER_VERSION = \"$adapter_version\";" adapters/openlive-acp/src/acp/transport.ts
+          printf 'OPENLIVE_ASSET=%s\n' "$asset" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: adapters/openlive-acp/package-lock.json
+      - name: Install adapter dependencies
+        working-directory: adapters/openlive-acp
+        run: npm ci --ignore-scripts
+      - name: Validate adapter
+        working-directory: adapters/openlive-acp
+        run: npm run check && npm run build && npm test
+      - name: Validate shell integration
+        run: |
+          bash -n opencode-vm.sh tests/openlive_test.sh scripts/build-openlive-adapter.sh
+          shellcheck --severity=error opencode-vm.sh tests/openlive_test.sh scripts/build-openlive-adapter.sh
+          bash tests/openlive_test.sh
+      - name: Build reproducible OpenLive adapter
+        run: |
+          mkdir -p release-a release-b
+          scripts/build-openlive-adapter.sh "release-a/$OPENLIVE_ASSET"
+          scripts/build-openlive-adapter.sh "release-b/$OPENLIVE_ASSET"
+          cmp "release-a/$OPENLIVE_ASSET" "release-b/$OPENLIVE_ASSET"
+          actual="$(sha256sum "release-a/$OPENLIVE_ASSET" | awk '{print $1}')"
+          expected="$(awk -F'\"' '/^OPENLIVE_ADAPTER_SHA256=/ {print $2; exit}' opencode-vm.sh)"
+          test "$actual" = "$expected"
+          printf '%s  %s\n' "$actual" "$OPENLIVE_ASSET" > release-a/SHA256SUMS
+          mkdir release-smoke
+          tar -xf "release-a/$OPENLIVE_ASSET" -C release-smoke
+          root="release-smoke/${OPENLIVE_ASSET%.tar}"
+          test -f "$root/dist/main.js"
+          test -f "$root/manager/tool.mjs"
+          test ! -e "$root/src"
+          test ! -e "$root/tests"
+          test ! -e "$root/node_modules"
+          npm ci --omit=dev --ignore-scripts --no-audit --no-fund --prefix "$root"
+          node --check "$root/dist/main.js"
+          if output="$(env -u OCVM_OPENLIVE_RUNTIME -u OCVM_OPENLIVE_MANAGER_FILE \
+            -u OCVM_OPENLIVE_CONTROL_SOCKET -u OCVM_OPENLIVE_PROJECT_HASH \
+            node "$root/dist/main.js" 2>&1)"; then
+            echo "packaged adapter unexpectedly started without its runtime descriptor" >&2
+            exit 1
+          fi
+          grep -q 'Missing required OpenLive adapter environment: OCVM_OPENLIVE_RUNTIME' <<<"$output"
+          OCVM_OPENLIVE_TEST_MANAGER_TOOL="$PWD/$root/manager/tool.mjs" \
+            node adapters/openlive-acp/tests/opencode-tool-integration.mjs
+      - name: Publish release
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            opencode-vm.sh \
+            "release-a/$OPENLIVE_ASSET" \
+            release-a/SHA256SUMS \
+            --verify-tag --generate-notes --title "opencode-vm $GITHUB_REF_NAME"
+        env:
+          GH_TOKEN: ${{ github.token }}

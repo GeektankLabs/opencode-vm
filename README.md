@@ -635,6 +635,44 @@ source ~/.bashrc
 
 Optional: if you prefer to hide the update-available hint on each command, set `OCVM_DISABLE_UPDATE_CHECK=1`. If you want updates and patch generation to use a different upstream, set `OCVM_UPDATE_URL`.
 
+## OpenLive voice integration
+
+[OpenLive](https://github.com/katipally/openlive) can use the OpenCode web runtime in the project VM as its conversational coding agent. OpenLive handles speech recognition and dialogue on macOS; its ACP messages pass through a managed host shim to an adapter that connects to the already-running `opencode web` server. Web UI, attached TUI, A2A, and OpenLive therefore share one OpenCode runtime and session history. Code, tools, skills, MCPs, provider credentials, and model access remain inside the VM.
+
+Install the bridge once, then restart OpenLive if it is running:
+
+```bash
+opencode-vm update
+opencode-vm openlive install
+cd /path/to/project && opencode-vm web
+opencode-vm openlive status
+opencode-vm openlive doctor /path/to/project
+```
+
+`openlive install` downloads the adapter archive attached to the matching `opencode-vm` release over HTTPS, verifies the SHA-256 embedded in the script, rejects unsafe paths and archive links, and installs it atomically in a content-addressed cache under `~/.opencode-vm/openlive/adapters/`. Reinstalling the same version reuses the verified cache. A repository checkout instead uses the adjacent `adapters/openlive-acp/` source tree automatically, which keeps the development workflow unchanged.
+
+The bridge only needs to be installed once. Future `opencode-vm update` runs automatically prepare the adapter required by the new script version when they detect the managed bridge. If that download fails, the update prints `opencode-vm openlive install` as the recovery command and a web start will refuse to activate a stale adapter rather than silently disabling or downgrading OpenLive.
+
+During `opencode-vm web`, the release package is staged into the session and its pinned production dependencies are installed before the web runtime becomes available. OpenLive's ACP startup itself never downloads, builds, provisions, or resumes anything.
+
+OpenLive remains optional. If the bridge has not been installed and no development source is adjacent to the script, `opencode-vm web` starts normally without preparing the adapter.
+
+Keep `opencode-vm web` running, then choose OpenCode and that project folder in OpenLive and speak or type a task. Each call starts in a persistent OpenLive manager session. On the first turn, the manager reports how many project sessions exist and how many are busy, then offers to switch to an existing session or start a new one. It can inspect project sessions and attach the current call to an exact, idle work session. If explicitly requested, it can also create a work session using OpenCode's configured primary agent and the model selected in OpenLive. Creation and attachment take effect only after the manager's confirmation turn succeeds; an unconfirmed new session is removed. Subsequent voice prompts continue in the selected work session. Ending the call clears the attachment, so the next call starts in manager mode again. Apart from explicit creation, the manager is read-only. OpenLive's model picker lists the connected, tool-capable OpenCode models and remembers its choice; initially the bridge selects the model most recently used by a normal project session. Every manager prompt carries that selection explicitly, so stale provider defaults from the manager history cannot take over. An attached work session keeps its own model and reasoning variant. Lifecycle diagnostics stay on stderr so they cannot corrupt the ACP stream.
+
+When camera or screen sharing is active, OpenLive attaches the freshest JPEG frame to each completed spoken turn. The bridge accepts at most two frames, limits each frame to 5 MiB and all frame data in one turn to 8 MiB, and forwards them as normal OpenCode image attachments. This is per-turn visual context, not continuous video. The selected manager or attached-session model must be configured for image input; otherwise the turn fails with a clear model-capability error. Frames remain in the OpenCode session history like images uploaded through the Web UI.
+
+Run `opencode-vm init` before starting the first web session. OpenLive allows only 15 seconds for an ACP agent to become ready, so it deliberately never provisions, resumes, or starts a VM/server. A missing or stopped web runtime produces an actionable error instead of a timeout.
+
+OpenLive 0.2.7 requires both a host-visible `opencode` command and a non-empty host `~/.local/share/opencode/auth.json` before it enables OpenCode. The installer creates a discovery symlink and, only when no real auth entries exist, a clearly named non-secret compatibility marker. It never copies VM credentials to the host. Existing host binaries, auth entries, and foreign OpenLive command overrides are preserved; use `install --force` only when intentionally replacing an override.
+
+OpenCode's own Bash and MCP tools run in the VM. A generic terminal opened by OpenLive itself is host-side and is not part of this bridge. The text MVP ignores client-provided `.mcp.json` definitions rather than executing them inside the VM; MCPs managed by `opencode-vm mcps` remain available through the central OpenCode runtime.
+
+Remove only the managed integration files with:
+
+```bash
+opencode-vm openlive uninstall
+```
+
 ## Useful Commands
 
 ```bash
@@ -649,6 +687,10 @@ opencode-vm a2a          # live A2A agents on this host + how to reach them
 opencode-vm a2a check    # verify an agent's A2A interface end to end
 opencode-vm attach       # reconnect to a running/kept session (e.g. after a terminal crash)
 opencode-vm shell        # shell into session VM (auto-starts if none is running)
+opencode-vm openlive     # install the OpenLive voice/chat bridge
+cd /path/to/project && opencode-vm web
+opencode-vm openlive doctor /path/to/project
+opencode-vm openlive uninstall
 opencode-vm base         # shell into base VM
 opencode-vm prune        # cleanup sessions, keep base
 opencode-vm ram show     # per-project VM sizing + host totals (run inside the project)

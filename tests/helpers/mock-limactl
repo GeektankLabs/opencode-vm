@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%q ' "$@" >> "${MOCK_LIMACTL_LOG:?}"
+printf '\n' >> "$MOCK_LIMACTL_LOG"
+
+case "${1:-}" in
+  list)
+    if [[ "${2:-}" == "-q" ]]; then
+      printf '%s\n' "${MOCK_LIMA_VM:-oc-openlive-test}"
+    elif [[ "${2:-}" == "${MOCK_LIMA_VM:-oc-openlive-test}" ]]; then
+      printf '%s %s\n' "${MOCK_LIMA_VM:-oc-openlive-test}" "${MOCK_LIMA_STATE:-Running}"
+    fi
+    ;;
+  shell)
+    if [[ "$*" == *"node"* && "$*" == *"dist/main.js"* ]]; then
+      if [[ -n "${MOCK_ACP_SLEEP:-}" ]]; then sleep "$MOCK_ACP_SLEEP"; fi
+      if [[ "${MOCK_ECHO_STDIN:-0}" == "1" ]]; then
+        IFS= read -r line
+        printf '%s\n' "$line"
+      else
+        printf '%s\n' '{"jsonrpc":"2.0","method":"test/openlive"}'
+      fi
+    elif [[ "${MOCK_CONSUME_STDIN:-0}" == "1" ]]; then
+      IFS= read -r _ || true
+    fi
+    ;;
+esac

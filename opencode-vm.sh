@@ -23,6 +23,24 @@ PROJECT_STATE_DIR="$SHARE_ROOT/project-state"
 PROJECT_HISTORY_DIR="$SHARE_ROOT/project-history"   # loaded only with --keep-history
 FRESH_HISTORY_DIR="$SHARE_ROOT/fresh-history"       # per-run snapshots from default fresh mode
 KEPT_SESSION_NOTIFIED_MARKER="$SHARE_ROOT/.kept-session-notified"
+OPENLIVE_DIR="$SHARE_ROOT/openlive"
+OPENLIVE_ADAPTER_CACHE_ROOT="$OPENLIVE_DIR/adapters"
+OPENLIVE_SHIM="$OPENLIVE_DIR/bin/opencode"
+OPENLIVE_COMMAND="$OPENLIVE_SHIM acp"
+OPENLIVE_DISCOVERY_LINK="$HOME/bin/opencode"
+OPENLIVE_SETTINGS="$HOME/Library/Application Support/OpenLive/data/settings.json"
+OPENLIVE_PREVIOUS_COMMAND="$OPENLIVE_DIR/previous-command"
+OPENLIVE_AUTH_MARKER="__opencode_vm_openlive__"
+OPENLIVE_LOCK_PATH=""
+OPENLIVE_ADAPTER_VERSION="0.1.3"
+OPENLIVE_ADAPTER_TAG="v0.5.43"
+OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.3.tar"
+OPENLIVE_ADAPTER_SHA256="91392d9f81722fd6eefa04c9c6d54bb9d8ab7f057f8cc3c4171bcdec55dd7597"
+OPENLIVE_ACP_SDK_VERSION="1.2.1"
+OPENLIVE_SDK_VERSION="1.18.21"
+OPENLIVE_MANAGER_AGENT="openlive-manager"
+OPENLIVE_MANAGER_DESCRIPTION="Read-only OpenLive voice session manager"
+OPENLIVE_MANAGER_PROMPT="You manage an OpenLive voice call. The voice_sessions tool is available and you must call it before listing, inspecting, summarizing, checking, attaching to, or creating project sessions. Never claim session details without a successful tool result. Ask for clarification if a requested session is ambiguous. Create a new work session only when the user explicitly asks for one. Apart from that explicit create action, you are read-only: do not edit files, run shell commands, create tasks, or mutate sessions. Keep responses brief and conversational: one or two plain sentences without Markdown, paths, URLs, code, or stray symbols. When attachment or creation succeeds, tell the user the next voice prompt will continue in that session."
 
 # Per-project VM sizing. The shared base VM is always provisioned at these
 # values; a project that needs more (or less) stores an override in its own
@@ -128,7 +146,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.5.21"
+OCVM_VERSION="0.5.43"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -3407,7 +3425,7 @@ ocvm_notify_if_new_version_available() {
   local current_cmd="$1"
 
   case "$current_cmd" in
-    install|update|create-patch|export-patch|--post-update-migrate) return 0 ;;
+    install|openlive|update|create-patch|export-patch|--post-update-migrate) return 0 ;;
   esac
 
   [[ "${OCVM_DISABLE_UPDATE_CHECK:-0}" == "1" ]] && return 0
@@ -3990,7 +4008,10 @@ doctor_cmd() {
       echo "[doctor] Providers from /connect (auth.json)"
       if [[ -f "$auth_file" ]]; then
         if command -v jq >/dev/null 2>&1; then
-          jq -r 'keys[]' "$auth_file" 2>/dev/null | sed 's/^/  - /' || echo "  <invalid json>"
+          jq -r --arg marker "$OPENLIVE_AUTH_MARKER" 'keys[] | select(. != $marker)' "$auth_file" 2>/dev/null | sed 's/^/  - /' || echo "  <invalid json>"
+          if openlive_owned_auth_marker; then
+            echo "  - <OpenLive readiness marker; no credential>"
+          fi
         else
           echo "  (jq missing - install jq to list keys)"
         fi
@@ -4004,7 +4025,11 @@ doctor_cmd() {
         if [[ -n "$(auth_oauth_provider_ids "$auth_file")" ]]; then
           auth_collect_freshest_oauth report
         else
-          echo "  <no OAuth providers — only static API keys>"
+          if openlive_owned_auth_marker && [[ "$(jq --arg marker "$OPENLIVE_AUTH_MARKER" 'del(.[$marker]) | length' "$auth_file")" -eq 0 ]]; then
+            echo "  <OpenLive readiness marker only; no credential>"
+          else
+            echo "  <no OAuth providers; static API credentials only>"
+          fi
         fi
       else
         echo "  <none>"
@@ -5155,7 +5180,7 @@ provider_cmd() {
     list|show|"")
       if [[ -f "$auth_file" ]] && command -v jq >/dev/null 2>&1; then
         echo "[provider] Configured providers:"
-        jq -r 'keys[]' "$auth_file" | sed 's/^/  - /'
+        jq -r --arg marker "$OPENLIVE_AUTH_MARKER" 'keys[] | select(. != $marker)' "$auth_file" | sed 's/^/  - /'
       else
         echo "Usage: opencode-vm provider {list|add|rm ...}"
       fi
@@ -5245,6 +5270,13 @@ ocvm_post_update_migrate() {
   # shadowing). Upgrading from pre-0.4.x state: upgrade through the latest
   # 0.4.x first, or re-run `opencode-vm init`.
   [[ "$#" -eq 2 ]] || return 0
+  if openlive_bridge_installed; then
+    echo "[openlive] Updating the installed adapter for opencode-vm $2..."
+    openlive_prepare_adapter_cache || {
+      echo "[openlive] Adapter update failed. Retry with: opencode-vm openlive install" >&2
+      return 1
+    }
+  fi
   return 0
 }
 
@@ -5284,6 +5316,7 @@ update_cmd() {
   else
     echo "Updated script, but post-update migration hook reported an issue." >&2
     echo "Run opencode-vm again and inspect your state before continuing." >&2
+    return 1
   fi
   echo ""
 
@@ -5435,6 +5468,804 @@ install_cmd() {
   echo "  $step. Init base VM:       opencode-vm init"
   step=$((step + 1))
   echo "  $step. Start a session:    cd /path/to/project && opencode-vm start"
+}
+
+openlive_app_installed() {
+  [[ -d "/Applications/OpenLive.app" || -d "$HOME/Applications/OpenLive.app" ]]
+}
+
+openlive_adapter_release_url() {
+  printf '%s\n' "${OCVM_OPENLIVE_ADAPTER_URL:-https://github.com/$OCVM_UPDATE_REPO/releases/download/$OPENLIVE_ADAPTER_TAG/$OPENLIVE_ADAPTER_FILENAME}"
+}
+
+openlive_adapter_cache_dir() {
+  printf '%s\n' "$OPENLIVE_ADAPTER_CACHE_ROOT/$OPENLIVE_ADAPTER_VERSION-$OPENLIVE_ADAPTER_SHA256"
+}
+
+openlive_adapter_present() {
+  [[ -e "$SCRIPT_DIR/adapters/openlive-acp" || -e "$(openlive_adapter_cache_dir)" ]]
+}
+
+openlive_bridge_installed() {
+  [[ -f "$OPENLIVE_SHIM" ]] && grep -qFx '# opencode-vm-openlive-shim-v1' "$OPENLIVE_SHIM" 2>/dev/null
+}
+
+openlive_adapter_dev_valid() {
+  local dir="$1"
+  [[ -f "$dir/package.json" && -f "$dir/package-lock.json" && -f "$dir/tsconfig.json" \
+    && -f "$dir/src/main.ts" && -f "$dir/src/manager/tool.mjs" ]] || return 1
+  [[ "$(jq -r '.version // empty' "$dir/package.json" 2>/dev/null)" == "$OPENLIVE_ADAPTER_VERSION" ]]
+}
+
+openlive_adapter_release_valid() {
+  local dir="$1"
+  [[ -f "$dir/manifest.json" && -f "$dir/package.json" && -f "$dir/package-lock.json" \
+    && -f "$dir/dist/main.js" && -f "$dir/manager/tool.mjs" \
+    && -f "$dir/.archive-sha256" ]] || return 1
+  [[ "$(<"$dir/.archive-sha256")" == "$OPENLIVE_ADAPTER_SHA256" ]] || return 1
+  jq -e --arg version "$OPENLIVE_ADAPTER_VERSION" --arg acp "$OPENLIVE_ACP_SDK_VERSION" \
+    --arg opencode "$OPENLIVE_SDK_VERSION" '
+      .schema == 1 and .adapterVersion == $version and
+      .acpSdkVersion == $acp and .opencodeSdkVersion == $opencode
+    ' "$dir/manifest.json" >/dev/null 2>&1
+}
+
+openlive_adapter_source_dir() {
+  local dev="$SCRIPT_DIR/adapters/openlive-acp" cached
+  if [[ -e "$dev" ]]; then
+    if ! openlive_adapter_dev_valid "$dev"; then
+      echo "[openlive] Adjacent adapter source is incomplete or has the wrong version: $dev" >&2
+      return 1
+    fi
+    printf '%s\n' "$dev"
+    return 0
+  fi
+  cached="$(openlive_adapter_cache_dir)"
+  if ! openlive_adapter_release_valid "$cached"; then
+    echo "[openlive] Adapter $OPENLIVE_ADAPTER_VERSION is not installed." >&2
+    echo "[openlive] Run: opencode-vm openlive install" >&2
+    return 1
+  fi
+  printf '%s\n' "$cached"
+}
+
+openlive_sha256() {
+  local file="$1"
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | awk '{print $1}'
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 "$file" | awk '{print $NF}'
+  else
+    echo "[openlive] No SHA-256 tool is available (shasum, sha256sum, or openssl)." >&2
+    return 1
+  fi
+}
+
+openlive_prepare_adapter_cache() {
+  local dev="$SCRIPT_DIR/adapters/openlive-acp" cached url tmp archive extract root member actual
+  local members listing type
+  if [[ -e "$dev" ]]; then
+    openlive_adapter_dev_valid "$dev" || {
+      echo "[openlive] Adjacent adapter source is incomplete or has the wrong version: $dev" >&2
+      return 1
+    }
+    echo "[openlive] Using adjacent adapter source $dev"
+    return 0
+  fi
+
+  cached="$(openlive_adapter_cache_dir)"
+  if openlive_adapter_release_valid "$cached"; then
+    echo "[openlive] Adapter $OPENLIVE_ADAPTER_VERSION is already installed."
+    return 0
+  fi
+
+  need curl
+  need tar
+  if ! mkdir -p "$OPENLIVE_ADAPTER_CACHE_ROOT"; then
+    echo "[openlive] Could not create adapter cache: $OPENLIVE_ADAPTER_CACHE_ROOT" >&2
+    return 1
+  fi
+  if ! tmp="$(mktemp -d "$OPENLIVE_ADAPTER_CACHE_ROOT/.install.XXXXXX")"; then
+    echo "[openlive] Could not create a temporary adapter directory." >&2
+    return 1
+  fi
+  archive="$tmp/$OPENLIVE_ADAPTER_FILENAME"
+  extract="$tmp/extract"
+  members="$tmp/members"
+  listing="$tmp/listing"
+  root="opencode-vm-openlive-adapter-$OPENLIVE_ADAPTER_VERSION"
+  if ! mkdir -p "$extract"; then
+    rm -rf "$tmp"
+    echo "[openlive] Could not prepare adapter extraction." >&2
+    return 1
+  fi
+  url="$(openlive_adapter_release_url)"
+  echo "[openlive] Downloading adapter $OPENLIVE_ADAPTER_VERSION..."
+  if ! curl --proto '=https' --proto-redir '=https' --fail --location --retry 2 \
+    --connect-timeout 10 --max-time 120 --output "$archive" "$url"; then
+    rm -rf "$tmp"
+    echo "[openlive] Could not download the adapter from: $url" >&2
+    return 1
+  fi
+  actual="$(openlive_sha256 "$archive")" || { rm -rf "$tmp"; return 1; }
+  if [[ "$actual" != "$OPENLIVE_ADAPTER_SHA256" ]]; then
+    rm -rf "$tmp"
+    echo "[openlive] Adapter checksum mismatch; download was not installed." >&2
+    return 1
+  fi
+  if ! tar -tf "$archive" > "$members" || ! tar -tvf "$archive" > "$listing"; then
+    rm -rf "$tmp"
+    echo "[openlive] Adapter archive could not be inspected." >&2
+    return 1
+  fi
+  while IFS= read -r member; do
+    if [[ "$member" == /* || "$member" == *"/../"* || "$member" == ../* \
+      || ( "$member" != "$root" && "$member" != "$root/"* ) ]]; then
+      rm -rf "$tmp"
+      echo "[openlive] Adapter archive contains an unsafe path." >&2
+      return 1
+    fi
+  done < "$members"
+  while IFS= read -r type; do
+    case "${type:0:1}" in
+      -|d) ;;
+      *)
+        rm -rf "$tmp"
+        echo "[openlive] Adapter archive contains a link or unsupported entry." >&2
+        return 1
+        ;;
+    esac
+  done < "$listing"
+  if ! tar -xf "$archive" -C "$extract"; then
+    rm -rf "$tmp"
+    echo "[openlive] Adapter archive could not be extracted." >&2
+    return 1
+  fi
+  if ! printf '%s\n' "$OPENLIVE_ADAPTER_SHA256" > "$extract/$root/.archive-sha256"; then
+    rm -rf "$tmp"
+    echo "[openlive] Could not finalize the extracted adapter." >&2
+    return 1
+  fi
+  if ! openlive_adapter_release_valid "$extract/$root"; then
+    rm -rf "$tmp"
+    echo "[openlive] Adapter archive is incomplete or incompatible." >&2
+    return 1
+  fi
+  if ! chmod -R go-w "$extract/$root"; then
+    rm -rf "$tmp"
+    echo "[openlive] Could not secure the extracted adapter." >&2
+    return 1
+  fi
+  if [[ -e "$cached" ]] && ! rm -rf "$cached"; then
+    rm -rf "$tmp"
+    echo "[openlive] Could not replace the invalid adapter cache." >&2
+    return 1
+  fi
+  if ! mv "$extract/$root" "$cached"; then
+    rm -rf "$tmp"
+    echo "[openlive] Could not activate the downloaded adapter." >&2
+    return 1
+  fi
+  rm -rf "$tmp" || true
+  echo "[openlive] Installed adapter $OPENLIVE_ADAPTER_VERSION."
+}
+
+openlive_stage_adapter() {
+  local share="$1" source tool
+  local target="$share/openlive/adapter"
+  local config_dir="$share/config/opencode"
+  local config_file="$config_dir/opencode.json"
+  local package_file="$config_dir/package.json"
+  source="$(openlive_adapter_source_dir)" || return 1
+  if [[ -f "$config_file" ]] && jq -e --arg name "$OPENLIVE_MANAGER_AGENT" \
+    --arg description "$OPENLIVE_MANAGER_DESCRIPTION" '
+      (.agent[$name]? // null) as $current
+      | $current != null and (
+          $current.description != $description or
+          $current.mode != "primary" or
+          $current.permission != {"*":"deny", "voice_sessions":"allow"}
+        )
+    ' "$config_file" >/dev/null 2>&1; then
+    echo "[openlive] OpenCode agent name '$OPENLIVE_MANAGER_AGENT' is already used by this project." >&2
+    return 1
+  fi
+  if ! mkdir -p "$target" "$config_dir/tools"; then
+    echo "[openlive] Could not prepare adapter staging directories." >&2
+    return 1
+  fi
+  if ! printf '%s\n' "opencode-vm-openlive-staging-v1" > "$target/.ocvm-managed"; then
+    echo "[openlive] Could not mark the managed adapter staging directory." >&2
+    return 1
+  fi
+  if openlive_adapter_dev_valid "$source"; then
+    if ! rsync -a --checksum --delete --exclude='node_modules/' --exclude='dist/' \
+      --exclude='.ocvm-managed' "$source/" "$target/"; then
+      echo "[openlive] Could not stage adapter source files." >&2
+      return 1
+    fi
+    tool="$source/src/manager/tool.mjs"
+  else
+    if ! rsync -a --checksum --delete --exclude='node_modules/' --exclude='.ocvm-managed' \
+      "$source/" "$target/"; then
+      echo "[openlive] Could not stage the packaged adapter." >&2
+      return 1
+    fi
+    tool="$source/manager/tool.mjs"
+  fi
+  if ! rm -f "$config_dir/plugins/openlive-voice-sessions.mjs" \
+    "$config_dir/plugins/openlive-voice-sessions.js" || \
+    ! cp -p "$tool" "$config_dir/tools/voice_sessions.js"; then
+    echo "[openlive] Could not install the OpenLive session tool." >&2
+    return 1
+  fi
+  if [[ -f "$package_file" ]]; then
+    jq_inplace "$package_file" --arg version "$OPENLIVE_SDK_VERSION" '
+      .dependencies = ((.dependencies // {}) + {"@opencode-ai/plugin": $version})
+    ' || return 1
+  else
+    if ! jq -n --arg version "$OPENLIVE_SDK_VERSION" \
+      '{"dependencies":{"@opencode-ai/plugin":$version}}' > "$package_file"; then
+      echo "[openlive] Could not create the OpenCode tool package." >&2
+      return 1
+    fi
+  fi
+  if [[ -f "$config_file" ]]; then
+    jq_inplace "$config_file" --arg name "$OPENLIVE_MANAGER_AGENT" \
+      --arg description "$OPENLIVE_MANAGER_DESCRIPTION" --arg prompt "$OPENLIVE_MANAGER_PROMPT" '
+      .agent = ((.agent // {}) + {($name): {
+          "description": $description,
+          "mode": "primary",
+          "prompt": $prompt,
+          "permission": {"*":"deny", "voice_sessions":"allow"}
+        }})
+    ' || return 1
+  fi
+  return 0
+}
+
+openlive_unstage_adapter() {
+  local share="$1" config_file="$1/config/opencode/opencode.json"
+  rm -f "$share/openlive/runtime.json"
+  if [[ -f "$share/openlive/adapter/.ocvm-managed" ]]; then
+    rm -f "$share/config/opencode/tools/voice_sessions.js"
+    if [[ -f "$config_file" ]] && jq -e --arg name "$OPENLIVE_MANAGER_AGENT" \
+      --arg description "$OPENLIVE_MANAGER_DESCRIPTION" \
+      '.agent[$name].description == $description' "$config_file" >/dev/null 2>&1; then
+      jq_inplace "$config_file" --arg name "$OPENLIVE_MANAGER_AGENT" '
+        del(.agent[$name]) | if .agent == {} then del(.agent) else . end
+      ' || true
+    fi
+    rm -rf "$share/openlive/adapter"
+  fi
+}
+
+openlive_owned_auth_marker() {
+  local auth_file="$HOST_DATA_DIR/auth.json"
+  [[ -f "$auth_file" ]] || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  jq -e --arg id "$OPENLIVE_AUTH_MARKER" '
+    .[$id] == {"type":"api", "key":"opencode-vm-openlive-readiness-v1"}
+  ' "$auth_file" >/dev/null 2>&1
+}
+
+openlive_install_auth_marker() {
+  need jq
+  ensure_host_opencode_dirs || return 1
+  local auth_file="$HOST_DATA_DIR/auth.json" tmp
+  if [[ -f "$auth_file" ]] && ! jq -e 'type == "object"' "$auth_file" >/dev/null 2>&1; then
+    echo "[openlive] Refusing to modify invalid JSON: $auth_file" >&2
+    return 1
+  fi
+  if [[ -f "$auth_file" ]] && [[ "$(jq 'length' "$auth_file")" -gt 0 ]]; then
+    return 0
+  fi
+  if ! tmp="$(mktemp "$HOST_DATA_DIR/.auth.openlive.XXXXXX")"; then
+    echo "[openlive] Could not prepare the readiness marker." >&2
+    return 1
+  fi
+  if ! jq --arg id "$OPENLIVE_AUTH_MARKER" '
+    . + {($id): {"type":"api", "key":"opencode-vm-openlive-readiness-v1"}}
+  ' "$auth_file" > "$tmp" 2>/dev/null; then
+    if ! jq -n --arg id "$OPENLIVE_AUTH_MARKER" '
+      {($id): {"type":"api", "key":"opencode-vm-openlive-readiness-v1"}}
+    ' > "$tmp"; then
+      rm -f "$tmp"
+      echo "[openlive] Could not create the readiness marker." >&2
+      return 1
+    fi
+  fi
+  if ! chmod 600 "$tmp" || ! mv -f "$tmp" "$auth_file"; then
+    rm -f "$tmp"
+    echo "[openlive] Could not install the readiness marker." >&2
+    return 1
+  fi
+  echo "[openlive] Installed non-secret OpenLive readiness marker."
+}
+
+openlive_remove_auth_marker() {
+  openlive_owned_auth_marker || return 0
+  local auth_file="$HOST_DATA_DIR/auth.json" tmp
+  tmp="$(mktemp "$HOST_DATA_DIR/.auth.openlive.XXXXXX")"
+  jq --arg id "$OPENLIVE_AUTH_MARKER" 'del(.[$id])' "$auth_file" > "$tmp"
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$auth_file"
+  echo "[openlive] Removed readiness marker."
+}
+
+openlive_setting_value() {
+  local api_value=""
+  if command -v curl >/dev/null 2>&1; then
+    api_value="$(curl -fsS --max-time 1 http://localhost:47824/api/settings 2>/dev/null |
+      jq -r '.["acpCommand:opencode"] // empty' 2>/dev/null || true)"
+    if [[ -n "$api_value" ]]; then
+      printf '%s\n' "$api_value"
+      return 0
+    fi
+  fi
+  [[ -f "$OPENLIVE_SETTINGS" ]] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  jq -r '.["acpCommand:opencode"] // empty' "$OPENLIVE_SETTINGS" 2>/dev/null || true
+}
+
+openlive_api_set_command() {
+  local value="$1" payload
+  command -v curl >/dev/null 2>&1 || return 1
+  curl -fsS --max-time 1 http://localhost:47824/api/settings >/dev/null 2>&1 || return 1
+  payload="$(jq -cn --arg value "$value" '{"acpCommand:opencode": $value}')" || return 1
+  curl -fsS --max-time 3 -X PUT -H 'Content-Type: application/json' \
+    --data-binary "$payload" http://localhost:47824/api/settings >/dev/null
+}
+
+openlive_write_setting() {
+  local force="${1:-0}" current settings_dir tmp
+  need jq
+  settings_dir="$(dirname "$OPENLIVE_SETTINGS")"
+  if ! mkdir -p "$settings_dir"; then
+    echo "[openlive] Could not create the OpenLive settings directory." >&2
+    return 1
+  fi
+  if [[ -f "$OPENLIVE_SETTINGS" ]] && ! jq -e 'type == "object"' "$OPENLIVE_SETTINGS" >/dev/null 2>&1; then
+    echo "[openlive] Refusing to modify invalid JSON: $OPENLIVE_SETTINGS" >&2
+    return 1
+  fi
+  current="$(openlive_setting_value)"
+  if [[ -n "$current" && "$current" != "$OPENLIVE_COMMAND" && "$force" != "1" ]]; then
+    echo "[openlive] Existing custom OpenCode command left unchanged." >&2
+    echo "[openlive] Re-run with 'opencode-vm openlive install --force' to replace it." >&2
+    return 1
+  fi
+  if [[ -n "$current" && "$current" != "$OPENLIVE_COMMAND" && "$force" == "1" && ! -f "$OPENLIVE_PREVIOUS_COMMAND" ]]; then
+    if ! ( umask 077; printf '%s\n' "$current" > "$OPENLIVE_PREVIOUS_COMMAND" ); then
+      echo "[openlive] Could not preserve the previous OpenLive command." >&2
+      return 1
+    fi
+  fi
+  if openlive_api_set_command "$OPENLIVE_COMMAND"; then
+    echo "[openlive] Configured the running OpenLive app to use: $OPENLIVE_COMMAND"
+    return 0
+  fi
+  if ! tmp="$(mktemp "$settings_dir/.settings.openlive.XXXXXX")"; then
+    echo "[openlive] Could not prepare the OpenLive settings update." >&2
+    return 1
+  fi
+  if [[ -f "$OPENLIVE_SETTINGS" ]]; then
+    if ! jq --arg cmd "$OPENLIVE_COMMAND" '. + {"acpCommand:opencode": $cmd}' "$OPENLIVE_SETTINGS" > "$tmp"; then
+      rm -f "$tmp"
+      return 1
+    fi
+  else
+    if ! jq -n --arg cmd "$OPENLIVE_COMMAND" '{"acpCommand:opencode": $cmd}' > "$tmp"; then
+      rm -f "$tmp"
+      return 1
+    fi
+  fi
+  if ! chmod 600 "$tmp" || ! mv -f "$tmp" "$OPENLIVE_SETTINGS"; then
+    rm -f "$tmp"
+    echo "[openlive] Could not install the OpenLive settings update." >&2
+    return 1
+  fi
+  echo "[openlive] Configured OpenLive to use: $OPENLIVE_COMMAND"
+}
+
+openlive_restore_setting() {
+  local value="$1" settings_dir tmp
+  if openlive_api_set_command "$value"; then
+    return 0
+  fi
+  settings_dir="$(dirname "$OPENLIVE_SETTINGS")"
+  mkdir -p "$settings_dir" || return 1
+  tmp="$(mktemp "$settings_dir/.settings.openlive.XXXXXX")" || return 1
+  if [[ -f "$OPENLIVE_SETTINGS" ]]; then
+    if [[ -n "$value" ]]; then
+      jq --arg cmd "$value" '. + {"acpCommand:opencode": $cmd}' "$OPENLIVE_SETTINGS" > "$tmp" || {
+        rm -f "$tmp"
+        return 1
+      }
+    else
+      jq 'del(.["acpCommand:opencode"])' "$OPENLIVE_SETTINGS" > "$tmp" || {
+        rm -f "$tmp"
+        return 1
+      }
+    fi
+  elif [[ -n "$value" ]]; then
+    jq -n --arg cmd "$value" '{"acpCommand:opencode": $cmd}' > "$tmp" || {
+      rm -f "$tmp"
+      return 1
+    }
+  else
+    printf '{}\n' > "$tmp" || { rm -f "$tmp"; return 1; }
+  fi
+  if ! chmod 600 "$tmp" || ! mv -f "$tmp" "$OPENLIVE_SETTINGS"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  return 0
+}
+
+openlive_remove_setting() {
+  [[ "$(openlive_setting_value)" == "$OPENLIVE_COMMAND" ]] || return 0
+  local replacement=""
+  if [[ -f "$OPENLIVE_PREVIOUS_COMMAND" ]]; then
+    replacement="$(<"$OPENLIVE_PREVIOUS_COMMAND")"
+  fi
+  if openlive_api_set_command "$replacement"; then
+    echo "[openlive] Removed managed command from the running OpenLive app."
+    rm -f "$OPENLIVE_PREVIOUS_COMMAND"
+    return 0
+  fi
+  local settings_dir tmp
+  settings_dir="$(dirname "$OPENLIVE_SETTINGS")"
+  tmp="$(mktemp "$settings_dir/.settings.openlive.XXXXXX")"
+  if [[ -n "$replacement" ]]; then
+    jq --arg cmd "$replacement" '. + {"acpCommand:opencode": $cmd}' "$OPENLIVE_SETTINGS" > "$tmp"
+  else
+    jq 'del(.["acpCommand:opencode"])' "$OPENLIVE_SETTINGS" > "$tmp"
+  fi
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$OPENLIVE_SETTINGS"
+  rm -f "$OPENLIVE_PREVIOUS_COMMAND"
+  echo "[openlive] Removed managed OpenLive command setting."
+}
+
+openlive_install_cmd() {
+  local force=0 source_path shim_tmp current
+  local created_link=0 had_marker=0 had_previous=0 had_setting=0
+  case "${1:-}" in
+    "") ;;
+    --force) force=1 ;;
+    *) echo "Usage: opencode-vm openlive install [--force]" >&2; return 2 ;;
+  esac
+  if [[ "$(uname -s)" != "Darwin" ]]; then
+    echo "[openlive] Installation is supported on macOS only." >&2
+    return 1
+  fi
+  if [[ "$OPENLIVE_SHIM" =~ [[:space:]] ]]; then
+    echo "[openlive] OpenLive 0.2.7 cannot parse an ACP command path containing whitespace:" >&2
+    echo "[openlive]   $OPENLIVE_SHIM" >&2
+    return 1
+  fi
+  need jq
+  if [[ -f "$OPENLIVE_SETTINGS" ]] && ! jq -e 'type == "object"' "$OPENLIVE_SETTINGS" >/dev/null 2>&1; then
+    echo "[openlive] Refusing to modify invalid JSON: $OPENLIVE_SETTINGS" >&2
+    return 1
+  fi
+  current="$(openlive_setting_value)"
+  if [[ -n "$current" && "$current" != "$OPENLIVE_COMMAND" && "$force" != "1" ]]; then
+    echo "[openlive] Existing custom OpenCode command left unchanged." >&2
+    echo "[openlive] Re-run with 'opencode-vm openlive install --force' to replace it." >&2
+    return 1
+  fi
+  if [[ -e "$OPENLIVE_SHIM" ]] && ! grep -qFx '# opencode-vm-openlive-shim-v1' "$OPENLIVE_SHIM" 2>/dev/null; then
+    echo "[openlive] Refusing to replace a file not owned by opencode-vm:" >&2
+    echo "[openlive]   $OPENLIVE_SHIM" >&2
+    return 1
+  fi
+  openlive_prepare_adapter_cache || return 1
+  source_path="$(ocvm_resolve_script_path)"
+  openlive_owned_auth_marker && had_marker=1
+  [[ -f "$OPENLIVE_PREVIOUS_COMMAND" ]] && had_previous=1
+  [[ "$current" == "$OPENLIVE_COMMAND" ]] && had_setting=1
+  if ! mkdir -p "$OPENLIVE_DIR/bin" "$(dirname "$OPENLIVE_DISCOVERY_LINK")"; then
+    echo "[openlive] Could not create the bridge directories." >&2
+    return 1
+  fi
+  if ! shim_tmp="$(mktemp "$OPENLIVE_DIR/bin/.opencode.XXXXXX")"; then
+    echo "[openlive] Could not prepare the ACP shim." >&2
+    return 1
+  fi
+  if ! {
+    printf '#!/usr/bin/env bash\nset -euo pipefail\n'
+    printf '# opencode-vm-openlive-shim-v1\n'
+    printf 'OCVM=%q\n' "$source_path"
+    cat <<'OPENLIVE_SHIM_BODY'
+case "${1:-}" in
+  acp)
+    shift
+    exec "$OCVM" openlive acp "$PWD" "$@"
+    ;;
+  --version|-v|version)
+    exec "$OCVM" openlive version
+    ;;
+  *)
+    echo "This opencode shim is managed by opencode-vm for OpenLive ACP only." >&2
+    exit 2
+    ;;
+esac
+OPENLIVE_SHIM_BODY
+  } > "$shim_tmp" || ! chmod 755 "$shim_tmp"; then
+    rm -f "$shim_tmp"
+    echo "[openlive] Could not prepare the ACP shim." >&2
+    return 1
+  fi
+
+  if [[ ! -e "$OPENLIVE_DISCOVERY_LINK" && ! -L "$OPENLIVE_DISCOVERY_LINK" ]]; then
+    if ! ln -s "$OPENLIVE_SHIM" "$OPENLIVE_DISCOVERY_LINK"; then
+      rm -f "$shim_tmp"
+      echo "[openlive] Could not install the discovery link." >&2
+      return 1
+    fi
+    created_link=1
+    echo "[openlive] Installed discovery link: $OPENLIVE_DISCOVERY_LINK"
+  elif [[ -L "$OPENLIVE_DISCOVERY_LINK" && "$(readlink "$OPENLIVE_DISCOVERY_LINK")" == "$OPENLIVE_SHIM" ]]; then
+    echo "[openlive] Discovery link already installed."
+  else
+    echo "[openlive] Existing $OPENLIVE_DISCOVERY_LINK left unchanged." >&2
+  fi
+
+  if ! openlive_install_auth_marker; then
+    [[ "$created_link" -eq 1 ]] && rm -f "$OPENLIVE_DISCOVERY_LINK"
+    rm -f "$shim_tmp"
+    return 1
+  fi
+  if ! openlive_write_setting "$force"; then
+    [[ "$had_marker" -eq 0 ]] && openlive_remove_auth_marker || true
+    [[ "$had_previous" -eq 0 ]] && rm -f "$OPENLIVE_PREVIOUS_COMMAND"
+    [[ "$created_link" -eq 1 ]] && rm -f "$OPENLIVE_DISCOVERY_LINK"
+    rm -f "$shim_tmp"
+    return 1
+  fi
+  if ! mv -f "$shim_tmp" "$OPENLIVE_SHIM"; then
+    if [[ "$had_setting" -eq 0 ]] && ! openlive_restore_setting "$current"; then
+      echo "[openlive] WARNING: could not restore the previous OpenLive command." >&2
+    fi
+    [[ "$had_marker" -eq 0 ]] && openlive_remove_auth_marker || true
+    [[ "$had_previous" -eq 0 ]] && rm -f "$OPENLIVE_PREVIOUS_COMMAND"
+    [[ "$created_link" -eq 1 ]] && rm -f "$OPENLIVE_DISCOVERY_LINK"
+    rm -f "$shim_tmp"
+    echo "[openlive] Could not activate the ACP shim." >&2
+    return 1
+  fi
+  echo "[openlive] Installed ACP shim: $OPENLIVE_SHIM"
+  if ! openlive_app_installed; then
+    echo "[openlive] OpenLive.app was not found in /Applications or ~/Applications." >&2
+  fi
+  echo "[openlive] Installation complete. Restart OpenLive if it is currently running."
+}
+
+openlive_status_cmd() {
+  local failures=0 setting discovery="missing" cached dev
+  echo "[openlive] Integration status"
+  if openlive_app_installed; then echo "  app:       found"; else echo "  app:       not found"; failures=$((failures + 1)); fi
+  if [[ -x "$OPENLIVE_SHIM" ]]; then echo "  shim:      $OPENLIVE_SHIM"; else echo "  shim:      missing"; failures=$((failures + 1)); fi
+  if [[ -L "$OPENLIVE_DISCOVERY_LINK" && "$(readlink "$OPENLIVE_DISCOVERY_LINK")" == "$OPENLIVE_SHIM" ]]; then
+    discovery="$OPENLIVE_DISCOVERY_LINK (managed)"
+  elif [[ -e "$OPENLIVE_DISCOVERY_LINK" || -L "$OPENLIVE_DISCOVERY_LINK" ]]; then
+    discovery="$OPENLIVE_DISCOVERY_LINK (external)"
+  fi
+  echo "  discovery: $discovery"
+  setting="$(openlive_setting_value)"
+  if [[ "$setting" == "$OPENLIVE_COMMAND" ]]; then
+    echo "  command:   configured"
+  elif [[ -n "$setting" ]]; then
+    echo "  command:   custom command configured"
+    failures=$((failures + 1))
+  else
+    echo "  command:   not configured"
+    failures=$((failures + 1))
+  fi
+  if [[ -s "$HOST_DATA_DIR/auth.json" ]] && jq -e 'type == "object" and length > 0' "$HOST_DATA_DIR/auth.json" >/dev/null 2>&1; then
+    if openlive_owned_auth_marker; then echo "  readiness: compatibility marker (no secret)"; else echo "  readiness: real OpenCode auth data"; fi
+  else
+    echo "  readiness: missing"
+    failures=$((failures + 1))
+  fi
+  dev="$SCRIPT_DIR/adapters/openlive-acp"
+  cached="$(openlive_adapter_cache_dir)"
+  if [[ -e "$dev" ]] && openlive_adapter_dev_valid "$dev"; then
+    echo "  adapter:   $OPENLIVE_ADAPTER_VERSION (adjacent source)"
+  elif openlive_adapter_release_valid "$cached"; then
+    echo "  adapter:   $OPENLIVE_ADAPTER_VERSION (installed release)"
+  else
+    echo "  adapter:   missing, run 'opencode-vm openlive install'"
+    failures=$((failures + 1))
+  fi
+  return "$failures"
+}
+
+openlive_doctor_cmd() {
+  local project="${1:-$(pwd)}" failures=0 resolved senv
+  openlive_status_cmd || failures=$((failures + 1))
+  echo ""
+  echo "[openlive] Project"
+  if [[ ! -d "$project" ]]; then
+    echo "  error: project directory does not exist: $project"
+    return 1
+  fi
+  resolved="$(openlive_resolve_project "$project")"
+  echo "  path:      $resolved"
+  senv="$(session_env "$resolved")"
+  if [[ -f "$senv" ]]; then
+    # shellcheck disable=SC1090
+    source "$senv"
+    echo "  session:   $SESS_NAME"
+    if is_vm_running "$SESS_NAME"; then
+      echo "  VM:        running"
+    elif limactl list -q 2>/dev/null | grep -qx "$SESS_NAME"; then
+      echo "  VM:        stopped, run 'opencode-vm web' in this project"
+      failures=$((failures + 1))
+    else
+      echo "  VM:        missing, run 'opencode-vm start --fresh'"
+      failures=$((failures + 1))
+    fi
+    if [[ "${SESS_MODE:-}" != "web" ]]; then
+      echo "  mode:      ${SESS_MODE:-unknown}, run 'opencode-vm web' in this project"
+      failures=$((failures + 1))
+    elif [[ -f "$(session_share_dir "$resolved")/openlive/runtime.json" ]]; then
+      echo "  runtime:   ready"
+    else
+      echo "  runtime:   missing, restart with 'opencode-vm web' in this project"
+      failures=$((failures + 1))
+    fi
+  else
+    echo "  session:   none, run 'opencode-vm web' in this project"
+    if ! base_exists; then
+      echo "  base VM:   missing, run 'opencode-vm init' before using OpenLive"
+      failures=$((failures + 1))
+    fi
+  fi
+  if [[ -f "$resolved/.mcp.json" ]]; then
+    echo "  note:      OpenLive-provided .mcp.json entries are ignored; opencode-vm MCPs remain available"
+  fi
+  if [[ "$failures" -eq 0 ]]; then echo "[openlive] Doctor found no blocking issue."; fi
+  return "$failures"
+}
+
+openlive_uninstall_cmd() {
+  [[ "$#" -eq 0 ]] || { echo "Usage: opencode-vm openlive uninstall" >&2; return 2; }
+  need jq
+  openlive_remove_setting
+  if [[ -L "$OPENLIVE_DISCOVERY_LINK" && "$(readlink "$OPENLIVE_DISCOVERY_LINK")" == "$OPENLIVE_SHIM" ]]; then
+    rm -f "$OPENLIVE_DISCOVERY_LINK"
+    echo "[openlive] Removed discovery link."
+  fi
+  openlive_remove_auth_marker
+  if [[ -f "$OPENLIVE_SHIM" ]]; then
+    if grep -qFx '# opencode-vm-openlive-shim-v1' "$OPENLIVE_SHIM"; then
+      rm -f "$OPENLIVE_SHIM"
+    else
+      echo "[openlive] Shim path changed ownership; left untouched: $OPENLIVE_SHIM" >&2
+    fi
+  fi
+  rm -rf "$OPENLIVE_ADAPTER_CACHE_ROOT"
+  rmdir "$OPENLIVE_DIR/bin" "$OPENLIVE_DIR" 2>/dev/null || true
+  echo "[openlive] Uninstalled managed integration."
+}
+
+openlive_prepare_cmd() {
+  local requested="${1:-$(pwd)}" project
+  [[ "$#" -le 1 ]] || { echo "Usage: opencode-vm openlive prepare [project]" >&2; return 2; }
+  project="$(openlive_resolve_project "$requested")" || {
+    echo "[openlive] Project directory does not exist: $requested" >&2
+    return 1
+  }
+  echo "[openlive] 'prepare' no longer creates a retained ACP runtime." >&2
+  printf '[openlive] Start the central runtime instead:\n[openlive]   cd %q && opencode-vm web\n' "$project" >&2
+  return 1
+}
+
+openlive_release_lock() {
+  [[ -n "$OPENLIVE_LOCK_PATH" ]] || return 0
+  if [[ -f "$OPENLIVE_LOCK_PATH/pid" && "$(<"$OPENLIVE_LOCK_PATH/pid")" == "$$" ]]; then
+    rm -f "$OPENLIVE_LOCK_PATH/pid" 2>/dev/null || true
+    rmdir "$OPENLIVE_LOCK_PATH" 2>/dev/null || true
+  fi
+  OPENLIVE_LOCK_PATH=""
+}
+
+openlive_acquire_lock() {
+  local project="$1" lock_root pid="" acquired=0
+  lock_root="$OPENLIVE_DIR/locks"
+  mkdir -p "$lock_root"
+  OPENLIVE_LOCK_PATH="$lock_root/$(proj_hash "$project").lock"
+  if mkdir "$OPENLIVE_LOCK_PATH" 2>/dev/null; then
+    acquired=1
+  else
+    [[ -f "$OPENLIVE_LOCK_PATH/pid" ]] && pid="$(<"$OPENLIVE_LOCK_PATH/pid")"
+    if [[ ! "$pid" =~ ^[0-9]+$ ]] || ! kill -0 "$pid" 2>/dev/null; then
+      rm -f "$OPENLIVE_LOCK_PATH/pid"
+      rmdir "$OPENLIVE_LOCK_PATH" 2>/dev/null || true
+      if mkdir "$OPENLIVE_LOCK_PATH" 2>/dev/null; then acquired=1; fi
+    fi
+  fi
+  if [[ "$acquired" -ne 1 ]]; then
+    echo "[openlive] Another OpenLive conversation is already using this project." >&2
+    OPENLIVE_LOCK_PATH=""
+    return 1
+  fi
+  printf '%s\n' "$$" > "$OPENLIVE_LOCK_PATH/pid"
+}
+
+openlive_host_signal() {
+  trap - INT TERM HUP
+  openlive_release_lock
+  exit 143
+}
+
+openlive_acp_cmd() {
+  local requested="${1:-}" project senv
+  [[ -n "$requested" ]] || { echo "[openlive] Missing project directory." >&2; return 2; }
+  shift
+
+  # OpenLive owns stdout as an ACP JSON stream. Keep a dedicated descriptor for
+  # it and reserve stdin for the final ACP process. Preparation commands must
+  # never consume the initialize request OpenLive writes while the VM starts.
+  exec 3>&1
+  exec 4<&0
+  exec 1>&2
+  exec 0</dev/null
+  need limactl
+  ensure_dirs
+  project="$(openlive_resolve_project "$requested")" || {
+    echo "[openlive] Project directory does not exist: $requested" >&2
+    return 1
+  }
+  openlive_acquire_lock "$project" || return 1
+  trap openlive_host_signal INT TERM HUP
+  trap openlive_release_lock EXIT
+  senv="$(session_env "$project")"
+  [[ -f "$senv" ]] || {
+    echo "[openlive] This project has no running web session." >&2
+    printf '[openlive] Start the central runtime first:\n[openlive]   cd %q && opencode-vm web\n' "$project" >&2
+    return 1
+  }
+  # shellcheck disable=SC1090
+  source "$senv"
+  if [[ "${SESS_MODE:-}" != "web" ]]; then
+    echo "[openlive] This project session is not running in web mode." >&2
+    printf '[openlive] Start the central runtime first:\n[openlive]   cd %q && opencode-vm web\n' "$project" >&2
+    return 1
+  fi
+  if ! is_vm_running "$SESS_NAME"; then
+    echo "[openlive] The central web runtime is not running." >&2
+    printf '[openlive] Start it first:\n[openlive]   cd %q && opencode-vm web\n' "$project" >&2
+    return 1
+  fi
+  if [[ ! -f "$(session_share_dir "$project")/openlive/runtime.json" ]]; then
+    echo "[openlive] The central web runtime is not ready for OpenLive." >&2
+    printf '[openlive] Restart it:\n[openlive]   cd %q && opencode-vm web\n' "$project" >&2
+    return 1
+  fi
+  openlive_exec_in_vm "$SESS_NAME" "$project" "$(session_share_dir "$project")" "$@"
+}
+
+openlive_cmd() {
+  local op="${1:-install}"
+  shift || true
+  case "$op" in
+    install) openlive_install_cmd "$@" ;;
+    prepare) openlive_prepare_cmd "$@" ;;
+    status) openlive_status_cmd "$@" ;;
+    doctor) openlive_doctor_cmd "$@" ;;
+    uninstall) openlive_uninstall_cmd "$@" ;;
+    acp) openlive_acp_cmd "$@" ;;
+    version) printf 'opencode-vm OpenLive bridge %s\n' "$OCVM_VERSION" ;;
+    *)
+       echo "Usage: opencode-vm openlive {install [--force]|status|doctor [project]|uninstall}" >&2
+      return 2
+      ;;
+  esac
 }
 
 export_patch_cmd() {
@@ -8052,6 +8883,23 @@ attach_session() {
 
   # Refresh the in-VM web library on every attach, so a session created by an
   # older opencode-vm picks it up without being destroyed and recreated.
+  if [[ "$sess_mode" == "web" ]]; then
+    local openlive_share
+    openlive_share="$(session_share_dir "$proj")"
+    rm -f "$openlive_share/openlive/runtime.json"
+    if openlive_adapter_present; then
+      if ! openlive_stage_adapter "$openlive_share"; then
+        openlive_unstage_adapter "$openlive_share"
+        echo "[attach] WARNING: could not stage the OpenLive adapter." >&2
+      fi
+    elif openlive_bridge_installed; then
+      openlive_unstage_adapter "$openlive_share"
+      echo "[attach] WARNING: the installed OpenLive bridge needs its current adapter." >&2
+      echo "[attach] Run: opencode-vm openlive install" >&2
+    else
+      openlive_unstage_adapter "$openlive_share"
+    fi
+  fi
   install_web_lib "$(session_share_dir "$proj")" ||
     echo "[attach] WARNING: could not write the web library into the session share." >&2
   resolve_session_auth "$(session_share_dir "$proj")"
@@ -8069,6 +8917,7 @@ attach_session() {
     OC_REQUIRE_A2A="${9:-0}"
     OC_A2A_DEFAULT_SECRET="${10:-opencode-vm}"
     OC_LAN_UP="${11:-1}"
+    OC_OPENLIVE_PROJECT_HASH="${12:-}"
 
     # Shared in-VM web library (materialized into the session share by
     # install_web_lib on the host, and mounted here at the same path). It owns
@@ -8117,6 +8966,44 @@ attach_session() {
     export XDG_DATA_HOME=/tmp/oc-xdg-data
     export XDG_STATE_HOME=/tmp/oc-xdg-state
     export OCVM_ATTACHMENTS_DIR="$SESS_SHARE/attachments"
+    prepare_openlive_adapter() {
+      [ "$OC_MODE" = "web" ] || return 0
+      [ -n "$OC_OPENLIVE_PROJECT_HASH" ] || return 1
+      local adapter="$SESS_SHARE/openlive/adapter"
+      [ -f "$adapter/package-lock.json" ] || return 0
+      local lock_hash mode installed_mode=""
+      lock_hash="$(sha256sum "$adapter/package-lock.json" | awk "{print \$1}")"
+      mode="source-$lock_hash"
+      if [ -f "$adapter/manifest.json" ]; then
+        mode="release-$(cat "$adapter/.archive-sha256")"
+      fi
+      [ -f "$adapter/node_modules/.ocvm-install-mode" ] && installed_mode="$(cat "$adapter/node_modules/.ocvm-install-mode")"
+      if [ ! -f "$adapter/node_modules/.package-lock.json" ] || [ "$adapter/package-lock.json" -nt "$adapter/node_modules/.package-lock.json" ] || [ "$installed_mode" != "$mode" ]; then
+        if [ "${mode%%-*}" = "source" ]; then
+          ( cd "$adapter" && npm ci --no-audit --no-fund --loglevel=error )
+        else
+          ( cd "$adapter" && npm ci --omit=dev --ignore-scripts --no-audit --no-fund --loglevel=error )
+        fi
+        printf "%s\n" "$mode" > "$adapter/node_modules/.ocvm-install-mode"
+      fi
+      if [ "${mode%%-*}" = "source" ]; then
+        # Source staging excludes dist, so every web start rebuilds it.
+        ( cd "$adapter" && npm run build --silent )
+      else
+        [ -f "$adapter/dist/main.js" ] || return 1
+      fi
+      mkdir -p "$SESS_SHARE/openlive"
+      export OCVM_OPENLIVE_RUNTIME="$SESS_SHARE/openlive/runtime.json"
+      export OCVM_OPENLIVE_MANAGER_FILE="$SESS_SHARE/openlive/manager.json"
+      export OCVM_OPENLIVE_CONTROL_SOCKET="/tmp/ocvm-openlive/$OC_OPENLIVE_PROJECT_HASH/control.sock"
+      export OCVM_OPENLIVE_PROJECT_HASH
+      local tmp="$OCVM_OPENLIVE_RUNTIME.$$.tmp"
+      jq -n --arg project "$PROJ_DIR" --arg url "http://127.0.0.1:$OC_PORT_INTERNAL" \
+        --arg generation "$(date +%s)-$$" --arg version "$(opencode --version 2>/dev/null || true)" \
+        "{schema:1,project:\$project,backendUrl:\$url,generation:\$generation,opencodeVersion:\$version}" > "$tmp"
+      chmod 600 "$tmp"
+      mv -f "$tmp" "$OCVM_OPENLIVE_RUNTIME"
+    }
     # ECC project identity: stable hash across sessions uses host project path
     if [ -f "$SESS_SHARE/config/opencode/.ecc-applied" ]; then
       export CLAUDE_PROJECT_DIR="$PROJ_DIR"
@@ -8155,6 +9042,7 @@ attach_session() {
       echo ""
       stop_all_proxies
       stop_a2a
+      rm -f "$SESS_SHARE/openlive/runtime.json"
       echo "[attach] Stopping session — syncing data back to host..."
       # The rsync excludes log/, which made server-side failures undebuggable
       # from the host — keep the tail of the opencode log in the share.
@@ -8193,6 +9081,7 @@ attach_session() {
 
     if [ "$OC_MODE" = "web" ]; then
       start_web_proxies
+      prepare_openlive_adapter
       start_a2a
       print_web_banner
       a2a_watch_ready
@@ -8250,7 +9139,7 @@ attach_session() {
 
     # Sync-back happens via the EXIT trap installed above (covers Ctrl+C as
     # well as normal exit).
-  ' "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$effective_base" "$host_lan_ip" "${OC_WEB_TUI:-false}" "$sess_tls" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up"
+  ' "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$effective_base" "$host_lan_ip" "${OC_WEB_TUI:-false}" "$sess_tls" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up" "$(proj_hash "$proj")"
 }
 
 # --- Session Basic-auth secret -------------------------------------------
@@ -8320,6 +9209,71 @@ write_senv() {
   local senv="$1" name="$2" proj="$3" cfg_hash="$4" mode="$5" port="$6" keep="$7" tls="${8:-0}"
   printf 'SESS_NAME=%q\nSESS_PROJ=%q\nCFG_HASH_AT_START=%q\nSESS_MODE=%q\nSESS_PORT=%q\nSESS_KEEP_HISTORY=%q\nSESS_TLS=%q\n' \
     "$name" "$proj" "$cfg_hash" "$mode" "$port" "$keep" "$tls" > "$senv"
+}
+
+# Resolve OpenLive's physical cwd back to the project spelling stored in a
+# session record. This matters when Finder resolves a symlink before launching
+# the agent: project hashes are path-based, while SESS_PROJ remains canonical.
+openlive_resolve_project() {
+  local requested="$1" physical candidate f
+  physical="$(cd "$requested" 2>/dev/null && pwd -P)" || return 1
+  if [[ -f "$(session_env "$physical")" ]]; then
+    printf '%s\n' "$physical"
+    return 0
+  fi
+  for f in "$SESSIONS_DIR"/*.env; do
+    [[ -f "$f" ]] || continue
+    candidate="$(
+      unset SESS_PROJ
+      # shellcheck disable=SC1090
+      source "$f" 2>/dev/null || exit 0
+      printf '%s' "${SESS_PROJ:-}"
+    )"
+    [[ -d "$candidate" ]] || continue
+    if [[ "$(cd "$candidate" 2>/dev/null && pwd -P)" == "$physical" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  printf '%s\n' "$physical"
+}
+
+# Guest-side ACP adapter. The web runtime already owns OpenCode and its data;
+# this process only bridges OpenLive's stdio to that running server.
+openlive_guest_script() {
+  cat <<'OPENLIVE_GUEST'
+set -euo pipefail
+PROJ_DIR="$1"
+SESS_SHARE="$2"
+PROJECT_HASH="$3"
+shift 3
+
+exec 3>&1
+exec 1>&2
+
+export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$PATH"
+export npm_config_cache=/tmp/npm-cache
+export OCVM_OPENLIVE_RUNTIME="$SESS_SHARE/openlive/runtime.json"
+export OCVM_OPENLIVE_MANAGER_FILE="$SESS_SHARE/openlive/manager.json"
+export OCVM_OPENLIVE_CONTROL_SOCKET="/tmp/ocvm-openlive/$PROJECT_HASH/control.sock"
+export OCVM_OPENLIVE_PROJECT_HASH="$PROJECT_HASH"
+
+adapter="$SESS_SHARE/openlive/adapter"
+[ -f "$OCVM_OPENLIVE_RUNTIME" ] || { echo "[openlive] Runtime descriptor is missing."; exit 1; }
+[ -f "$adapter/dist/main.js" ] || { echo "[openlive] Adapter is not installed in this web session. Restart with 'opencode-vm web'."; exit 1; }
+adapter_log="$SESS_SHARE/openlive/adapter.log"
+touch "$adapter_log"
+chmod 600 "$adapter_log"
+exec node "$adapter/dist/main.js" "$@" <&0 >&3 2> >(tee -a "$adapter_log" >&2)
+OPENLIVE_GUEST
+}
+
+openlive_exec_in_vm() {
+  local vm="$1" project="$2" share="$3"
+  shift 3
+  local guest_script
+  guest_script="$(openlive_guest_script)"
+  vm_exec "$vm" "$guest_script" "$project" "$share" "$(proj_hash "$project")" "$@" <&4 >&3
 }
 
 # Update SESS_MODE / SESS_PORT in an existing session.env, preserving other
@@ -8898,6 +9852,27 @@ start_session() {
     cp -p "$sess_cfg_file" "$sess_share/config/opencode/.opencode.json"
   fi
 
+  if [[ "$SESSION_MODE" == "web" ]]; then
+    rm -f "$sess_share/openlive/runtime.json"
+    if openlive_adapter_present; then
+      openlive_stage_adapter "$sess_share" || {
+        echo "[run] OpenLive adapter staging failed." >&2
+        return 1
+      }
+      if ! cp -p "$sess_cfg_file" "$sess_share/config/opencode/.opencode.json"; then
+        echo "[run] Could not snapshot the OpenLive session configuration." >&2
+        return 1
+      fi
+    elif openlive_bridge_installed; then
+      openlive_unstage_adapter "$sess_share"
+      echo "[run] The installed OpenLive bridge needs its current adapter." >&2
+      echo "[run] Run: opencode-vm openlive install" >&2
+      return 1
+    else
+      openlive_unstage_adapter "$sess_share"
+    fi
+  fi
+
   # Skills (independent of ECC enabled state — package guards handle dependencies)
   skills_mount_for_session "$sess_share" "$proj"
 
@@ -8939,7 +9914,12 @@ start_session() {
     sleep 2
   done
   echo $$ > "$lockfile"
-  trap "rm -f '$lockfile'" EXIT
+  _clone_lock_cleanup() {
+    local rc=$?
+    rm -f "$lockfile"
+    return "$rc"
+  }
+  trap _clone_lock_cleanup EXIT
 
   # Lima's docker-rootful template creates a shared socket dir at ~/.lima/sock/
   # which Lima may misinterpret as a VM instance, causing fatal errors during
@@ -9075,13 +10055,18 @@ start_session() {
 
     echo "[cleanup] Config conflict check... $(_ts)"
     if [[ -f "$sess_cfg" ]]; then
-      # The mcp block is session-time state (injected fresh every start from
-      # the MCPs registry + active MCPS_PACKAGES) and must NOT be persisted.
-      # Strip it before writing back to project-state and host so stale
-      # entries never leak into the next session's baseline.
+      # MCPs and the OpenLive manager are session-time state injected fresh on
+      # every start. Strip them before writing back so they cannot leak into
+      # the project-state or host config baseline.
       local persist_cfg="$sess_cfg.sanitized"
-      if command -v jq >/dev/null 2>&1 && jq -e '.mcp' "$sess_cfg" >/dev/null 2>&1; then
-        jq 'del(.mcp)' "$sess_cfg" > "$persist_cfg" 2>/dev/null || cp -p "$sess_cfg" "$persist_cfg"
+      local strip_openlive=false
+      [[ "${SESSION_MODE:-}" == "web" ]] && strip_openlive=true
+      if command -v jq >/dev/null 2>&1 && jq -e . "$sess_cfg" >/dev/null 2>&1; then
+        jq --arg manager "$OPENLIVE_MANAGER_AGENT" --argjson strip_openlive "$strip_openlive" '
+          del(.mcp)
+          | if $strip_openlive then del(.agent[$manager]) else . end
+          | if .agent == {} then del(.agent) else . end
+        ' "$sess_cfg" > "$persist_cfg" 2>/dev/null || cp -p "$sess_cfg" "$persist_cfg"
       else
         cp -p "$sess_cfg" "$persist_cfg"
       fi
@@ -9233,6 +10218,7 @@ start_session() {
     fi
     # Remove clean mount symlink if created
     [[ -n "${clean_link:-}" ]] && rm -f "$clean_link"
+    return 0
   }
   # HUP/TERM as well as EXIT: a closed terminal window kills the shell without
   # running an EXIT-only trap, which is how a web session can leave its SSH
@@ -9366,6 +10352,7 @@ start_session() {
     OC_REQUIRE_A2A="${9:-0}"
     OC_A2A_DEFAULT_SECRET="${10:-opencode-vm}"
     OC_LAN_UP="${11:-1}"
+    OC_OPENLIVE_PROJECT_HASH="${12:-}"
 
     # Shared in-VM web library (materialized into the session share by
     # install_web_lib on the host, and mounted here at the same path). It owns
@@ -9397,6 +10384,44 @@ start_session() {
     # Config stays on mount (small JSON files, safe over virtiofs)
     export XDG_CONFIG_HOME="$SESS_SHARE/config"
     export OCVM_ATTACHMENTS_DIR="$SESS_SHARE/attachments"
+    prepare_openlive_adapter() {
+      [ "$OC_MODE" = "web" ] || return 0
+      [ -n "$OC_OPENLIVE_PROJECT_HASH" ] || return 1
+      local adapter="$SESS_SHARE/openlive/adapter"
+      [ -f "$adapter/package-lock.json" ] || return 0
+      local lock_hash mode installed_mode=""
+      lock_hash="$(sha256sum "$adapter/package-lock.json" | awk "{print \$1}")"
+      mode="source-$lock_hash"
+      if [ -f "$adapter/manifest.json" ]; then
+        mode="release-$(cat "$adapter/.archive-sha256")"
+      fi
+      [ -f "$adapter/node_modules/.ocvm-install-mode" ] && installed_mode="$(cat "$adapter/node_modules/.ocvm-install-mode")"
+      if [ ! -f "$adapter/node_modules/.package-lock.json" ] || [ "$adapter/package-lock.json" -nt "$adapter/node_modules/.package-lock.json" ] || [ "$installed_mode" != "$mode" ]; then
+        if [ "${mode%%-*}" = "source" ]; then
+          ( cd "$adapter" && npm ci --no-audit --no-fund --loglevel=error )
+        else
+          ( cd "$adapter" && npm ci --omit=dev --ignore-scripts --no-audit --no-fund --loglevel=error )
+        fi
+        printf "%s\n" "$mode" > "$adapter/node_modules/.ocvm-install-mode"
+      fi
+      if [ "${mode%%-*}" = "source" ]; then
+        # Source staging excludes dist, so every web start rebuilds it.
+        ( cd "$adapter" && npm run build --silent )
+      else
+        [ -f "$adapter/dist/main.js" ] || return 1
+      fi
+      mkdir -p "$SESS_SHARE/openlive"
+      export OCVM_OPENLIVE_RUNTIME="$SESS_SHARE/openlive/runtime.json"
+      export OCVM_OPENLIVE_MANAGER_FILE="$SESS_SHARE/openlive/manager.json"
+      export OCVM_OPENLIVE_CONTROL_SOCKET="/tmp/ocvm-openlive/$OC_OPENLIVE_PROJECT_HASH/control.sock"
+      export OCVM_OPENLIVE_PROJECT_HASH
+      local tmp="$OCVM_OPENLIVE_RUNTIME.$$.tmp"
+      jq -n --arg project "$PROJ_DIR" --arg url "http://127.0.0.1:$OC_PORT_INTERNAL" \
+        --arg generation "$(date +%s)-$$" --arg version "$(opencode --version 2>/dev/null || true)" \
+        "{schema:1,project:\$project,backendUrl:\$url,generation:\$generation,opencodeVersion:\$version}" > "$tmp"
+      chmod 600 "$tmp"
+      mv -f "$tmp" "$OCVM_OPENLIVE_RUNTIME"
+    }
 
     # ECC project identity: stable hash across sessions uses host project path
     if [ -f "$SESS_SHARE/config/opencode/.ecc-applied" ]; then
@@ -9485,6 +10510,7 @@ EOF
       set +e
       stop_all_proxies
       stop_a2a
+      rm -f "$SESS_SHARE/openlive/runtime.json"
       echo "[$(date +%T)] Syncing session data back to host..."
       # The rsync excludes log/, which made server-side failures undebuggable
       # from the host — keep the tail of the opencode log in the share.
@@ -9560,8 +10586,12 @@ EOF
         echo "[shell] Exit this shell to return to host terminal."
         bash
         ;;
+      prepare)
+        echo "[openlive] Project session prepared."
+        ;;
       web)
         start_web_proxies
+        prepare_openlive_adapter
         start_a2a
         print_web_banner
         a2a_watch_ready
@@ -9630,10 +10660,13 @@ EOF
 
     # Sync back happens via the EXIT trap installed above (covers both clean
     # exit and Ctrl+C-driven termination of the web server).
-  ' "$proj" "$sess_share" "$SESSION_MODE" "$effective_base" "${OC_WEB_TUI:-false}" "$host_lan_ip" "${SESSION_TLS:-0}" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up"; then
+  ' "$proj" "$sess_share" "$SESSION_MODE" "$effective_base" "${OC_WEB_TUI:-false}" "$host_lan_ip" "${SESSION_TLS:-0}" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up" "$(proj_hash "$proj")"; then
     if [[ "$SESSION_MODE" != "shell" ]]; then
-    OC_SHELL_OK=1
+      OC_SHELL_OK=1
     fi
+  else
+    echo "[run] Session command failed." >&2
+    return 1
   fi
 }
 
@@ -9762,6 +10795,10 @@ case "$cmd" in
 
   a2a)
     a2a_cmd "$@"
+    ;;
+
+  openlive)
+    openlive_cmd "$@"
     ;;
 
   init)
@@ -9950,6 +10987,11 @@ Usage:
   opencode-vm attach                       # reconnect to the project's session VM
                                            # (auto-starts a stopped-but-kept VM)
   opencode-vm shell                        # open shell in session VM (auto-starts if missing)
+  opencode-vm openlive [install]           # install the OpenLive voice/chat bridge (macOS)
+  opencode-vm openlive prepare [project]   # deprecated: use 'opencode-vm web' instead
+  opencode-vm openlive status              # inspect OpenLive discovery and readiness
+  opencode-vm openlive doctor [project]    # diagnose bridge + project session
+  opencode-vm openlive uninstall           # remove only managed OpenLive integration files
   opencode-vm init                         # create/provision base VM (one-time setup)
                                            # Skill + MCP packages stay at their defaults —
                                            # manage later via 'opencode-vm skills|mcps on/off <pkg>'.

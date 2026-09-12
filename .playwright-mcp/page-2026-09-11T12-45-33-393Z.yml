@@ -1,0 +1,1832 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - generic [ref=e3]:
+      - link "Skip to content" [ref=e4] [cursor=pointer]:
+        - /url: "#start-of-content"
+      - banner [ref=e9]:
+        - heading "Navigation Menu" [level=2] [ref=e10]
+        - generic [ref=e11]:
+          - link "Homepage" [ref=e13] [cursor=pointer]:
+            - /url: /
+          - generic [ref=e16]:
+            - navigation "Global" [ref=e17]:
+              - list [ref=e18]:
+                - listitem [ref=e19]:
+                  - button "Platform" [ref=e21] [cursor=pointer]
+                - listitem [ref=e24]:
+                  - button "Solutions" [ref=e26] [cursor=pointer]
+                - listitem [ref=e29]:
+                  - button "Resources" [ref=e31] [cursor=pointer]
+                - listitem [ref=e34]:
+                  - button "Open Source" [ref=e36] [cursor=pointer]
+                - listitem [ref=e39]:
+                  - button "Enterprise" [ref=e41] [cursor=pointer]
+                - listitem [ref=e44]:
+                  - link "Pricing" [ref=e45] [cursor=pointer]:
+                    - /url: https://github.com/pricing
+            - generic [ref=e46]:
+              - button "Search or jump to, type / to search" [ref=e48] [cursor=pointer]
+              - link "Sign in" [ref=e55] [cursor=pointer]:
+                - /url: /login?return_to=https%3A%2F%2Fgithub.com%2Fkatipally%2Fopenlive%2Fblob%2F849173cd1c8c17a95d600b17b428c301722bf5df%2Fpackages%2Fshared%2Fsrc%2Fagent-registry.ts%3Fplain%3D1
+              - link "Sign up" [ref=e58] [cursor=pointer]:
+                - /url: /signup?ref_cta=Sign+up&ref_loc=header+logged+out&ref_page=%2F%3Cuser-name%3E%2F%3Crepo-name%3E%2Fblob%2Fshow&source=header-repo&source_repo=katipally%2Fopenlive
+              - button "Appearance settings" [ref=e61] [cursor=pointer]
+    - main [ref=e68]:
+      - generic [ref=e69]:
+        - generic [ref=e70]:
+          - generic [ref=e72]:
+            - link "katipally" [ref=e76] [cursor=pointer]:
+              - /url: /katipally
+            - generic [ref=e77]: /
+            - strong [ref=e78]:
+              - link "openlive" [ref=e79] [cursor=pointer]:
+                - /url: /katipally/openlive
+            - generic [ref=e80]: Public
+          - generic [ref=e81]:
+            - list:
+              - listitem [ref=e82]:
+                - link "You must be signed in to change notification settings" [ref=e83] [cursor=pointer]:
+                  - /url: /login?return_to=%2Fkatipally%2Fopenlive
+                  - text: Notifications
+              - listitem [ref=e86]:
+                - link "Fork 61" [ref=e87] [cursor=pointer]:
+                  - /url: /login?return_to=%2Fkatipally%2Fopenlive
+                  - text: Fork
+                  - generic "61" [ref=e90]
+              - listitem [ref=e91]:
+                - link "You must be signed in to star a repository" [ref=e93] [cursor=pointer]:
+                  - /url: /login?return_to=%2Fkatipally%2Fopenlive
+                  - text: Star
+                  - generic "288 users starred this repository" [ref=e96]: "288"
+        - navigation "Repository" [ref=e97]:
+          - list [ref=e98]:
+            - listitem [ref=e99]:
+              - link "Code" [ref=e100] [cursor=pointer]:
+                - /url: /katipally/openlive
+            - listitem [ref=e104]:
+              - link "Issues" [ref=e105] [cursor=pointer]:
+                - /url: /katipally/openlive/issues
+            - listitem [ref=e110]:
+              - link "Pull requests 1" [ref=e111] [cursor=pointer]:
+                - /url: /katipally/openlive/pulls
+                - generic [ref=e114]: Pull requests
+                - generic "1" [ref=e115]
+            - listitem [ref=e116]:
+              - link "Actions" [ref=e117] [cursor=pointer]:
+                - /url: /katipally/openlive/actions
+            - listitem [ref=e121]:
+              - link "Projects" [ref=e122] [cursor=pointer]:
+                - /url: /katipally/openlive/projects
+            - listitem [ref=e126]:
+              - link "Security and quality" [ref=e127] [cursor=pointer]:
+                - /url: /katipally/openlive/security
+            - listitem [ref=e131]:
+              - link "Insights" [ref=e132] [cursor=pointer]:
+                - /url: /katipally/openlive/pulse
+      - generic [ref=e146]:
+        - generic [ref=e150]:
+          - generic [ref=e151]:
+            - heading "Expand file tree" [level=2] [ref=e153]:
+              - button "Expand file tree" [ref=e154] [cursor=pointer]
+            - button "849173cd1c8c17a95d600b17b428c301722bf5df branch" [ref=e159] [cursor=pointer]:
+              - generic [ref=e160]: 849173cd1c8c17a95d600b17b428c301722bf5df
+            - generic [ref=e165]:
+              - navigation [ref=e166]:
+                - heading "Breadcrumbs" [level=2] [ref=e167]
+                - list [ref=e168]:
+                  - listitem [ref=e169]:
+                    - link "openlive" [ref=e170] [cursor=pointer]:
+                      - /url: /katipally/openlive/tree/849173cd1c8c17a95d600b17b428c301722bf5df
+                  - listitem [ref=e171]:
+                    - text: /
+                    - link "packages" [ref=e172] [cursor=pointer]:
+                      - /url: /katipally/openlive/tree/849173cd1c8c17a95d600b17b428c301722bf5df/packages
+                  - listitem [ref=e173]:
+                    - text: /
+                    - link "shared" [ref=e174] [cursor=pointer]:
+                      - /url: /katipally/openlive/tree/849173cd1c8c17a95d600b17b428c301722bf5df/packages/shared
+                  - listitem [ref=e175]:
+                    - text: /
+                    - link "src" [ref=e176] [cursor=pointer]:
+                      - /url: /katipally/openlive/tree/849173cd1c8c17a95d600b17b428c301722bf5df/packages/shared/src
+              - generic [ref=e177]:
+                - text: /
+                - heading "agent-registry.ts" [level=1] [ref=e178]
+              - button "Copy path" [ref=e179] [cursor=pointer]
+          - generic [ref=e185]:
+            - combobox "Go to file" [ref=e192]
+            - button "More file actions" [ref=e193] [cursor=pointer]
+        - generic [ref=e196]:
+          - generic [ref=e198]:
+            - heading "Latest commit" [level=2] [ref=e199]
+            - generic [ref=e202]:
+              - heading "History" [level=2] [ref=e203]
+              - link "History" [ref=e204] [cursor=pointer]:
+                - /url: /katipally/openlive/commits/849173cd1c8c17a95d600b17b428c301722bf5df/packages/shared/src/agent-registry.ts
+          - generic [ref=e208]:
+            - generic [ref=e210]:
+              - heading "File metadata and controls" [level=2] [ref=e211]
+              - generic [ref=e212]:
+                - list "File view" [ref=e213]:
+                  - listitem [ref=e214]:
+                    - button "Code" [pressed] [ref=e215] [cursor=pointer]
+                  - listitem [ref=e218]:
+                    - button "Blame" [ref=e219] [cursor=pointer]
+                - generic "13.9 KB" [ref=e224]: 269 lines (260 loc) · 13.9 KB
+              - generic [ref=e225]:
+                - generic [ref=e227]:
+                  - link "Raw" [ref=e229] [cursor=pointer]:
+                    - /url: https://github.com/katipally/openlive/raw/849173cd1c8c17a95d600b17b428c301722bf5df/packages/shared/src/agent-registry.ts
+                  - button "Copy raw file" [ref=e233] [cursor=pointer]
+                  - button "Download raw file" [ref=e238] [cursor=pointer]
+                - button "Open symbols panel" [ref=e242] [cursor=pointer]
+            - region [ref=e246]:
+              - generic [ref=e251]:
+                - generic [ref=e252]:
+                  - generic [ref=e253] [cursor=pointer]: "1"
+                  - generic [ref=e254] [cursor=pointer]: "2"
+                  - generic [ref=e255] [cursor=pointer]: "3"
+                  - generic [ref=e256] [cursor=pointer]: "4"
+                  - generic [ref=e257] [cursor=pointer]: "5"
+                  - generic [ref=e258] [cursor=pointer]: "6"
+                  - generic [ref=e259] [cursor=pointer]: "7"
+                  - generic [ref=e260] [cursor=pointer]: "8"
+                  - generic [ref=e261] [cursor=pointer]: "9"
+                  - generic [ref=e262] [cursor=pointer]: "10"
+                  - generic [ref=e263] [cursor=pointer]: "11"
+                  - generic [ref=e264] [cursor=pointer]: "12"
+                  - generic [ref=e265] [cursor=pointer]:
+                    - text: "13"
+                    - button [expanded] [ref=e266]
+                  - generic [ref=e269] [cursor=pointer]: "14"
+                  - generic [ref=e270] [cursor=pointer]: "15"
+                  - generic [ref=e271] [cursor=pointer]: "16"
+                  - generic [ref=e272] [cursor=pointer]: "17"
+                  - generic [ref=e273] [cursor=pointer]: "18"
+                  - generic [ref=e274] [cursor=pointer]: "19"
+                  - generic [ref=e275] [cursor=pointer]: "20"
+                  - generic [ref=e276] [cursor=pointer]: "21"
+                  - generic [ref=e277] [cursor=pointer]: "22"
+                  - generic [ref=e278] [cursor=pointer]: "23"
+                  - generic [ref=e279] [cursor=pointer]: "24"
+                  - generic [ref=e280] [cursor=pointer]: "25"
+                  - generic [ref=e281] [cursor=pointer]: "26"
+                  - generic [ref=e282] [cursor=pointer]:
+                    - text: "27"
+                    - button [expanded] [ref=e283]
+                  - generic [ref=e286] [cursor=pointer]: "28"
+                  - generic [ref=e287] [cursor=pointer]: "29"
+                  - generic [ref=e288] [cursor=pointer]: "30"
+                  - generic [ref=e289] [cursor=pointer]: "31"
+                  - generic [ref=e290] [cursor=pointer]: "32"
+                  - generic [ref=e291] [cursor=pointer]: "33"
+                  - generic [ref=e292] [cursor=pointer]: "34"
+                  - generic [ref=e293] [cursor=pointer]: "35"
+                  - generic [ref=e294] [cursor=pointer]: "36"
+                  - generic [ref=e295] [cursor=pointer]: "37"
+                  - generic [ref=e296] [cursor=pointer]: "38"
+                  - generic [ref=e297] [cursor=pointer]: "39"
+                  - generic [ref=e298] [cursor=pointer]: "40"
+                  - generic [ref=e299] [cursor=pointer]: "41"
+                  - generic [ref=e300] [cursor=pointer]: "42"
+                  - generic [ref=e301] [cursor=pointer]: "43"
+                  - generic [ref=e302] [cursor=pointer]: "44"
+                  - generic [ref=e303] [cursor=pointer]: "45"
+                  - generic [ref=e304] [cursor=pointer]: "46"
+                  - generic [ref=e305] [cursor=pointer]: "47"
+                  - generic [ref=e306] [cursor=pointer]: "48"
+                  - generic [ref=e307] [cursor=pointer]: "49"
+                  - generic [ref=e308] [cursor=pointer]: "50"
+                  - generic [ref=e309] [cursor=pointer]: "51"
+                  - generic [ref=e310] [cursor=pointer]: "52"
+                  - generic [ref=e311] [cursor=pointer]: "53"
+                  - generic [ref=e312] [cursor=pointer]: "54"
+                  - generic [ref=e313] [cursor=pointer]: "55"
+                  - generic [ref=e314] [cursor=pointer]: "56"
+                  - generic [ref=e315] [cursor=pointer]: "57"
+                  - generic [ref=e316] [cursor=pointer]: "58"
+                  - generic [ref=e317] [cursor=pointer]: "59"
+                  - generic [ref=e318] [cursor=pointer]: "60"
+                  - generic [ref=e319] [cursor=pointer]: "61"
+                  - generic [ref=e320] [cursor=pointer]: "62"
+                  - generic [ref=e321] [cursor=pointer]: "63"
+                  - generic [ref=e322] [cursor=pointer]: "64"
+                  - generic [ref=e323] [cursor=pointer]: "65"
+                  - generic [ref=e324] [cursor=pointer]: "66"
+                  - generic [ref=e325] [cursor=pointer]: "67"
+                  - generic [ref=e326] [cursor=pointer]: "68"
+                  - generic [ref=e327] [cursor=pointer]: "69"
+                  - generic [ref=e328] [cursor=pointer]: "70"
+                  - generic [ref=e329] [cursor=pointer]: "71"
+                  - generic [ref=e330] [cursor=pointer]: "72"
+                  - generic [ref=e331] [cursor=pointer]: "73"
+                  - generic [ref=e332] [cursor=pointer]: "74"
+                  - generic [ref=e333] [cursor=pointer]: "75"
+                  - generic [ref=e334] [cursor=pointer]: "76"
+                  - generic [ref=e335] [cursor=pointer]: "77"
+                  - generic [ref=e336] [cursor=pointer]: "78"
+                  - generic [ref=e337] [cursor=pointer]: "79"
+                  - generic [ref=e338] [cursor=pointer]: "80"
+                  - generic [ref=e339] [cursor=pointer]: "81"
+                  - generic [ref=e340] [cursor=pointer]: "82"
+                  - generic [ref=e341] [cursor=pointer]: "83"
+                  - generic [ref=e342] [cursor=pointer]: "84"
+                  - generic [ref=e343] [cursor=pointer]: "85"
+                  - generic [ref=e344] [cursor=pointer]: "86"
+                  - generic [ref=e345] [cursor=pointer]: "87"
+                  - generic [ref=e346] [cursor=pointer]: "88"
+                  - generic [ref=e347] [cursor=pointer]: "89"
+                  - generic [ref=e348] [cursor=pointer]: "90"
+                  - generic [ref=e349] [cursor=pointer]: "91"
+                  - generic [ref=e350] [cursor=pointer]: "92"
+                  - generic [ref=e351] [cursor=pointer]: "93"
+                  - generic [ref=e352] [cursor=pointer]: "94"
+                  - generic [ref=e353] [cursor=pointer]: "95"
+                  - generic [ref=e354] [cursor=pointer]: "96"
+                  - generic [ref=e355] [cursor=pointer]: "97"
+                  - generic [ref=e356] [cursor=pointer]: "98"
+                  - generic [ref=e357] [cursor=pointer]: "99"
+                  - generic [ref=e358] [cursor=pointer]: "100"
+                  - generic [ref=e359] [cursor=pointer]: "101"
+                  - generic [ref=e360] [cursor=pointer]: "102"
+                  - generic [ref=e361] [cursor=pointer]: "103"
+                  - generic [ref=e362] [cursor=pointer]: "104"
+                  - generic [ref=e363] [cursor=pointer]: "105"
+                  - generic [ref=e364] [cursor=pointer]: "106"
+                  - generic [ref=e365] [cursor=pointer]: "107"
+                  - generic [ref=e366] [cursor=pointer]: "108"
+                  - generic [ref=e367] [cursor=pointer]: "109"
+                  - generic [ref=e368] [cursor=pointer]: "110"
+                  - generic [ref=e369] [cursor=pointer]: "111"
+                  - generic [ref=e370] [cursor=pointer]: "112"
+                  - generic [ref=e371] [cursor=pointer]: "113"
+                  - generic [ref=e372] [cursor=pointer]: "114"
+                  - generic [ref=e373] [cursor=pointer]: "115"
+                  - generic [ref=e374] [cursor=pointer]: "116"
+                  - generic [ref=e375] [cursor=pointer]: "117"
+                  - generic [ref=e376] [cursor=pointer]: "118"
+                  - generic [ref=e377] [cursor=pointer]: "119"
+                  - generic [ref=e378] [cursor=pointer]: "120"
+                  - generic [ref=e379] [cursor=pointer]: "121"
+                  - generic [ref=e380] [cursor=pointer]: "122"
+                  - generic [ref=e381] [cursor=pointer]: "123"
+                  - generic [ref=e382] [cursor=pointer]: "124"
+                  - generic [ref=e383] [cursor=pointer]: "125"
+                  - generic [ref=e384] [cursor=pointer]: "126"
+                  - generic [ref=e385] [cursor=pointer]: "127"
+                  - generic [ref=e386] [cursor=pointer]: "128"
+                  - generic [ref=e387] [cursor=pointer]: "129"
+                  - generic [ref=e388] [cursor=pointer]: "130"
+                  - generic [ref=e389] [cursor=pointer]: "131"
+                  - generic [ref=e390] [cursor=pointer]: "132"
+                  - generic [ref=e391] [cursor=pointer]: "133"
+                  - generic [ref=e392] [cursor=pointer]: "134"
+                  - generic [ref=e393] [cursor=pointer]: "135"
+                  - generic [ref=e394] [cursor=pointer]: "136"
+                  - generic [ref=e395] [cursor=pointer]: "137"
+                  - generic [ref=e396] [cursor=pointer]: "138"
+                  - generic [ref=e397] [cursor=pointer]: "139"
+                  - generic [ref=e398] [cursor=pointer]: "140"
+                  - generic [ref=e399] [cursor=pointer]: "141"
+                  - generic [ref=e400] [cursor=pointer]: "142"
+                  - generic [ref=e401] [cursor=pointer]: "143"
+                  - generic [ref=e402] [cursor=pointer]: "144"
+                  - generic [ref=e403] [cursor=pointer]: "145"
+                  - generic [ref=e404] [cursor=pointer]: "146"
+                  - generic [ref=e405] [cursor=pointer]: "147"
+                  - generic [ref=e406] [cursor=pointer]: "148"
+                  - generic [ref=e407] [cursor=pointer]: "149"
+                  - generic [ref=e408] [cursor=pointer]: "150"
+                  - generic [ref=e409] [cursor=pointer]: "151"
+                  - generic [ref=e410] [cursor=pointer]: "152"
+                  - generic [ref=e411] [cursor=pointer]: "153"
+                  - generic [ref=e412] [cursor=pointer]: "154"
+                  - generic [ref=e413] [cursor=pointer]: "155"
+                  - generic [ref=e414] [cursor=pointer]: "156"
+                  - generic [ref=e415] [cursor=pointer]: "157"
+                  - generic [ref=e416] [cursor=pointer]: "158"
+                  - generic [ref=e417] [cursor=pointer]: "159"
+                  - generic [ref=e418] [cursor=pointer]: "160"
+                  - generic [ref=e419] [cursor=pointer]: "161"
+                  - generic [ref=e420] [cursor=pointer]: "162"
+                  - generic [ref=e421] [cursor=pointer]: "163"
+                  - generic [ref=e422] [cursor=pointer]: "164"
+                  - generic [ref=e423] [cursor=pointer]: "165"
+                  - generic [ref=e424] [cursor=pointer]: "166"
+                  - generic [ref=e425] [cursor=pointer]: "167"
+                  - generic [ref=e426] [cursor=pointer]: "168"
+                  - generic [ref=e427] [cursor=pointer]: "169"
+                  - generic [ref=e428] [cursor=pointer]: "170"
+                  - generic [ref=e429] [cursor=pointer]: "171"
+                  - generic [ref=e430] [cursor=pointer]: "172"
+                  - generic [ref=e431] [cursor=pointer]: "173"
+                  - generic [ref=e432] [cursor=pointer]: "174"
+                  - generic [ref=e433] [cursor=pointer]: "175"
+                  - generic [ref=e434] [cursor=pointer]: "176"
+                  - generic [ref=e435] [cursor=pointer]: "177"
+                  - generic [ref=e436] [cursor=pointer]: "178"
+                  - generic [ref=e437] [cursor=pointer]: "179"
+                  - generic [ref=e438] [cursor=pointer]: "180"
+                  - generic [ref=e439] [cursor=pointer]: "181"
+                  - generic [ref=e440] [cursor=pointer]: "182"
+                  - generic [ref=e441] [cursor=pointer]: "183"
+                  - generic [ref=e442] [cursor=pointer]: "184"
+                  - generic [ref=e443] [cursor=pointer]: "185"
+                  - generic [ref=e444] [cursor=pointer]: "186"
+                  - generic [ref=e445] [cursor=pointer]: "187"
+                  - generic [ref=e446] [cursor=pointer]: "188"
+                  - generic [ref=e447] [cursor=pointer]: "189"
+                  - generic [ref=e448] [cursor=pointer]: "190"
+                  - generic [ref=e449] [cursor=pointer]: "191"
+                  - generic [ref=e450] [cursor=pointer]: "192"
+                  - generic [ref=e451] [cursor=pointer]: "193"
+                  - generic [ref=e452] [cursor=pointer]: "194"
+                  - generic [ref=e453] [cursor=pointer]: "195"
+                  - generic [ref=e454] [cursor=pointer]: "196"
+                  - generic [ref=e455] [cursor=pointer]: "197"
+                  - generic [ref=e456] [cursor=pointer]: "198"
+                  - generic [ref=e457] [cursor=pointer]: "199"
+                  - generic [ref=e458] [cursor=pointer]: "200"
+                  - generic [ref=e459] [cursor=pointer]: "201"
+                  - generic [ref=e460] [cursor=pointer]: "202"
+                  - generic [ref=e461] [cursor=pointer]: "203"
+                  - generic [ref=e462] [cursor=pointer]: "204"
+                  - generic [ref=e463] [cursor=pointer]: "205"
+                  - generic [ref=e464] [cursor=pointer]: "206"
+                  - generic [ref=e465] [cursor=pointer]: "207"
+                  - generic [ref=e466] [cursor=pointer]: "208"
+                  - generic [ref=e467] [cursor=pointer]: "209"
+                  - generic [ref=e468] [cursor=pointer]: "210"
+                  - generic [ref=e469] [cursor=pointer]: "211"
+                  - generic [ref=e470] [cursor=pointer]: "212"
+                  - generic [ref=e471] [cursor=pointer]: "213"
+                  - generic [ref=e472] [cursor=pointer]: "214"
+                  - generic [ref=e473] [cursor=pointer]: "215"
+                  - generic [ref=e474] [cursor=pointer]: "216"
+                  - generic [ref=e475] [cursor=pointer]: "217"
+                  - generic [ref=e476] [cursor=pointer]: "218"
+                  - generic [ref=e477] [cursor=pointer]: "219"
+                  - generic [ref=e478] [cursor=pointer]: "220"
+                  - generic [ref=e479] [cursor=pointer]: "221"
+                  - generic [ref=e480] [cursor=pointer]: "222"
+                  - generic [ref=e481] [cursor=pointer]: "223"
+                  - generic [ref=e482] [cursor=pointer]: "224"
+                  - generic [ref=e483] [cursor=pointer]: "225"
+                  - generic [ref=e484] [cursor=pointer]: "226"
+                  - generic [ref=e485] [cursor=pointer]: "227"
+                  - generic [ref=e486] [cursor=pointer]: "228"
+                  - generic [ref=e487] [cursor=pointer]: "229"
+                  - generic [ref=e488] [cursor=pointer]: "230"
+                  - generic [ref=e489] [cursor=pointer]: "231"
+                  - generic [ref=e490] [cursor=pointer]: "232"
+                  - generic [ref=e491] [cursor=pointer]: "233"
+                  - generic [ref=e492] [cursor=pointer]: "234"
+                  - generic [ref=e493] [cursor=pointer]: "235"
+                  - generic [ref=e494] [cursor=pointer]: "236"
+                  - generic [ref=e495] [cursor=pointer]: "237"
+                  - generic [ref=e496] [cursor=pointer]: "238"
+                  - generic [ref=e497] [cursor=pointer]: "239"
+                  - generic [ref=e498] [cursor=pointer]: "240"
+                  - generic [ref=e499] [cursor=pointer]: "241"
+                  - generic [ref=e500] [cursor=pointer]: "242"
+                  - generic [ref=e501] [cursor=pointer]: "243"
+                  - generic [ref=e502] [cursor=pointer]: "244"
+                  - generic [ref=e503] [cursor=pointer]: "245"
+                  - generic [ref=e504] [cursor=pointer]: "246"
+                  - generic [ref=e505] [cursor=pointer]: "247"
+                  - generic [ref=e506] [cursor=pointer]: "248"
+                  - generic [ref=e507] [cursor=pointer]: "249"
+                  - generic [ref=e508] [cursor=pointer]: "250"
+                  - generic [ref=e509] [cursor=pointer]: "251"
+                  - generic [ref=e510] [cursor=pointer]: "252"
+                  - generic [ref=e511] [cursor=pointer]: "253"
+                  - generic [ref=e512] [cursor=pointer]: "254"
+                  - generic [ref=e513] [cursor=pointer]: "255"
+                  - generic [ref=e514] [cursor=pointer]: "256"
+                  - generic [ref=e515] [cursor=pointer]: "257"
+                  - generic [ref=e516] [cursor=pointer]: "258"
+                  - generic [ref=e517] [cursor=pointer]: "259"
+                  - generic [ref=e518] [cursor=pointer]: "260"
+                  - generic [ref=e519] [cursor=pointer]: "261"
+                  - generic [ref=e520] [cursor=pointer]: "262"
+                  - generic [ref=e521] [cursor=pointer]: "263"
+                  - generic [ref=e522] [cursor=pointer]: "264"
+                  - generic [ref=e523] [cursor=pointer]: "265"
+                  - generic [ref=e524] [cursor=pointer]: "266"
+                  - generic [ref=e525] [cursor=pointer]: "267"
+                  - generic [ref=e526] [cursor=pointer]: "268"
+                  - generic [ref=e527] [cursor=pointer]: "269"
+                - generic [ref=e528]:
+                  - generic [ref=e529]: // THE single source of truth for every coding agent OpenLive can drive.
+                  - generic [ref=e533]: // Everything that used to be scattered per-file (labels in six places, adapter
+                  - generic [ref=e537]: // commands in two, install recipes, session dirs, brand marks) lives here; the
+                  - generic [ref=e541]: // server driver, the API routes, and every UI surface read this one table — so
+                  - generic [ref=e545]: // adding an agent is one entry, and History/selectors/settings pick it up free.
+                  - generic [ref=e549]: "// Pure serializable data: NO node imports (the browser bundles this). Node-only"
+                  - generic [ref=e553]: // helpers (credential probing, PATH widening, terminal launch) live in ./node.
+                  - generic [ref=e562]:
+                    - generic [ref=e563]: export
+                    - generic [ref=e564]: const
+                    - generic [ref=e565]: AGENT_IDS
+                    - generic [ref=e566]: =
+                    - generic [ref=e567]: "["
+                    - generic [ref=e568]: "\"claude-code\""
+                    - generic [ref=e569]: ","
+                    - generic [ref=e570]: "\"codex\""
+                    - generic [ref=e571]: ","
+                    - generic [ref=e572]: "\"cursor\""
+                    - generic [ref=e573]: ","
+                    - generic [ref=e574]: "\"opencode\""
+                    - generic [ref=e575]: ","
+                    - generic [ref=e576]: "\"hermes\""
+                    - generic [ref=e577]: "]"
+                    - generic [ref=e578]: as
+                    - generic [ref=e579]: const
+                    - generic [ref=e580]: ;
+                  - generic [ref=e583]:
+                    - generic [ref=e584]: export
+                    - generic [ref=e585]: type
+                    - generic [ref=e586]: AgentId
+                    - generic [ref=e587]: =
+                    - generic [ref=e588]: (
+                    - generic [ref=e589]: typeof
+                    - generic [ref=e590]: AGENT_IDS
+                    - generic [ref=e591]: )
+                    - generic [ref=e592]: "["
+                    - generic [ref=e593]: number
+                    - generic [ref=e594]: "]"
+                    - generic [ref=e595]: ;
+                  - generic [ref=e599]: /** How to tell — read-only, without spawning the agent — whether it's signed in. */
+                  - generic [ref=e605]:
+                    - generic [ref=e606]: export
+                    - generic [ref=e607]: type
+                    - generic [ref=e608]: CredProbe
+                    - generic [ref=e609]: =
+                  - generic [ref=e612]:
+                    - generic [ref=e613]: "|"
+                    - generic [ref=e614]: "{"
+                    - generic [ref=e615]: kind
+                    - text: ":"
+                    - generic [ref=e616]: "\"file\""
+                    - generic [ref=e617]: ;
+                    - generic [ref=e618]: path
+                    - text: ":"
+                    - generic [ref=e619]: string
+                    - generic [ref=e620]: "}"
+                    - generic [ref=e621]: // "~"-relative; exists → signed in
+                  - generic [ref=e624]:
+                    - generic [ref=e625]: "|"
+                    - generic [ref=e626]: "{"
+                    - generic [ref=e627]: kind
+                    - text: ":"
+                    - generic [ref=e628]: "\"json\""
+                    - generic [ref=e629]: ;
+                    - generic [ref=e630]: path
+                    - text: ":"
+                    - generic [ref=e631]: string
+                    - generic [ref=e632]: ;
+                    - generic [ref=e633]: rule
+                    - text: ":"
+                    - generic [ref=e634]: "\"nonEmptyObject\""
+                    - generic [ref=e635]: "|"
+                    - generic [ref=e636]: "{"
+                    - generic [ref=e637]: hasKey
+                    - text: ":"
+                    - generic [ref=e638]: string
+                    - generic [ref=e639]: "}"
+                    - generic [ref=e640]: "|"
+                    - generic [ref=e641]: "{"
+                    - generic [ref=e642]: anyNonEmptyArrayUnder
+                    - text: ":"
+                    - generic [ref=e643]: string
+                    - generic [ref=e644]: "}"
+                    - generic [ref=e645]: "}"
+                  - generic [ref=e648]:
+                    - generic [ref=e649]: "|"
+                    - generic [ref=e650]: "{"
+                    - generic [ref=e651]: kind
+                    - text: ":"
+                    - generic [ref=e652]: "\"fileMatch\""
+                    - generic [ref=e653]: ;
+                    - generic [ref=e654]: path
+                    - text: ":"
+                    - generic [ref=e655]: string
+                    - generic [ref=e656]: ;
+                    - generic [ref=e657]: pattern
+                    - text: ":"
+                    - generic [ref=e658]: string
+                    - generic [ref=e659]: "}"
+                    - generic [ref=e660]: // any line matches the regex (multiline) → signed in
+                  - generic [ref=e663]:
+                    - generic [ref=e664]: "|"
+                    - generic [ref=e665]: "{"
+                    - generic [ref=e666]: kind
+                    - text: ":"
+                    - generic [ref=e667]: "\"keychain\""
+                    - generic [ref=e668]: ;
+                    - generic [ref=e669]: service
+                    - text: ":"
+                    - generic [ref=e670]: string
+                    - generic [ref=e671]: "}"
+                    - generic [ref=e672]: // macOS login keychain (exit code only — never reads the secret)
+                  - generic [ref=e675]:
+                    - generic [ref=e676]: "|"
+                    - generic [ref=e677]: "{"
+                    - generic [ref=e678]: kind
+                    - text: ":"
+                    - generic [ref=e679]: "\"anyOf\""
+                    - generic [ref=e680]: ;
+                    - generic [ref=e681]: probes
+                    - text: ":"
+                    - generic [ref=e682]: CredProbe
+                    - generic [ref=e683]: "["
+                    - generic [ref=e684]: "]"
+                    - generic [ref=e685]: "}"
+                    - generic [ref=e686]: ;
+                  - generic [ref=e690]: "/** Shell recipes per action. `npm` means global npm install/uninstall of that"
+                  - generic [ref=e694]: "* package; `terminal` opens the user's terminal running an INTERACTIVE flow"
+                  - generic [ref=e698]: "* instead of streaming a headless command. NOTE: an install recipe must always"
+                  - generic [ref=e702]: "* be able to actually INSTALL headlessly — an interactive-only \"install\" is a"
+                  - generic [ref=e706]: "* sign-in wearing an Install button (see hermes' entry). */"
+                  - generic [ref=e712]:
+                    - generic [ref=e713]: export
+                    - generic [ref=e714]: interface
+                    - generic [ref=e715]: InstallRecipe
+                    - generic [ref=e716]: "{"
+                    - generic [ref=e717]: npm
+                    - text: "?:"
+                    - generic [ref=e718]: string
+                    - generic [ref=e719]: ;
+                    - generic [ref=e720]: posixShell
+                    - text: "?:"
+                    - generic [ref=e721]: string
+                    - generic [ref=e722]: ;
+                    - generic [ref=e723]: winShell
+                    - text: "?:"
+                    - generic [ref=e724]: string
+                    - generic [ref=e725]: ;
+                    - generic [ref=e726]: terminal
+                    - text: "?:"
+                    - generic [ref=e727]: string
+                    - generic [ref=e728]: ;
+                    - generic [ref=e729]: winTerminal
+                    - text: "?:"
+                    - generic [ref=e730]: string
+                    - generic [ref=e731]: "}"
+                  - generic [ref=e737]:
+                    - generic [ref=e738]: export
+                    - generic [ref=e739]: interface
+                    - generic [ref=e740]: AgentDef
+                    - generic [ref=e741]: "{"
+                  - generic [ref=e744]:
+                    - generic [ref=e745]: id
+                    - text: ":"
+                    - generic [ref=e746]: AgentId
+                    - generic [ref=e747]: ;
+                  - generic [ref=e750]:
+                    - generic [ref=e751]: label
+                    - text: ":"
+                    - generic [ref=e752]: string
+                    - generic [ref=e753]: ;
+                  - generic [ref=e754]: "/** Brand mark: official color when the mark is colored; letter badge fallback"
+                  - generic [ref=e758]: "* for agents without a bundled mark (honest, not a made-up logo). */"
+                  - generic [ref=e764]:
+                    - generic [ref=e765]: brand
+                    - text: ":"
+                    - generic [ref=e766]: "{"
+                    - generic [ref=e767]: color
+                    - text: "?:"
+                    - generic [ref=e768]: string
+                    - generic [ref=e769]: ;
+                    - generic [ref=e770]: letter
+                    - text: "?:"
+                    - generic [ref=e771]: string
+                    - generic [ref=e772]: "}"
+                    - generic [ref=e773]: ;
+                  - generic [ref=e774]: /** Bundled brand mark under /public/agents (when one exists). */
+                  - generic [ref=e780]:
+                    - generic [ref=e781]: logoSrc
+                    - text: "?:"
+                    - generic [ref=e782]: string
+                    - generic [ref=e783]: ;
+                  - generic [ref=e784]: /** The ACP adapter OpenLive spawns to talk to this agent (JSON-RPC over stdio). */
+                  - generic [ref=e790]:
+                    - generic [ref=e791]: adapter
+                    - text: ":"
+                    - generic [ref=e792]: "{"
+                    - generic [ref=e793]: command
+                    - text: ":"
+                    - generic [ref=e794]: string
+                    - generic [ref=e795]: ;
+                    - generic [ref=e796]: args
+                    - text: ":"
+                    - generic [ref=e797]: string
+                    - generic [ref=e798]: "["
+                    - generic [ref=e799]: "]"
+                    - generic [ref=e800]: "}"
+                    - generic [ref=e801]: ;
+                  - generic [ref=e802]: /** Binaries whose PATH presence means "installed" (any one suffices). */
+                  - generic [ref=e808]:
+                    - generic [ref=e809]: bins
+                    - text: ":"
+                    - generic [ref=e810]: string
+                    - generic [ref=e811]: "["
+                    - generic [ref=e812]: "]"
+                    - generic [ref=e813]: ;
+                  - generic [ref=e816]:
+                    - generic [ref=e817]: install
+                    - text: "?:"
+                    - generic [ref=e818]: InstallRecipe
+                    - generic [ref=e819]: ;
+                  - generic [ref=e822]:
+                    - generic [ref=e823]: uninstall
+                    - text: "?:"
+                    - generic [ref=e824]: InstallRecipe
+                    - generic [ref=e825]: ;
+                  - generic [ref=e826]: /** CLI sign-in command — needs a real TTY/browser, so it runs in a terminal. */
+                  - generic [ref=e832]:
+                    - generic [ref=e833]: login
+                    - text: ":"
+                    - generic [ref=e834]: string
+                    - generic [ref=e835]: ;
+                  - generic [ref=e836]: "/** Windows PowerShell variant of `login`, when the POSIX one won't parse in"
+                  - generic [ref=e840]: "* PowerShell (e.g. hermes' pipeline/quoting). Falls back to `login`. */"
+                  - generic [ref=e846]:
+                    - generic [ref=e847]: winLogin
+                    - text: "?:"
+                    - generic [ref=e848]: string
+                    - generic [ref=e849]: ;
+                  - generic [ref=e850]: /** CLI sign-out command; absent → no Sign out affordance. */
+                  - generic [ref=e856]:
+                    - generic [ref=e857]: logout
+                    - text: "?:"
+                    - generic [ref=e858]: string
+                    - generic [ref=e859]: ;
+                  - generic [ref=e860]: /** Where the agent keeps its own sessions (display + discovery root). */
+                  - generic [ref=e866]:
+                    - generic [ref=e867]: sessionsDir
+                    - text: ":"
+                    - generic [ref=e868]: string
+                    - generic [ref=e869]: ;
+                  - generic [ref=e870]: /** Which on-disk format its sessions use (drives History discovery). */
+                  - generic [ref=e876]:
+                    - generic [ref=e877]: sessionParser
+                    - text: ":"
+                    - generic [ref=e878]: "\"claude-jsonl\""
+                    - generic [ref=e879]: "|"
+                    - generic [ref=e880]: "\"codex-rollout\""
+                    - generic [ref=e881]: "|"
+                    - generic [ref=e882]: "\"cursor-meta\""
+                    - generic [ref=e883]: "|"
+                    - generic [ref=e884]: "\"opencode-sqlite\""
+                    - generic [ref=e885]: "|"
+                    - generic [ref=e886]: "\"hermes-sqlite\""
+                    - generic [ref=e887]: ;
+                  - generic [ref=e888]: /** External sessions are plain files we may delete; sqlite-backed stores are
+                  - generic [ref=e892]: "* the agent's live database — never written from OpenLive. */"
+                  - generic [ref=e898]:
+                    - generic [ref=e899]: externalDeletable
+                    - text: ":"
+                    - generic [ref=e900]: boolean
+                    - generic [ref=e901]: ;
+                  - generic [ref=e904]:
+                    - generic [ref=e905]: credProbe
+                    - text: ":"
+                    - generic [ref=e906]: CredProbe
+                    - generic [ref=e907]: ;
+                  - generic [ref=e908]: /** Extra "is it actually installed" probe ANDed with the PATH check — for
+                  - generic [ref=e912]: "* agents whose runner binary alone proves nothing (e.g. an agent launched"
+                  - generic [ref=e916]: "* through a shared runner like uvx, where the runner's presence proves"
+                  - generic [ref=e920]: "* nothing about the agent itself). Currently unused. */"
+                  - generic [ref=e926]:
+                    - generic [ref=e927]: installedProbe
+                    - text: "?:"
+                    - generic [ref=e928]: CredProbe
+                    - generic [ref=e929]: ;
+                  - generic [ref=e930]: "/** Sign-in IS the setup wizard (not a plain login): an aborted run can leave"
+                  - generic [ref=e934]: "* the agent half-configured, so the UI says \"Setup incomplete\"/\"Finish"
+                  - generic [ref=e938]: "* setup\" instead of \"Sign in needed\"/\"Sign in\". */"
+                  - generic [ref=e944]:
+                    - generic [ref=e945]: wizard
+                    - text: "?:"
+                    - generic [ref=e946]: boolean
+                    - generic [ref=e947]: ;
+                  - generic [ref=e948]: /** Actionable one-liner when the agent dies before the ACP handshake. */
+                  - generic [ref=e954]:
+                    - generic [ref=e955]: startHint
+                    - text: ":"
+                    - generic [ref=e956]: string
+                    - generic [ref=e957]: ;
+                  - generic [ref=e958]: /** Per-agent ACP plumbing quirks — each agent plugged per its own spec, not
+                  - generic [ref=e962]: "* generically. Read by the ACP driver (acp-agent.ts); pure data. */"
+                  - generic [ref=e968]:
+                    - generic [ref=e969]: acp
+                    - text: ":"
+                    - generic [ref=e970]: "{"
+                  - generic [ref=e971]: /** Sessions survive the agent process (loadSession after a restart works).
+                  - generic [ref=e975]: "* Cursor advertises loadSession but its sessions die with the process. */"
+                  - generic [ref=e981]:
+                    - generic [ref=e982]: resumeAcrossRestart
+                    - text: ":"
+                    - generic [ref=e983]: boolean
+                    - generic [ref=e984]: ;
+                  - generic [ref=e985]: "/** Where the voice-call preamble goes: Claude's adapter takes a system-prompt"
+                  - generic [ref=e989]: "* append via `_meta.claudeCode.options`; everyone else gets it prepended to"
+                  - generic [ref=e993]: "* the first user message. */"
+                  - generic [ref=e999]:
+                    - generic [ref=e1000]: preamble
+                    - text: ":"
+                    - generic [ref=e1001]: "\"systemPrompt\""
+                    - generic [ref=e1002]: "|"
+                    - generic [ref=e1003]: "\"firstMessage\""
+                    - generic [ref=e1004]: ;
+                  - generic [ref=e1005]: /** MCP passthrough policy for session/new + session/load. "native" = the
+                  - generic [ref=e1009]: "* agent reads the project's .mcp.json itself (passing it again would"
+                  - generic [ref=e1013]: "* double-register); \"passthrough\" = we read .mcp.json and pass it. */"
+                  - generic [ref=e1019]:
+                    - generic [ref=e1020]: mcp
+                    - text: ":"
+                    - generic [ref=e1021]: "\"native\""
+                    - generic [ref=e1022]: "|"
+                    - generic [ref=e1023]: "\"passthrough\""
+                    - generic [ref=e1024]: ;
+                  - generic [ref=e1025]: /** Advertise client-hosted terminals to this agent. */
+                  - generic [ref=e1031]:
+                    - generic [ref=e1032]: terminal
+                    - text: ":"
+                    - generic [ref=e1033]: boolean
+                    - generic [ref=e1034]: ;
+                  - generic [ref=e1035]: /** Extra env for the adapter process (e.g. Claude's entrypoint marker that
+                  - generic [ref=e1039]: "* files sessions where `claude --resume` finds them — verified 2026-07-15"
+                  - generic [ref=e1043]: "* against claude 2.1.198 / adapter 0.59.0). */"
+                  - generic [ref=e1049]:
+                    - generic [ref=e1050]: env
+                    - text: "?:"
+                    - generic [ref=e1051]: Record
+                    - generic [ref=e1052]: <
+                    - generic [ref=e1053]: string
+                    - generic [ref=e1054]: ","
+                    - generic [ref=e1055]: string
+                    - generic [ref=e1056]: ">"
+                    - generic [ref=e1057]: ;
+                  - generic [ref=e1060]:
+                    - generic [ref=e1061]: "}"
+                    - generic [ref=e1062]: ;
+                  - generic [ref=e1063]: "}"
+                  - generic [ref=e1070]: // Facts verified 2026-07-16 against each tool's CLI on this machine (auth
+                  - generic [ref=e1074]: // subcommands, credential store locations) and each ACP adapter's distribution.
+                  - generic [ref=e1078]: "// claude-agent-acp is PINNED: OpenLive relies on its `_meta.claudeCode.options`"
+                  - generic [ref=e1082]: // passthrough (native session persistence + system-prompt append, verified
+                  - generic [ref=e1086]: "// against 0.59.0) — an unpinned `npx -y` silently floats to whatever ships next."
+                  - generic [ref=e1092]:
+                    - generic [ref=e1093]: export
+                    - generic [ref=e1094]: const
+                    - generic [ref=e1095]: AGENT_REGISTRY
+                    - text: ":"
+                    - generic [ref=e1096]: Record
+                    - generic [ref=e1097]: <
+                    - generic [ref=e1098]: AgentId
+                    - generic [ref=e1099]: ","
+                    - generic [ref=e1100]: AgentDef
+                    - generic [ref=e1101]: ">"
+                    - generic [ref=e1102]: =
+                    - generic [ref=e1103]: "{"
+                  - generic [ref=e1106]:
+                    - generic [ref=e1107]: "\"claude-code\""
+                    - text: ":"
+                    - generic [ref=e1108]: "{"
+                  - generic [ref=e1111]:
+                    - generic [ref=e1112]: id
+                    - text: ":"
+                    - generic [ref=e1113]: "\"claude-code\""
+                    - generic [ref=e1114]: ","
+                  - generic [ref=e1117]:
+                    - generic [ref=e1118]: label
+                    - text: ":"
+                    - generic [ref=e1119]: "\"Claude Code\""
+                    - generic [ref=e1120]: ","
+                  - generic [ref=e1123]:
+                    - generic [ref=e1124]: brand
+                    - text: ":"
+                    - generic [ref=e1125]: "{"
+                    - generic [ref=e1126]: color
+                    - text: ":"
+                    - generic [ref=e1127]: "\"#D97757\""
+                    - generic [ref=e1128]: "}"
+                    - generic [ref=e1129]: ","
+                  - generic [ref=e1132]:
+                    - generic [ref=e1133]: logoSrc
+                    - text: ":"
+                    - generic [ref=e1134]: "\"/agents/claude.svg\""
+                    - generic [ref=e1135]: ","
+                  - generic [ref=e1138]:
+                    - generic [ref=e1139]: adapter
+                    - text: ":"
+                    - generic [ref=e1140]: "{"
+                    - generic [ref=e1141]: command
+                    - text: ":"
+                    - generic [ref=e1142]: "\"npx\""
+                    - generic [ref=e1143]: ","
+                    - generic [ref=e1144]: args
+                    - text: ":"
+                    - generic [ref=e1145]: "["
+                    - generic [ref=e1146]: "\"-y\""
+                    - generic [ref=e1147]: ","
+                    - generic [ref=e1148]: "\"@agentclientprotocol/claude-agent-acp@0.59.0\""
+                    - generic [ref=e1149]: "]"
+                    - generic [ref=e1150]: "}"
+                    - generic [ref=e1151]: ","
+                  - generic [ref=e1154]:
+                    - generic [ref=e1155]: bins
+                    - text: ":"
+                    - generic [ref=e1156]: "["
+                    - generic [ref=e1157]: "\"claude\""
+                    - generic [ref=e1158]: "]"
+                    - generic [ref=e1159]: ","
+                  - generic [ref=e1162]:
+                    - generic [ref=e1163]: install
+                    - text: ":"
+                    - generic [ref=e1164]: "{"
+                    - generic [ref=e1165]: npm
+                    - text: ":"
+                    - generic [ref=e1166]: "\"@anthropic-ai/claude-code\""
+                    - generic [ref=e1167]: "}"
+                    - generic [ref=e1168]: ","
+                  - generic [ref=e1171]:
+                    - generic [ref=e1172]: uninstall
+                    - text: ":"
+                    - generic [ref=e1173]: "{"
+                    - generic [ref=e1174]: npm
+                    - text: ":"
+                    - generic [ref=e1175]: "\"@anthropic-ai/claude-code\""
+                    - generic [ref=e1176]: "}"
+                    - generic [ref=e1177]: ","
+                  - generic [ref=e1180]:
+                    - generic [ref=e1181]: login
+                    - text: ":"
+                    - generic [ref=e1182]: "\"claude auth login\""
+                    - generic [ref=e1183]: ","
+                  - generic [ref=e1186]:
+                    - generic [ref=e1187]: logout
+                    - text: ":"
+                    - generic [ref=e1188]: "\"claude auth logout\""
+                    - generic [ref=e1189]: ","
+                  - generic [ref=e1192]:
+                    - generic [ref=e1193]: sessionsDir
+                    - text: ":"
+                    - generic [ref=e1194]: "\"~/.claude\""
+                    - generic [ref=e1195]: ","
+                  - generic [ref=e1198]:
+                    - generic [ref=e1199]: sessionParser
+                    - text: ":"
+                    - generic [ref=e1200]: "\"claude-jsonl\""
+                    - generic [ref=e1201]: ","
+                  - generic [ref=e1204]:
+                    - generic [ref=e1205]: externalDeletable
+                    - text: ":"
+                    - generic [ref=e1206]: "true"
+                    - generic [ref=e1207]: ","
+                  - generic [ref=e1210]:
+                    - generic [ref=e1211]: credProbe
+                    - text: ":"
+                    - generic [ref=e1212]: "{"
+                  - generic [ref=e1215]:
+                    - generic [ref=e1216]: kind
+                    - text: ":"
+                    - generic [ref=e1217]: "\"anyOf\""
+                    - generic [ref=e1218]: ","
+                  - generic [ref=e1221]:
+                    - generic [ref=e1222]: probes
+                    - text: ":"
+                    - generic [ref=e1223]: "["
+                  - generic [ref=e1226]:
+                    - generic [ref=e1227]: "{"
+                    - generic [ref=e1228]: kind
+                    - text: ":"
+                    - generic [ref=e1229]: "\"keychain\""
+                    - generic [ref=e1230]: ","
+                    - generic [ref=e1231]: service
+                    - text: ":"
+                    - generic [ref=e1232]: "\"Claude Code-credentials\""
+                    - generic [ref=e1233]: "}"
+                    - generic [ref=e1234]: ","
+                    - generic [ref=e1235]: // macOS
+                  - generic [ref=e1238]:
+                    - generic [ref=e1239]: "{"
+                    - generic [ref=e1240]: kind
+                    - text: ":"
+                    - generic [ref=e1241]: "\"file\""
+                    - generic [ref=e1242]: ","
+                    - generic [ref=e1243]: path
+                    - text: ":"
+                    - generic [ref=e1244]: "\"~/.claude/.credentials.json\""
+                    - generic [ref=e1245]: "}"
+                    - generic [ref=e1246]: ","
+                    - generic [ref=e1247]: // Linux/Windows
+                  - generic [ref=e1250]:
+                    - generic [ref=e1251]: "]"
+                    - generic [ref=e1252]: ","
+                  - generic [ref=e1255]:
+                    - generic [ref=e1256]: "}"
+                    - generic [ref=e1257]: ","
+                  - generic [ref=e1260]:
+                    - generic [ref=e1261]: acp
+                    - text: ":"
+                    - generic [ref=e1262]: "{"
+                  - generic [ref=e1265]:
+                    - generic [ref=e1266]: resumeAcrossRestart
+                    - text: ":"
+                    - generic [ref=e1267]: "true"
+                    - generic [ref=e1268]: ","
+                  - generic [ref=e1271]:
+                    - generic [ref=e1272]: preamble
+                    - text: ":"
+                    - generic [ref=e1273]: "\"systemPrompt\""
+                    - generic [ref=e1274]: ","
+                  - generic [ref=e1277]:
+                    - generic [ref=e1278]: mcp
+                    - text: ":"
+                    - generic [ref=e1279]: "\"native\""
+                    - generic [ref=e1280]: ","
+                    - generic [ref=e1281]: // claude reads the project's .mcp.json itself
+                  - generic [ref=e1284]:
+                    - generic [ref=e1285]: terminal
+                    - text: ":"
+                    - generic [ref=e1286]: "true"
+                    - generic [ref=e1287]: ","
+                  - generic [ref=e1290]:
+                    - generic [ref=e1291]: env
+                    - text: ":"
+                    - generic [ref=e1292]: "{"
+                    - generic [ref=e1293]: CLAUDE_CODE_ENTRYPOINT
+                    - text: ":"
+                    - generic [ref=e1294]: "\"claude-vscode\""
+                    - generic [ref=e1295]: "}"
+                    - generic [ref=e1296]: ","
+                  - generic [ref=e1299]:
+                    - generic [ref=e1300]: "}"
+                    - generic [ref=e1301]: ","
+                  - generic [ref=e1304]:
+                    - generic [ref=e1305]: startHint
+                    - text: ":"
+                    - generic [ref=e1306]: "\"Make sure Claude Code is installed and signed in (run `claude`).\""
+                    - generic [ref=e1307]: ","
+                  - generic [ref=e1310]:
+                    - generic [ref=e1311]: "}"
+                    - generic [ref=e1312]: ","
+                  - generic [ref=e1315]:
+                    - generic [ref=e1316]: "\"codex\""
+                    - text: ":"
+                    - generic [ref=e1317]: "{"
+                  - generic [ref=e1320]:
+                    - generic [ref=e1321]: id
+                    - text: ":"
+                    - generic [ref=e1322]: "\"codex\""
+                    - generic [ref=e1323]: ","
+                  - generic [ref=e1326]:
+                    - generic [ref=e1327]: label
+                    - text: ":"
+                    - generic [ref=e1328]: "\"Codex\""
+                    - generic [ref=e1329]: ","
+                  - generic [ref=e1332]:
+                    - generic [ref=e1333]: brand
+                    - text: ":"
+                    - generic [ref=e1334]: "{"
+                    - generic [ref=e1335]: "}"
+                    - generic [ref=e1336]: ","
+                  - generic [ref=e1339]:
+                    - generic [ref=e1340]: logoSrc
+                    - text: ":"
+                    - generic [ref=e1341]: "\"/agents/codex.svg\""
+                    - generic [ref=e1342]: ","
+                  - generic [ref=e1345]:
+                    - generic [ref=e1346]: adapter
+                    - text: ":"
+                    - generic [ref=e1347]: "{"
+                    - generic [ref=e1348]: command
+                    - text: ":"
+                    - generic [ref=e1349]: "\"npx\""
+                    - generic [ref=e1350]: ","
+                    - generic [ref=e1351]: args
+                    - text: ":"
+                    - generic [ref=e1352]: "["
+                    - generic [ref=e1353]: "\"-y\""
+                    - generic [ref=e1354]: ","
+                    - generic [ref=e1355]: "\"@agentclientprotocol/codex-acp\""
+                    - generic [ref=e1356]: "]"
+                    - generic [ref=e1357]: "}"
+                    - generic [ref=e1358]: ","
+                  - generic [ref=e1361]:
+                    - generic [ref=e1362]: bins
+                    - text: ":"
+                    - generic [ref=e1363]: "["
+                    - generic [ref=e1364]: "\"codex\""
+                    - generic [ref=e1365]: "]"
+                    - generic [ref=e1366]: ","
+                  - generic [ref=e1369]:
+                    - generic [ref=e1370]: install
+                    - text: ":"
+                    - generic [ref=e1371]: "{"
+                    - generic [ref=e1372]: npm
+                    - text: ":"
+                    - generic [ref=e1373]: "\"@openai/codex\""
+                    - generic [ref=e1374]: "}"
+                    - generic [ref=e1375]: ","
+                  - generic [ref=e1378]:
+                    - generic [ref=e1379]: uninstall
+                    - text: ":"
+                    - generic [ref=e1380]: "{"
+                    - generic [ref=e1381]: npm
+                    - text: ":"
+                    - generic [ref=e1382]: "\"@openai/codex\""
+                    - generic [ref=e1383]: "}"
+                    - generic [ref=e1384]: ","
+                  - generic [ref=e1387]:
+                    - generic [ref=e1388]: login
+                    - text: ":"
+                    - generic [ref=e1389]: "\"codex login\""
+                    - generic [ref=e1390]: ","
+                  - generic [ref=e1393]:
+                    - generic [ref=e1394]: logout
+                    - text: ":"
+                    - generic [ref=e1395]: "\"codex logout\""
+                    - generic [ref=e1396]: ","
+                  - generic [ref=e1399]:
+                    - generic [ref=e1400]: sessionsDir
+                    - text: ":"
+                    - generic [ref=e1401]: "\"~/.codex/sessions\""
+                    - generic [ref=e1402]: ","
+                  - generic [ref=e1405]:
+                    - generic [ref=e1406]: sessionParser
+                    - text: ":"
+                    - generic [ref=e1407]: "\"codex-rollout\""
+                    - generic [ref=e1408]: ","
+                  - generic [ref=e1411]:
+                    - generic [ref=e1412]: externalDeletable
+                    - text: ":"
+                    - generic [ref=e1413]: "true"
+                    - generic [ref=e1414]: ","
+                  - generic [ref=e1417]:
+                    - generic [ref=e1418]: credProbe
+                    - text: ":"
+                    - generic [ref=e1419]: "{"
+                    - generic [ref=e1420]: kind
+                    - text: ":"
+                    - generic [ref=e1421]: "\"file\""
+                    - generic [ref=e1422]: ","
+                    - generic [ref=e1423]: path
+                    - text: ":"
+                    - generic [ref=e1424]: "\"~/.codex/auth.json\""
+                    - generic [ref=e1425]: "}"
+                    - generic [ref=e1426]: ","
+                  - generic [ref=e1429]:
+                    - generic [ref=e1430]: acp
+                    - text: ":"
+                    - generic [ref=e1431]: "{"
+                    - generic [ref=e1432]: resumeAcrossRestart
+                    - text: ":"
+                    - generic [ref=e1433]: "true"
+                    - generic [ref=e1434]: ","
+                    - generic [ref=e1435]: preamble
+                    - text: ":"
+                    - generic [ref=e1436]: "\"firstMessage\""
+                    - generic [ref=e1437]: ","
+                    - generic [ref=e1438]: mcp
+                    - text: ":"
+                    - generic [ref=e1439]: "\"passthrough\""
+                    - generic [ref=e1440]: ","
+                    - generic [ref=e1441]: terminal
+                    - text: ":"
+                    - generic [ref=e1442]: "true"
+                    - generic [ref=e1443]: "}"
+                    - generic [ref=e1444]: ","
+                  - generic [ref=e1447]:
+                    - generic [ref=e1448]: startHint
+                    - text: ":"
+                    - generic [ref=e1449]: "\"Make sure `codex` is installed and signed in (run `codex`).\""
+                    - generic [ref=e1450]: ","
+                  - generic [ref=e1453]:
+                    - generic [ref=e1454]: "}"
+                    - generic [ref=e1455]: ","
+                  - generic [ref=e1458]:
+                    - generic [ref=e1459]: "\"cursor\""
+                    - text: ":"
+                    - generic [ref=e1460]: "{"
+                  - generic [ref=e1463]:
+                    - generic [ref=e1464]: id
+                    - text: ":"
+                    - generic [ref=e1465]: "\"cursor\""
+                    - generic [ref=e1466]: ","
+                  - generic [ref=e1469]:
+                    - generic [ref=e1470]: label
+                    - text: ":"
+                    - generic [ref=e1471]: "\"Cursor\""
+                    - generic [ref=e1472]: ","
+                  - generic [ref=e1475]:
+                    - generic [ref=e1476]: brand
+                    - text: ":"
+                    - generic [ref=e1477]: "{"
+                    - generic [ref=e1478]: "}"
+                    - generic [ref=e1479]: ","
+                  - generic [ref=e1482]:
+                    - generic [ref=e1483]: logoSrc
+                    - text: ":"
+                    - generic [ref=e1484]: "\"/agents/cursor.svg\""
+                    - generic [ref=e1485]: ","
+                  - generic [ref=e1488]:
+                    - generic [ref=e1489]: adapter
+                    - text: ":"
+                    - generic [ref=e1490]: "{"
+                    - generic [ref=e1491]: command
+                    - text: ":"
+                    - generic [ref=e1492]: "\"agent\""
+                    - generic [ref=e1493]: ","
+                    - generic [ref=e1494]: args
+                    - text: ":"
+                    - generic [ref=e1495]: "["
+                    - generic [ref=e1496]: "\"acp\""
+                    - generic [ref=e1497]: "]"
+                    - generic [ref=e1498]: "}"
+                    - generic [ref=e1499]: ","
+                  - generic [ref=e1500]: "// Cursor renamed its binary `cursor-agent` → `agent`; both land on PATH."
+                  - generic [ref=e1506]:
+                    - generic [ref=e1507]: bins
+                    - text: ":"
+                    - generic [ref=e1508]: "["
+                    - generic [ref=e1509]: "\"agent\""
+                    - generic [ref=e1510]: ","
+                    - generic [ref=e1511]: "\"cursor-agent\""
+                    - generic [ref=e1512]: "]"
+                    - generic [ref=e1513]: ","
+                  - generic [ref=e1514]: // No npm package or uninstaller — a curl script installs into ~/.local/bin.
+                  - generic [ref=e1520]:
+                    - generic [ref=e1521]: install
+                    - text: ":"
+                    - generic [ref=e1522]: "{"
+                  - generic [ref=e1525]:
+                    - generic [ref=e1526]: posixShell
+                    - text: ":"
+                    - generic [ref=e1527]: "\"curl https://cursor.com/install -fsS | bash\""
+                    - generic [ref=e1528]: ","
+                  - generic [ref=e1531]:
+                    - generic [ref=e1532]: winShell
+                    - text: ":"
+                    - generic [ref=e1533]: "\"irm https://cursor.com/install -useb | iex\""
+                    - generic [ref=e1534]: ","
+                  - generic [ref=e1537]:
+                    - generic [ref=e1538]: "}"
+                    - generic [ref=e1539]: ","
+                  - generic [ref=e1542]:
+                    - generic [ref=e1543]: uninstall
+                    - text: ":"
+                    - generic [ref=e1544]: "{"
+                  - generic [ref=e1547]:
+                    - generic [ref=e1548]: posixShell
+                    - text: ":"
+                    - generic [ref=e1549]: "\"rm -f ~/.local/bin/agent ~/.local/bin/cursor-agent && echo 'Removed cursor-agent from ~/.local/bin.'\""
+                    - generic [ref=e1550]: ","
+                  - generic [ref=e1553]:
+                    - generic [ref=e1554]: winShell
+                    - text: ":"
+                    - generic [ref=e1555]: "\"Remove-Item -Force \\\"$env:USERPROFILE\\\\.local\\\\bin\\\\agent.exe\\\",\\\"$env:USERPROFILE\\\\.local\\\\bin\\\\cursor-agent.exe\\\" -ErrorAction SilentlyContinue; echo 'Removed cursor-agent.'\""
+                    - generic [ref=e1556]: ","
+                  - generic [ref=e1559]:
+                    - generic [ref=e1560]: "}"
+                    - generic [ref=e1561]: ","
+                  - generic [ref=e1564]:
+                    - generic [ref=e1565]: login
+                    - text: ":"
+                    - generic [ref=e1566]: "\"agent login\""
+                    - generic [ref=e1567]: ","
+                  - generic [ref=e1570]:
+                    - generic [ref=e1571]: logout
+                    - text: ":"
+                    - generic [ref=e1572]: "\"agent logout\""
+                    - generic [ref=e1573]: ","
+                  - generic [ref=e1576]:
+                    - generic [ref=e1577]: sessionsDir
+                    - text: ":"
+                    - generic [ref=e1578]: "\"~/.cursor\""
+                    - generic [ref=e1579]: ","
+                  - generic [ref=e1582]:
+                    - generic [ref=e1583]: sessionParser
+                    - text: ":"
+                    - generic [ref=e1584]: "\"cursor-meta\""
+                    - generic [ref=e1585]: ","
+                  - generic [ref=e1588]:
+                    - generic [ref=e1589]: externalDeletable
+                    - text: ":"
+                    - generic [ref=e1590]: "true"
+                    - generic [ref=e1591]: ","
+                  - generic [ref=e1594]:
+                    - generic [ref=e1595]: credProbe
+                    - text: ":"
+                    - generic [ref=e1596]: "{"
+                    - generic [ref=e1597]: kind
+                    - text: ":"
+                    - generic [ref=e1598]: "\"json\""
+                    - generic [ref=e1599]: ","
+                    - generic [ref=e1600]: path
+                    - text: ":"
+                    - generic [ref=e1601]: "\"~/.cursor/cli-config.json\""
+                    - generic [ref=e1602]: ","
+                    - generic [ref=e1603]: rule
+                    - text: ":"
+                    - generic [ref=e1604]: "{"
+                    - generic [ref=e1605]: hasKey
+                    - text: ":"
+                    - generic [ref=e1606]: "\"authInfo\""
+                    - generic [ref=e1607]: "}"
+                    - generic [ref=e1608]: "}"
+                    - generic [ref=e1609]: ","
+                  - generic [ref=e1610]: "// resumeAcrossRestart false: advertises loadSession but sessions die with"
+                  - generic [ref=e1614]: // the process (upstream "Session not found" after restart).
+                  - generic [ref=e1620]:
+                    - generic [ref=e1621]: acp
+                    - text: ":"
+                    - generic [ref=e1622]: "{"
+                    - generic [ref=e1623]: resumeAcrossRestart
+                    - text: ":"
+                    - generic [ref=e1624]: "false"
+                    - generic [ref=e1625]: ","
+                    - generic [ref=e1626]: preamble
+                    - text: ":"
+                    - generic [ref=e1627]: "\"firstMessage\""
+                    - generic [ref=e1628]: ","
+                    - generic [ref=e1629]: mcp
+                    - text: ":"
+                    - generic [ref=e1630]: "\"passthrough\""
+                    - generic [ref=e1631]: ","
+                    - generic [ref=e1632]: terminal
+                    - text: ":"
+                    - generic [ref=e1633]: "true"
+                    - generic [ref=e1634]: "}"
+                    - generic [ref=e1635]: ","
+                  - generic [ref=e1638]:
+                    - generic [ref=e1639]: startHint
+                    - text: ":"
+                    - generic [ref=e1640]: "\"Its CLI may be outdated (needs ACP support) or signed out — update Cursor, then run `agent login`.\""
+                    - generic [ref=e1641]: ","
+                  - generic [ref=e1644]:
+                    - generic [ref=e1645]: "}"
+                    - generic [ref=e1646]: ","
+                  - generic [ref=e1649]:
+                    - generic [ref=e1650]: "\"opencode\""
+                    - text: ":"
+                    - generic [ref=e1651]: "{"
+                  - generic [ref=e1654]:
+                    - generic [ref=e1655]: id
+                    - text: ":"
+                    - generic [ref=e1656]: "\"opencode\""
+                    - generic [ref=e1657]: ","
+                  - generic [ref=e1660]:
+                    - generic [ref=e1661]: label
+                    - text: ":"
+                    - generic [ref=e1662]: "\"OpenCode\""
+                    - generic [ref=e1663]: ","
+                  - generic [ref=e1666]:
+                    - generic [ref=e1667]: brand
+                    - text: ":"
+                    - generic [ref=e1668]: "{"
+                    - generic [ref=e1669]: "}"
+                    - generic [ref=e1670]: ","
+                  - generic [ref=e1673]:
+                    - generic [ref=e1674]: logoSrc
+                    - text: ":"
+                    - generic [ref=e1675]: "\"/agents/opencode.svg\""
+                    - generic [ref=e1676]: ","
+                  - generic [ref=e1679]:
+                    - generic [ref=e1680]: adapter
+                    - text: ":"
+                    - generic [ref=e1681]: "{"
+                    - generic [ref=e1682]: command
+                    - text: ":"
+                    - generic [ref=e1683]: "\"opencode\""
+                    - generic [ref=e1684]: ","
+                    - generic [ref=e1685]: args
+                    - text: ":"
+                    - generic [ref=e1686]: "["
+                    - generic [ref=e1687]: "\"acp\""
+                    - generic [ref=e1688]: "]"
+                    - generic [ref=e1689]: "}"
+                    - generic [ref=e1690]: ","
+                  - generic [ref=e1693]:
+                    - generic [ref=e1694]: bins
+                    - text: ":"
+                    - generic [ref=e1695]: "["
+                    - generic [ref=e1696]: "\"opencode\""
+                    - generic [ref=e1697]: "]"
+                    - generic [ref=e1698]: ","
+                  - generic [ref=e1701]:
+                    - generic [ref=e1702]: install
+                    - text: ":"
+                    - generic [ref=e1703]: "{"
+                    - generic [ref=e1704]: npm
+                    - text: ":"
+                    - generic [ref=e1705]: "\"opencode-ai\""
+                    - generic [ref=e1706]: "}"
+                    - generic [ref=e1707]: ","
+                  - generic [ref=e1710]:
+                    - generic [ref=e1711]: uninstall
+                    - text: ":"
+                    - generic [ref=e1712]: "{"
+                    - generic [ref=e1713]: npm
+                    - text: ":"
+                    - generic [ref=e1714]: "\"opencode-ai\""
+                    - generic [ref=e1715]: "}"
+                    - generic [ref=e1716]: ","
+                  - generic [ref=e1719]:
+                    - generic [ref=e1720]: login
+                    - text: ":"
+                    - generic [ref=e1721]: "\"opencode auth login\""
+                    - generic [ref=e1722]: ","
+                  - generic [ref=e1725]:
+                    - generic [ref=e1726]: logout
+                    - text: ":"
+                    - generic [ref=e1727]: "\"opencode auth logout\""
+                    - generic [ref=e1728]: ","
+                  - generic [ref=e1729]: "// Verified 2026-07-16 against opencode's docs: %USERPROFILE%\\.local\\share\\opencode"
+                  - generic [ref=e1733]: // on Windows too — the same "~"-relative path everywhere. Discovery also
+                  - generic [ref=e1737]: // honors $XDG_DATA_HOME (see agentSessions.ts).
+                  - generic [ref=e1743]:
+                    - generic [ref=e1744]: sessionsDir
+                    - text: ":"
+                    - generic [ref=e1745]: "\"~/.local/share/opencode\""
+                    - generic [ref=e1746]: ","
+                  - generic [ref=e1749]:
+                    - generic [ref=e1750]: sessionParser
+                    - text: ":"
+                    - generic [ref=e1751]: "\"opencode-sqlite\""
+                    - generic [ref=e1752]: ","
+                  - generic [ref=e1755]:
+                    - generic [ref=e1756]: externalDeletable
+                    - text: ":"
+                    - generic [ref=e1757]: "false"
+                    - generic [ref=e1758]: ","
+                  - generic [ref=e1761]:
+                    - generic [ref=e1762]: credProbe
+                    - text: ":"
+                    - generic [ref=e1763]: "{"
+                    - generic [ref=e1764]: kind
+                    - text: ":"
+                    - generic [ref=e1765]: "\"json\""
+                    - generic [ref=e1766]: ","
+                    - generic [ref=e1767]: path
+                    - text: ":"
+                    - generic [ref=e1768]: "\"~/.local/share/opencode/auth.json\""
+                    - generic [ref=e1769]: ","
+                    - generic [ref=e1770]: rule
+                    - text: ":"
+                    - generic [ref=e1771]: "\"nonEmptyObject\""
+                    - generic [ref=e1772]: "}"
+                    - generic [ref=e1773]: ","
+                  - generic [ref=e1776]:
+                    - generic [ref=e1777]: acp
+                    - text: ":"
+                    - generic [ref=e1778]: "{"
+                    - generic [ref=e1779]: resumeAcrossRestart
+                    - text: ":"
+                    - generic [ref=e1780]: "true"
+                    - generic [ref=e1781]: ","
+                    - generic [ref=e1782]: preamble
+                    - text: ":"
+                    - generic [ref=e1783]: "\"firstMessage\""
+                    - generic [ref=e1784]: ","
+                    - generic [ref=e1785]: mcp
+                    - text: ":"
+                    - generic [ref=e1786]: "\"passthrough\""
+                    - generic [ref=e1787]: ","
+                    - generic [ref=e1788]: terminal
+                    - text: ":"
+                    - generic [ref=e1789]: "true"
+                    - generic [ref=e1790]: "}"
+                    - generic [ref=e1791]: ","
+                  - generic [ref=e1794]:
+                    - generic [ref=e1795]: startHint
+                    - text: ":"
+                    - generic [ref=e1796]: "\"Make sure OpenCode is installed (opencode.ai) and signed in — run `opencode` in a terminal once.\""
+                    - generic [ref=e1797]: ","
+                  - generic [ref=e1800]:
+                    - generic [ref=e1801]: "}"
+                    - generic [ref=e1802]: ","
+                  - generic [ref=e1805]:
+                    - generic [ref=e1806]: "\"hermes\""
+                    - text: ":"
+                    - generic [ref=e1807]: "{"
+                  - generic [ref=e1810]:
+                    - generic [ref=e1811]: id
+                    - text: ":"
+                    - generic [ref=e1812]: "\"hermes\""
+                    - generic [ref=e1813]: ","
+                  - generic [ref=e1816]:
+                    - generic [ref=e1817]: label
+                    - text: ":"
+                    - generic [ref=e1818]: "\"Hermes\""
+                    - generic [ref=e1819]: ","
+                  - generic [ref=e1822]:
+                    - generic [ref=e1823]: brand
+                    - text: ":"
+                    - generic [ref=e1824]: "{"
+                    - generic [ref=e1825]: "}"
+                    - generic [ref=e1826]: ","
+                  - generic [ref=e1829]:
+                    - generic [ref=e1830]: logoSrc
+                    - text: ":"
+                    - generic [ref=e1831]: "\"/agents/hermes.svg\""
+                    - generic [ref=e1832]: ","
+                  - generic [ref=e1833]: // Hermes' official installer (hermes-agent.nousresearch.com) git-clones into
+                  - generic [ref=e1837]: "// ~/.hermes/hermes-agent, builds a venv there, and puts ONE launcher on PATH:"
+                  - generic [ref=e1841]: "// `hermes` (~/.local/bin on POSIX; %LOCALAPPDATA%\\hermes\\hermes-agent\\venv\\Scripts"
+                  - generic [ref=e1845]: "// on Windows, via User PATH). `hermes-acp` stays inside the venv — so the"
+                  - generic [ref=e1849]: "// adapter and the installed-check both go through `hermes` (its `acp`"
+                  - generic [ref=e1853]: "// subcommand is the documented ACP entry point). `hermes-acp` is kept in"
+                  - generic [ref=e1857]: "// `bins` for uv-tool installs (`uv tool install 'hermes-agent[acp]'`), which"
+                  - generic [ref=e1861]: // put both console scripts on PATH.
+                  - generic [ref=e1867]:
+                    - generic [ref=e1868]: adapter
+                    - text: ":"
+                    - generic [ref=e1869]: "{"
+                    - generic [ref=e1870]: command
+                    - text: ":"
+                    - generic [ref=e1871]: "\"hermes\""
+                    - generic [ref=e1872]: ","
+                    - generic [ref=e1873]: args
+                    - text: ":"
+                    - generic [ref=e1874]: "["
+                    - generic [ref=e1875]: "\"acp\""
+                    - generic [ref=e1876]: "]"
+                    - generic [ref=e1877]: "}"
+                    - generic [ref=e1878]: ","
+                  - generic [ref=e1881]:
+                    - generic [ref=e1882]: bins
+                    - text: ":"
+                    - generic [ref=e1883]: "["
+                    - generic [ref=e1884]: "\"hermes\""
+                    - generic [ref=e1885]: ","
+                    - generic [ref=e1886]: "\"hermes-acp\""
+                    - generic [ref=e1887]: "]"
+                    - generic [ref=e1888]: ","
+                  - generic [ref=e1891]:
+                    - generic [ref=e1892]: install
+                    - text: ":"
+                    - generic [ref=e1893]: "{"
+                  - generic [ref=e1894]: // The official installer — the same one hermes' site documents. --skip-setup
+                  - generic [ref=e1898]: "// keeps it headless (sign-in stays the separate `hermes setup` step, like"
+                  - generic [ref=e1902]: "// every other agent). Idempotent: rerunning it updates the git checkout, so"
+                  - generic [ref=e1906]: // Update = rerun (same pattern as cursor's curl install).
+                  - generic [ref=e1912]:
+                    - generic [ref=e1913]: posixShell
+                    - text: ":"
+                    - generic [ref=e1914]: "\"curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --skip-setup\""
+                    - generic [ref=e1915]: ","
+                  - generic [ref=e1918]:
+                    - generic [ref=e1919]: winShell
+                    - text: ":"
+                  - generic [ref=e1922]:
+                    - generic [ref=e1923]: "'$s = Join-Path $env:TEMP \"hermes-install.ps1\"; irm https://hermes-agent.nousresearch.com/install.ps1 -OutFile $s; & $s -SkipSetup'"
+                    - generic [ref=e1924]: ","
+                  - generic [ref=e1927]:
+                    - generic [ref=e1928]: "}"
+                    - generic [ref=e1929]: ","
+                  - generic [ref=e1930]: // Uninstall = remove the launcher, any legacy uv-tool install, AND the
+                  - generic [ref=e1934]: // footprint. Everything hermes owns (code, credentials, sessions, memories)
+                  - generic [ref=e1938]: // lives under ~/.hermes (%LOCALAPPDATA%\hermes on Windows). Destructive —
+                  - generic [ref=e1942]: // the UI double-confirms.
+                  - generic [ref=e1948]:
+                    - generic [ref=e1949]: uninstall
+                    - text: ":"
+                    - generic [ref=e1950]: "{"
+                  - generic [ref=e1953]:
+                    - generic [ref=e1954]: posixShell
+                    - text: ":"
+                    - generic [ref=e1955]: "'\"$(command -v uv || echo \"$HOME/.local/bin/uv\")\" tool uninstall hermes-agent 2>/dev/null; rm -f ~/.local/bin/hermes; rm -rf ~/.hermes'"
+                    - generic [ref=e1956]: ","
+                  - generic [ref=e1959]:
+                    - generic [ref=e1960]: winShell
+                    - text: ":"
+                  - generic [ref=e1961]: "\"$uv = (Get-Command uv -ErrorAction SilentlyContinue).Source; if ($uv) { & $uv tool uninstall hermes-agent 2>$null }; \""
+                  - generic [ref=e1967]:
+                    - generic [ref=e1968]: +
+                    - generic [ref=e1969]: "'foreach ($d in @(\"$env:LOCALAPPDATA\\\\hermes\", \"$HOME\\\\.hermes\")) { if (Test-Path $d) { Remove-Item -Recurse -Force $d } }'"
+                    - generic [ref=e1970]: ","
+                  - generic [ref=e1973]:
+                    - generic [ref=e1974]: "}"
+                    - generic [ref=e1975]: ","
+                  - generic [ref=e1978]:
+                    - generic [ref=e1979]: login
+                    - text: ":"
+                    - generic [ref=e1980]: "\"hermes setup\""
+                    - generic [ref=e1981]: ","
+                  - generic [ref=e1984]:
+                    - generic [ref=e1985]: winLogin
+                    - text: ":"
+                    - generic [ref=e1986]: "\"hermes setup\""
+                    - generic [ref=e1987]: ","
+                  - generic [ref=e1988]: // No logout — its setup wizard manages credentials in ~/.hermes.
+                  - generic [ref=e1994]:
+                    - generic [ref=e1995]: wizard
+                    - text: ":"
+                    - generic [ref=e1996]: "true"
+                    - generic [ref=e1997]: ","
+                  - generic [ref=e2000]:
+                    - generic [ref=e2001]: sessionsDir
+                    - text: ":"
+                    - generic [ref=e2002]: "\"~/.hermes\""
+                    - generic [ref=e2003]: ","
+                  - generic [ref=e2006]:
+                    - generic [ref=e2007]: sessionParser
+                    - text: ":"
+                    - generic [ref=e2008]: "\"hermes-sqlite\""
+                    - generic [ref=e2009]: ","
+                  - generic [ref=e2012]:
+                    - generic [ref=e2013]: externalDeletable
+                    - text: ":"
+                    - generic [ref=e2014]: "false"
+                    - generic [ref=e2015]: ","
+                  - generic [ref=e2016]: // Hermes has THREE places a working provider can come from, and setup writes
+                  - generic [ref=e2020]: "// whichever fits the chosen provider (verified against hermes 0.18.2 source):"
+                  - generic [ref=e2024]: // • ~/.hermes/.env — API-key providers (MINIMAX_API_KEY=…, etc.)
+                  - generic [ref=e2028]: // • ~/.hermes/config.yaml — an explicitly selected provider (anything ≠ "auto",
+                  - generic [ref=e2032]: // which is the pre-setup default; covers keyless ones like lmstudio)
+                  - generic [ref=e2036]: // • ~/.hermes/auth.json — OAuth providers (Nous Portal, Codex)
+                  - generic [ref=e2040]: // Probing only auth.json (the old probe) showed "Setup incomplete" on a fully
+                  - generic [ref=e2044]: "// configured API-key install. ponytail: a config.yaml provider without its key"
+                  - generic [ref=e2048]: // still reads as ready — hermes itself surfaces that error at session start.
+                  - generic [ref=e2054]:
+                    - generic [ref=e2055]: credProbe
+                    - text: ":"
+                    - generic [ref=e2056]: "{"
+                  - generic [ref=e2059]:
+                    - generic [ref=e2060]: kind
+                    - text: ":"
+                    - generic [ref=e2061]: "\"anyOf\""
+                    - generic [ref=e2062]: ","
+                  - generic [ref=e2065]:
+                    - generic [ref=e2066]: probes
+                    - text: ":"
+                    - generic [ref=e2067]: "["
+                  - generic [ref=e2070]:
+                    - generic [ref=e2071]: "{"
+                    - generic [ref=e2072]: kind
+                    - text: ":"
+                    - generic [ref=e2073]: "\"fileMatch\""
+                    - generic [ref=e2074]: ","
+                    - generic [ref=e2075]: path
+                    - text: ":"
+                    - generic [ref=e2076]: "\"~/.hermes/.env\""
+                    - generic [ref=e2077]: ","
+                    - generic [ref=e2078]: pattern
+                    - text: ":"
+                    - generic [ref=e2079]: "\"^[A-Z0-9_]*API_KEY=.+\""
+                    - generic [ref=e2080]: "}"
+                    - generic [ref=e2081]: ","
+                  - generic [ref=e2084]:
+                    - generic [ref=e2085]: "{"
+                    - generic [ref=e2086]: kind
+                    - text: ":"
+                    - generic [ref=e2087]: "\"fileMatch\""
+                    - generic [ref=e2088]: ","
+                    - generic [ref=e2089]: path
+                    - text: ":"
+                    - generic [ref=e2090]: "\"~/.hermes/config.yaml\""
+                    - generic [ref=e2091]: ","
+                    - generic [ref=e2092]: pattern
+                    - text: ":"
+                    - generic [ref=e2093]: "\"^\\\\s*provider:\\\\s*[\\\"']?(?!auto\\\\b)[a-z]\""
+                    - generic [ref=e2094]: "}"
+                    - generic [ref=e2095]: ","
+                  - generic [ref=e2098]:
+                    - generic [ref=e2099]: "{"
+                    - generic [ref=e2100]: kind
+                    - text: ":"
+                    - generic [ref=e2101]: "\"json\""
+                    - generic [ref=e2102]: ","
+                    - generic [ref=e2103]: path
+                    - text: ":"
+                    - generic [ref=e2104]: "\"~/.hermes/auth.json\""
+                    - generic [ref=e2105]: ","
+                    - generic [ref=e2106]: rule
+                    - text: ":"
+                    - generic [ref=e2107]: "{"
+                    - generic [ref=e2108]: hasKey
+                    - text: ":"
+                    - generic [ref=e2109]: "\"providers\""
+                    - generic [ref=e2110]: "}"
+                    - generic [ref=e2111]: "}"
+                    - generic [ref=e2112]: ","
+                  - generic [ref=e2115]:
+                    - generic [ref=e2116]: "]"
+                    - generic [ref=e2117]: ","
+                  - generic [ref=e2120]:
+                    - generic [ref=e2121]: "}"
+                    - generic [ref=e2122]: ","
+                  - generic [ref=e2125]:
+                    - generic [ref=e2126]: acp
+                    - text: ":"
+                    - generic [ref=e2127]: "{"
+                    - generic [ref=e2128]: resumeAcrossRestart
+                    - text: ":"
+                    - generic [ref=e2129]: "true"
+                    - generic [ref=e2130]: ","
+                    - generic [ref=e2131]: preamble
+                    - text: ":"
+                    - generic [ref=e2132]: "\"firstMessage\""
+                    - generic [ref=e2133]: ","
+                    - generic [ref=e2134]: mcp
+                    - text: ":"
+                    - generic [ref=e2135]: "\"passthrough\""
+                    - generic [ref=e2136]: ","
+                    - generic [ref=e2137]: terminal
+                    - text: ":"
+                    - generic [ref=e2138]: "true"
+                    - generic [ref=e2139]: "}"
+                    - generic [ref=e2140]: ","
+                  - generic [ref=e2143]:
+                    - generic [ref=e2144]: startHint
+                    - text: ":"
+                    - generic [ref=e2145]: "\"Hermes has no model provider selected. Run `hermes setup` (the Finish setup button in Settings → Agents) and pick a provider.\""
+                    - generic [ref=e2146]: ","
+                  - generic [ref=e2149]:
+                    - generic [ref=e2150]: "}"
+                    - generic [ref=e2151]: ","
+                  - generic [ref=e2154]:
+                    - generic [ref=e2155]: "}"
+                    - generic [ref=e2156]: ;
+                  - generic [ref=e2160]: /** Canonical display/discovery order (History, selectors, settings). */
+                  - generic [ref=e2166]:
+                    - generic [ref=e2167]: export
+                    - generic [ref=e2168]: const
+                    - generic [ref=e2169]: AGENT_LIST
+                    - text: ":"
+                    - generic [ref=e2170]: AgentDef
+                    - generic [ref=e2171]: "["
+                    - generic [ref=e2172]: "]"
+                    - generic [ref=e2173]: =
+                    - generic [ref=e2174]: AGENT_IDS
+                    - generic [ref=e2175]: .
+                    - generic [ref=e2176]: map
+                    - generic [ref=e2177]: (
+                    - generic [ref=e2178]: (
+                    - generic [ref=e2179]: id
+                    - generic [ref=e2180]: )
+                    - generic [ref=e2181]: =>
+                    - generic [ref=e2182]: AGENT_REGISTRY
+                    - generic [ref=e2183]: "["
+                    - generic [ref=e2184]: id
+                    - generic [ref=e2185]: "]"
+                    - generic [ref=e2186]: )
+                    - generic [ref=e2187]: ;
+                  - generic [ref=e2193]:
+                    - generic [ref=e2194]: export
+                    - generic [ref=e2195]: const
+                    - generic [ref=e2196]: isAgentId
+                    - generic [ref=e2197]: =
+                    - generic [ref=e2198]: (
+                    - generic [ref=e2199]: x
+                    - text: ":"
+                    - generic [ref=e2200]: unknown
+                    - generic [ref=e2201]: )
+                    - text: ":"
+                    - generic [ref=e2202]: x
+                    - text: is
+                    - generic [ref=e2203]: AgentId
+                    - generic [ref=e2204]: =>
+                    - generic [ref=e2205]: typeof
+                    - generic [ref=e2206]: x
+                    - generic [ref=e2207]: ===
+                    - generic [ref=e2208]: "\"string\""
+                    - generic [ref=e2209]: "&&"
+                    - generic [ref=e2210]: (
+                    - generic [ref=e2211]: AGENT_IDS
+                    - generic [ref=e2212]: as
+                    - generic [ref=e2213]: readonly
+                    - generic [ref=e2214]: string
+                    - generic [ref=e2215]: "["
+                    - generic [ref=e2216]: "]"
+                    - generic [ref=e2217]: )
+                    - generic [ref=e2218]: .
+                    - generic [ref=e2219]: includes
+                    - generic [ref=e2220]: (
+                    - generic [ref=e2221]: x
+                    - generic [ref=e2222]: )
+                    - generic [ref=e2223]: ;
+                  - generic [ref=e2227]: /** Label for an agent id; null/unknown = the built-in OpenLive assistant. */
+                  - generic [ref=e2233]:
+                    - generic [ref=e2234]: export
+                    - generic [ref=e2235]: const
+                    - generic [ref=e2236]: agentLabel
+                    - generic [ref=e2237]: =
+                    - generic [ref=e2238]: (
+                    - generic [ref=e2239]: id
+                    - text: ":"
+                    - generic [ref=e2240]: string
+                    - generic [ref=e2241]: "|"
+                    - generic [ref=e2242]: "null"
+                    - generic [ref=e2243]: "|"
+                    - generic [ref=e2244]: undefined
+                    - generic [ref=e2245]: )
+                    - text: ":"
+                    - generic [ref=e2246]: string
+                    - generic [ref=e2247]: =>
+                  - generic [ref=e2250]:
+                    - generic [ref=e2251]: (
+                    - generic [ref=e2252]: id
+                    - generic [ref=e2253]: "&&"
+                    - generic [ref=e2254]: isAgentId
+                    - generic [ref=e2255]: (
+                    - generic [ref=e2256]: id
+                    - generic [ref=e2257]: )
+                    - generic [ref=e2258]: "&&"
+                    - generic [ref=e2259]: AGENT_REGISTRY
+                    - generic [ref=e2260]: "["
+                    - generic [ref=e2261]: id
+                    - generic [ref=e2262]: "]"
+                    - generic [ref=e2263]: .
+                    - generic [ref=e2264]: label
+                    - generic [ref=e2265]: )
+                    - generic [ref=e2266]: "||"
+                    - generic [ref=e2267]: "\"OpenLive\""
+                    - generic [ref=e2268]: ;
+                  - generic [ref=e2272]: /** The adapter command as one display string (settings placeholder, docs). */
+                  - generic [ref=e2278]:
+                    - generic [ref=e2279]: export
+                    - generic [ref=e2280]: const
+                    - generic [ref=e2281]: adapterCommand
+                    - generic [ref=e2282]: =
+                    - generic [ref=e2283]: (
+                    - generic [ref=e2284]: id
+                    - text: ":"
+                    - generic [ref=e2285]: AgentId
+                    - generic [ref=e2286]: )
+                    - text: ":"
+                    - generic [ref=e2287]: string
+                    - generic [ref=e2288]: =>
+                    - generic [ref=e2289]: "{"
+                  - generic [ref=e2292]:
+                    - generic [ref=e2293]: const
+                    - generic [ref=e2294]: a
+                    - generic [ref=e2295]: =
+                    - generic [ref=e2296]: AGENT_REGISTRY
+                    - generic [ref=e2297]: "["
+                    - generic [ref=e2298]: id
+                    - generic [ref=e2299]: "]"
+                    - generic [ref=e2300]: .
+                    - generic [ref=e2301]: adapter
+                    - generic [ref=e2302]: ;
+                  - generic [ref=e2305]:
+                    - generic [ref=e2306]: return
+                    - generic [ref=e2307]: "["
+                    - generic [ref=e2308]: a
+                    - generic [ref=e2309]: .
+                    - generic [ref=e2310]: command
+                    - generic [ref=e2311]: ","
+                    - text: ...
+                    - generic [ref=e2312]: a
+                    - generic [ref=e2313]: .
+                    - generic [ref=e2314]: args
+                    - generic [ref=e2315]: "]"
+                    - generic [ref=e2316]: .
+                    - generic [ref=e2317]: join
+                    - generic [ref=e2318]: (
+                    - generic [ref=e2319]: "\" \""
+                    - generic [ref=e2320]: )
+                    - generic [ref=e2321]: ;
+                  - generic [ref=e2324]:
+                    - generic [ref=e2325]: "}"
+                    - generic [ref=e2326]: ;
+    - contentinfo [ref=e2328]:
+      - heading "Footer" [level=2] [ref=e2329]
+      - generic [ref=e2330]:
+        - generic [ref=e2331]:
+          - link "GitHub Homepage" [ref=e2332] [cursor=pointer]:
+            - /url: https://github.com
+          - generic [ref=e2335]: © 2026 GitHub, Inc.
+        - navigation "Footer" [ref=e2336]:
+          - heading "Footer navigation" [level=3] [ref=e2337]
+          - list "Footer navigation" [ref=e2338]:
+            - listitem [ref=e2339]:
+              - link "Terms" [ref=e2340] [cursor=pointer]:
+                - /url: https://docs.github.com/site-policy/github-terms/github-terms-of-service
+            - listitem [ref=e2341]:
+              - link "Privacy" [ref=e2342] [cursor=pointer]:
+                - /url: https://docs.github.com/site-policy/privacy-policies/github-privacy-statement
+            - listitem [ref=e2343]:
+              - link "Security" [ref=e2344] [cursor=pointer]:
+                - /url: https://github.com/security
+            - listitem [ref=e2345]:
+              - link "Status" [ref=e2346] [cursor=pointer]:
+                - /url: https://www.githubstatus.com/
+            - listitem [ref=e2347]:
+              - link "Community" [ref=e2348] [cursor=pointer]:
+                - /url: https://github.community/
+            - listitem [ref=e2349]:
+              - link "Docs" [ref=e2350] [cursor=pointer]:
+                - /url: https://docs.github.com/
+            - listitem [ref=e2351]:
+              - link "Contact" [ref=e2352] [cursor=pointer]:
+                - /url: https://support.github.com?tags=dotcom-footer
+            - listitem [ref=e2353]:
+              - button "Manage cookies" [ref=e2355] [cursor=pointer]
+            - listitem [ref=e2356]:
+              - button "Do not share my personal information" [ref=e2358] [cursor=pointer]
+  - alert [ref=e2361]

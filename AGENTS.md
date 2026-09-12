@@ -20,6 +20,8 @@ The entire tool is one Bash script: `opencode-vm.sh`. Two small JSON registries 
 
 **VM Lifecycle:** `oc-base` (provisioned once via `init`) → cloned per session → session deleted on exit.
 
+**OpenLive integration (since v0.5.24):** `opencode-vm openlive {install|prepare|status|doctor|uninstall}` installs a macOS host shim at `~/.opencode-vm/openlive/bin/opencode`. The regular single-script path downloads the versioned adapter release over HTTPS, verifies the SHA-256 embedded in `opencode-vm.sh`, rejects unsafe archive paths and links, and atomically caches it at `~/.opencode-vm/openlive/adapters/<version>-<sha256>/`; an adjacent `adapters/openlive-acp/` tree remains the automatic development source. Later `opencode-vm update` runs refresh the required adapter automatically when the managed bridge exists; failure is explicit and stale adapters are not activated. `opencode-vm web` stages either source or release files into the session, builds source packages, or installs only locked production dependencies for precompiled release packages. OpenLive invokes the shim as `opencode acp`; the shim forwards ACP stdio to the prepared adapter inside the already-running project-specific web VM. The adapter talks to the central OpenCode server through `@opencode-ai/sdk`; Web UI, attached TUI, A2A, and OpenLive share one runtime. A persistent OpenLive manager session reports project-session totals on the first turn, can list/read sessions, and can attach the current call to an idle work session. On explicit request it can also create a work session with OpenCode's configured primary agent and OpenLive's selected model; unconfirmed creations are rolled back. Apart from explicit creation the manager is read-only, and all attachments are call-local. Per-turn camera/screen JPEG frames are validated, bounded, and forwarded as normal OpenCode image attachments to vision-capable models; this is not continuous video, and frames remain in session history. `openlive prepare` is deprecated and directs users to `opencode-vm web`; ACP never downloads, builds, starts, or resumes a VM. All lifecycle output stays on stderr because stdout is the ACP protocol stream, and ACP stdin is reserved for the adapter. OpenLive's host credential probe is satisfied with a reserved non-secret marker only when host `auth.json` has no real entries. The marker, discovery symlink, hidden `acpCommand:opencode` setting, and adapter cache are ownership-checked and reversibly removed. Agent tools and MCPs remain VM-side; OpenLive's generic terminal remains host-side.
+
 **Host directories:**
 - `~/.opencode-vm/project-state/` — persistent OpenCode config/data per project hash
 - `~/.opencode-vm/sessions/` — per-project session working copy + running-session env tracker
@@ -32,6 +34,7 @@ The entire tool is one Bash script: `opencode-vm.sh`. Two small JSON registries 
 - `~/.opencode-vm/mcps.env` — MCPs subsystem state (field: `MCPS_PACKAGES` — space-separated active MCP names; seeded from registry defaults on first use)
 - `~/.opencode-vm/proxmox.env` — Proxmox MCP credentials (mode 0600; only when Proxmox MCP is enabled)
 - `~/.opencode-vm/proxmox-mcp/` — host-side clone of ProxmoxMCP (only when Proxmox MCP is enabled)
+- `~/.opencode-vm/openlive/adapters/` — verified, content-addressed OpenLive adapter release cache
 
 **Extensions split into two subsystems (since v0.4.4):** `skills/` is for knowledge packages (pure markdown mounted as agent context); `mcps/` is for Model Context Protocol servers (tools the agent can call). Two separate registries, two separate CLIs, two separate state files. The distinction is deliberate: skills and MCPs have different lifecycles, different token-cost curves, and different security surfaces (credentials apply only to MCPs). A unified abstraction was rejected as perpetuating the debt of conflating "context" with "capability".
 
@@ -53,12 +56,13 @@ The entire tool is one Bash script: `opencode-vm.sh`. Two small JSON registries 
 7. Skills subsystem (registry-driven): `_skills_registry_path/read/ensure`, `skills_registry_has/field/list/always_active`, `skills_load/save/pkg_is_active/pkg_on/pkg_off`, resolvers (`skills_resolve_ecc_filtered`, `skills_resolve_ecc_all_pkg`, `skills_resolve_single_bundled`, generic `skills_resolve_pkg`), `skills_mount_for_session`
 8. MCPs subsystem (registry-driven): `_mcps_registry_path/read/ensure`, `mcps_registry_has/defaults/list`, `mcps_load/save/pkg_is_active/pkg_on/pkg_off`, `mcps_build_config_json`, `mcps_mount_skill_docs_for_session`, `mcps_cmd`
 9. A2A interface subsystem (host side): `_a2a_sessions`, `_a2a_resolve_target`, `_a2a_card_validate`, `_a2a_rpc`, `a2a_status_cmd`, `a2a_check_cmd`, `a2a_cmd`
-10. Self-update helpers + commands: `update_cmd`, `export_patch_cmd`, `ocvm_post_update_migrate`
-11. `ports_cmd` — CLI subcommand for managing firewall policy
-12. `provision_base` — creates base VM, installs OpenCode + nftables + Playwright + RepoMapper + all CLI tooling
-13. `apply_policy_in_vm` — translates `policy.env` into nft commands
-14. `start_session` — main workflow: backup config → host/project sync → clone → mount → apply policy → inject MCPs → mount skill docs → run opencode → cleanup+sync-back
-15. `doctor_cmd` / `skills_cmd` / top-level `case` dispatch
+10. OpenLive host integration: managed shim/settings/auth marker commands (`openlive_cmd`) plus ACP session lock/runtime helpers near the session code
+11. Self-update helpers + commands: `update_cmd`, `export_patch_cmd`, `ocvm_post_update_migrate`
+12. `ports_cmd` — CLI subcommand for managing firewall policy
+13. `provision_base` — creates base VM, installs OpenCode + nftables + Playwright + RepoMapper + all CLI tooling
+14. `apply_policy_in_vm` — translates `policy.env` into nft commands
+15. `start_session` — main workflow: backup config → host/project sync → clone → mount → apply policy → inject MCPs → mount skill docs → run opencode → cleanup+sync-back
+16. `doctor_cmd` / `skills_cmd` / top-level `case` dispatch
 
 ## Commands
 
@@ -86,6 +90,7 @@ opencode-vm ports lan tcp add 192.168.178.10:443
 opencode-vm skills {status|on|off|list}  # knowledge packages
 opencode-vm mcps {status|list|on|off|purge}  # MCP servers
 opencode-vm a2a {status|card|check}          # A2A interface: live agents, card, contract check
+opencode-vm openlive {install|prepare|status|doctor|uninstall}  # OpenLive voice/chat bridge
 
 # Providers / auth
 opencode-vm provider {list|add|new|refresh|rm}
