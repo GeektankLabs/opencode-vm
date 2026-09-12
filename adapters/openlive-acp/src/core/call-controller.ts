@@ -44,6 +44,8 @@ type VoiceCall = {
 const CLEANUP_TIMEOUT_MS = 5_000;
 const FIRST_MANAGER_TURN_SYSTEM =
   "This is the first user turn of a new OpenLive call. First call voice_sessions with action list. Begin your answer with one short status sentence in the user's language stating the exact number of existing project sessions and how many are busy, then say that the user can switch to an existing session or start a new one. Continue by answering the user's request. Do not use Markdown.";
+const OPENLIVE_WORK_TURN_SYSTEM =
+  "This turn comes from an OpenLive voice conversation. Respond in the user's language with natural, speakable, reasonably concise paragraphs. Avoid Markdown tables, deeply nested lists, and long code blocks unless the user explicitly requests a written artifact. When the user wants to discuss or review the current work, understand a draft step by step, or walk through open decisions, load the `besprechung` skill when it is available and follow its Dialog output form. A natural-language request is sufficient; no slash command is required. If the user explicitly requests a discussion document, follow the skill's Document output form. Do not load the skill for an ordinary short question. A discussion by itself is not an instruction to implement changes.";
 
 export class CallController {
   private readonly calls = new Map<string, VoiceCall>();
@@ -138,8 +140,10 @@ export class CallController {
       const initialTargetSettings = manager ? undefined : call.targetSettings;
       const settings = manager
         ? this.managerSettings(call)
-        : (initialTargetSettings ??
-          (await this.inspector.promptSettings(sessionId)));
+        : withOpenLiveWorkPrimer(
+            initialTargetSettings ??
+              (await this.inspector.promptSettings(sessionId)),
+          );
       if (manager) {
         if ((await this.gateway.status(sessionId)) !== "idle") {
           throw new Error(
@@ -338,6 +342,15 @@ export class CallController {
     if (!call) throw new Error("Unknown ACP session.");
     return call;
   }
+}
+
+function withOpenLiveWorkPrimer(settings: PromptSettings): PromptSettings {
+  return {
+    ...settings,
+    system: settings.system
+      ? `${settings.system}\n\n${OPENLIVE_WORK_TURN_SYSTEM}`
+      : OPENLIVE_WORK_TURN_SYSTEM,
+  };
 }
 
 function assertCurrentControl(

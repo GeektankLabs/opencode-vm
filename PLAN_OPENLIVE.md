@@ -2,10 +2,13 @@
 
 Current status:
 
-- The functional MVP and regular single-script distribution path are implemented and automated-test complete at `opencode-vm` `0.5.43` / adapter `0.1.3`, using ACP SDK `1.2.1` and OpenCode SDK/server `1.18.21`.
+- The local, remote, and discussion MVP baselines plus the regular single-script distribution path are implemented at `opencode-vm` `0.5.46` / adapter `0.1.5`, using ACP SDK `1.2.1` and OpenCode SDK/server `1.18.21`.
 - A real OpenLive run has already confirmed ACP setup, reuse of the central runtime, model selection, normal streaming, and per-turn screen sharing. The exact OpenLive build used for that run was not recorded.
-- Remaining release gates are publication of the `v0.5.43` adapter asset before the script reaches the update path, plus the complete macOS/OpenLive acceptance run in A.6: first-turn status, existing-session attach, explicit new-session creation, subsequent work routing, call reset, and process-count verification with the exact OpenLive build recorded.
-- A versioned reproducible adapter archive, embedded SHA-256 verification, safe extraction, atomic content-addressed host cache, packaged-runtime session preparation, and tag-driven release workflow are part of the baseline. Protected-runtime support, richer ACP activity, generic attachments, and retention policy remain future work.
+- Remaining release gates are publication of the `v0.5.46` adapter asset before the script reaches the update path, the complete local macOS/OpenLive acceptance run in A.6, and the real two-computer remote acceptance in section 29.11, with the exact OpenLive build recorded. A real spoken discussion (skill activation, follow-up question, decision and result summary) remains a manual acceptance step.
+- A versioned reproducible adapter archive, embedded SHA-256 verification, safe extraction, atomic content-addressed host cache, packaged-runtime session preparation, and tag-driven release workflow are part of the baseline. Richer ACP activity, generic attachments, and retention policy remain future work.
+- Remote OpenLive through the existing web port is implemented in section 29 (work package C). It uses a local stub folder and `opencode-vm openlive remote`; no SSH access, local project checkout, or client-side base VM is required.
+- Script `0.5.45` / adapter `0.1.5` add the first discussion baseline: the default-active bundled `besprechung` skill with document and turn-based dialogue commands. Every attached OpenLive work turn receives a concise voice primer that points natural review and decision requests to this skill; ordinary questions and the read-only manager remain unchanged. Existing installations receive the package through a one-time, opt-out-preserving skills migration.
+- Script `0.5.46` closes the discussion lifecycle gaps: reconnect refreshes owned skill/command files and applies opt-out while preserving user edits; cache refresh errors are explicit, incomplete packages are retried, and an already-current script can retry asset updates. Regression tests cover the actual attach entry point with a mocked VM launch and standalone Git transport with local fixtures. The adapter bytes and version remain `0.1.5`.
 
 ## 1. Goal
 
@@ -46,6 +49,7 @@ OpenLive and OpenCode remain unmodified. The former direct `opencode acp` path w
 | Concurrency                  | At most one OpenLive call per project                                                                      |
 | Passive monitoring           | Not included while OpenLive ignores unsolicited turn updates                                               |
 | Initial distribution         | Single installed script plus a versioned, checksummed GitHub Release adapter artifact                      |
+| Remote MVP (planned)         | Local stub folder and setup command; ACP over the existing web port; adapter and tools remain in the VM    |
 
 ## 3. Why the Adapter Will Not Use A2A as Its Only Backend
 
@@ -414,7 +418,7 @@ The MVP is intentionally narrower than full feature parity. It must prove the ar
 - Rich replay of tools, reasoning, and files.
 - Continuous video and generic non-JPEG media or file attachments.
 - ACP rendering parity for tool cards, plans, diffs, usage, permissions, and questions.
-- Mobile or remote voice transport.
+- Mobile or remote voice transport in the local baseline; the separately approved remote desktop MVP is specified in section 29.
 - Multiple projects in one voice call.
 - Multiple simultaneous OpenLive calls to one project.
 
@@ -765,6 +769,8 @@ Exit criterion: production-ready integration with repeatable installation and re
 
 No new estimate is assigned to phases 3-4. They are a prioritized backlog, not committed release scope.
 
+The approved next remote desktop baseline is work package C in section 29. It depends on the existing core plus the narrow authentication work required by C, not on completion of phases 3-4.
+
 ## 24. Explicit Non-Goals
 
 - No OpenLive fork.
@@ -1042,7 +1048,7 @@ Future compatibility work:
 - Consider in-call detach or return-to-manager only if OpenLive can present the transition without surprising the user.
 - Consider a session-selector config option only if it can preserve exact-ID and busy-state safety.
 - Define manager-history and repeated-screen-frame retention/compaction policies before describing long-running visual use as production-ready.
-- Consider passive monitoring, multiple concurrent calls, remote/mobile transport, or project switching only after a concrete client and protocol contract exists.
+- Remote desktop ACP transport now has an approved client workflow and is planned in package C. Passive monitoring, multiple concurrent calls, mobile clients, and in-call project switching remain deferred.
 
 Package B has no unconditional exit criterion. For any selected item, its implementation is complete only when the corresponding shell, VM, protocol, documentation, and real-application tests pass.
 
@@ -1051,3 +1057,223 @@ Package B has no unconditional exit criterion. For any selected item, its implem
 - Direct HTTP access from an unrelated isolated development VM to the macOS test runtime can be blocked by the VM session firewall. Mirroring the private target adapter log into `~/Desktop/opencode-share/openlive-live.log` remains a development workaround, not product behavior.
 - The OpenLive watchdog behavior used during characterization came from the inspected upstream build. Record the exact installed macOS OpenLive version or commit before treating those timings as the compatibility contract.
 - Package A must not absorb package B work merely because it is desirable. An item moves into package A only if a reproducible failure proves it is required for the section 14.3 installed-script scenario.
+
+## 29. Remote OpenLive MVP Implementation Plan (Work Package C)
+
+**Status: MVP baseline implemented in script 0.5.44 / adapter 0.1.4; automated validation passes. Real two-computer OpenLive acceptance in section 29.11 remains pending.**
+
+This section specifies the implemented remote desktop baseline and its remaining release acceptance. Local behavior remains available for folders without a mapping; the real-application acceptance record is still outstanding.
+
+### 29.1 Goal, user workflow, and scope
+
+The user operates OpenLive on a macOS workstation while the actual project and `opencode-vm web` run in another account on another development computer. Only the already published web port is reachable over LAN or VPN. There is no SSH login, host filesystem mount, project synchronization, or direct Lima access from the workstation.
+
+Planned workstation flow after installing the script:
+
+```bash
+mkdir -p ~/Remote-Projekte/MeinProjekt
+cd ~/Remote-Projekte/MeinProjekt
+opencode-vm openlive remote
+```
+
+The command configures the current existing folder as a connection stub. OpenLive subsequently selects OpenCode and that folder through its existing UI. The remote project's real files never need to exist in the stub.
+
+On the development computer, the operator updates `opencode-vm` and starts the actual project with the existing password-protected `web` workflow and chosen port. A compatible `web` startup prepares the remote gateway when web authentication is configured, even if no local OpenLive host shim exists there. The development computer does not need the OpenLive app. Gateway/package preparation belongs to web startup, never to an incoming network request; failure leaves the remote feature unavailable with a diagnostic while ordinary web services retain their existing lifecycle.
+
+Important command distinction:
+
+- `opencode-vm install` makes the script callable and currently may install Lima as part of its normal setup.
+- `opencode-vm init` provisions a local base VM; it is **not required** for remote OpenLive.
+- `openlive remote` must work without running `init`, without a local session record, and without invoking `limactl`. Avoid redesigning the general installer solely to remove its existing Lima dependency check.
+- Installing `opencode-vm` on the workstation is supported and is the intended delivery path; a separate manually maintained proxy application is not required.
+
+MVP capabilities:
+
+- One local stub maps to one confirmed remote project and one web origin.
+- Multiple stubs can select different remote projects through the same global OpenLive shim.
+- Preserve manager-first calls, session counts, list/read, exact-session attach, explicit create, selected models, text/thought streaming, cancellation, and the current bounded JPEG frame support.
+- The server-side adapter, manager tool, provider credentials, and coding tools remain inside the development VM.
+- Normal local OpenLive operation remains available when a selected folder has no remote mapping.
+
+Explicit exclusions: remote filesystem browsing or synchronization, SSH fallback, a second OpenCode runtime, generic terminal forwarding, arbitrary server process execution, automatic project discovery across a LAN, multiple calls per remote project, mobile clients, and automatic replay/retry of interrupted work.
+
+### 29.2 Setup interaction and lifecycle of a mapping
+
+`opencode-vm openlive remote` is an interactive setup/update command, not a long-running tunnel. Its steps are:
+
+1. Canonicalize the current folder and check macOS/OpenLive availability before changing integration settings. If OpenLive is missing, print installation guidance and exit without claiming setup succeeded. Prepare the verified local network-client executable and its Node prerequisites before attempting connection tests; this may populate the cache but does not activate a mapping or alter OpenLive settings.
+2. If a mapping exists, show the saved project and sanitized origin, test it again, and offer to keep or change it. Reconfiguration replaces the same mapping; it must not create duplicates or silently convert the folder back to local mode.
+3. Ask for the **actual reachable web address**, for example `https://dev-machine:4444`. Accept DNS names, IPv4, and bracketed IPv6 through a real URL parser. A bare host with port may default to HTTPS. Do not derive internal backend/A2A ports from this input.
+4. Permit a pasted normal OpenCode project deep link by extracting its origin and explaining that the server will confirm the target project. Strip UI path/query/fragment data; reject embedded credentials and unsupported schemes. Custom reverse-proxy subpath deployments are outside the MVP.
+5. Establish TLS trust before sending credentials, request the web username (default `opencode`) and password without echo, and query the authenticated remote capability document.
+6. Show the server-confirmed project display name and origin and obtain confirmation. The local folder name is only a label, never proof of remote identity.
+7. Check protocol compatibility, server readiness, and a real authenticated WebSocket upgrade through the public web entry point. This probe creates no manager/work session, sends no model prompt, and must not interrupt an existing call. A busy project can still be configured; report that a call is currently active.
+8. Reuse the prepared local network-bridge runtime and install/reuse the existing managed OpenLive shim, discovery link, and readiness marker. Preserve foreign command overrides under the same explicit replacement rules as the local installer.
+9. Persist the confirmed mapping and credentials atomically only after successful checks and bridge preparation. On failure/cancel preserve the previous mapping and restore changes made to the shared integration in this attempt. A downloaded verified artifact may remain cached.
+10. Print the exact local folder and the next steps: open/restart OpenLive, choose OpenCode, select this folder, and keep the remote web session running. Do not print credentials or the remote filesystem path in the normal completion message.
+
+Minimal companion behavior:
+
+- Extend `openlive status` and `openlive doctor [folder]` to recognize a remote mapping before checking local Lima state. Status shows configuration; doctor performs bounded connection/trust/auth/project/protocol checks without a model call.
+- Add `openlive remote --remove` for the current folder. This removes only that stub's mapping and saved connection secret; it leaves the shared shim and other projects intact. Confirm that the folder will thereafter follow local routing.
+- On shared `openlive uninstall`, remove owned remote mappings/credentials as well as managed integration files, report their removal, and leave stub folders and project contents untouched.
+- Renaming or moving a stub requires rerunning setup at the new path; do not introduce automatic filesystem tracking.
+
+### 29.3 Architecture and ownership
+
+```text
+Workstation                                      Development VM
+OpenLive
+   | ACP stdin/stdout
+managed opencode shim
+   | selected local stub -> saved remote mapping
+network client -------- HTTPS/WSS web port -----> existing web entry point
+                                                   | dedicated path routing
+                                                   v
+                                                loopback remote gateway
+                                                   | fixed adapter child
+                                                existing ACP adapter
+                                                   | SDK HTTP/SSE
+                                                existing OpenCode server
+                                                   |
+                                                tools + actual project
+
+voice_sessions tool <---- existing VM-local Unix socket ----> ACP adapter
+```
+
+- Add only a small network client and a VM-side ACP gateway around the existing adapter; do not reimplement the call controller or manager behavior on the workstation.
+- The gateway runs for the web-session lifetime. It may start one fixed, preinstalled adapter child for an admitted call; it never starts/resumes a VM or another OpenCode server.
+- An internal loopback listener is allowed, but no additional host/LAN port is published. Allocate its internal port without colliding with the existing backend/A2A block; an OS-assigned loopback port with private runtime metadata is sufficient.
+- Extend `OCVM_WEB_REDIRECT_PY`/the generated web library to route only the two dedicated paths below to that listener. Preserve all other Web UI/API/SSE/WebSocket and A2A behavior, including the HTML seed/redirect path.
+- Routing must retain bytes already read past the HTTP headers, support WebSocket upgrade, and avoid mixing upstreams on a keep-alive connection. Discovery responses close their HTTP connection; upgrade connections remain bound to the selected gateway until close.
+- The web supervisor owns gateway start/stop and readiness on fresh and resumed sessions. Start only after package preparation; report not-ready until the central backend and required tool are ready. A gateway failure must be visible without stopping unrelated Web UI/A2A use.
+
+### 29.4 Minimal network contract
+
+Stable paths on the supplied web origin:
+
+| Endpoint | Contract |
+| --- | --- |
+| `GET /openlive/info` | Authenticated, bounded JSON capability/project/readiness response; no model call or session creation |
+| `GET /openlive/acp` with WebSocket upgrade | Authenticated ACP transport with the explicit `ocvm-openlive.v1` subprotocol |
+
+The capability response contains only the required fields: schema/protocol version, script and adapter versions, stable project ID, bounded display name, readiness, call-busy state, supported frame-size limit, and the relative ACP path. Do not return credentials or accept an advertised cross-origin endpoint. Project identity derives from the server's canonical project identity, not the port number, VM name, or disposable runtime generation.
+
+Connection sequence:
+
+1. The client sends the expected project ID and protocol through bounded handshake headers, plus HTTP authorization. The gateway validates all of them before spawning an adapter or exposing project details.
+2. The gateway sends one bounded transport-level `ready` message identifying the confirmed project, runtime generation, and canonical server-side ACP working directory. The local helper consumes this message; it is never written to OpenLive's ACP stdout.
+3. A setup probe may close immediately after `ready`, without acquiring the call slot or starting the adapter.
+4. The first ACP request within a bounded startup deadline triggers call admission and adapter launch. From then on, each WebSocket text message contains one ACP JSON-RPC object, translated to/from one NDJSON line on the child pipes. Preserve JSON-RPC IDs and notification ordering.
+5. Reject binary messages, unsupported subprotocols, oversized payloads, and malformed framing. Disable WebSocket compression initially; preserve the existing 12 MiB ACP-line and decoded image limits. Bound write queues and propagate backpressure; terminate a persistently slow connection rather than buffer indefinitely.
+
+HTTP failures must distinguish missing/wrong credentials (`401`), authenticated but unavailable/disabled service (`503` with a bounded reason), project mismatch (`409`), unsupported protocol/upgrade (`400`/`426`), and a missing remote feature on older servers (`404`). A call-busy race after upgrade produces a transport failure and closes without starting a second child. Transport errors must never masquerade as successful ACP responses.
+
+No query-string tokens, secret-bearing URLs, arbitrary launch commands, remote executable paths, or arbitrary backend URLs are accepted. Cross-origin redirects are rejected rather than forwarding credentials. Browser WebSocket origins are rejected for the MVP native-client endpoint; the workstation helper does not need a browser-origin allowance.
+
+### 29.5 Project mapping and ACP working directories
+
+Persist one per-stub record under the existing private project-state hierarchy, for example:
+
+```text
+~/.opencode-vm/project-state/<canonical-stub-hash>/openlive-remote.json
+```
+
+The versioned record holds the canonical local stub, sanitized web origin, expected server project ID, display name, protocol version, connection credential, and any explicit certificate trust pin. A single atomically replaced mode-0600 JSON record keeps connection/credential updates consistent without a second state registry; containing directories are private. Read it as data, never shell-source or evaluate it. Exclude it from VM config/data sync, generated agent context, logs, and exported patches. Existing OpenCode provider `auth.json` is not the storage location for the remote password.
+
+Dispatch and scope rules:
+
+- Check for a mapping **before** local `need limactl`, session lookup, or provisioning. An unreadable/invalid mapping fails explicitly; it is not equivalent to no mapping.
+- A valid remote mapping selects only the remote helper. Failed network/auth/trust/project checks never fall back to local execution.
+- The helper verifies that ACP `session/new` and `session/load` refer to the selected canonical local stub. It then rewrites only their `cwd` to the authenticated server working directory from `ready`.
+- The server retains the existing strict `validateSessionScope` comparison against its own descriptor. Client parameters cannot select another project. Additional workspaces remain rejected, and ACP-provided MCP definitions remain ignored.
+- Prompt text, session IDs, filenames, and image contents are not subject to blanket path substitution. Local path-based file attachments are not added in this MVP.
+- The server checks the expected stable project ID on every connection. Reuse of the same port by another project requires explicit reconfiguration. A new VM generation for the same project may reconnect in a new call, but never resumes an uncertain active prompt automatically.
+
+### 29.6 Authentication and certificate trust
+
+Reuse the web session's existing configured username/password from its protected `auth.env`; do not reuse the public default A2A credential or create another account subsystem. Authenticate both discovery and upgrade at the gateway itself, because the existing web redirector normally relies on backend authentication and routing around that backend must not bypass it.
+
+MVP defaults and explicit exceptions:
+
+- HTTPS/WSS is the normal setup path. A manually entered HTTP origin may be supported for a user-confirmed trusted LAN/VPN connection, with a clear one-time notice that this transport itself is unencrypted; never silently downgrade HTTPS.
+- A web session without a configured password does not expose remote ACP. The setup command gives the operator the existing password-configuration guidance. Local OpenLive and ordinary `--no-auth` Web UI behavior remain unchanged.
+- Standard trusted certificates use normal hostname/chain verification. For a self-signed certificate, setup shows the endpoint and SHA-256 certificate fingerprint, explains the trust decision, and persists an explicit pin after confirmation. Certificate probing sends no credentials.
+- Apply the same trust policy to discovery, setup probing, and every WSS call. A changed pin or invalid certificate fails closed and requires setup again. Do not use global TLS verification disabling; any self-signed exception is scoped to that exact origin and pinned certificate.
+- Credential/certificate changes take effect on subsequent connections; restarting the web service closes existing calls. Do not add live credential rotation machinery to the MVP.
+
+The VM-side `OpenCodeGateway` also needs the narrow protected-runtime support currently deferred in B.2: apply Basic authentication consistently to SDK requests and SSE when backend auth is enabled, read from the trusted session channel, and leave the runtime descriptor non-secret. Gateway admission and backend API authentication are separate checks, both required.
+
+The network credential grants the configured remote service's authority, including coding tasks inside the VM. This is not a new read-only role or a multi-user authorization system. It grants no additional host login or Git-origin credentials.
+
+### 29.7 Admission, disconnects, and startup timing
+
+- Enforce one active OpenLive call per remote project **across local and remote entry paths**. Two workstation stubs or two computers must not bypass the existing policy.
+- Add one VM-side ownership gate at the common adapter startup boundary, before any Unix-socket removal or manager mutation. A simple atomic local lock with owner identity and bounded stale-owner recovery is sufficient; the existing host lock can remain an early local diagnostic.
+- Correct `ControlServer.start` sequencing so an arriving adapter cannot unlink a live owner's socket. Only the owning process may remove its socket and lock. Gateway probes do not consume call ownership.
+- Gateway launch uses a fixed executable and argument vector, a bounded environment, and the preinstalled package; never interpolate client input into a shell command.
+- ACP EOF, explicit close, WebSocket close, heartbeat failure, gateway shutdown, and signals reach the existing idempotent call cleanup. If necessary, terminate the adapter child after a bounded grace period; never stop the central runtime or abort an unrelated session.
+- Configure WebSocket ping/pong, for example 15-second heartbeat with a 10-second response deadline. This detects dead network connections and is separate from the adapter's substantive-progress watchdog.
+- After an uncertain disconnect, report the interruption and advise checking Web UI. Do not reconnect and resend an in-flight prompt, recreate an unconfirmed session blindly, or restore a work attachment automatically. A later explicit call starts in the persistent manager as usual.
+- Target a 12-second total client startup budget within OpenLive's characterized 15-second limit, including connection, authenticated upgrade, and the existing bounded adapter preflight. Dependencies, certificate approval, credential prompts, downloads, and builds happen only during setup/update, never in ACP startup.
+- Preserve stdin from the first buffered OpenLive request onward; protocol stdout carries ACP only. Setup/probe messages and remote child diagnostics remain bounded and on stderr.
+
+### 29.8 Distribution and workstation runtime
+
+Extend the existing verified adapter artifact with compiled network-client and gateway entry points. Keep one versioned artifact and its locked production dependencies rather than adding a package registry or a second updater. Pin a small maintained WebSocket implementation supporting authorization headers and per-connection TLS options; select and lock its exact version during implementation, and include its licensing obligations in packaging checks.
+
+- Reuse source-development and precompiled-release paths, embedded digest verification, content-addressed caching, and release-before-script publication ordering.
+- On the workstation, `openlive remote` checks for Node.js 22 or newer and prepares production dependencies locally with the locked install and lifecycle scripts disabled. No local OpenCode server or TypeScript build is needed for the installed release path.
+- If Node is absent/incompatible, offer the standard host installation when Homebrew is available, with confirmation, or print a precise prerequisite and retry instruction. Do not start a VM to supply Node or silently alter an existing runtime manager.
+- Save the resolved executable location in managed bridge state so OpenLive launched from Finder does not depend on an interactive shell's PATH. Validate it at startup and give setup recovery guidance if it disappears.
+- `opencode-vm update` refreshes the package and local runtime dependencies when remote mappings exist. A failed update remains explicit; subsequent ACP must not use mismatched client/package state. Local-only installations do not gain an unnecessary host Node requirement.
+- Test execution from an installed single script without adjacent sources, plus the development checkout path. Node modules/cache files stay outside the stub and project repository.
+
+### 29.9 Implementation sequence and file-level work
+
+C.1 through C.7 and the documentation portion of C.8 are implemented. Automated tests cover the packaged TLS round trip, exact existing-port routing, transactional setup, fail-closed dispatch, authenticated non-mutating probing, shared ownership, and local regressions. C.8 remains open only for the real two-computer macOS/OpenLive acceptance in section 29.11; behavior tests, not implementation-line greps, remain the release criterion.
+
+| Step | Work and expected locations | Exit criterion |
+| --- | --- | --- |
+| C.1 Contract and fixtures | Finalize info/ready/ACP framing and error fixtures under `adapters/openlive-acp/tests/`; characterize the exact OpenLive build's cwd, initialization, and close behavior | One written protocol-v1 contract and executable fixtures cover project binding and read-only setup probing |
+| C.2 Shared admission and protected backend | `src/main.ts`, `src/manager/control-server.ts`, a small VM-local ownership helper, and `src/opencode/gateway.ts` | Local calls still pass; simultaneous local/remote-style launches cannot unlink each other's sockets; protected HTTP and SSE work |
+| C.3 VM gateway | New `src/remote/server.ts` around the existing child entry point, with explicit auth, protocol, size, and lifecycle handling | Authenticated info/upgrade/probe/ACP succeed on loopback; unauthorized and mismatched requests spawn no child |
+| C.4 Existing-port integration | `opencode-vm.sh`: `OCVM_WEB_REDIRECT_PY`, generated web lifecycle, fresh/resumed preparation and cleanup | The same public web port carries discovery and WSS; ordinary Web/API/SSE/A2A traffic remains correct; no additional published port |
+| C.5 Workstation helper | New `src/remote/client.ts` with bounded framing, TLS/auth, cwd mapping, and EOF behavior | A stdio ACP client operates through the public endpoint from a different local path, including spaces and non-ASCII names |
+| C.6 Setup and routing | `opencode-vm.sh`: `openlive_cmd`, `openlive_acp_cmd`, private mapping helpers, host-runtime preparation, status/doctor/remove/uninstall/update | Stub setup is idempotent and transactional; remote dispatch works without Lima/base/session records and never falls back locally |
+| C.7 Artifact and automation | `package.json`/lockfile, `scripts/build-openlive-adapter.sh`, `.github/workflows/release.yml`, focused shell and package tests | Production-only extracted client/gateway packages complete an actual authenticated ACP round trip through the web entry point |
+| C.8 Documentation and real acceptance | Future README/AGENTS/release-doc changes plus the acceptance record in this plan | A two-computer macOS/OpenLive run over the sole allowed web port meets section 29.11, with versions recorded |
+
+The implementation increments the script to 0.5.44 and the adapter/package to 0.1.4, adds the pinned `ws` runtime, and extends the reproducible artifact with the remote client and gateway. The embedded digest and version fixtures are validated with every release build.
+
+### 29.10 Required automated validation
+
+**Routing and setup:** fresh and existing stubs; keep/change/remove; missing OpenLive/Node; GUI PATH; no local `limactl` or base VM; multiple mappings through one shim; foreign command preservation; failed setup retains old state; secret-free output; changed server/project/port; renamed stub; invalid mapping never selects local mode. Run the actual command paths with controlled dependencies.
+
+**Transport and scope:** real authenticated info and WebSocket upgrade through the generated public web proxy; client cwd differs from server cwd; same-origin endpoint enforcement; missing/wrong credentials; unsupported protocol; older server; wrong project ID; busy call; unauthorized requests never create an adapter, manager, or socket. A setup probe must remain non-mutating even when a call is busy.
+
+**TLS and limits:** trusted certificates; explicit self-signed trust; changed pin; credentials withheld until trust is established; HTTP confirmation/no automatic downgrade; Unicode and IPv6 URL handling; malformed JSON/NDJSON and binary frames; size limits before parsing; slow peers/backpressure; bounded diagnostics without secrets.
+
+**Call behavior:** launch the actual extracted client, gateway, and adapter against the pinned real OpenCode server with a deterministic fake provider. Exercise ACP initialize/new/prompt/cancel/close, real manager-tool schema and execution, first-turn counts, deferred attach/create, subsequent exact-session work, rollback, selected model, JPEG delivery, and manager reset. Do not accept a missing-environment exit or a source-only manager-tool test as proof of remote runtime functionality.
+
+**Lifecycle and concurrency:** local-vs-remote and remote-vs-remote contention; EOF during preflight/streaming; network loss during manager create; no automatic prompt replay; gateway/child crash; stale-lock recovery without touching live owners; heartbeat expiry; web restart invalidates old connections; fresh and resumed web sessions clean up only owned processes.
+
+**Distribution and regressions:** reproducible double build and embedded SHA; locked host and guest production installs; same-size/same-mtime package updates replace old files; failed update yields nonzero and no stale execution; shell syntax checks for each changed file separately, ShellCheck on changed scope, TypeScript checks, existing local tests, workflow lint, and `git diff --check`. Include a macOS host job or an explicit macOS shell smoke run for Bash 3.2, BSD tar, and Finder-launched runtime resolution; Linux mocks alone do not prove workstation portability.
+
+### 29.11 Two-computer acceptance and definition of done
+
+1. Record exact macOS, OpenLive, script, adapter/client protocol, Node, and OpenCode versions on both sides.
+2. Run one protected `opencode-vm web` project on computer A. Make only its existing web port reachable from B, over LAN and then VPN. B must have no SSH access to A and no copy of the real project.
+3. Install the script on B, leave local base/session VMs absent, create an empty named stub, and run `opencode-vm openlive remote` there.
+4. Complete URL/auth/certificate/project confirmation and verify setup prints the correct OpenLive next steps. Setup must leave the remote session count unchanged.
+5. Launch OpenLive from the GUI, choose OpenCode and the stub, and complete first-turn manager status within the startup budget.
+6. Read and attach to an existing WebUI session, then verify a spoken work prompt and its answer appear under that exact session ID in the remote WebUI. Explicit creation and selected-model behavior must also work.
+7. Send a bounded screen-sharing turn to a vision-capable model and verify the image reaches the same remote session.
+8. End the call and verify that the next call starts in the same manager. Attempt a concurrent local/remote call and confirm it is rejected without disturbing the active one.
+9. Interrupt the network during work, inspect the clearly reported uncertain outcome in WebUI, and verify no automatic replay or extra runtime was created. Start a new call explicitly after connectivity returns.
+10. Exercise a second stub/remote target, a wrong password, changed certificate, reused port serving another project, missing feature on an older server, and reconfiguration/removal. None may silently route to a local or unintended project.
+11. Verify exactly one OpenCode server for the development project, at most one admitted adapter child, a VM-local manager socket, and zero local coding runtimes or new public ports. Browser/API/A2A usage remains functional throughout.
+
+**Remote-MVP release readiness requires all C steps and the above acceptance to pass.** Publish compatible client/gateway artifacts before distributing their referencing script; a new client talking to an older server must produce upgrade guidance. The existing local A.6 acceptance remains a separate required regression gate, not something remote planning or mocks can satisfy.
+
+Further proxy platforms, browser clients, fine-grained multi-user authorization, background reconnection, and filesystem features enter a later plan only after a concrete need. No such work is necessary to deliver the stub-folder remote workflow approved here.

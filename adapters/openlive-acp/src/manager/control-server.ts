@@ -6,6 +6,7 @@ import type { ControlRequest } from "../types.js";
 
 export class ControlServer {
   private server?: net.Server;
+  private ownsSocket = false;
 
   constructor(
     private readonly socketPath: string,
@@ -14,7 +15,6 @@ export class ControlServer {
 
   async start(): Promise<void> {
     await mkdir(dirname(this.socketPath), { recursive: true, mode: 0o700 });
-    await rm(this.socketPath, { force: true });
     this.server = net.createServer((socket) => {
       let input = "";
       const disconnected = new AbortController();
@@ -32,6 +32,7 @@ export class ControlServer {
       this.server?.once("error", reject);
       this.server?.listen(this.socketPath, () => resolve());
     });
+    this.ownsSocket = true;
     await chmod(this.socketPath, 0o600);
   }
 
@@ -40,7 +41,10 @@ export class ControlServer {
     this.server = undefined;
     if (server)
       await new Promise<void>((resolve) => server.close(() => resolve()));
-    await rm(this.socketPath, { force: true });
+    if (this.ownsSocket) {
+      this.ownsSocket = false;
+      await rm(this.socketPath, { force: true });
+    }
   }
 
   private async respond(

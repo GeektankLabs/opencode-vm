@@ -23,6 +23,17 @@
         "cache_var": "SSH_SKILL_CACHE"
       }
     },
+    "besprechung": {
+      "description": "Session-aware review documents and guided decision dialogues for text and voice conversations",
+      "default_active": true,
+      "resolver": "single_bundled",
+      "skill_dir_name": "besprechung",
+      "commands": ["besprechung.md", "besprechung-dialog.md"],
+      "install": {
+        "type": "bundled",
+        "sparse_path": "skills/besprechung"
+      }
+    },
     "ecc-auto": {
       "description": "Language-filtered subset of ECC skills (~30 skills, ~2-4k tokens)",
       "default_active": false,
@@ -59,16 +70,20 @@
         ],
         "language_prefixes": {
           "typescript": ["frontend-", "backend-", "bun-runtime", "react-"],
-          "golang":     ["golang-"],
-          "python":     ["django-", "python-"],
-          "php":        ["laravel-"],
-          "java":       ["java-", "jpa-", "hexagonal-architecture"],
-          "kotlin":     ["kotlin-", "android-clean-architecture", "compose-multiplatform-patterns"],
-          "swift":      ["foundation-models-on-device"],
-          "csharp":     ["csharp-", "dotnet-patterns"],
-          "cpp":        ["cpp-"],
-          "dart":       ["dart-flutter-patterns", "flutter-dart-code-review"],
-          "web":        ["frontend-design", "design-system", "accessibility"]
+          "golang": ["golang-"],
+          "python": ["django-", "python-"],
+          "php": ["laravel-"],
+          "java": ["java-", "jpa-", "hexagonal-architecture"],
+          "kotlin": [
+            "kotlin-",
+            "android-clean-architecture",
+            "compose-multiplatform-patterns"
+          ],
+          "swift": ["foundation-models-on-device"],
+          "csharp": ["csharp-", "dotnet-patterns"],
+          "cpp": ["cpp-"],
+          "dart": ["dart-flutter-patterns", "flutter-dart-code-review"],
+          "web": ["frontend-design", "design-system", "accessibility"]
         },
         "exclude": ["continuous-learning-v2"]
       }

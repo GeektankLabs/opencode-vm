@@ -44,12 +44,21 @@ export class OpenCodeGateway {
     private readonly progressTimeoutMs = PROGRESS_TIMEOUT_MS,
     private readonly connectTimeoutMs = SSE_CONNECT_TIMEOUT_MS,
   ) {
+    const password = process.env.OPENCODE_SERVER_PASSWORD;
+    const username = process.env.OPENCODE_SERVER_USERNAME || "opencode";
     this.client =
       client ??
       createOpencodeClient({
         baseUrl: runtime.backendUrl,
         directory: runtime.project,
         throwOnError: true,
+        ...(password
+          ? {
+              headers: {
+                Authorization: `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`,
+              },
+            }
+          : {}),
       });
   }
 

@@ -23,7 +23,7 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 STAGE="$TMP/$NAME"
 mkdir -p "$STAGE/dist/acp" "$STAGE/dist/core" "$STAGE/dist/manager" \
-  "$STAGE/dist/opencode" "$STAGE/manager"
+  "$STAGE/dist/opencode" "$STAGE/dist/remote" "$STAGE/manager"
 
 (
   cd "$ADAPTER"
@@ -37,16 +37,20 @@ cp -p "$ADAPTER/src/manager/tool.mjs" "$STAGE/manager/tool.mjs"
 cp -p "$ADAPTER/dist/main.js" "$ADAPTER/dist/types.js" "$STAGE/dist/"
 cp -p "$ADAPTER/dist/acp/transport.js" "$STAGE/dist/acp/"
 cp -p "$ADAPTER/dist/core/call-controller.js" \
+  "$ADAPTER/dist/core/project-ownership.js" \
   "$ADAPTER/dist/core/session-inspector.js" "$STAGE/dist/core/"
 cp -p "$ADAPTER/dist/manager/control-server.js" \
   "$ADAPTER/dist/manager/manager-session.js" "$STAGE/dist/manager/"
 cp -p "$ADAPTER/dist/opencode/gateway.js" "$STAGE/dist/opencode/"
+cp -p "$ADAPTER/dist/remote/client.js" "$ADAPTER/dist/remote/protocol.js" \
+  "$ADAPTER/dist/remote/server.js" "$STAGE/dist/remote/"
 
 jq -n \
   --arg version "$VERSION" \
   --arg acp "$(jq -er '.dependencies["@agentclientprotocol/sdk"]' "$ADAPTER/package.json")" \
   --arg opencode "$(jq -er '.dependencies["@opencode-ai/sdk"]' "$ADAPTER/package.json")" \
-  '{schema:1,adapterVersion:$version,node:">=22",acpSdkVersion:$acp,opencodeSdkVersion:$opencode}' \
+  --arg ws "$(jq -er '.dependencies.ws' "$ADAPTER/package.json")" \
+  '{schema:1,adapterVersion:$version,node:">=22",acpSdkVersion:$acp,opencodeSdkVersion:$opencode,webSocketVersion:$ws,remoteProtocol:"ocvm-openlive.v1"}' \
   > "$STAGE/manifest.json"
 
 LC_ALL=C "$TAR" --sort=name --format=ustar --owner=0 --group=0 --numeric-owner \

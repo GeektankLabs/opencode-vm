@@ -32,10 +32,10 @@ OPENLIVE_SETTINGS="$HOME/Library/Application Support/OpenLive/data/settings.json
 OPENLIVE_PREVIOUS_COMMAND="$OPENLIVE_DIR/previous-command"
 OPENLIVE_AUTH_MARKER="__opencode_vm_openlive__"
 OPENLIVE_LOCK_PATH=""
-OPENLIVE_ADAPTER_VERSION="0.1.3"
-OPENLIVE_ADAPTER_TAG="v0.5.43"
-OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.3.tar"
-OPENLIVE_ADAPTER_SHA256="91392d9f81722fd6eefa04c9c6d54bb9d8ab7f057f8cc3c4171bcdec55dd7597"
+OPENLIVE_ADAPTER_VERSION="0.1.5"
+OPENLIVE_ADAPTER_TAG="v0.5.46"
+OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.5.tar"
+OPENLIVE_ADAPTER_SHA256="1f320e9ab0274ed589b2c4881eb8aa981b32bf5aa3f7b4bdb57793b052512f17"
 OPENLIVE_ACP_SDK_VERSION="1.2.1"
 OPENLIVE_SDK_VERSION="1.18.21"
 OPENLIVE_MANAGER_AGENT="openlive-manager"
@@ -65,6 +65,7 @@ DEFAULT_ECC_REF="main"
 # Skills subsystem (registry-driven since v0.4.5 — skills/registry.json is the source of truth)
 SKILLS_ENV="$SHARE_ROOT/skills.env"
 SKILLS_REGISTRY_CACHE="$SHARE_ROOT/skills-registry"   # fallback if script is not co-located with bundled skills/
+SKILLS_DEFAULTS_VERSION_CURRENT=1
 
 # MCPs subsystem (separate from skills: MCPs are servers + credentials; skills are knowledge)
 MCPS_ENV="$SHARE_ROOT/mcps.env"
@@ -146,7 +147,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.5.43"
+OCVM_VERSION="0.5.46"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -1732,15 +1733,46 @@ skills_registry_ensure() {
       echo "[skills] Could not fetch registry from $raw_repo" >&2
       return 1
     }
-    git -C "$SKILLS_REGISTRY_CACHE" sparse-checkout set skills >/dev/null 2>&1 || {
-      echo "[skills] sparse-checkout failed" >&2
-      return 1
-    }
   else
-    git -C "$SKILLS_REGISTRY_CACHE" fetch --depth=1 origin "$OCVM_UPDATE_BRANCH" >/dev/null 2>&1 || true
-    git -C "$SKILLS_REGISTRY_CACHE" checkout -q FETCH_HEAD 2>/dev/null || true
+    if ! git -C "$SKILLS_REGISTRY_CACHE" fetch --depth=1 origin "$OCVM_UPDATE_BRANCH" >/dev/null 2>&1 ||
+      ! git -C "$SKILLS_REGISTRY_CACHE" checkout -q FETCH_HEAD >/dev/null 2>&1; then
+      echo "[skills] Could not refresh the skills registry cache." >&2
+      return 1
+    fi
   fi
+  # Also repair a clone whose initial sparse checkout did not finish.
+  git -C "$SKILLS_REGISTRY_CACHE" sparse-checkout set skills >/dev/null 2>&1 || {
+    echo "[skills] sparse-checkout failed" >&2
+    return 1
+  }
   [[ -f "$SKILLS_REGISTRY_CACHE/skills/registry.json" ]]
+}
+
+skills_besprechung_ready() {
+  local root="$1"
+  jq -e '.skills.besprechung | .resolver == "single_bundled" and
+    .skill_dir_name == "besprechung" and
+    .commands == ["besprechung.md", "besprechung-dialog.md"]' \
+    "$root/registry.json" >/dev/null 2>&1 &&
+    [[ -s "$root/besprechung/SKILL.md" &&
+       -s "$root/besprechung/commands/besprechung.md" &&
+       -s "$root/besprechung/commands/besprechung-dialog.md" ]]
+}
+
+skills_besprechung_ensure() {
+  local root="$SCRIPT_DIR/skills"
+  # A checkout is authoritative; do not conceal incomplete local changes by
+  # downloading different files. Standalone installs can reuse a complete cache.
+  if [[ ! -f "$root/registry.json" ]]; then
+    root="$SKILLS_REGISTRY_CACHE/skills"
+    if ! skills_besprechung_ready "$root"; then
+      skills_registry_ensure || return 1
+    fi
+  fi
+  skills_besprechung_ready "$root" || {
+    echo "[skills] Incomplete besprechung package (registry, skill and both commands required). Retry preparation after repairing the source or cache." >&2
+    return 1
+  }
 }
 
 _skills_registry_read() {
@@ -1783,17 +1815,38 @@ skills_registry_defaults() {
 
 skills_load() {
   SKILLS_PACKAGES=""
+  SKILLS_DEFAULTS_VERSION=0
   if [[ -f "$SKILLS_ENV" ]]; then
     # shellcheck disable=SC1090
     source "$SKILLS_ENV"
+    [[ "${SKILLS_DEFAULTS_VERSION:-}" =~ ^[0-9]+$ ]] || SKILLS_DEFAULTS_VERSION=0
+    if (( SKILLS_DEFAULTS_VERSION < SKILLS_DEFAULTS_VERSION_CURRENT )); then
+      # Refresh a standalone install's sparse skills checkout before applying
+      # newly introduced defaults. A deliberate later `skills off` is retained
+      # because the marker advances with the one-time migration.
+      skills_besprechung_ensure || return 1
+      if skills_registry_has besprechung; then
+        case " ${SKILLS_PACKAGES:-} " in
+          *" besprechung "*) ;;
+          *) SKILLS_PACKAGES="${SKILLS_PACKAGES:+$SKILLS_PACKAGES }besprechung" ;;
+        esac
+        SKILLS_DEFAULTS_VERSION="$SKILLS_DEFAULTS_VERSION_CURRENT"
+        skills_save
+        echo "[skills] Enabled new default package 'besprechung'. Restart session to apply." >&2
+      fi
+    fi
   else
     # First use: seed all default_active packages from the registry.
+    skills_besprechung_ensure || return 1
     local def defs=""
     while IFS= read -r def; do
       [[ -n "$def" ]] || continue
       defs="${defs:+$defs }$def"
     done < <(skills_registry_defaults 2>/dev/null)
     SKILLS_PACKAGES="$defs"
+    if skills_registry_has besprechung; then
+      SKILLS_DEFAULTS_VERSION="$SKILLS_DEFAULTS_VERSION_CURRENT"
+    fi
     skills_save
   fi
   return 0
@@ -1805,6 +1858,8 @@ skills_save() {
 # opencode-vm skills subsystem
 # space-separated list of active package names
 SKILLS_PACKAGES="${SKILLS_PACKAGES:-}"
+# one-time default-package migrations already applied
+SKILLS_DEFAULTS_VERSION="${SKILLS_DEFAULTS_VERSION:-0}"
 EOF
 }
 
@@ -1829,6 +1884,9 @@ skills_pkg_on() {
     echo "[skills] 'proxmox' is now an MCP, not a skill." >&2
     echo "         Run instead: opencode-vm mcps on proxmox" >&2
     return 2
+  fi
+  if [[ "$pkg" == "besprechung" ]]; then
+    skills_besprechung_ensure || return 1
   fi
   if ! skills_registry_has "$pkg"; then
     local reg available=""
@@ -2051,6 +2109,14 @@ skills_source_root_for() {
         echo "$SSH_SKILL_CACHE/skills"
       fi
       ;;
+    besprechung)
+      local bundled="$SCRIPT_DIR/skills"
+      if [[ -d "$bundled/besprechung" ]]; then
+        echo "$bundled"
+      else
+        echo "$SKILLS_REGISTRY_CACHE/skills"
+      fi
+      ;;
     *) return 1 ;;
   esac
 }
@@ -2060,7 +2126,8 @@ skills_source_root_for() {
 skills_mount_for_session() {
   local sess_share="$1"
   local proj="$2"
-  skills_load
+  skills_load || return 1
+  skills_sync_besprechung_for_session "$sess_share" || return 1
 
   # Always-active packages (from registry) are mounted regardless of SKILLS_PACKAGES.
   local all_pkgs="${SKILLS_PACKAGES:-}"
@@ -2082,6 +2149,11 @@ skills_mount_for_session() {
 
   local pkg
   for pkg in $all_pkgs; do
+    if [[ "$pkg" == "besprechung" ]]; then
+      [[ ! -s "$dest_root/besprechung/besprechung/SKILL.md" ]] ||
+        echo "besprechung/besprechung" >> "$manifest"
+      continue
+    fi
     local names="" rtype
     rtype="$(skills_registry_field "$pkg" ".resolver")"
     case "$rtype" in
@@ -2122,19 +2194,96 @@ skills_mount_for_session() {
 
     local pkg_dest="$dest_root/$pkg"
     mkdir -p "$pkg_dest"
-    local n
+    local n mounted_pkg=0
     while IFS= read -r n; do
       [[ -z "$n" ]] && continue
       local src="$src_root/$n"
       [[ -d "$src" ]] || continue
-      rsync -a --delete "$src/" "$pkg_dest/$n/"
+      rsync -a --delete --exclude='commands/' "$src/" "$pkg_dest/$n/"
       echo "$pkg/$n" >> "$manifest"
+      mounted_pkg=1
     done <<< "$names"
+
+    # A bundled package may expose thin commands alongside its skill. Keep the
+    # user's or ECC's command when the same name already exists.
+    if [[ "$mounted_pkg" == "1" && "$rtype" == "single_bundled" ]]; then
+      local command command_src command_dest="$sess_share/config/opencode/commands"
+      local _dir_name
+      _dir_name="$(skills_registry_field "$pkg" ".skill_dir_name")"
+      while IFS= read -r command; do
+        [[ -n "$command" && "$command" != */* && "$command" == *.md ]] || continue
+        command_src="$src_root/$_dir_name/commands/$command"
+        [[ -f "$command_src" ]] || continue
+        mkdir -p "$command_dest"
+        if [[ -e "$command_dest/$command" ]]; then
+          echo "[skills] Command '$command' already exists; '$pkg' did not replace it." >&2
+        else
+          cp -p "$command_src" "$command_dest/$command"
+        fi
+      done < <(skills_registry_field "$pkg" ".commands[]?")
+    fi
   done
 
   local total
   total=$(wc -l < "$manifest" 2>/dev/null | tr -d ' ')
   echo "[skills] Mounted ${total:-0} skills (packages: ${all_pkgs})"
+}
+
+# Reconcile only files installed by this package, including on kept-session
+# resume. Last-installed copies identify our files without overwriting edits.
+skills_sync_besprechung_for_session() {
+  local share="$1" active=0 root="" src rel dest previous checksum expected
+  local state="$share/besprechung-installed"
+  skills_load || return 1
+  case " ${SKILLS_PACKAGES:-} " in *" besprechung "*) active=1 ;; esac
+  if [[ "$active" == "1" ]]; then
+    skills_besprechung_ensure || return 1
+    root="$(skills_source_root_for besprechung)" || return 1
+    root="$root/besprechung"
+  fi
+  for src in SKILL.md commands/besprechung.md commands/besprechung-dialog.md; do
+    case "$src" in
+      SKILL.md) rel="skills/besprechung/besprechung/SKILL.md"; expected="1794848888 5425" ;;
+      commands/besprechung.md) rel="$src"; expected="891645523 636" ;;
+      commands/besprechung-dialog.md) rel="$src"; expected="507219861 695" ;;
+    esac
+    dest="$share/config/opencode/$rel"
+    previous="$state/$src"
+    # The first MVP did not record ownership. Adopt only its exact original
+    # bytes (portable POSIX cksum); changed files and symlinks remain user-owned.
+    if [[ -f "$dest" && ! -L "$dest" && ! -f "$previous" ]]; then
+      checksum="$(cksum < "$dest")"
+      if [[ "$checksum" == "$expected" ]] ||
+        { [[ "$active" == "1" ]] && cmp -s "$dest" "$root/$src"; }; then
+        mkdir -p "$(dirname "$previous")" || return 1
+        cp "$dest" "$previous" || return 1
+      fi
+    fi
+    if [[ -e "$dest" || -L "$dest" ]]; then
+      if [[ -L "$dest" || ! -f "$previous" ]] || ! cmp -s "$dest" "$previous"; then
+        echo "[skills] '$rel' already exists or was edited; preserving user file." >&2
+        continue
+      fi
+    fi
+    if [[ "$active" == "1" ]]; then
+      mkdir -p "$(dirname "$dest")" "$(dirname "$previous")" || return 1
+      cp "$root/$src" "$dest" && cp "$root/$src" "$previous" || return 1
+    else
+      rm -f "$dest" "$previous" || return 1
+    fi
+  done
+  local manifest="$share/skills-manifest.txt" entry tmp
+  mkdir -p "$share" || return 1
+  tmp="$(mktemp "$share/skills-manifest.XXXXXX")" || return 1
+  if [[ -f "$manifest" ]]; then
+    while IFS= read -r entry; do
+      [[ "$entry" == "besprechung/besprechung" ]] || printf '%s\n' "$entry" >> "$tmp"
+    done < "$manifest"
+  fi
+  if [[ -s "$share/config/opencode/skills/besprechung/besprechung/SKILL.md" ]]; then
+    printf '%s\n' "besprechung/besprechung" >> "$tmp"
+  fi
+  mv -f "$tmp" "$manifest"
 }
 
 # Rough token-cost estimate for the skills menu based on count (frontmatter-only).
@@ -2788,7 +2937,7 @@ code indexing, infra APIs). Skills are knowledge-only markdown.
 
 Built-in MCPs: playwright (default on), searxng (default on), repomapper (default off),
 graphify (default off), proxmox (default off; requires API host + token on first enable).
-Built-in skills: webimg (default on), ssh-toolkit (default on), ecc-auto, ecc-all.
+Built-in skills: besprechung (default on), webimg (default on), ssh-toolkit (default on), ecc-auto, ecc-all.
 
 Session MCP injection is data-driven: only MCPs in the active list end up
 in opencode.json's mcp block. MCPs can also contribute an "agents_md_snippet"
@@ -5270,7 +5419,19 @@ ocvm_post_update_migrate() {
   # shadowing). Upgrading from pre-0.4.x state: upgrade through the latest
   # 0.4.x first, or re-run `opencode-vm init`.
   [[ "$#" -eq 2 ]] || return 0
-  if openlive_bridge_installed; then
+  if ! skills_registry_ensure >/dev/null; then
+    echo "[skills] Could not refresh bundled skill packages after update." >&2
+    return 1
+  fi
+  skills_besprechung_ensure || return 1
+  skills_load || return 1
+  if openlive_remote_mappings_exist; then
+    echo "[openlive] Updating remote OpenLive runtimes for opencode-vm $2..."
+    openlive_refresh_remote_runtimes || {
+      echo "[openlive] Remote runtime update failed. Retry from a stub with: opencode-vm openlive remote" >&2
+      return 1
+    }
+  elif openlive_bridge_installed; then
     echo "[openlive] Updating the installed adapter for opencode-vm $2..."
     openlive_prepare_adapter_cache || {
       echo "[openlive] Adapter update failed. Retry with: opencode-vm openlive install" >&2
@@ -5296,6 +5457,9 @@ update_cmd() {
 
   if ! ocvm_version_greater_than "$remote_version" "$current_version"; then
     rm -f "$remote_tmp_file"
+    # Also retry package/migration work after a previous partial update; the
+    # script may already have advanced even though its assets could not refresh.
+    ocvm_post_update_migrate "$current_version" "$current_version" || return 1
     echo "Already up to date (version $current_version)."
     return 0
   fi
@@ -5354,7 +5518,7 @@ update_cmd() {
   echo "  opencode-vm start"
   echo
   skills_load
-  echo "Built-in skills: webimg (web image optimization), ssh-toolkit (SSH/network workflows) — both default-active"
+  echo "Built-in skills: besprechung (session reviews/dialogues), webimg (web image optimization), ssh-toolkit (SSH/network workflows) — default-active"
   if [[ -n "${SKILLS_PACKAGES:-}" ]]; then
     echo "Active skill packages: ${SKILLS_PACKAGES}"
     echo "These will be applied automatically on next 'opencode-vm start'."
@@ -5471,7 +5635,8 @@ install_cmd() {
 }
 
 openlive_app_installed() {
-  [[ -d "/Applications/OpenLive.app" || -d "$HOME/Applications/OpenLive.app" ]]
+  [[ -d "/Applications/OpenLive.app" || -d "$HOME/Applications/OpenLive.app" \
+    || ( -n "${OCVM_OPENLIVE_APP_PATH:-}" && -d "$OCVM_OPENLIVE_APP_PATH" ) ]]
 }
 
 openlive_adapter_release_url() {
@@ -5493,20 +5658,23 @@ openlive_bridge_installed() {
 openlive_adapter_dev_valid() {
   local dir="$1"
   [[ -f "$dir/package.json" && -f "$dir/package-lock.json" && -f "$dir/tsconfig.json" \
-    && -f "$dir/src/main.ts" && -f "$dir/src/manager/tool.mjs" ]] || return 1
+    && -f "$dir/src/main.ts" && -f "$dir/src/manager/tool.mjs" \
+    && -f "$dir/src/remote/client.ts" && -f "$dir/src/remote/server.ts" ]] || return 1
   [[ "$(jq -r '.version // empty' "$dir/package.json" 2>/dev/null)" == "$OPENLIVE_ADAPTER_VERSION" ]]
 }
 
 openlive_adapter_release_valid() {
   local dir="$1"
   [[ -f "$dir/manifest.json" && -f "$dir/package.json" && -f "$dir/package-lock.json" \
-    && -f "$dir/dist/main.js" && -f "$dir/manager/tool.mjs" \
+    && -f "$dir/dist/main.js" && -f "$dir/dist/remote/client.js" \
+    && -f "$dir/dist/remote/server.js" && -f "$dir/manager/tool.mjs" \
     && -f "$dir/.archive-sha256" ]] || return 1
   [[ "$(<"$dir/.archive-sha256")" == "$OPENLIVE_ADAPTER_SHA256" ]] || return 1
   jq -e --arg version "$OPENLIVE_ADAPTER_VERSION" --arg acp "$OPENLIVE_ACP_SDK_VERSION" \
     --arg opencode "$OPENLIVE_SDK_VERSION" '
       .schema == 1 and .adapterVersion == $version and
-      .acpSdkVersion == $acp and .opencodeSdkVersion == $opencode
+      .acpSdkVersion == $acp and .opencodeSdkVersion == $opencode and
+      .remoteProtocol == "ocvm-openlive.v1" and (.webSocketVersion | type == "string")
     ' "$dir/manifest.json" >/dev/null 2>&1
 }
 
@@ -5527,6 +5695,112 @@ openlive_adapter_source_dir() {
     return 1
   fi
   printf '%s\n' "$cached"
+}
+
+openlive_remote_mapping_file() {
+  printf '%s/openlive-remote.json\n' "$(project_state_dir "$1")"
+}
+
+openlive_remote_mapping_secure() {
+  local file="$1" dir owner mode dir_owner dir_mode
+  [[ -f "$file" && ! -L "$file" ]] || return 1
+  dir="$(dirname "$file")"
+  [[ -d "$dir" && ! -L "$dir" ]] || return 1
+  if owner="$(stat -f '%u' "$file" 2>/dev/null)" && [[ "$owner" =~ ^[0-9]+$ ]]; then
+    mode="$(stat -f '%Lp' "$file" 2>/dev/null)" || return 1
+    dir_owner="$(stat -f '%u' "$dir" 2>/dev/null)" || return 1
+    dir_mode="$(stat -f '%Lp' "$dir" 2>/dev/null)" || return 1
+  else
+    owner="$(stat -c '%u' "$file" 2>/dev/null)" || return 1
+    mode="$(stat -c '%a' "$file" 2>/dev/null)" || return 1
+    dir_owner="$(stat -c '%u' "$dir" 2>/dev/null)" || return 1
+    dir_mode="$(stat -c '%a' "$dir" 2>/dev/null)" || return 1
+  fi
+  [[ "$owner" == "$(id -u)" && "$mode" == "600" && "$dir_owner" == "$(id -u)" ]] || return 1
+  (( (8#$dir_mode & 077) == 0 ))
+}
+
+openlive_remote_client_is_current() {
+  local expected
+  expected="$(openlive_adapter_source_dir)" || return 1
+  [[ "$1" == "$expected/dist/remote/client.js" ]]
+}
+
+openlive_remote_mappings_exist() {
+  local file
+  for file in "$PROJECT_STATE_DIR"/*/openlive-remote.json; do
+    [[ -f "$file" || -L "$file" ]] && return 0
+  done
+  return 1
+}
+
+openlive_prepare_host_runtime() {
+  local source node_path major lock_hash mode installed_mode=""
+  openlive_prepare_adapter_cache >&2 || return 1
+  source="$(openlive_adapter_source_dir)" || return 1
+  node_path="$(command -v node 2>/dev/null || true)"
+  if [[ -z "$node_path" ]]; then
+    echo "[openlive] Node.js 22 or newer is required for remote OpenLive." >&2
+    echo "[openlive] Install it with Homebrew or your existing Node version manager, then retry." >&2
+    return 1
+  fi
+  major="$("$node_path" -p 'process.versions.node.split(".")[0]' 2>/dev/null || true)"
+  if [[ ! "$major" =~ ^[0-9]+$ || "$major" -lt 22 ]]; then
+    echo "[openlive] Node.js 22 or newer is required; found $("$node_path" --version 2>/dev/null || echo unknown)." >&2
+    return 1
+  fi
+  command -v npm >/dev/null 2>&1 || {
+    echo "[openlive] npm is required to prepare the remote OpenLive client." >&2
+    return 1
+  }
+  lock_hash="$(openlive_sha256 "$source/package-lock.json")" || return 1
+  mode="host-source-$lock_hash"
+  [[ -f "$source/manifest.json" ]] && mode="host-release-$OPENLIVE_ADAPTER_SHA256"
+  [[ -f "$source/node_modules/.ocvm-host-install-mode" ]] && installed_mode="$(<"$source/node_modules/.ocvm-host-install-mode")"
+  if [[ ! -f "$source/node_modules/.package-lock.json" || "$installed_mode" != "$mode" ]]; then
+    if [[ -f "$source/manifest.json" ]]; then
+      ( cd "$source" && npm ci --omit=dev --ignore-scripts --no-audit --no-fund --loglevel=error ) >&2 || return 1
+    else
+      ( cd "$source" && npm ci --ignore-scripts --no-audit --no-fund --loglevel=error ) >&2 || return 1
+    fi
+    printf '%s\n' "$mode" > "$source/node_modules/.ocvm-host-install-mode" || return 1
+  fi
+  if [[ ! -f "$source/manifest.json" ]]; then
+    ( cd "$source" && npm run build --silent ) || return 1
+  fi
+  [[ -f "$source/dist/remote/client.js" ]] || {
+    echo "[openlive] Remote OpenLive client is missing from adapter $OPENLIVE_ADAPTER_VERSION." >&2
+    return 1
+  }
+  printf '%s\n%s\n' "$node_path" "$source/dist/remote/client.js"
+}
+
+openlive_refresh_remote_runtimes() {
+  local runtime node_path client_path file tmp failures=0
+  runtime="$(openlive_prepare_host_runtime)" || return 1
+  node_path="$(printf '%s\n' "$runtime" | sed -n '1p')"
+  client_path="$(printf '%s\n' "$runtime" | sed -n '2p')"
+  for file in "$PROJECT_STATE_DIR"/*/openlive-remote.json; do
+    [[ -f "$file" || -L "$file" ]] || continue
+    if ! openlive_remote_mapping_secure "$file" || \
+      ! jq -e '.schema == 1 and .protocol == "ocvm-openlive.v1"' "$file" >/dev/null 2>&1; then
+      echo "[openlive] Invalid remote mapping needs manual repair: $file" >&2
+      failures=$((failures + 1))
+      continue
+    fi
+    tmp="$file.$$.tmp"
+    if ! jq --arg nodePath "$node_path" --arg clientPath "$client_path" \
+      --arg adapterVersion "$OPENLIVE_ADAPTER_VERSION" --arg adapterSha256 "$OPENLIVE_ADAPTER_SHA256" \
+      '.nodePath = $nodePath | .clientPath = $clientPath |
+       .adapterVersion = $adapterVersion | .adapterSha256 = $adapterSha256' "$file" > "$tmp" || \
+      ! chmod 600 "$tmp" || ! mv -f "$tmp" "$file"; then
+      rm -f "$tmp"
+      echo "[openlive] Could not refresh remote mapping: $file" >&2
+      failures=$((failures + 1))
+      continue
+    fi
+  done
+  [[ "$failures" -eq 0 ]]
 }
 
 openlive_sha256() {
@@ -6045,7 +6319,7 @@ OPENLIVE_SHIM_BODY
 }
 
 openlive_status_cmd() {
-  local failures=0 setting discovery="missing" cached dev
+  local failures=0 setting discovery="missing" cached dev mapping_count=0 file
   echo "[openlive] Integration status"
   if openlive_app_installed; then echo "  app:       found"; else echo "  app:       not found"; failures=$((failures + 1)); fi
   if [[ -x "$OPENLIVE_SHIM" ]]; then echo "  shim:      $OPENLIVE_SHIM"; else echo "  shim:      missing"; failures=$((failures + 1)); fi
@@ -6081,11 +6355,15 @@ openlive_status_cmd() {
     echo "  adapter:   missing, run 'opencode-vm openlive install'"
     failures=$((failures + 1))
   fi
+  for file in "$PROJECT_STATE_DIR"/*/openlive-remote.json; do
+    [[ -f "$file" || -L "$file" ]] && mapping_count=$((mapping_count + 1))
+  done
+  echo "  remotes:   $mapping_count configured"
   return "$failures"
 }
 
 openlive_doctor_cmd() {
-  local project="${1:-$(pwd)}" failures=0 resolved senv
+  local project="${1:-$(pwd)}" failures=0 resolved senv mapping node_path client_path
   openlive_status_cmd || failures=$((failures + 1))
   echo ""
   echo "[openlive] Project"
@@ -6095,6 +6373,36 @@ openlive_doctor_cmd() {
   fi
   resolved="$(openlive_resolve_project "$project")"
   echo "  path:      $resolved"
+  mapping="$(openlive_remote_mapping_file "$resolved")"
+  if [[ -e "$mapping" || -L "$mapping" ]]; then
+    echo "  mode:      remote"
+    if ! openlive_remote_mapping_secure "$mapping" || \
+      ! jq -e --arg project "$resolved" --arg version "$OPENLIVE_ADAPTER_VERSION" \
+      --arg sha "$OPENLIVE_ADAPTER_SHA256" '
+        .schema == 1 and .protocol == "ocvm-openlive.v1" and
+        .localProject == $project and .adapterVersion == $version and .adapterSha256 == $sha and
+        (.nodePath | type == "string") and
+        (.clientPath | type == "string")
+      ' "$mapping" >/dev/null 2>&1; then
+      echo "  runtime:   invalid mapping, run 'opencode-vm openlive remote'"
+      return 1
+    fi
+    node_path="$(jq -r '.nodePath' "$mapping")"
+    client_path="$(jq -r '.clientPath' "$mapping")"
+    if [[ ! -x "$node_path" || ! -f "$client_path" ]] || \
+      ! openlive_remote_client_is_current "$client_path"; then
+      echo "  runtime:   missing, run 'opencode-vm openlive remote' again"
+      return 1
+    fi
+    if "$node_path" "$client_path" "$mapping" "$resolved" --probe </dev/null >/dev/null; then
+      echo "  gateway:   reachable and compatible"
+    else
+      echo "  gateway:   unavailable; mapping was not changed"
+      failures=$((failures + 1))
+    fi
+    if [[ "$failures" -eq 0 ]]; then echo "[openlive] Doctor found no blocking issue."; fi
+    return "$failures"
+  fi
   senv="$(session_env "$resolved")"
   if [[ -f "$senv" ]]; then
     # shellcheck disable=SC1090
@@ -6133,7 +6441,17 @@ openlive_doctor_cmd() {
 }
 
 openlive_uninstall_cmd() {
-  [[ "$#" -eq 0 ]] || { echo "Usage: opencode-vm openlive uninstall" >&2; return 2; }
+  local force=0 file
+  case "${1:-}" in
+    "") ;;
+    --force) force=1 ;;
+    *) echo "Usage: opencode-vm openlive uninstall [--force]" >&2; return 2 ;;
+  esac
+  if openlive_remote_mappings_exist && [[ "$force" != "1" ]]; then
+    echo "[openlive] Remote project mappings still use this integration." >&2
+    echo "[openlive] Remove them from each stub with 'opencode-vm openlive remote --remove', or use uninstall --force." >&2
+    return 1
+  fi
   need jq
   openlive_remove_setting
   if [[ -L "$OPENLIVE_DISCOVERY_LINK" && "$(readlink "$OPENLIVE_DISCOVERY_LINK")" == "$OPENLIVE_SHIM" ]]; then
@@ -6149,6 +6467,11 @@ openlive_uninstall_cmd() {
     fi
   fi
   rm -rf "$OPENLIVE_ADAPTER_CACHE_ROOT"
+  if [[ "$force" == "1" ]]; then
+    for file in "$PROJECT_STATE_DIR"/*/openlive-remote.json; do
+      [[ -f "$file" || -L "$file" ]] && rm -f "$file"
+    done
+  fi
   rmdir "$OPENLIVE_DIR/bin" "$OPENLIVE_DIR" 2>/dev/null || true
   echo "[openlive] Uninstalled managed integration."
 }
@@ -6163,6 +6486,259 @@ openlive_prepare_cmd() {
   echo "[openlive] 'prepare' no longer creates a retained ACP runtime." >&2
   printf '[openlive] Start the central runtime instead:\n[openlive]   cd %q && opencode-vm web\n' "$project" >&2
   return 1
+}
+
+openlive_remote_remove_cmd() {
+  local requested="${1:-$(pwd)}" project mapping
+  [[ "$#" -le 1 ]] || { echo "Usage: opencode-vm openlive remote --remove [stub]" >&2; return 2; }
+  project="$(cd "$requested" 2>/dev/null && pwd -P)" || {
+    echo "[openlive] Stub directory does not exist: $requested" >&2
+    return 1
+  }
+  mapping="$(openlive_remote_mapping_file "$project")"
+  if [[ -f "$mapping" || -L "$mapping" ]]; then
+    rm -f "$mapping"
+    rmdir "$(dirname "$mapping")" 2>/dev/null || true
+    echo "[openlive] Removed remote mapping for: $project"
+  else
+    echo "[openlive] No remote mapping exists for: $project"
+  fi
+}
+
+openlive_remote_write_curl_config() {
+  local file="$1" url="$2" url_json
+  url_json="$(jq -Rn --arg value "$url" '$value')" || return 1
+  printf 'url = %s\nsilent\nshow-error\nconnect-timeout = 10\nmax-time = 12\n' "$url_json" > "$file"
+  chmod 600 "$file"
+}
+
+openlive_remote_cmd() {
+  if [[ "${1:-}" == "--remove" ]]; then
+    shift
+    openlive_remote_remove_cmd "$@"
+    return
+  fi
+
+  local requested url="" username="opencode" password="${OCVM_OPENLIVE_REMOTE_PASSWORD:-}"
+  local expected_fingerprint="" force=0 confirmed=0 project mapping existing_action=""
+  local runtime node_path client_path origin info strict_config connection_mapping tmp_mapping backup_mapping had_mapping=0
+  local connect_host server_name actual_fingerprint project_id display_name answer tls_trusted=0
+  requested="$(pwd)"
+  unset OCVM_OPENLIVE_REMOTE_PASSWORD
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      --url) shift; url="${1:-}" ;;
+      --url=*) url="${1#*=}" ;;
+      --username) shift; username="${1:-}" ;;
+      --username=*) username="${1#*=}" ;;
+      --fingerprint) shift; expected_fingerprint="${1:-}" ;;
+      --fingerprint=*) expected_fingerprint="${1#*=}" ;;
+      --force) force=1 ;;
+      --yes) confirmed=1 ;;
+      --stub) shift; requested="${1:-}" ;;
+      --stub=*) requested="${1#*=}" ;;
+      *) echo "Usage: opencode-vm openlive remote [--url URL] [--username USER] [--fingerprint SHA256] [--yes] [--force] [--stub DIR]" >&2; return 2 ;;
+    esac
+    shift || true
+  done
+  [[ "$(uname -s)" == "Darwin" ]] || {
+    echo "[openlive] Remote OpenLive setup is supported on macOS only." >&2
+    return 1
+  }
+  openlive_app_installed || {
+    echo "[openlive] OpenLive.app was not found in /Applications or ~/Applications." >&2
+    return 1
+  }
+  need jq
+  need curl
+  project="$(cd "$requested" 2>/dev/null && pwd -P)" || {
+    echo "[openlive] Stub directory does not exist: $requested" >&2
+    return 1
+  }
+  ensure_dirs
+  mapping="$(openlive_remote_mapping_file "$project")"
+  if [[ ( -f "$mapping" || -L "$mapping" ) && -z "$url" ]]; then
+    if ! openlive_remote_mapping_secure "$mapping"; then
+      echo "[openlive] Existing remote mapping is not a private, user-owned regular file." >&2
+      echo "[openlive] Remove it with: opencode-vm openlive remote --remove '$project'" >&2
+      return 1
+    fi
+    printf '[openlive] This folder already maps to %s. [k]eep, [c]hange, or [r]emove? [k] ' \
+      "$(jq -r '.displayName + " at " + .origin' "$mapping" 2>/dev/null || echo 'an invalid remote target')"
+    read -r existing_action
+    case "${existing_action:-k}" in
+      k|K)
+        if openlive_doctor_cmd "$project"; then
+          echo "[openlive] Existing remote mapping kept."
+          return 0
+        fi
+        echo "[openlive] Existing mapping is not healthy; choose change or remove." >&2
+        return 1
+        ;;
+      r|R) openlive_remote_remove_cmd "$project"; return ;;
+      c|C) ;;
+      *) echo "[openlive] Expected keep, change, or remove." >&2; return 2 ;;
+    esac
+  fi
+
+  runtime="$(openlive_prepare_host_runtime)" || return 1
+  node_path="$(printf '%s\n' "$runtime" | sed -n '1p')"
+  client_path="$(printf '%s\n' "$runtime" | sed -n '2p')"
+  if [[ -z "$url" ]]; then
+    printf 'Remote opencode-vm web URL (https://host:port): '
+    read -r url
+  fi
+  [[ "$url" == *"://"* ]] || url="https://$url"
+  origin="$("$node_path" -e '
+    const value = new URL(process.argv[1]);
+    if (value.protocol !== "https:" || value.username || value.password) process.exit(1);
+    console.log(value.origin);
+  ' "$url" 2>/dev/null)" || {
+    echo "[openlive] Enter an HTTPS address without embedded credentials." >&2
+    return 1
+  }
+  if [[ "$url" != "$origin" && "$url" != "$origin/" ]]; then
+    echo "[openlive] Using the server origin $origin; the pasted UI path/query is not part of the remote endpoint."
+  fi
+  if [[ -z "$password" ]]; then
+    printf 'Web password for %s: ' "$origin"
+    read -r -s password
+    printf '\n'
+  fi
+  [[ -n "$password" && "$password" != *$'\n'* && "$username" != *$'\n'* ]] || {
+    echo "[openlive] A non-empty single-line web password is required." >&2
+    return 1
+  }
+
+  strict_config="$(mktemp)"
+  info="$(mktemp)"
+  connection_mapping="$(mktemp)"
+  tmp_mapping="$(mktemp)"
+  backup_mapping="$(mktemp)"
+  trap 'rm -f "$strict_config" "$info" "$connection_mapping" "$tmp_mapping" "$backup_mapping"' RETURN
+  openlive_remote_write_curl_config "$strict_config" "$origin/openlive/info" || return 1
+  if curl --config "$strict_config" --output /dev/null; then tls_trusted=1; fi
+  actual_fingerprint=""
+  if [[ "$tls_trusted" -ne 1 || -n "$expected_fingerprint" ]]; then
+    command -v openssl >/dev/null 2>&1 || {
+      echo "[openlive] TLS validation failed and openssl is unavailable for explicit certificate trust." >&2
+      return 1
+    }
+    connect_host="$("$node_path" -e 'console.log(new URL(process.argv[1]).host)' "$origin")"
+    server_name="$("$node_path" -e 'console.log(new URL(process.argv[1]).hostname)' "$origin")"
+    actual_fingerprint="$(openssl s_client -connect "$connect_host" -servername "$server_name" -showcerts </dev/null 2>/dev/null | \
+      openssl x509 -fingerprint -sha256 -noout 2>/dev/null | awk -F= '{print tolower($2)}' | tr -d ':')"
+    [[ "$actual_fingerprint" =~ ^[0-9a-f]{64}$ ]] || {
+      echo "[openlive] Could not inspect the remote TLS certificate." >&2
+      return 1
+    }
+    if [[ -n "$expected_fingerprint" ]]; then
+      expected_fingerprint="$(printf '%s' "$expected_fingerprint" | tr '[:upper:]' '[:lower:]' | tr -d ':')"
+      [[ "$expected_fingerprint" == "$actual_fingerprint" ]] || {
+        echo "[openlive] The supplied TLS fingerprint does not match the server." >&2
+        return 1
+      }
+    elif [[ "$tls_trusted" -ne 1 ]]; then
+      echo "[openlive] The certificate is not trusted by macOS."
+      echo "[openlive] SHA-256 fingerprint: $actual_fingerprint"
+      printf 'Trust this certificate for exactly %s? [y/N] ' "$origin"
+      read -r answer
+      [[ "$answer" == "y" || "$answer" == "Y" ]] || {
+        echo "[openlive] Certificate was not trusted; no mapping was changed." >&2
+        return 1
+      }
+    fi
+  fi
+
+  exec 9<<<"$password"
+  if ! jq -n --arg localProject "$project" --arg origin "$origin" \
+    --arg username "$username" --rawfile password /dev/fd/9 \
+    --arg nodePath "$node_path" --arg clientPath "$client_path" \
+    --arg adapterVersion "$OPENLIVE_ADAPTER_VERSION" --arg adapterSha256 "$OPENLIVE_ADAPTER_SHA256" \
+    --arg tlsFingerprint "$actual_fingerprint" '
+      {schema:1,protocol:"ocvm-openlive.v1",localProject:$localProject,origin:$origin,
+        projectId:"pending",displayName:"pending",username:$username,password:($password | rtrimstr("\n")),
+       nodePath:$nodePath,clientPath:$clientPath,adapterVersion:$adapterVersion,
+       adapterSha256:$adapterSha256}
+      + if $tlsFingerprint == "" then {} else {tlsFingerprint:$tlsFingerprint} end
+    ' > "$connection_mapping"; then
+    exec 9<&-
+    return 1
+  fi
+  exec 9<&-
+  chmod 600 "$connection_mapping"
+  if ! "$node_path" "$client_path" --info "$connection_mapping" > "$info"; then
+    echo "[openlive] Authenticated remote discovery failed. Check URL, password, and web runtime." >&2
+    return 1
+  fi
+  if ! jq -e --arg adapterVersion "$OPENLIVE_ADAPTER_VERSION" '
+      .schema == 1 and .protocol == "ocvm-openlive.v1" and .ready == true and
+      .adapterVersion == $adapterVersion and
+      (.scriptVersion | type == "string" and length > 0) and
+      (.projectId | type == "string" and length > 0) and
+      (.displayName | type == "string" and length > 0 and length <= 120) and
+      .acpPath == "/openlive/acp"
+    ' "$info" >/dev/null; then
+    echo "[openlive] The server does not expose a compatible remote OpenLive project." >&2
+    return 1
+  fi
+  project_id="$(jq -r '.projectId' "$info")"
+  display_name="$(jq -r '.displayName' "$info")"
+  if jq -e '.busy == true' "$info" >/dev/null; then
+    echo "[openlive] Note: another OpenLive call is currently using this project."
+  fi
+  echo "[openlive] Confirmed remote project: $display_name at $origin"
+  if [[ "$confirmed" != "1" ]]; then
+    printf 'Configure this stub for that project? [y/N] '
+    read -r answer
+    [[ "$answer" == "y" || "$answer" == "Y" ]] || {
+      echo "[openlive] Setup cancelled; no mapping was changed." >&2
+      return 1
+    }
+  fi
+  exec 9<<<"$password"
+  if ! jq -n --arg localProject "$project" --arg origin "$origin" \
+    --arg projectId "$project_id" --arg displayName "$display_name" \
+    --arg username "$username" --rawfile password /dev/fd/9 \
+    --arg nodePath "$node_path" --arg clientPath "$client_path" \
+    --arg adapterVersion "$OPENLIVE_ADAPTER_VERSION" --arg adapterSha256 "$OPENLIVE_ADAPTER_SHA256" \
+    --arg tlsFingerprint "$actual_fingerprint" '
+      {schema:1,protocol:"ocvm-openlive.v1",localProject:$localProject,origin:$origin,
+        projectId:$projectId,displayName:$displayName,username:$username,password:($password | rtrimstr("\n")),
+       nodePath:$nodePath,clientPath:$clientPath,adapterVersion:$adapterVersion,
+       adapterSha256:$adapterSha256}
+      + if $tlsFingerprint == "" then {} else {tlsFingerprint:$tlsFingerprint} end
+    ' > "$tmp_mapping"; then
+    exec 9<&-
+    return 1
+  fi
+  exec 9<&-
+  chmod 600 "$tmp_mapping"
+  if ! "$node_path" "$client_path" "$tmp_mapping" "$project" --probe; then
+    echo "[openlive] The ACP WebSocket probe failed; no mapping was changed." >&2
+    return 1
+  fi
+  mkdir -p "$(dirname "$mapping")" || return 1
+  chmod 700 "$(dirname "$mapping")" || return 1
+  if [[ -f "$mapping" ]]; then
+    cp -p "$mapping" "$backup_mapping" || return 1
+    had_mapping=1
+  fi
+  mv -f "$tmp_mapping" "$mapping" || return 1
+  chmod 600 "$mapping"
+  if [[ "$force" == "1" ]]; then
+    if ! openlive_install_cmd --force; then
+      if [[ "$had_mapping" == "1" ]]; then cp -p "$backup_mapping" "$mapping"; else rm -f "$mapping"; fi
+      return 1
+    fi
+  elif ! openlive_install_cmd; then
+    if [[ "$had_mapping" == "1" ]]; then cp -p "$backup_mapping" "$mapping"; else rm -f "$mapping"; fi
+    return 1
+  fi
+  trap - RETURN
+  rm -f "$strict_config" "$info" "$connection_mapping" "$backup_mapping"
+  echo "[openlive] Remote project configured: $display_name"
+  echo "[openlive] In OpenLive choose OpenCode and this folder: $project"
 }
 
 openlive_release_lock() {
@@ -6204,7 +6780,7 @@ openlive_host_signal() {
 }
 
 openlive_acp_cmd() {
-  local requested="${1:-}" project senv
+  local requested="${1:-}" project senv mapping node_path client_path
   [[ -n "$requested" ]] || { echo "[openlive] Missing project directory." >&2; return 2; }
   shift
 
@@ -6215,12 +6791,35 @@ openlive_acp_cmd() {
   exec 4<&0
   exec 1>&2
   exec 0</dev/null
-  need limactl
   ensure_dirs
   project="$(openlive_resolve_project "$requested")" || {
     echo "[openlive] Project directory does not exist: $requested" >&2
     return 1
   }
+  mapping="$(openlive_remote_mapping_file "$project")"
+  if [[ -e "$mapping" || -L "$mapping" ]]; then
+    if ! openlive_remote_mapping_secure "$mapping" || \
+      ! jq -e --arg project "$project" --arg version "$OPENLIVE_ADAPTER_VERSION" \
+      --arg sha "$OPENLIVE_ADAPTER_SHA256" '
+        .schema == 1 and .protocol == "ocvm-openlive.v1" and
+        .localProject == $project and .adapterVersion == $version and .adapterSha256 == $sha and
+        (.nodePath | type == "string" and length > 0) and
+        (.clientPath | type == "string" and length > 0)
+      ' "$mapping" >/dev/null 2>&1; then
+      echo "[openlive] Remote mapping is invalid; run 'opencode-vm openlive remote' again." >&2
+      return 1
+    fi
+    node_path="$(jq -r '.nodePath' "$mapping")"
+    client_path="$(jq -r '.clientPath' "$mapping")"
+    [[ -x "$node_path" && -f "$client_path" ]] && \
+      openlive_remote_client_is_current "$client_path" || {
+      echo "[openlive] Remote client runtime is missing; run 'opencode-vm openlive remote' again." >&2
+      return 1
+    }
+    "$node_path" "$client_path" "$mapping" "$project" "$@" <&4 >&3
+    return
+  fi
+  need limactl
   openlive_acquire_lock "$project" || return 1
   trap openlive_host_signal INT TERM HUP
   trap openlive_release_lock EXIT
@@ -6255,6 +6854,7 @@ openlive_cmd() {
   shift || true
   case "$op" in
     install) openlive_install_cmd "$@" ;;
+    remote) openlive_remote_cmd "$@" ;;
     prepare) openlive_prepare_cmd "$@" ;;
     status) openlive_status_cmd "$@" ;;
     doctor) openlive_doctor_cmd "$@" ;;
@@ -6262,7 +6862,7 @@ openlive_cmd() {
     acp) openlive_acp_cmd "$@" ;;
     version) printf 'opencode-vm OpenLive bridge %s\n' "$OCVM_VERSION" ;;
     *)
-       echo "Usage: opencode-vm openlive {install [--force]|status|doctor [project]|uninstall}" >&2
+       echo "Usage: opencode-vm openlive {install [--force]|remote [options]|status|doctor [project]|uninstall [--force]}" >&2
       return 2
       ;;
   esac
@@ -7723,7 +8323,7 @@ stop_web_tunnels() {
 # Kept free of single quotes: this is embedded in the single-quoted in-VM
 # script as a positional argument.
 read -r -d '' OCVM_WEB_REDIRECT_PY <<'PYSRC' || true
-import socket, sys, threading, select, ssl, base64, json
+import socket, sys, threading, select, ssl, base64, json, os
 
 LISTEN_PORT = int(sys.argv[1])
 TARGET_PORT = int(sys.argv[2])
@@ -7734,6 +8334,9 @@ KEY = sys.argv[3]
 # makes the origin a secure context; upstream stays plain HTTP on loopback.
 CERT_FILE = sys.argv[4] if len(sys.argv) > 4 else ""
 KEY_FILE = sys.argv[5] if len(sys.argv) > 5 else ""
+REMOTE_TARGET = sys.argv[6] if len(sys.argv) > 6 else "0"
+REMOTE_PROJECT = sys.argv[7] if len(sys.argv) > 7 else ""
+REMOTE_GENERATION = sys.argv[8] if len(sys.argv) > 8 else ""
 TLS_ENABLED = bool(CERT_FILE and KEY_FILE)
 
 TLS_CONTEXT = None
@@ -7841,6 +8444,67 @@ def wants_seed_page(head):
     return b"text/html" in header_value(rest, b"accept").lower()
 
 
+def wants_openlive_gateway(head):
+    line, _, _ = head.partition(b"\r\n")
+    parts = line.split(b" ")
+    if len(parts) < 2 or parts[0] != b"GET":
+        return False
+    return parts[1] in (b"/openlive/info", b"/openlive/acp")
+
+
+def openlive_port():
+    if REMOTE_TARGET.isdigit():
+        return int(REMOTE_TARGET)
+    try:
+        with open(REMOTE_TARGET, "r", encoding="utf-8") as ready:
+            value = json.load(ready)
+        port = value.get("port")
+        pid = value.get("pid")
+        executable = value.get("executable")
+        script = value.get("script")
+        if value.get("schema") != 1 or not isinstance(port, int) or not 0 < port < 65536:
+            return 0
+        if value.get("projectId") != REMOTE_PROJECT or value.get("generation") != REMOTE_GENERATION:
+            return 0
+        if not isinstance(pid, int) or pid < 1:
+            return 0
+        if not isinstance(executable, str) or not isinstance(script, str):
+            return 0
+        if not script.endswith("/dist/remote/server.js") and script != "dist/remote/server.js":
+            return 0
+        if os.path.realpath("/proc/%d/exe" % pid) != os.path.realpath(executable):
+            return 0
+        with open("/proc/%d/cmdline" % pid, "rb") as cmdline:
+            arguments = cmdline.read().split(b"\0")
+            if os.fsencode(script) not in arguments:
+                return 0
+        listener = None
+        for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+            with open(table, "r", encoding="ascii") as sockets:
+                for row in sockets:
+                    fields = row.split()
+                    if len(fields) > 9 and fields[3] == "0A" and int(fields[1].rsplit(":", 1)[1], 16) == port:
+                        listener = fields[9]
+                        break
+            if listener:
+                break
+        if not listener:
+            return 0
+        owns_listener = False
+        for fd in os.listdir("/proc/%d/fd" % pid):
+            try:
+                if os.readlink("/proc/%d/fd/%s" % (pid, fd)) == "socket:[%s]" % listener:
+                    owns_listener = True
+                    break
+            except OSError:
+                continue
+        if not owns_listener:
+            return 0
+        return port
+    except (OSError, ValueError, TypeError, IndexError):
+        return 0
+
+
 def https_redirect(head):
     # Plain HTTP spoke to the TLS port. Answering with a redirect beats letting
     # the handshake fail, which the browser shows as a connection error.
@@ -7946,9 +8610,32 @@ def handle(conn):
         reply_and_close(client, SEED_RESPONSE)
         return
 
+    is_openlive = wants_openlive_gateway(head)
+    remote_port = openlive_port() if is_openlive else 0
+    if is_openlive and not remote_port:
+        reply_and_close(client, (
+            b"HTTP/1.1 503 Service Unavailable\r\n"
+            b"Content-Type: application/json\r\n"
+            b"Cache-Control: no-store\r\n"
+            b"Content-Length: 39\r\n"
+            b"Connection: close\r\n\r\n"
+            b'{"error":"remote_openlive_unavailable"}'
+        ))
+        return
+    target = remote_port if remote_port else TARGET_PORT
     try:
-        upstream = socket.create_connection(("127.0.0.1", TARGET_PORT))
+        upstream = socket.create_connection(("127.0.0.1", target))
     except OSError:
+        if remote_port:
+            reply_and_close(client, (
+                b"HTTP/1.1 503 Service Unavailable\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Cache-Control: no-store\r\n"
+                b"Content-Length: 39\r\n"
+                b"Connection: close\r\n\r\n"
+                b'{"error":"remote_openlive_unavailable"}'
+            ))
+            return
         close_all(client)
         return
     try:
@@ -8006,6 +8693,8 @@ PYSRC
 read -r -d '' OCVM_WEB_LIB_SH <<'WEBLIB' || true
 OC_PORT_INTERNAL=$(( OC_PORT - 1 ))
 OC_A2A_INTERNAL=$(( OC_PORT - 2 ))
+OC_OPENLIVE_REMOTE_TARGET=0
+OC_OPENLIVE_REMOTE_GENERATION=""
 OC_SCHEME=http
 OC_TLS_CERT=""
 OC_TLS_KEY=""
@@ -8115,12 +8804,13 @@ _stop_legacy_redirector() {
   return 0
 }
 
-# start_proxy <name> <listen-port> <target-port> <seed-key> <cert> <key>
+# start_proxy <name> <listen-port> <target-port> <seed-key> <cert> <key> [openlive-target project generation]
 # Idempotent. Silent on failure — the caller owns the message, because what a
 # dead listener means differs per service. Returns non-zero if nothing is
 # listening after ~4s.
 start_proxy() {
-  local name="$1" listen="$2" target="$3" seedkey="$4" crt="$5" keyf="$6"
+  local name="$1" listen="$2" target="$3" seedkey="$4" crt="$5" keyf="$6" remote="${7:-0}"
+  local remote_project="${8:-}" remote_generation="${9:-}"
   local waited=0 marker="ocvm-proxy-$1"
   stop_proxy "$name"
   # `bash -c <loop> <marker> ...` rather than a forked subshell, so the marker
@@ -8129,14 +8819,14 @@ start_proxy() {
   # background job holding stdout keeps `limactl shell` from ever returning.
   setsid bash -c '
     marker="$0"; name="$1"; py="$2"; listen="$3"; target="$4"
-    key="$5"; crt="$6"; keyf="$7"
+    key="$5"; crt="$6"; keyf="$7"; remote="$8"; remote_project="$9"; remote_generation="${10}"
     while true; do
-      python3 "$py" "$listen" "$target" "$key" "$crt" "$keyf" "$marker" \
+      python3 "$py" "$listen" "$target" "$key" "$crt" "$keyf" "$remote" "$remote_project" "$remote_generation" "$marker" \
         >>"/tmp/ocvm-proxy-$name.log" 2>&1 &
       echo $! > "/tmp/ocvm-proxy-$name.run.pid"
       wait $! || true
       sleep 1
-    done' "$marker" "$name" "$OC_PROXY_PY" "$listen" "$target" "$seedkey" "$crt" "$keyf" \
+    done' "$marker" "$name" "$OC_PROXY_PY" "$listen" "$target" "$seedkey" "$crt" "$keyf" "$remote" "$remote_project" "$remote_generation" \
     </dev/null >/dev/null 2>&1 &
   echo $! > "/tmp/ocvm-proxy-$name.sup.pid"
   while [ "$waited" -lt 20 ]; do
@@ -8166,6 +8856,110 @@ load_session_auth() {
     export OPENCODE_SERVER_PASSWORD="$OC_PASSWORD"
   else
     unset OPENCODE_SERVER_PASSWORD 2>/dev/null || true
+  fi
+  return 0
+}
+
+stop_openlive_gateway() {
+  local pid pidf marker pidf_marker pids="" waited
+  for pidf_marker in "/tmp/ocvm-openlive-gateway.sup.pid:ocvm-openlive-gateway-supervisor" \
+    "/tmp/ocvm-openlive-gateway.run.pid:dist/remote/server.js"; do
+    pidf="${pidf_marker%%:*}"
+    marker="${pidf_marker#*:}"
+    [ -f "$pidf" ] || continue
+    pid="$(cat "$pidf" 2>/dev/null || true)"
+    if _pid_has_marker "$pid" "$marker"; then
+      kill "$pid" 2>/dev/null || true
+      pids="$pids $pid"
+    fi
+    rm -f "$pidf"
+  done
+  for pid in $pids; do
+    waited=0
+    while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 80 ]; do
+      sleep 0.1
+      waited=$(( waited + 1 ))
+    done
+  done
+  rm -f "$SESS_SHARE/openlive/gateway-ready.json"
+  OC_OPENLIVE_REMOTE_TARGET=0
+  OC_OPENLIVE_REMOTE_GENERATION=""
+  return 0
+}
+
+start_openlive_gateway() {
+  local adapter="$SESS_SHARE/openlive/adapter" waited=0 marker="ocvm-openlive-gateway-supervisor"
+  local ready_file="$SESS_SHARE/openlive/gateway-ready.json" expected_generation port pid
+  stop_openlive_gateway
+  load_session_auth
+  [ "$OC_SCHEME" = "https" ] || {
+    echo "[openlive] Remote gateway disabled: HTTPS is required."
+    return 0
+  }
+  [ -n "$OC_PASSWORD" ] || {
+    echo "[openlive] Remote gateway disabled: configure web with --password."
+    return 0
+  }
+  [ -f "$adapter/dist/remote/server.js" ] && [ -f "$SESS_SHARE/openlive/runtime.json" ] || {
+    echo "[openlive] Remote gateway unavailable: adapter package is not ready."
+    return 0
+  }
+  expected_generation="$(jq -r '.generation // empty' "$SESS_SHARE/openlive/runtime.json")"
+  [ -n "$expected_generation" ] || return 0
+  rm -f "$ready_file"
+  export OCVM_OPENLIVE_GATEWAY_PORT=0
+  export OCVM_OPENLIVE_GATEWAY_READY="$ready_file"
+  export OCVM_OPENLIVE_DISPLAY_NAME="$(basename "$PROJ_DIR")"
+  export OCVM_OPENLIVE_SCRIPT_VERSION="${OC_OPENLIVE_SCRIPT_VERSION:-unknown}"
+  setsid bash -c '
+    adapter="$1"; log="$2"
+    while true; do
+      node "$adapter/dist/remote/server.js" >>"$log" 2>&1 &
+      echo $! > /tmp/ocvm-openlive-gateway.run.pid
+      wait $! || true
+      sleep 1
+    done' "$marker" "$adapter" "$SESS_SHARE/openlive/gateway.log" \
+    </dev/null >/dev/null 2>&1 &
+  echo $! > /tmp/ocvm-openlive-gateway.sup.pid
+  while [ "$waited" -lt 20 ]; do
+    if [ -f "$ready_file" ] && jq -e --arg project "$OC_OPENLIVE_PROJECT_HASH" \
+      --arg generation "$expected_generation" '
+        .schema == 1 and .projectId == $project and .generation == $generation and
+        (.port | type == "number" and . > 0 and . < 65536) and (.pid | type == "number") and
+        (.executable | type == "string" and length > 0) and
+        (.script | type == "string" and endswith("/dist/remote/server.js"))
+      ' "$ready_file" >/dev/null 2>&1; then
+      port="$(jq -r '.port' "$ready_file")"
+      pid="$(jq -r '.pid' "$ready_file")"
+      if _pid_has_marker "$pid" "dist/remote/server.js" && \
+        ss -ltn "sport = :$port" 2>/dev/null | grep -q LISTEN; then
+        OC_OPENLIVE_REMOTE_TARGET="$ready_file"
+        OC_OPENLIVE_REMOTE_GENERATION="$expected_generation"
+        echo "[openlive] Remote gateway ready on the existing HTTPS web port."
+        return 0
+      fi
+    fi
+    sleep 0.2
+    waited=$(( waited + 1 ))
+  done
+  stop_openlive_gateway
+  echo "[openlive] WARNING: remote gateway failed to start; web startup will continue."
+  return 0
+}
+
+openlive_proxy_fallback() {
+  local runtime="$SESS_SHARE/openlive/runtime.json" tmp
+  stop_openlive_gateway
+  OC_PORT_INTERNAL="$OC_PORT"
+  OC_SCHEME=http
+  if [ -f "$runtime" ]; then
+    tmp="$runtime.$$.tmp"
+    if jq --arg url "http://127.0.0.1:$OC_PORT" '.backendUrl = $url' "$runtime" > "$tmp"; then
+      chmod 600 "$tmp"
+      mv -f "$tmp" "$runtime"
+    else
+      rm -f "$tmp"
+    fi
   fi
   return 0
 }
@@ -8202,6 +8996,7 @@ start_web_proxies() {
   _stop_legacy_redirector
   if [ ! -f "$SESS_SHARE/lib/proxy.py" ] || ! command -v python3 >/dev/null 2>&1; then
     echo "[web] No redirector available — root URL will show the project launcher."
+    openlive_proxy_fallback
     return 0
   fi
   ensure_web_tls
@@ -8214,15 +9009,14 @@ start_web_proxies() {
   # proxy crash into a permanently dead listener.
   if ! cp -f "$SESS_SHARE/lib/proxy.py" "$OC_PROXY_PY"; then
     echo "[web] Could not stage the proxy — root URL will show the project launcher."
-    OC_PORT_INTERNAL="$OC_PORT"
-    OC_SCHEME=http
+    openlive_proxy_fallback
     return 0
   fi
-  if ! start_proxy web-tls "$OC_PORT" "$OC_PORT_INTERNAL" "$OC_DIR_KEY" "$OC_TLS_CERT" "$OC_TLS_KEY"; then
+  if ! start_proxy web-tls "$OC_PORT" "$OC_PORT_INTERNAL" "$OC_DIR_KEY" "$OC_TLS_CERT" "$OC_TLS_KEY" \
+    "$OC_OPENLIVE_REMOTE_TARGET" "$OC_OPENLIVE_PROJECT_HASH" "$OC_OPENLIVE_REMOTE_GENERATION"; then
     echo "[web] Redirector did not bind port $OC_PORT — falling back to opencode on $OC_PORT directly."
     stop_all_proxies
-    OC_PORT_INTERNAL="$OC_PORT"
-    OC_SCHEME=http
+    openlive_proxy_fallback
     return 0
   fi
 
@@ -8850,6 +9644,30 @@ attach_session() {
   graphify_ensure_mcp_in_vm "$SESS_NAME"
   if [[ "$sess_mode" == "web" ]]; then
     a2a_ensure_installed_in_vm "$SESS_NAME"
+    local _web_share _old_base
+    _web_share="$(session_share_dir "$proj")"
+    for _old_base in $(seq "$sess_port" $((sess_port + 9))); do
+      stop_web_tunnels "$SESS_NAME" "$_old_base" >/dev/null 2>&1 || true
+    done
+    install_web_lib "$_web_share" || {
+      echo "[attach] Could not prepare the authenticated web listener; no LAN tunnel was opened." >&2
+      return 1
+    }
+    vm_exec "$SESS_NAME" '
+      set -euo pipefail
+      PROJ_DIR="$1"; SESS_SHARE="$2"; OC_PORT="$3"; OC_HOST_IP="$4"; OC_TLS="${5:-0}"
+      . "$SESS_SHARE/lib/web.sh"
+      stop_all_proxies
+      stop_openlive_gateway
+      for base in $(seq "$OC_PORT" $(( OC_PORT + 9 ))); do
+        reap_stale_opencode "$(( base - 1 ))"
+        reap_stale_opencode "$base"
+      done
+    ' "$proj" "$_web_share" "$sess_port" "$host_lan_ip" "$sess_tls" || {
+      echo "[attach] Could not stop the previous web/OpenLive runtime safely." >&2
+      return 1
+    }
+    resolve_session_auth "$_web_share" || return 1
   fi
 
   # Web mode: open the four LAN forwards for this session's port block and tear
@@ -8881,29 +9699,35 @@ attach_session() {
     start_materialize_daemon "$SESS_NAME" "$_att_sess_share" || true
   fi
 
-  # Refresh the in-VM web library on every attach, so a session created by an
-  # older opencode-vm picks it up without being destroyed and recreated.
+  # Refresh the staged adapter only after the old gateway has stopped using it.
   if [[ "$sess_mode" == "web" ]]; then
     local openlive_share
     openlive_share="$(session_share_dir "$proj")"
-    rm -f "$openlive_share/openlive/runtime.json"
-    if openlive_adapter_present; then
-      if ! openlive_stage_adapter "$openlive_share"; then
-        openlive_unstage_adapter "$openlive_share"
-        echo "[attach] WARNING: could not stage the OpenLive adapter." >&2
+    if [[ -f "$openlive_share/lib/web.sh" ]]; then
+      rm -f "$openlive_share/openlive/runtime.json"
+      if [[ -s "$openlive_share/auth.env" ]] && ! openlive_adapter_present; then
+        openlive_prepare_adapter_cache ||
+          echo "[attach] WARNING: remote OpenLive package preparation failed; web startup will continue." >&2
       fi
-    elif openlive_bridge_installed; then
-      openlive_unstage_adapter "$openlive_share"
-      echo "[attach] WARNING: the installed OpenLive bridge needs its current adapter." >&2
-      echo "[attach] Run: opencode-vm openlive install" >&2
+      if openlive_adapter_present; then
+        if ! openlive_stage_adapter "$openlive_share"; then
+          openlive_unstage_adapter "$openlive_share"
+          echo "[attach] WARNING: could not stage the OpenLive adapter." >&2
+        fi
+      elif openlive_bridge_installed; then
+        openlive_unstage_adapter "$openlive_share"
+        echo "[attach] WARNING: the installed OpenLive bridge needs its current adapter." >&2
+        echo "[attach] Run: opencode-vm openlive install" >&2
+      else
+        openlive_unstage_adapter "$openlive_share"
+      fi
     else
-      openlive_unstage_adapter "$openlive_share"
+      echo "[attach] WARNING: skipping OpenLive restaging because the web library is unavailable." >&2
     fi
   fi
-  install_web_lib "$(session_share_dir "$proj")" ||
-    echo "[attach] WARNING: could not write the web library into the session share." >&2
-  resolve_session_auth "$(session_share_dir "$proj")"
-
+  # OpenCode reads skills/commands at startup. Reconcile the managed package
+  # after stopping the old web runtime and before launching the resumed one.
+  skills_sync_besprechung_for_session "$(session_share_dir "$proj")" || return 1
   vm_exec "$SESS_NAME" '
     set -euo pipefail
     PROJ_DIR="$1"
@@ -8918,6 +9742,7 @@ attach_session() {
     OC_A2A_DEFAULT_SECRET="${10:-opencode-vm}"
     OC_LAN_UP="${11:-1}"
     OC_OPENLIVE_PROJECT_HASH="${12:-}"
+    OC_OPENLIVE_SCRIPT_VERSION="${13:-unknown}"
 
     # Shared in-VM web library (materialized into the session share by
     # install_web_lib on the host, and mounted here at the same path). It owns
@@ -8933,9 +9758,15 @@ attach_session() {
       . "$SESS_SHARE/lib/web.sh"
     else
       echo "[attach] web library missing from the session share — running without the redirector."
-      echo "[web] WARNING: without it the session also has no application password."
+      if [ -f "$SESS_SHARE/auth.env" ]; then
+        . "$SESS_SHARE/auth.env"
+        export OPENCODE_SERVER_USERNAME OPENCODE_SERVER_PASSWORD
+      fi
       start_web_proxies() { return 0; }
       stop_all_proxies()  { return 0; }
+      ensure_web_tls()    { return 0; }
+      start_openlive_gateway() { return 0; }
+      stop_openlive_gateway()  { return 0; }
       start_a2a()         { return 0; }
       stop_a2a()          { return 0; }
       wait_for_a2a()      { return 1; }
@@ -8972,27 +9803,27 @@ attach_session() {
       local adapter="$SESS_SHARE/openlive/adapter"
       [ -f "$adapter/package-lock.json" ] || return 0
       local lock_hash mode installed_mode=""
-      lock_hash="$(sha256sum "$adapter/package-lock.json" | awk "{print \$1}")"
+      lock_hash="$(sha256sum "$adapter/package-lock.json" | awk "{print \$1}")" || return 1
       mode="source-$lock_hash"
       if [ -f "$adapter/manifest.json" ]; then
-        mode="release-$(cat "$adapter/.archive-sha256")"
+        mode="release-$(cat "$adapter/.archive-sha256")" || return 1
       fi
       [ -f "$adapter/node_modules/.ocvm-install-mode" ] && installed_mode="$(cat "$adapter/node_modules/.ocvm-install-mode")"
       if [ ! -f "$adapter/node_modules/.package-lock.json" ] || [ "$adapter/package-lock.json" -nt "$adapter/node_modules/.package-lock.json" ] || [ "$installed_mode" != "$mode" ]; then
         if [ "${mode%%-*}" = "source" ]; then
-          ( cd "$adapter" && npm ci --no-audit --no-fund --loglevel=error )
+          ( cd "$adapter" && npm ci --no-audit --no-fund --loglevel=error ) || return 1
         else
-          ( cd "$adapter" && npm ci --omit=dev --ignore-scripts --no-audit --no-fund --loglevel=error )
+          ( cd "$adapter" && npm ci --omit=dev --ignore-scripts --no-audit --no-fund --loglevel=error ) || return 1
         fi
-        printf "%s\n" "$mode" > "$adapter/node_modules/.ocvm-install-mode"
+        printf "%s\n" "$mode" > "$adapter/node_modules/.ocvm-install-mode" || return 1
       fi
       if [ "${mode%%-*}" = "source" ]; then
         # Source staging excludes dist, so every web start rebuilds it.
-        ( cd "$adapter" && npm run build --silent )
+        ( cd "$adapter" && npm run build --silent ) || return 1
       else
-        [ -f "$adapter/dist/main.js" ] || return 1
+        [ -f "$adapter/dist/main.js" ] && [ -f "$adapter/dist/remote/server.js" ] || return 1
       fi
-      mkdir -p "$SESS_SHARE/openlive"
+      mkdir -p "$SESS_SHARE/openlive" || return 1
       export OCVM_OPENLIVE_RUNTIME="$SESS_SHARE/openlive/runtime.json"
       export OCVM_OPENLIVE_MANAGER_FILE="$SESS_SHARE/openlive/manager.json"
       export OCVM_OPENLIVE_CONTROL_SOCKET="/tmp/ocvm-openlive/$OC_OPENLIVE_PROJECT_HASH/control.sock"
@@ -9000,9 +9831,9 @@ attach_session() {
       local tmp="$OCVM_OPENLIVE_RUNTIME.$$.tmp"
       jq -n --arg project "$PROJ_DIR" --arg url "http://127.0.0.1:$OC_PORT_INTERNAL" \
         --arg generation "$(date +%s)-$$" --arg version "$(opencode --version 2>/dev/null || true)" \
-        "{schema:1,project:\$project,backendUrl:\$url,generation:\$generation,opencodeVersion:\$version}" > "$tmp"
-      chmod 600 "$tmp"
-      mv -f "$tmp" "$OCVM_OPENLIVE_RUNTIME"
+        "{schema:1,project:\$project,backendUrl:\$url,generation:\$generation,opencodeVersion:\$version}" > "$tmp" || return 1
+      chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+      mv -f "$tmp" "$OCVM_OPENLIVE_RUNTIME" || { rm -f "$tmp"; return 1; }
     }
     # ECC project identity: stable hash across sessions uses host project path
     if [ -f "$SESS_SHARE/config/opencode/.ecc-applied" ]; then
@@ -9041,6 +9872,7 @@ attach_session() {
       set +e
       echo ""
       stop_all_proxies
+      stop_openlive_gateway
       stop_a2a
       rm -f "$SESS_SHARE/openlive/runtime.json"
       echo "[attach] Stopping session — syncing data back to host..."
@@ -9080,12 +9912,20 @@ attach_session() {
     fi
 
     if [ "$OC_MODE" = "web" ]; then
+      stop_all_proxies
+      stop_openlive_gateway
+      reap_stale_opencode "$OC_PORT_INTERNAL"
+      reap_stale_opencode "$OC_PORT"
+      if ! prepare_openlive_adapter; then
+        rm -f "$SESS_SHARE/openlive/runtime.json"
+        echo "[openlive] WARNING: adapter preparation failed; web startup will continue."
+      fi
+      ensure_web_tls
+      start_openlive_gateway
       start_web_proxies
-      prepare_openlive_adapter
       start_a2a
       print_web_banner
       a2a_watch_ready
-      reap_stale_opencode "$OC_PORT_INTERNAL"
       if [ "$OC_WEB_TUI" = "true" ]; then
         aa-exec -p opencode-sandbox -- opencode web --hostname 127.0.0.1 --port "$OC_PORT_INTERNAL" &
         OC_WEB_PID=$!
@@ -9139,7 +9979,7 @@ attach_session() {
 
     # Sync-back happens via the EXIT trap installed above (covers Ctrl+C as
     # well as normal exit).
-  ' "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$effective_base" "$host_lan_ip" "${OC_WEB_TUI:-false}" "$sess_tls" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up" "$(proj_hash "$proj")"
+  ' "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$effective_base" "$host_lan_ip" "${OC_WEB_TUI:-false}" "$sess_tls" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up" "$(proj_hash "$proj")" "$OCVM_VERSION"
 }
 
 # --- Session Basic-auth secret -------------------------------------------
@@ -9177,7 +10017,8 @@ read_session_auth() {
   ( set +u
     OPENCODE_SERVER_PASSWORD=""
     # shellcheck disable=SC1090
-    . "$f" 2>/dev/null || true
+    . "$f" 2>/dev/null || exit 1
+    [[ -n "$OPENCODE_SERVER_PASSWORD" ]] || exit 1
     printf '%s' "$OPENCODE_SERVER_PASSWORD" )
 }
 
@@ -9189,15 +10030,23 @@ resolve_session_auth() {
   local share="$1"
   case "${SESSION_AUTH_MODE:-}" in
     set)
-      write_session_auth "$share" "$SESSION_PASSWORD" ||
-        echo "[run] WARNING: could not persist the session password." >&2
+      if ! write_session_auth "$share" "$SESSION_PASSWORD"; then
+        echo "[run] Could not persist the session password; refusing to start web mode." >&2
+        return 1
+      fi
       ;;
     clear)
-      write_session_auth "$share" ""
+      if ! write_session_auth "$share" ""; then
+        echo "[run] Could not clear the prior session password; refusing to start web mode." >&2
+        return 1
+      fi
       SESSION_PASSWORD=""
       ;;
     *)
-      SESSION_PASSWORD="$(read_session_auth "$share")"
+      if ! SESSION_PASSWORD="$(read_session_auth "$share")"; then
+        echo "[run] Could not read the existing session password; refusing to start web mode." >&2
+        return 1
+      fi
       ;;
   esac
   return 0
@@ -9257,6 +10106,10 @@ export OCVM_OPENLIVE_RUNTIME="$SESS_SHARE/openlive/runtime.json"
 export OCVM_OPENLIVE_MANAGER_FILE="$SESS_SHARE/openlive/manager.json"
 export OCVM_OPENLIVE_CONTROL_SOCKET="/tmp/ocvm-openlive/$PROJECT_HASH/control.sock"
 export OCVM_OPENLIVE_PROJECT_HASH="$PROJECT_HASH"
+if [ -f "$SESS_SHARE/auth.env" ]; then
+  . "$SESS_SHARE/auth.env"
+  export OPENCODE_SERVER_USERNAME OPENCODE_SERVER_PASSWORD
+fi
 
 adapter="$SESS_SHARE/openlive/adapter"
 [ -f "$OCVM_OPENLIVE_RUNTIME" ] || { echo "[openlive] Runtime descriptor is missing."; exit 1; }
@@ -9853,21 +10706,29 @@ start_session() {
   fi
 
   if [[ "$SESSION_MODE" == "web" ]]; then
+    resolve_session_auth "$sess_share" || return 1
+    install_web_lib "$sess_share" || {
+      echo "[run] Could not prepare the authenticated web listener; no LAN tunnel was opened." >&2
+      return 1
+    }
     rm -f "$sess_share/openlive/runtime.json"
+    if [[ -s "$sess_share/auth.env" ]] && ! openlive_adapter_present; then
+      openlive_prepare_adapter_cache ||
+        echo "[run] WARNING: remote OpenLive package preparation failed; web startup will continue." >&2
+    fi
     if openlive_adapter_present; then
-      openlive_stage_adapter "$sess_share" || {
-        echo "[run] OpenLive adapter staging failed." >&2
-        return 1
-      }
-      if ! cp -p "$sess_cfg_file" "$sess_share/config/opencode/.opencode.json"; then
-        echo "[run] Could not snapshot the OpenLive session configuration." >&2
-        return 1
+      if openlive_stage_adapter "$sess_share"; then
+        if ! cp -p "$sess_cfg_file" "$sess_share/config/opencode/.opencode.json"; then
+          echo "[run] WARNING: could not snapshot the OpenLive session configuration." >&2
+        fi
+      else
+        openlive_unstage_adapter "$sess_share"
+        echo "[run] WARNING: OpenLive adapter staging failed; web startup will continue." >&2
       fi
     elif openlive_bridge_installed; then
       openlive_unstage_adapter "$sess_share"
       echo "[run] The installed OpenLive bridge needs its current adapter." >&2
       echo "[run] Run: opencode-vm openlive install" >&2
-      return 1
     else
       openlive_unstage_adapter "$sess_share"
     fi
@@ -10335,10 +11196,6 @@ start_session() {
     start_materialize_daemon "$sess" "$sess_share" || true
   fi
 
-  install_web_lib "$sess_share" ||
-    echo "[run] WARNING: could not write the web library into the session share." >&2
-  resolve_session_auth "$sess_share"
-
   if vm_exec "$sess" '
     set -euo pipefail
     PROJ_DIR="$1"
@@ -10353,6 +11210,7 @@ start_session() {
     OC_A2A_DEFAULT_SECRET="${10:-opencode-vm}"
     OC_LAN_UP="${11:-1}"
     OC_OPENLIVE_PROJECT_HASH="${12:-}"
+    OC_OPENLIVE_SCRIPT_VERSION="${13:-unknown}"
 
     # Shared in-VM web library (materialized into the session share by
     # install_web_lib on the host, and mounted here at the same path). It owns
@@ -10368,9 +11226,15 @@ start_session() {
       . "$SESS_SHARE/lib/web.sh"
     else
       echo "[run] web library missing from the session share — running without the redirector."
-      echo "[web] WARNING: without it the session also has no application password."
+      if [ -f "$SESS_SHARE/auth.env" ]; then
+        . "$SESS_SHARE/auth.env"
+        export OPENCODE_SERVER_USERNAME OPENCODE_SERVER_PASSWORD
+      fi
       start_web_proxies() { return 0; }
       stop_all_proxies()  { return 0; }
+      ensure_web_tls()    { return 0; }
+      start_openlive_gateway() { return 0; }
+      stop_openlive_gateway()  { return 0; }
       start_a2a()         { return 0; }
       stop_a2a()          { return 0; }
       wait_for_a2a()      { return 1; }
@@ -10390,27 +11254,27 @@ start_session() {
       local adapter="$SESS_SHARE/openlive/adapter"
       [ -f "$adapter/package-lock.json" ] || return 0
       local lock_hash mode installed_mode=""
-      lock_hash="$(sha256sum "$adapter/package-lock.json" | awk "{print \$1}")"
+      lock_hash="$(sha256sum "$adapter/package-lock.json" | awk "{print \$1}")" || return 1
       mode="source-$lock_hash"
       if [ -f "$adapter/manifest.json" ]; then
-        mode="release-$(cat "$adapter/.archive-sha256")"
+        mode="release-$(cat "$adapter/.archive-sha256")" || return 1
       fi
       [ -f "$adapter/node_modules/.ocvm-install-mode" ] && installed_mode="$(cat "$adapter/node_modules/.ocvm-install-mode")"
       if [ ! -f "$adapter/node_modules/.package-lock.json" ] || [ "$adapter/package-lock.json" -nt "$adapter/node_modules/.package-lock.json" ] || [ "$installed_mode" != "$mode" ]; then
         if [ "${mode%%-*}" = "source" ]; then
-          ( cd "$adapter" && npm ci --no-audit --no-fund --loglevel=error )
+          ( cd "$adapter" && npm ci --no-audit --no-fund --loglevel=error ) || return 1
         else
-          ( cd "$adapter" && npm ci --omit=dev --ignore-scripts --no-audit --no-fund --loglevel=error )
+          ( cd "$adapter" && npm ci --omit=dev --ignore-scripts --no-audit --no-fund --loglevel=error ) || return 1
         fi
-        printf "%s\n" "$mode" > "$adapter/node_modules/.ocvm-install-mode"
+        printf "%s\n" "$mode" > "$adapter/node_modules/.ocvm-install-mode" || return 1
       fi
       if [ "${mode%%-*}" = "source" ]; then
         # Source staging excludes dist, so every web start rebuilds it.
-        ( cd "$adapter" && npm run build --silent )
+        ( cd "$adapter" && npm run build --silent ) || return 1
       else
-        [ -f "$adapter/dist/main.js" ] || return 1
+        [ -f "$adapter/dist/main.js" ] && [ -f "$adapter/dist/remote/server.js" ] || return 1
       fi
-      mkdir -p "$SESS_SHARE/openlive"
+      mkdir -p "$SESS_SHARE/openlive" || return 1
       export OCVM_OPENLIVE_RUNTIME="$SESS_SHARE/openlive/runtime.json"
       export OCVM_OPENLIVE_MANAGER_FILE="$SESS_SHARE/openlive/manager.json"
       export OCVM_OPENLIVE_CONTROL_SOCKET="/tmp/ocvm-openlive/$OC_OPENLIVE_PROJECT_HASH/control.sock"
@@ -10418,9 +11282,9 @@ start_session() {
       local tmp="$OCVM_OPENLIVE_RUNTIME.$$.tmp"
       jq -n --arg project "$PROJ_DIR" --arg url "http://127.0.0.1:$OC_PORT_INTERNAL" \
         --arg generation "$(date +%s)-$$" --arg version "$(opencode --version 2>/dev/null || true)" \
-        "{schema:1,project:\$project,backendUrl:\$url,generation:\$generation,opencodeVersion:\$version}" > "$tmp"
-      chmod 600 "$tmp"
-      mv -f "$tmp" "$OCVM_OPENLIVE_RUNTIME"
+        "{schema:1,project:\$project,backendUrl:\$url,generation:\$generation,opencodeVersion:\$version}" > "$tmp" || return 1
+      chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+      mv -f "$tmp" "$OCVM_OPENLIVE_RUNTIME" || { rm -f "$tmp"; return 1; }
     }
 
     # ECC project identity: stable hash across sessions uses host project path
@@ -10509,6 +11373,7 @@ EOF
       # losing the history sync. Nothing below may die on a write error.
       set +e
       stop_all_proxies
+      stop_openlive_gateway
       stop_a2a
       rm -f "$SESS_SHARE/openlive/runtime.json"
       echo "[$(date +%T)] Syncing session data back to host..."
@@ -10590,12 +11455,20 @@ EOF
         echo "[openlive] Project session prepared."
         ;;
       web)
+        stop_all_proxies
+        stop_openlive_gateway
+        reap_stale_opencode "$OC_PORT_INTERNAL"
+        reap_stale_opencode "$OC_PORT"
+        if ! prepare_openlive_adapter; then
+          rm -f "$SESS_SHARE/openlive/runtime.json"
+          echo "[openlive] WARNING: adapter preparation failed; web startup will continue."
+        fi
+        ensure_web_tls
+        start_openlive_gateway
         start_web_proxies
-        prepare_openlive_adapter
         start_a2a
         print_web_banner
         a2a_watch_ready
-        reap_stale_opencode "$OC_PORT_INTERNAL"
         if [ "$OC_WEB_TUI" = "true" ]; then
           aa-exec -p opencode-sandbox -- opencode web --hostname 127.0.0.1 --port "$OC_PORT_INTERNAL" &
           OC_WEB_PID=$!
@@ -10660,7 +11533,7 @@ EOF
 
     # Sync back happens via the EXIT trap installed above (covers both clean
     # exit and Ctrl+C-driven termination of the web server).
-  ' "$proj" "$sess_share" "$SESSION_MODE" "$effective_base" "${OC_WEB_TUI:-false}" "$host_lan_ip" "${SESSION_TLS:-0}" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up" "$(proj_hash "$proj")"; then
+  ' "$proj" "$sess_share" "$SESSION_MODE" "$effective_base" "${OC_WEB_TUI:-false}" "$host_lan_ip" "${SESSION_TLS:-0}" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up" "$(proj_hash "$proj")" "$OCVM_VERSION"; then
     if [[ "$SESSION_MODE" != "shell" ]]; then
       OC_SHELL_OK=1
     fi
@@ -10719,12 +11592,12 @@ skills_cmd() {
       ;;
     on)
       local pkg="${1:-}"
-      [[ -n "$pkg" ]] || { echo "Usage: opencode-vm skills on <ecc-auto|ecc-all|webimg|ssh-toolkit>" >&2; exit 2; }
+      [[ -n "$pkg" ]] || { echo "Usage: opencode-vm skills on <besprechung|ecc-auto|ecc-all|webimg|ssh-toolkit>" >&2; exit 2; }
       skills_pkg_on "$pkg"
       ;;
     off)
       local pkg="${1:-}"
-      [[ -n "$pkg" ]] || { echo "Usage: opencode-vm skills off <ecc-auto|ecc-all|webimg|ssh-toolkit>" >&2; exit 2; }
+      [[ -n "$pkg" ]] || { echo "Usage: opencode-vm skills off <besprechung|ecc-auto|ecc-all|webimg|ssh-toolkit>" >&2; exit 2; }
       skills_pkg_off "$pkg"
       ;;
     list)
@@ -10764,7 +11637,7 @@ skills_cmd() {
 Usage:
   opencode-vm skills                      # status (alias)
   opencode-vm skills status [path]        # active packages + resolved skills + token estimate
-  opencode-vm skills on <pkg>             # enable package (ecc-auto | ecc-all | webimg | ssh-toolkit)
+  opencode-vm skills on <pkg>             # enable package (besprechung | ecc-auto | ecc-all | webimg | ssh-toolkit)
   opencode-vm skills off <pkg>            # disable package
   opencode-vm skills list [path]          # preview what would mount (no VM touch)
 
@@ -10777,6 +11650,10 @@ EOF
       exit 2 ;;
   esac
 }
+
+if [[ "${OCVM_INTERNAL_SOURCE_ONLY:-0}" == "1" && "${BASH_SOURCE[0]}" != "$0" ]]; then
+  return 0
+fi
 
 ocvm_notify_if_new_version_available "$cmd"
 
@@ -10825,7 +11702,7 @@ case "$cmd" in
     echo "  opencode-vm start"
     echo
     skills_load
-    echo "Built-in skills: webimg (web image optimization), ssh-toolkit (SSH/network workflows) — both default-active"
+    echo "Built-in skills: besprechung (session reviews/dialogues), webimg (web image optimization), ssh-toolkit (SSH/network workflows) — default-active"
     if [[ -n "${SKILLS_PACKAGES:-}" ]]; then
       echo "Active skill packages: ${SKILLS_PACKAGES}"
       echo "These will be applied automatically on next 'opencode-vm start'."
@@ -10988,6 +11865,8 @@ Usage:
                                            # (auto-starts a stopped-but-kept VM)
   opencode-vm shell                        # open shell in session VM (auto-starts if missing)
   opencode-vm openlive [install]           # install the OpenLive voice/chat bridge (macOS)
+  opencode-vm openlive remote              # map the current local stub to a remote HTTPS web project
+  opencode-vm openlive remote --remove     # remove the current stub mapping
   opencode-vm openlive prepare [project]   # deprecated: use 'opencode-vm web' instead
   opencode-vm openlive status              # inspect OpenLive discovery and readiness
   opencode-vm openlive doctor [project]    # diagnose bridge + project session
@@ -10997,8 +11876,10 @@ Usage:
                                            # manage later via 'opencode-vm skills|mcps on/off <pkg>'.
   opencode-vm skills {status|on|off|list} [pkg|path]
                                            # manage skill packages (knowledge-only markdown)
-                                           # packages (registry: skills/registry.json):
-                                           #   webimg      — default on; web image optimization pipeline
+                                            # packages (registry: skills/registry.json):
+                                            #   besprechung — default on; session-aware review
+                                            #                 documents and guided dialogues
+                                            #   webimg      — default on; web image optimization pipeline
                                            #                 (CLI tools pre-installed in base VM)
                                            #   ssh-toolkit — default on; SSH/network workflow knowledge
                                            #                 (CLI tools pre-installed in base VM)

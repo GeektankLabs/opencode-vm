@@ -6,7 +6,7 @@ import type { PromptImage } from "../types.js";
 const OPENLIVE_PREAMBLE_PREFIX =
   "[You're being used through OpenLive, a hands-free VOICE interface";
 const MODEL_CONFIG_ID = "model";
-const ADAPTER_VERSION = "0.1.3";
+const ADAPTER_VERSION = "0.1.5";
 const MAX_PROMPT_IMAGES = 2;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const MAX_PROMPT_IMAGE_BYTES = 8 * 1024 * 1024;

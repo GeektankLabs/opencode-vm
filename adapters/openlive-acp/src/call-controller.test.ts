@@ -150,7 +150,7 @@ test("selected ACP model is passed explicitly to OpenCode prompts", async () => 
   assert.equal(second?.system, undefined);
 });
 
-test("an attached work session keeps its own model selection", async () => {
+test("an attached work session keeps its settings and receives the voice discussion primer", async () => {
   let releasePrompt: (() => void) | undefined;
   const prompted: unknown[] = [];
   const gateway = {
@@ -232,11 +232,18 @@ test("an attached work session keeps its own model selection", async () => {
     modelID: "gpt",
   });
   assert.match(managerSettings?.system ?? "", /first user turn/i);
-  assert.deepEqual(workSettings, {
-    agent: "build",
-    model: { providerID: "Work", modelID: "code" },
-    variant: "high",
+  assert.equal(workSettings?.agent, "build");
+  assert.deepEqual(workSettings?.model, {
+    providerID: "Work",
+    modelID: "code",
   });
+  assert.equal(workSettings?.variant, "high");
+  assert.match(workSettings?.system ?? "", /OpenLive voice conversation/);
+  assert.match(workSettings?.system ?? "", /`besprechung` skill/);
+  assert.match(
+    workSettings?.system ?? "",
+    /not an instruction to implement changes/,
+  );
 });
 
 test("creating a work session attaches after confirmation with safe defaults", async () => {
@@ -327,14 +334,32 @@ test("creating a work session attaches after confirmation with safe defaults", a
     },
   ]);
   assert.deepEqual(deleted, []);
-  assert.deepEqual(settings[1], {
-    agent: "plan",
-    model: { providerID: "Luna", modelID: "gpt" },
-  });
-  assert.deepEqual(settings[2], {
-    agent: "build",
-    model: { providerID: "Work", modelID: "persisted" },
-  });
+  const firstWorkSettings = settings[1] as {
+    agent: string;
+    model: unknown;
+    system?: string;
+  };
+  const laterWorkSettings = settings[2] as {
+    agent: string;
+    model: unknown;
+    system?: string;
+  };
+  assert.deepEqual(
+    { agent: firstWorkSettings.agent, model: firstWorkSettings.model },
+    {
+      agent: "plan",
+      model: { providerID: "Luna", modelID: "gpt" },
+    },
+  );
+  assert.deepEqual(
+    { agent: laterWorkSettings.agent, model: laterWorkSettings.model },
+    {
+      agent: "build",
+      model: { providerID: "Work", modelID: "persisted" },
+    },
+  );
+  assert.match(firstWorkSettings.system ?? "", /`besprechung` skill/);
+  assert.match(laterWorkSettings.system ?? "", /`besprechung` skill/);
 });
 
 test("cancel aborts only a submitted active turn and settles it as cancelled", async () => {

@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 SCRIPT="$ROOT/opencode-vm.sh"
 TMP="$(mktemp -d)"
+NODE_BIN="$(command -v node)"
 trap 'rm -rf "$TMP"' EXIT
 
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
@@ -11,7 +12,7 @@ pass() { printf 'ok - %s\n' "$1"; }
 assert_file() { [[ -f "$1" ]] || fail "missing file: $1"; }
 assert_eq() { [[ "$1" == "$2" ]] || fail "expected '$2', got '$1'"; }
 
-ARTIFACT="$TMP/opencode-vm-openlive-adapter-0.1.3.tar"
+ARTIFACT="$TMP/opencode-vm-openlive-adapter-0.1.5.tar"
 "$ROOT/scripts/build-openlive-adapter.sh" "$ARTIFACT" >/dev/null
 ADAPTER_SHA="$(awk -F'"' '/^OPENLIVE_ADAPTER_SHA256=/ { print $2; exit }' "$SCRIPT")"
 assert_eq "$(sha256sum "$ARTIFACT" | awk '{ print $1 }')" "$ADAPTER_SHA"
@@ -78,7 +79,7 @@ assert_file "$AUTH"
 assert_eq "$(jq -r '.["acpCommand:opencode"]' "$SETTINGS")" "$SHIM acp"
 jq -e '.__opencode_vm_openlive__ == {"type":"api","key":"opencode-vm-openlive-readiness-v1"}' "$AUTH" >/dev/null ||
   fail "readiness marker missing or unexpected"
-assert_eq "$(HOME="$HOME_ONE" "$SHIM" --version)" "opencode-vm OpenLive bridge 0.5.43"
+assert_eq "$(HOME="$HOME_ONE" "$SHIM" --version)" "opencode-vm OpenLive bridge 0.5.46"
 pass "install creates the managed shim, setting, discovery link, and non-secret marker"
 
 STANDALONE_DIR="$TMP/standalone"
@@ -86,31 +87,88 @@ HOME_STANDALONE="$TMP/home-standalone"
 mkdir -p "$STANDALONE_DIR" "$HOME_STANDALONE"
 cp "$SCRIPT" "$STANDALONE_DIR/opencode-vm"
 chmod +x "$STANDALONE_DIR/opencode-vm"
+# Skills transport has its own fixture tests; adapter tests must stay offline.
+cp -R "$ROOT/skills" "$STANDALONE_DIR/skills"
 export MOCK_ADAPTER_ASSET="$ARTIFACT"
 HOME="$HOME_STANDALONE" bash "$STANDALONE_DIR/opencode-vm" openlive install \
   >"$TMP/standalone-install.out" 2>"$TMP/standalone-install.err"
-STANDALONE_CACHE="$HOME_STANDALONE/.opencode-vm/openlive/adapters/0.1.3-$ADAPTER_SHA"
+STANDALONE_CACHE="$HOME_STANDALONE/.opencode-vm/openlive/adapters/0.1.5-$ADAPTER_SHA"
 assert_file "$STANDALONE_CACHE/dist/main.js"
+assert_file "$STANDALONE_CACHE/dist/remote/client.js"
+assert_file "$STANDALONE_CACHE/dist/remote/server.js"
 assert_file "$STANDALONE_CACHE/manager/tool.mjs"
-jq -e '.schema == 1 and .adapterVersion == "0.1.3"' "$STANDALONE_CACHE/manifest.json" >/dev/null ||
+jq -e '.schema == 1 and .adapterVersion == "0.1.5" and .remoteProtocol == "ocvm-openlive.v1"' "$STANDALONE_CACHE/manifest.json" >/dev/null ||
   fail "standalone adapter manifest is missing or invalid"
 HOME="$HOME_STANDALONE" bash "$STANDALONE_DIR/opencode-vm" openlive status \
   >"$TMP/standalone-status.out" || true
-grep -q '0.1.3 (installed release)' "$TMP/standalone-status.out" ||
+grep -q '0.1.5 (installed release)' "$TMP/standalone-status.out" ||
   fail "standalone adapter status is not reported"
 HOME="$HOME_STANDALONE" bash "$STANDALONE_DIR/opencode-vm" openlive install \
   >"$TMP/standalone-reinstall.out" 2>"$TMP/standalone-reinstall.err"
 grep -q 'already installed' "$TMP/standalone-reinstall.out" ||
   fail "standalone adapter reinstall is not idempotent"
+STANDALONE_STUB="$TMP/standalone-remote-stub"
+mkdir -p "$STANDALONE_STUB"
+STANDALONE_REMOTE="$HOME_STANDALONE/.opencode-vm/project-state/openlive-test-hash"
+STANDALONE_REMOTE_TWO="$HOME_STANDALONE/.opencode-vm/project-state/migration-test-two"
+mkdir -p "$STANDALONE_REMOTE"
+mkdir -p "$STANDALONE_REMOTE_TWO"
+chmod 700 "$STANDALONE_REMOTE" "$STANDALONE_REMOTE_TWO"
+jq -n --arg localProject "$STANDALONE_STUB" '{schema:1,protocol:"ocvm-openlive.v1",
+  localProject:$localProject,origin:"https://127.0.0.1:1",projectId:"migration-project",
+  displayName:"Migration project",username:"opencode",password:"test-only-password",
+  nodePath:"old",clientPath:"old",adapterVersion:"0.1.3",adapterSha256:"old"}' \
+  > "$STANDALONE_REMOTE/openlive-remote.json"
+cp "$STANDALONE_REMOTE/openlive-remote.json" "$STANDALONE_REMOTE_TWO/openlive-remote.json"
+chmod 600 "$STANDALONE_REMOTE/openlive-remote.json" "$STANDALONE_REMOTE_TWO/openlive-remote.json"
 rm -rf "$STANDALONE_CACHE"
-HOME="$HOME_STANDALONE" bash "$STANDALONE_DIR/opencode-vm" \
-  --post-update-migrate 0.5.42 0.5.43 >"$TMP/standalone-migrate.out"
+PATH="$MOCK_BIN:$(dirname "$NODE_BIN"):/usr/local/bin:/usr/bin:/bin" HOME="$HOME_STANDALONE" \
+  bash "$STANDALONE_DIR/opencode-vm" \
+  --post-update-migrate 0.5.44 0.5.45 >"$TMP/standalone-migrate.out"
 assert_file "$STANDALONE_CACHE/dist/main.js"
-grep -q 'Updating the installed adapter' "$TMP/standalone-migrate.out" ||
-  fail "script update did not refresh the installed OpenLive adapter"
-pass "script updates refresh an already installed OpenLive bridge"
+grep -q 'Updating remote OpenLive runtimes' "$TMP/standalone-migrate.out" ||
+  fail "script update did not refresh remote OpenLive runtimes"
+for migrated in "$STANDALONE_REMOTE/openlive-remote.json" "$STANDALONE_REMOTE_TWO/openlive-remote.json"; do
+  jq -e --arg version "0.1.5" --arg sha "$ADAPTER_SHA" \
+    '.adapterVersion == $version and .adapterSha256 == $sha and
+     .projectId == "migration-project" and .password == "test-only-password" and
+     (.nodePath | type == "string" and length > 0) and (.clientPath | endswith("/dist/remote/client.js"))' \
+    "$migrated" >/dev/null || fail "script update did not bind every remote mapping to the refreshed adapter"
+done
+: > "$MOCK_LIMACTL_LOG"
+if PATH="$MOCK_BIN:$(dirname "$NODE_BIN"):/usr/local/bin:/usr/bin:/bin" HOME="$HOME_STANDALONE" \
+  bash "$STANDALONE_DIR/opencode-vm" openlive acp "$STANDALONE_STUB" \
+  >"$TMP/migrated-acp.out" 2>"$TMP/migrated-acp.err"; then
+  fail "unreachable migrated remote mapping unexpectedly connected"
+fi
+[[ ! -s "$MOCK_LIMACTL_LOG" ]] || fail "migrated remote mapping fell back to Lima"
+if grep -q 'mapping is invalid\|runtime is missing' "$TMP/migrated-acp.err"; then
+  fail "migrated mapping is not dispatchable"
+fi
+pass "script updates refresh installed adapters and version-bound remote mappings"
+MIGRATION_BAD="$HOME_STANDALONE/.opencode-vm/project-state/aaa-invalid"
+MIGRATION_GOOD="$HOME_STANDALONE/.opencode-vm/project-state/zzz-valid"
+mkdir -p "$MIGRATION_BAD" "$MIGRATION_GOOD"
+chmod 700 "$MIGRATION_BAD" "$MIGRATION_GOOD"
+printf '{}\n' > "$MIGRATION_BAD/openlive-remote.json"
+jq '.adapterVersion = "0.1.3" | .adapterSha256 = "old"' \
+  "$STANDALONE_REMOTE/openlive-remote.json" > "$MIGRATION_GOOD/openlive-remote.json"
+chmod 600 "$MIGRATION_BAD/openlive-remote.json" "$MIGRATION_GOOD/openlive-remote.json"
+if PATH="$MOCK_BIN:$(dirname "$NODE_BIN"):/usr/local/bin:/usr/bin:/bin" HOME="$HOME_STANDALONE" \
+  bash "$STANDALONE_DIR/opencode-vm" --post-update-migrate 0.5.44 0.5.45 \
+  >"$TMP/mixed-migrate.out" 2>"$TMP/mixed-migrate.err"; then
+  fail "migration with an invalid mapping should report failure"
+fi
+jq -e --arg version "0.1.5" --arg sha "$ADAPTER_SHA" \
+  '.adapterVersion == $version and .adapterSha256 == $sha' \
+  "$MIGRATION_GOOD/openlive-remote.json" >/dev/null ||
+  fail "an invalid mapping blocked migration of a later healthy mapping"
+rm -f "$MIGRATION_BAD/openlive-remote.json" "$MIGRATION_GOOD/openlive-remote.json"
+pass "mapping migration reports bad records after refreshing all healthy mappings"
 grep -A8 'post-update migration hook reported an issue' "$SCRIPT" | grep -q 'return 1' ||
   fail "script update does not fail when adapter migration fails"
+rm -f "$STANDALONE_REMOTE/openlive-remote.json"
+rm -f "$STANDALONE_REMOTE_TWO/openlive-remote.json"
 HOME="$HOME_STANDALONE" bash "$STANDALONE_DIR/opencode-vm" openlive uninstall \
   >"$TMP/standalone-uninstall.out"
 [[ ! -e "$HOME_STANDALONE/.opencode-vm/openlive/adapters" ]] ||
@@ -141,8 +199,8 @@ UNSAFE_ARTIFACT="$TMP/unsafe-openlive-adapter.tar"
 UNSAFE_SCRIPT="$STANDALONE_DIR/opencode-vm-unsafe"
 mkdir -p "$UNSAFE_STAGE"
 tar -xf "$ARTIFACT" -C "$UNSAFE_STAGE"
-ln -s /tmp/not-allowed "$UNSAFE_STAGE/opencode-vm-openlive-adapter-0.1.3/unsafe-link"
-tar -cf "$UNSAFE_ARTIFACT" -C "$UNSAFE_STAGE" opencode-vm-openlive-adapter-0.1.3
+ln -s /tmp/not-allowed "$UNSAFE_STAGE/opencode-vm-openlive-adapter-0.1.5/unsafe-link"
+tar -cf "$UNSAFE_ARTIFACT" -C "$UNSAFE_STAGE" opencode-vm-openlive-adapter-0.1.5
 UNSAFE_SHA="$(sha256sum "$UNSAFE_ARTIFACT" | awk '{ print $1 }')"
 perl -pe "s/$ADAPTER_SHA/$UNSAFE_SHA/g" "$STANDALONE_DIR/opencode-vm" > "$UNSAFE_SCRIPT"
 chmod +x "$UNSAFE_SCRIPT"
@@ -163,14 +221,14 @@ pass "adapter archives containing links are rejected before extraction"
 HOME_ACTIVATE="$TMP/home-activate-failure"
 mkdir -p "$HOME_ACTIVATE"
 export MOCK_ADAPTER_ASSET="$ARTIFACT"
-export MOCK_MV_FAIL_PATTERN="/openlive/adapters/0.1.3-$ADAPTER_SHA"
+export MOCK_MV_FAIL_PATTERN="/openlive/adapters/0.1.5-$ADAPTER_SHA"
 if HOME="$HOME_ACTIVATE" bash "$STANDALONE_DIR/opencode-vm" openlive install \
   >"$TMP/activate-install.out" 2>"$TMP/activate-install.err"; then
   fail "adapter activation failure should fail installation"
 fi
 [[ ! -e "$HOME_ACTIVATE/.opencode-vm/openlive/bin/opencode" ]] ||
   fail "activation failure left an OpenLive shim"
-[[ ! -e "$HOME_ACTIVATE/.opencode-vm/openlive/adapters/0.1.3-$ADAPTER_SHA" ]] ||
+[[ ! -e "$HOME_ACTIVATE/.opencode-vm/openlive/adapters/0.1.5-$ADAPTER_SHA" ]] ||
   fail "activation failure left an adapter cache"
 grep -q 'Could not activate the downloaded adapter' "$TMP/activate-install.err" ||
   fail "activation failure is not actionable"
@@ -208,9 +266,11 @@ if grep -qF 'src/main.ts" -nt "$adapter/dist/main.js' "$SCRIPT"; then
   fail "adapter build freshness checks only main.ts"
 fi
 assert_eq "$(grep -cF '( cd "$adapter" && npm run build --silent )' "$SCRIPT")" "2"
+assert_eq "$(grep -cF '( cd "$adapter" && npm run build --silent ) || return 1' "$SCRIPT")" "2"
+assert_eq "$(grep -cF 'if ! prepare_openlive_adapter; then' "$SCRIPT")" "2"
 pass "fresh and resumed web starts always rebuild staged adapter sources"
 
-assert_eq "$(grep -cF 'npm ci --omit=dev --ignore-scripts' "$SCRIPT")" "2"
+assert_eq "$(grep -cF 'npm ci --omit=dev --ignore-scripts' "$SCRIPT")" "3"
 pass "fresh and resumed web starts use packaged adapter runtime output"
 
 assert_eq "$(grep -cF 'rsync -a --checksum --delete' "$SCRIPT")" "2"
@@ -229,7 +289,7 @@ pass "release restaging replaces same-size files even when timestamps match"
 assert_eq "$(grep -cF 'if openlive_adapter_present; then' "$SCRIPT")" "2"
 assert_eq "$(grep -cF '[ -f "$adapter/package-lock.json" ] || return 0' "$SCRIPT")" "2"
 assert_eq "$(grep -cF 'openlive_unstage_adapter "$openlive_share"' "$SCRIPT")" "3"
-assert_eq "$(grep -cF 'openlive_unstage_adapter "$sess_share"' "$SCRIPT")" "2"
+assert_eq "$(grep -cF 'openlive_unstage_adapter "$sess_share"' "$SCRIPT")" "3"
 if grep -qF '[[ "$sess_mode" == "web" ]] && openlive_adapter_present' "$SCRIPT" ||
   grep -qF '[[ "$SESSION_MODE" == "web" ]] && openlive_adapter_present' "$SCRIPT"; then
   fail "OpenLive availability gates unrelated web-mode setup"
@@ -356,6 +416,151 @@ if HOME="$HOME_SPACE" bash "$SCRIPT" openlive install >"$TMP/space-home.out" 2>"
 fi
 pass "unsupported whitespace in the shim path fails clearly"
 
+ACP_INITIALIZE='{"jsonrpc":"2.0","id":1,"method":"initialize"}'
+HOME_REMOTE="$TMP/home-remote"
+REMOTE_STUB="$TMP/remote stub"
+REMOTE_STATE="$HOME_REMOTE/.opencode-vm/project-state/openlive-test-hash"
+REMOTE_NODE="$TMP/remote-node"
+REMOTE_CLIENT="$ROOT/adapters/openlive-acp/dist/remote/client.js"
+mkdir -p "$HOME_REMOTE" "$REMOTE_STUB" "$REMOTE_STATE"
+chmod 700 "$REMOTE_STATE"
+cat > "$REMOTE_NODE" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${MOCK_REMOTE_NODE_LOG:?}"
+IFS= read -r line
+printf '%s\n' "$line"
+EOF
+chmod +x "$REMOTE_NODE"
+jq -n --arg localProject "$REMOTE_STUB" --arg nodePath "$REMOTE_NODE" \
+  --arg clientPath "$REMOTE_CLIENT" --arg adapterSha "$ADAPTER_SHA" '{schema:1,protocol:"ocvm-openlive.v1",
+    localProject:$localProject,origin:"https://remote.example:4096",projectId:"remote-project",
+    displayName:"Remote project",username:"opencode",password:"secret",
+    nodePath:$nodePath,clientPath:$clientPath,adapterVersion:"0.1.5",
+    adapterSha256:$adapterSha}' > "$REMOTE_STATE/openlive-remote.json"
+chmod 600 "$REMOTE_STATE/openlive-remote.json"
+export MOCK_REMOTE_NODE_LOG="$TMP/remote-node.log"
+: > "$MOCK_REMOTE_NODE_LOG"
+: > "$MOCK_LIMACTL_LOG"
+printf '%s\n' "$ACP_INITIALIZE" | HOME="$HOME_REMOTE" bash "$SCRIPT" openlive acp "$REMOTE_STUB" \
+  >"$TMP/remote-acp.out" 2>"$TMP/remote-acp.err"
+assert_eq "$(<"$TMP/remote-acp.out")" "$ACP_INITIALIZE"
+[[ ! -s "$MOCK_LIMACTL_LOG" ]] || fail "remote ACP dispatch consulted Lima"
+grep -qF "$REMOTE_CLIENT $REMOTE_STATE/openlive-remote.json $REMOTE_STUB" "$MOCK_REMOTE_NODE_LOG" ||
+  fail "remote ACP dispatch did not use the mapped client runtime"
+pass "remote ACP dispatch needs neither a local VM nor Lima lifecycle access"
+
+chmod 644 "$REMOTE_STATE/openlive-remote.json"
+: > "$MOCK_LIMACTL_LOG"
+if HOME="$HOME_REMOTE" bash "$SCRIPT" openlive acp "$REMOTE_STUB" \
+  >"$TMP/public-remote.out" 2>"$TMP/public-remote.err"; then
+  fail "non-private remote mapping should fail"
+fi
+[[ ! -s "$MOCK_LIMACTL_LOG" ]] || fail "non-private remote mapping fell back to Lima"
+grep -q 'mapping is invalid' "$TMP/public-remote.err" || fail "non-private mapping error is not actionable"
+chmod 600 "$REMOTE_STATE/openlive-remote.json"
+
+printf '{}\n' > "$REMOTE_STATE/openlive-remote.json"
+: > "$MOCK_LIMACTL_LOG"
+if HOME="$HOME_REMOTE" bash "$SCRIPT" openlive acp "$REMOTE_STUB" \
+  >"$TMP/invalid-remote.out" 2>"$TMP/invalid-remote.err"; then
+  fail "invalid remote mapping should fail"
+fi
+[[ ! -s "$MOCK_LIMACTL_LOG" ]] || fail "invalid remote mapping fell back to Lima"
+[[ ! -s "$TMP/invalid-remote.out" ]] || fail "invalid remote mapping polluted ACP stdout"
+grep -q 'mapping is invalid' "$TMP/invalid-remote.err" || fail "invalid mapping error is not actionable"
+HOME="$HOME_REMOTE" bash "$SCRIPT" openlive remote --remove "$REMOTE_STUB" >"$TMP/remote-remove.out"
+[[ ! -e "$REMOTE_STATE/openlive-remote.json" ]] || fail "remote mapping survived removal"
+mkdir -p "$REMOTE_STATE"
+chmod 700 "$REMOTE_STATE"
+ln -s "$TMP/missing-remote-mapping" "$REMOTE_STATE/openlive-remote.json"
+: > "$MOCK_LIMACTL_LOG"
+if HOME="$HOME_REMOTE" bash "$SCRIPT" openlive acp "$REMOTE_STUB" \
+  >"$TMP/dangling-remote.out" 2>"$TMP/dangling-remote.err"; then
+  fail "dangling remote mapping should fail"
+fi
+[[ ! -s "$MOCK_LIMACTL_LOG" ]] || fail "dangling remote mapping fell back to Lima"
+HOME="$HOME_REMOTE" bash "$SCRIPT" openlive remote --remove "$REMOTE_STUB" >/dev/null
+[[ ! -L "$REMOTE_STATE/openlive-remote.json" ]] || fail "dangling remote mapping survived removal"
+pass "invalid remote mappings fail closed and removal is idempotent"
+
+SETUP_HOME="$TMP/home-remote-setup"
+SETUP_STUB="$TMP/setup stub"
+SETUP_APP="$TMP/OpenLive.app"
+SETUP_BIN="$TMP/setup-bin"
+SETUP_STATE="$TMP/setup-server.state"
+SETUP_CERT="$TMP/setup-cert.pem"
+SETUP_KEY="$TMP/setup-key.pem"
+mkdir -p "$SETUP_HOME" "$SETUP_STUB" "$SETUP_APP" "$SETUP_BIN"
+ln -s "$MOCK_BIN/uname" "$SETUP_BIN/uname"
+ln -s "$MOCK_BIN/md5" "$SETUP_BIN/md5"
+ln -s /usr/bin/curl "$SETUP_BIN/curl"
+"$NODE_BIN" "$ROOT/tests/helpers/remote-setup-server.mjs" "$SETUP_CERT" "$SETUP_KEY" "$SETUP_STATE" \
+  "$ROOT/adapters/openlive-acp/node_modules/ws/wrapper.mjs" >"$TMP/setup-server.out" 2>"$TMP/setup-server.err" &
+SETUP_SERVER_PID=$!
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  [[ -s "$SETUP_STATE" ]] && break
+  sleep 0.1
+done
+assert_file "$SETUP_STATE"
+SETUP_PORT="$(sed -n '1p' "$SETUP_STATE")"
+SETUP_FINGERPRINT="$(sed -n '2p' "$SETUP_STATE")"
+SETUP_PATH="$SETUP_BIN:$(dirname "$NODE_BIN"):/usr/local/bin:/usr/bin:/bin"
+if ! PATH="$SETUP_PATH" HOME="$SETUP_HOME" OCVM_OPENLIVE_APP_PATH="$SETUP_APP" \
+  OCVM_OPENLIVE_REMOTE_PASSWORD=remote-password-42 \
+  bash "$SCRIPT" openlive remote --stub "$SETUP_STUB" \
+  --url "https://127.0.0.1:$SETUP_PORT" --username opencode \
+  --fingerprint "$SETUP_FINGERPRINT" --yes >"$TMP/remote-setup.out" 2>"$TMP/remote-setup.err"; then
+  kill "$SETUP_SERVER_PID" 2>/dev/null || true
+  wait "$SETUP_SERVER_PID" 2>/dev/null || true
+  fail "transactional remote setup failed: $(<"$TMP/remote-setup.err")"
+fi
+kill "$SETUP_SERVER_PID" 2>/dev/null || true
+wait "$SETUP_SERVER_PID" 2>/dev/null || true
+SETUP_MAPPING="$SETUP_HOME/.opencode-vm/project-state/openlive-test-hash/openlive-remote.json"
+assert_file "$SETUP_MAPPING"
+jq -e --arg project "$SETUP_STUB" --arg fingerprint "$SETUP_FINGERPRINT" '
+  .localProject == $project and .projectId == "setup-project-id" and
+  .displayName == "Setup Remote" and .tlsFingerprint == $fingerprint and
+  .password == "remote-password-42" and .adapterVersion == "0.1.5"
+' "$SETUP_MAPPING" >/dev/null || fail "remote setup persisted the wrong mapping"
+assert_eq "$(stat -c '%a' "$SETUP_MAPPING")" "600"
+assert_eq "$(stat -c '%a' "$(dirname "$SETUP_MAPPING")")" "700"
+if grep -qF 'remote-password-42' "$TMP/remote-setup.out" "$TMP/remote-setup.err"; then
+  fail "remote setup leaked its password"
+fi
+if grep -q -- '--arg password' "$SCRIPT" || ! grep -qF -- '--rawfile password /dev/fd/9' "$SCRIPT"; then
+  fail "remote setup passes its password through process arguments"
+fi
+pass "remote setup verifies TLS/auth/project/ACP before atomically saving a private mapping"
+
+PIN_STATE="$TMP/pin-server.state"
+PIN_CERT="$TMP/pin-cert.pem"
+PIN_KEY="$TMP/pin-key.pem"
+"$NODE_BIN" "$ROOT/tests/helpers/remote-setup-server.mjs" "$PIN_CERT" "$PIN_KEY" "$PIN_STATE" \
+  "$ROOT/adapters/openlive-acp/node_modules/ws/wrapper.mjs" >"$TMP/pin-server.out" 2>"$TMP/pin-server.err" &
+PIN_SERVER_PID=$!
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  [[ -s "$PIN_STATE" ]] && break
+  sleep 0.1
+done
+assert_file "$PIN_STATE"
+PIN_PORT="$(sed -n '1p' "$PIN_STATE")"
+MAPPING_BEFORE="$(sha256sum "$SETUP_MAPPING" | awk '{print $1}')"
+if PATH="$SETUP_PATH" HOME="$SETUP_HOME" CURL_CA_BUNDLE="$PIN_CERT" \
+  OCVM_OPENLIVE_APP_PATH="$SETUP_APP" OCVM_OPENLIVE_REMOTE_PASSWORD=remote-password-42 \
+  bash "$SCRIPT" openlive remote --stub "$SETUP_STUB" --url "https://127.0.0.1:$PIN_PORT" \
+  --fingerprint "$(printf '0%.0s' {1..64})" --yes >"$TMP/wrong-pin.out" 2>"$TMP/wrong-pin.err"; then
+  kill "$PIN_SERVER_PID" 2>/dev/null || true
+  wait "$PIN_SERVER_PID" 2>/dev/null || true
+  fail "explicit fingerprint mismatch should fail for a CA-trusted certificate"
+fi
+kill "$PIN_SERVER_PID" 2>/dev/null || true
+wait "$PIN_SERVER_PID" 2>/dev/null || true
+grep -q 'fingerprint does not match' "$TMP/wrong-pin.err" || fail "explicit pin mismatch is not actionable"
+assert_eq "$(sha256sum "$SETUP_MAPPING" | awk '{print $1}')" "$MAPPING_BEFORE"
+pass "explicit TLS pins are enforced even when the certificate chain is trusted"
+
 HOME_THREE="$TMP/home-three"
 PROJECT="$TMP/project with spaces"
 mkdir -p "$HOME_THREE/.opencode-vm/sessions/openlive-test-hash/config/opencode" \
@@ -371,7 +576,6 @@ HOME="$HOME_THREE" bash "$SCRIPT" openlive acp "$PROJECT" >"$TMP/acp.out" 2>"$TM
 assert_eq "$(<"$TMP/acp.out")" '{"jsonrpc":"2.0","method":"test/openlive"}'
 pass "ACP stdout contains only protocol data for a project path with spaces"
 
-ACP_INITIALIZE='{"jsonrpc":"2.0","id":1,"method":"initialize"}'
 export MOCK_CONSUME_STDIN=1 MOCK_ECHO_STDIN=1
 printf '%s\n' "$ACP_INITIALIZE" | HOME="$HOME_THREE" bash "$SCRIPT" openlive acp "$PROJECT" >"$TMP/stdin.out" 2>"$TMP/stdin.err"
 assert_eq "$(<"$TMP/stdin.out")" "$ACP_INITIALIZE"
@@ -436,5 +640,8 @@ fi
 [[ ! -s "$TMP/no-base.out" ]] || fail "unprepared-project error polluted ACP stdout"
 grep -q "opencode-vm web" "$TMP/no-base.err" || fail "missing web-runtime error is not actionable"
 pass "first use requires a central web runtime outside the ACP handshake timeout"
+
+python3 "$ROOT/tests/web_proxy_remote_test.py"
+pass "the existing web port routes only exact remote OpenLive paths to the gateway"
 
 printf 'OpenLive tests passed.\n'

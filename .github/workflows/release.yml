@@ -40,8 +40,9 @@ jobs:
         run: npm run check && npm run build && npm test
       - name: Validate shell integration
         run: |
-          bash -n opencode-vm.sh tests/openlive_test.sh scripts/build-openlive-adapter.sh
-          shellcheck --severity=error opencode-vm.sh tests/openlive_test.sh scripts/build-openlive-adapter.sh
+          bash -n opencode-vm.sh tests/openlive_test.sh tests/besprechung_test.sh scripts/build-openlive-adapter.sh
+          shellcheck --severity=error opencode-vm.sh tests/openlive_test.sh tests/besprechung_test.sh scripts/build-openlive-adapter.sh
+          bash tests/besprechung_test.sh
           bash tests/openlive_test.sh
       - name: Build reproducible OpenLive adapter
         run: |
@@ -57,12 +58,16 @@ jobs:
           tar -xf "release-a/$OPENLIVE_ASSET" -C release-smoke
           root="release-smoke/${OPENLIVE_ASSET%.tar}"
           test -f "$root/dist/main.js"
+          test -f "$root/dist/remote/client.js"
+          test -f "$root/dist/remote/server.js"
           test -f "$root/manager/tool.mjs"
           test ! -e "$root/src"
           test ! -e "$root/tests"
           test ! -e "$root/node_modules"
           npm ci --omit=dev --ignore-scripts --no-audit --no-fund --prefix "$root"
           node --check "$root/dist/main.js"
+          node --check "$root/dist/remote/client.js"
+          node --check "$root/dist/remote/server.js"
           if output="$(env -u OCVM_OPENLIVE_RUNTIME -u OCVM_OPENLIVE_MANAGER_FILE \
             -u OCVM_OPENLIVE_CONTROL_SOCKET -u OCVM_OPENLIVE_PROJECT_HASH \
             node "$root/dist/main.js" 2>&1)"; then
@@ -72,6 +77,8 @@ jobs:
           grep -q 'Missing required OpenLive adapter environment: OCVM_OPENLIVE_RUNTIME' <<<"$output"
           OCVM_OPENLIVE_TEST_MANAGER_TOOL="$PWD/$root/manager/tool.mjs" \
             node adapters/openlive-acp/tests/opencode-tool-integration.mjs
+          OCVM_OPENLIVE_PACKAGE_ROOT="$PWD/$root" \
+            node adapters/openlive-acp/tests/openlive-remote-integration.mjs
       - name: Publish release
         run: |
           gh release create "$GITHUB_REF_NAME" \

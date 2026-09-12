@@ -105,22 +105,23 @@ ECC's `continuous-learning-v2` skill (commands `/learn` and `/instinct-status`) 
 
 `opencode-vm doctor` shows a summary of the learning store for the current working directory.
 
-## Skills (opt-in, knowledge only)
+## Skills (knowledge only)
 
 opencode-vm splits extensions into two subsystems: **Skills** (knowledge packages — pure markdown mounted as agent context) and **MCPs** (server-based capabilities — tools the agent can actually call). This section covers Skills; MCPs are below.
 
-The Skills subsystem is registry-driven: [`skills/registry.json`](skills/registry.json) is the source of truth. Four packages ship today:
+The Skills subsystem is registry-driven: [`skills/registry.json`](skills/registry.json) is the source of truth. Five packages ship today:
 
 | Package | Default | What it mounts | Approx. token cost |
 |---|---|---|---|
+| `besprechung` | on | Session-aware review documents, guided dialogues, and two slash commands | ~70 tokens |
 | `webimg`      | on  | Web image optimization pipeline (tools pre-installed in base VM) | ~70 tokens |
 | `ssh-toolkit` | on  | SSH/network workflows (tunnels, sshfs, discovery — tools pre-installed in base VM) | ~70 tokens |
 | `ecc-auto`    | off | Universal ECC skills + language-specific matches for your project (≈30) | +2–4k tokens |
 | `ecc-all`     | off | Every ECC skill (~180) | +10–15k tokens |
 
-`ecc-auto` and `ecc-all` are mutually exclusive (enabling one auto-disables the other). Both auto-clone ECC into `~/.opencode-vm/ecc/` on first enable — no separate install step needed. `webimg` and `ssh-toolkit` are seeded as active on first use; you can disable them with `opencode-vm skills off <pkg>` if you don't need them.
+`ecc-auto` and `ecc-all` are mutually exclusive (enabling one auto-disables the other). Both auto-clone ECC into `~/.opencode-vm/ecc/` on first enable — no separate install step needed. `besprechung`, `webimg`, and `ssh-toolkit` are seeded as active on first use; existing installations receive `besprechung` once during the update migration. You can disable any of them with `opencode-vm skills off <pkg>`. A later update does not re-enable a package that was deliberately disabled after that migration.
 
-**Why opt-in?** Each skill adds ~60–90 tokens of frontmatter to every new chat, whether you use it or not. `ecc-all` alone can push 10–15k tokens of pure menu noise — fine on a 200k-context remote model, painful on a 4k–32k local model.
+**Why configurable?** Each skill adds ~60–90 tokens of frontmatter to every new chat, whether you use it or not. `ecc-all` alone can push 10–15k tokens of pure menu noise — fine on a 200k-context remote model, painful on a 4k–32k local model.
 
 ```bash
 opencode-vm skills                       # status (alias)
@@ -130,6 +131,19 @@ opencode-vm skills off ecc-auto          # disable
 opencode-vm skills list                  # preview what would mount for cwd (no VM touch)
 opencode-vm skills list /path/to/other   # preview for another project path
 ```
+
+The `besprechung` package adds two commands to every new session:
+
+```text
+/besprechung [optional focus]         # complete, copyable discussion document
+/besprechung-dialog [optional focus]  # guided, turn-based discussion
+```
+
+Both commands reconstruct the relevant current session state instead of producing a chronological chat summary. The document form is optimized for reading aloud and transfer to another system. The dialogue form explains one main point at a time, handles follow-up questions, and asks only decisions that can materially change the work. Neither form treats discussion as an instruction to continue implementation.
+
+After an `opencode-vm update`, restart the affected OpenCode session. Fresh starts and reconnects (`opencode-vm attach` or `--reconnect`) both refresh the managed `besprechung` skill and commands before launching OpenCode. Disabling the package removes its unmodified managed files on the next start/reconnect; user-created or edited files are preserved with a notice. This package does not require rebuilding the base VM with `opencode-vm init`.
+
+Updates report failed skill-cache refreshes and validate the skill plus both command files before completing preparation. A complete local cache can be used offline for normal starts. If an update only partially succeeds, retry `opencode-vm update`: asset preparation runs even when the script version is already current. The one-time defaults migration still preserves later opt-outs.
 
 `opencode-vm init` only provisions the base VM — every opt-in skill stays off until you explicitly run `opencode-vm skills on <pkg>`.
 
@@ -651,23 +665,53 @@ opencode-vm openlive doctor /path/to/project
 
 `openlive install` downloads the adapter archive attached to the matching `opencode-vm` release over HTTPS, verifies the SHA-256 embedded in the script, rejects unsafe paths and archive links, and installs it atomically in a content-addressed cache under `~/.opencode-vm/openlive/adapters/`. Reinstalling the same version reuses the verified cache. A repository checkout instead uses the adjacent `adapters/openlive-acp/` source tree automatically, which keeps the development workflow unchanged.
 
-The bridge only needs to be installed once. Future `opencode-vm update` runs automatically prepare the adapter required by the new script version when they detect the managed bridge. If that download fails, the update prints `opencode-vm openlive install` as the recovery command and a web start will refuse to activate a stale adapter rather than silently disabling or downgrading OpenLive.
+The bridge only needs to be installed once. Future `opencode-vm update` runs automatically prepare the adapter required by the new script version when they detect the managed bridge or remote mappings. If that download fails, the update prints a recovery command and does not switch mappings to a mismatched client. Failure of the optional gateway never prevents the ordinary web runtime from starting.
 
 During `opencode-vm web`, the release package is staged into the session and its pinned production dependencies are installed before the web runtime becomes available. OpenLive's ACP startup itself never downloads, builds, provisions, or resumes anything.
 
-OpenLive remains optional. If the bridge has not been installed and no development source is adjacent to the script, `opencode-vm web` starts normally without preparing the adapter.
+OpenLive remains optional. A password-protected web session prepares the package and remote gateway even when OpenLive itself is not installed on that development computer. An unprotected or `--no-tls` session does not expose remote ACP.
+
+### Remote OpenLive from another Mac
+
+The OpenLive app and the real project may live on different computers. The development computer needs only the existing password-protected HTTPS web endpoint; Remote OpenLive adds no public port, SSH service, filesystem mount, project copy, or second OpenCode runtime.
+
+On the development computer:
+
+```bash
+cd /path/to/real/project
+opencode-vm web --password 'choose-a-password'
+```
+
+On the OpenLive workstation, install/update `opencode-vm` and Node.js 22 or newer, create an empty local stub, and configure it:
+
+```bash
+mkdir -p ~/Remote-Projekte/MeinProjekt
+cd ~/Remote-Projekte/MeinProjekt
+opencode-vm openlive remote
+```
+
+Enter the HTTPS URL printed by the development computer and its web password. For the default self-signed certificate, setup displays the SHA-256 fingerprint and requires explicit confirmation before credentials are sent. It then authenticates discovery, confirms the server-selected project, performs a non-mutating ACP WebSocket probe, installs the shared OpenLive shim, and atomically saves a private per-stub mapping. Select OpenCode and that stub folder in OpenLive afterwards.
+
+The workstation does not need `opencode-vm init`, Lima, a local session record, or the project files. A mapped folder always routes remotely; invalid credentials, changed certificates, an unavailable server, or a damaged mapping fail explicitly and never fall back to a local VM. The server accepts only one local-or-remote OpenLive call for the project at a time.
+
+```bash
+opencode-vm openlive doctor ~/Remote-Projekte/MeinProjekt
+cd ~/Remote-Projekte/MeinProjekt && opencode-vm openlive remote --remove
+```
 
 Keep `opencode-vm web` running, then choose OpenCode and that project folder in OpenLive and speak or type a task. Each call starts in a persistent OpenLive manager session. On the first turn, the manager reports how many project sessions exist and how many are busy, then offers to switch to an existing session or start a new one. It can inspect project sessions and attach the current call to an exact, idle work session. If explicitly requested, it can also create a work session using OpenCode's configured primary agent and the model selected in OpenLive. Creation and attachment take effect only after the manager's confirmation turn succeeds; an unconfirmed new session is removed. Subsequent voice prompts continue in the selected work session. Ending the call clears the attachment, so the next call starts in manager mode again. Apart from explicit creation, the manager is read-only. OpenLive's model picker lists the connected, tool-capable OpenCode models and remembers its choice; initially the bridge selects the model most recently used by a normal project session. Every manager prompt carries that selection explicitly, so stale provider defaults from the manager history cannot take over. An attached work session keeps its own model and reasoning variant. Lifecycle diagnostics stay on stderr so they cannot corrupt the ACP stream.
 
+Attached work-session turns carry a short voice primer. It asks OpenCode for natural, speakable answers and reminds it to load the `besprechung` skill when the user naturally asks to review the current work, understand a draft step by step, or walk through open decisions. No slash command is required in OpenLive. Ordinary short questions do not trigger the skill, an explicitly requested discussion document still uses the document form, and a discussion alone never authorizes implementation changes. Local and remote OpenLive use the same prompt path.
+
 When camera or screen sharing is active, OpenLive attaches the freshest JPEG frame to each completed spoken turn. The bridge accepts at most two frames, limits each frame to 5 MiB and all frame data in one turn to 8 MiB, and forwards them as normal OpenCode image attachments. This is per-turn visual context, not continuous video. The selected manager or attached-session model must be configured for image input; otherwise the turn fails with a clear model-capability error. Frames remain in the OpenCode session history like images uploaded through the Web UI.
 
-Run `opencode-vm init` before starting the first web session. OpenLive allows only 15 seconds for an ACP agent to become ready, so it deliberately never provisions, resumes, or starts a VM/server. A missing or stopped web runtime produces an actionable error instead of a timeout.
+For local OpenLive, run `opencode-vm init` before starting the first web session. A remote workstation does not need it. OpenLive allows only 15 seconds for an ACP agent to become ready, so ACP startup deliberately never downloads, provisions, resumes, or starts a VM/server. A missing or stopped web runtime produces an actionable error instead of a timeout.
 
 OpenLive 0.2.7 requires both a host-visible `opencode` command and a non-empty host `~/.local/share/opencode/auth.json` before it enables OpenCode. The installer creates a discovery symlink and, only when no real auth entries exist, a clearly named non-secret compatibility marker. It never copies VM credentials to the host. Existing host binaries, auth entries, and foreign OpenLive command overrides are preserved; use `install --force` only when intentionally replacing an override.
 
 OpenCode's own Bash and MCP tools run in the VM. A generic terminal opened by OpenLive itself is host-side and is not part of this bridge. The text MVP ignores client-provided `.mcp.json` definitions rather than executing them inside the VM; MCPs managed by `opencode-vm mcps` remain available through the central OpenCode runtime.
 
-Remove only the managed integration files with:
+Remove a mapping from its stub first. The global uninstaller refuses while mappings remain unless `--force` is explicit:
 
 ```bash
 opencode-vm openlive uninstall
@@ -688,6 +732,8 @@ opencode-vm a2a check    # verify an agent's A2A interface end to end
 opencode-vm attach       # reconnect to a running/kept session (e.g. after a terminal crash)
 opencode-vm shell        # shell into session VM (auto-starts if none is running)
 opencode-vm openlive     # install the OpenLive voice/chat bridge
+opencode-vm openlive remote                 # map the current stub to a remote web project
+opencode-vm openlive remote --remove        # remove the current stub mapping
 cd /path/to/project && opencode-vm web
 opencode-vm openlive doctor /path/to/project
 opencode-vm openlive uninstall
