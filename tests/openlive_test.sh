@@ -111,7 +111,7 @@ assert_file "$AUTH"
 assert_eq "$(jq -r '.["acpCommand:opencode"]' "$SETTINGS")" "$SHIM acp"
 jq -e '.__opencode_vm_openlive__ == {"type":"api","key":"opencode-vm-openlive-readiness-v1"}' "$AUTH" >/dev/null ||
   fail "readiness marker missing or unexpected"
-assert_eq "$(HOME="$HOME_ONE" "$SHIM" --version)" "opencode-vm OpenLive bridge 0.5.50"
+assert_eq "$(HOME="$HOME_ONE" "$SHIM" --version)" "opencode-vm OpenLive bridge 0.5.51"
 pass "install creates the managed shim, setting, discovery link, and non-secret marker"
 
 STANDALONE_DIR="$TMP/standalone"
@@ -292,6 +292,7 @@ pass "runtime descriptor filters preserve jq variables inside both guest scripts
 
 assert_eq "$(grep -cF 'OC_OPENLIVE_PROJECT_HASH="${12:-}"' "$SCRIPT")" "2"
 assert_eq "$(perl -0ne 'while (/OC_LAN_UP="\$\{11:-1\}"\n    OC_OPENLIVE_PROJECT_HASH="\$\{12:-\}"/g) { $n++ } END { print $n // 0 }' "$SCRIPT")" "2"
+assert_eq "$(grep -cF 'export OCVM_OPENLIVE_PROJECT_HASH="$OC_OPENLIVE_PROJECT_HASH"' "$SCRIPT")" "2"
 pass "fresh and resumed web starts receive the OpenLive project identity"
 
 if grep -qF 'src/main.ts" -nt "$adapter/dist/main.js' "$SCRIPT"; then

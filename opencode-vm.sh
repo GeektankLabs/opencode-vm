@@ -33,7 +33,7 @@ OPENLIVE_PREVIOUS_COMMAND="$OPENLIVE_DIR/previous-command"
 OPENLIVE_AUTH_MARKER="__opencode_vm_openlive__"
 OPENLIVE_LOCK_PATH=""
 OPENLIVE_ADAPTER_VERSION="0.1.6"
-OPENLIVE_ADAPTER_TAG="v0.5.50"
+OPENLIVE_ADAPTER_TAG="v0.5.51"
 OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.6.tar"
 OPENLIVE_ADAPTER_SHA256="06f461873b8b299de98220aa577824eb9807672b26cb069541acebcdd2d973b9"
 OPENLIVE_ACP_SDK_VERSION="1.2.1"
@@ -147,7 +147,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.5.50"
+OCVM_VERSION="0.5.51"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -10154,7 +10154,7 @@ attach_session() {
       export OCVM_OPENLIVE_RUNTIME="$SESS_SHARE/openlive/runtime.json"
       export OCVM_OPENLIVE_MANAGER_FILE="$SESS_SHARE/openlive/manager.json"
       export OCVM_OPENLIVE_CONTROL_SOCKET="/tmp/ocvm-openlive/$OC_OPENLIVE_PROJECT_HASH/control.sock"
-      export OCVM_OPENLIVE_PROJECT_HASH
+      export OCVM_OPENLIVE_PROJECT_HASH="$OC_OPENLIVE_PROJECT_HASH"
       local tmp="$OCVM_OPENLIVE_RUNTIME.$$.tmp"
       jq -n --arg project "$PROJ_DIR" --arg url "http://127.0.0.1:$OC_PORT_INTERNAL" \
         --arg generation "$(date +%s)-$$" --arg version "$(opencode --version 2>/dev/null || true)" \
@@ -11612,7 +11612,7 @@ start_session() {
       export OCVM_OPENLIVE_RUNTIME="$SESS_SHARE/openlive/runtime.json"
       export OCVM_OPENLIVE_MANAGER_FILE="$SESS_SHARE/openlive/manager.json"
       export OCVM_OPENLIVE_CONTROL_SOCKET="/tmp/ocvm-openlive/$OC_OPENLIVE_PROJECT_HASH/control.sock"
-      export OCVM_OPENLIVE_PROJECT_HASH
+      export OCVM_OPENLIVE_PROJECT_HASH="$OC_OPENLIVE_PROJECT_HASH"
       local tmp="$OCVM_OPENLIVE_RUNTIME.$$.tmp"
       jq -n --arg project "$PROJ_DIR" --arg url "http://127.0.0.1:$OC_PORT_INTERNAL" \
         --arg generation "$(date +%s)-$$" --arg version "$(opencode --version 2>/dev/null || true)" \

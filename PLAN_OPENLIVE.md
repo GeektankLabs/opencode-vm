@@ -2,15 +2,16 @@
 
 Current status:
 
-- The local, remote, and discussion MVP baselines plus the regular single-script distribution path are implemented at `opencode-vm` `0.5.50` / adapter `0.1.6`, using ACP SDK `1.2.1` and OpenCode SDK/server `1.18.21`.
+- The local, remote, and discussion MVP baselines plus the regular single-script distribution path are implemented at `opencode-vm` `0.5.51` / adapter `0.1.6`, using ACP SDK `1.2.1` and OpenCode SDK/server `1.18.21`.
 - A real OpenLive run has already confirmed ACP setup, reuse of the central runtime, model selection, normal streaming, and per-turn screen sharing. The exact OpenLive build used for that run was not recorded.
-- Remaining release gates are publication of the `v0.5.50` adapter asset before the script reaches the update path, the complete local macOS/OpenLive acceptance run in A.6, and the real two-computer remote acceptance in section 29.11, with the exact OpenLive build recorded. A real spoken discussion (skill activation, follow-up question, decision and result summary) remains a manual acceptance step.
+- Remaining release gates are publication of the `v0.5.51` adapter asset before the script reaches the update path, the complete local macOS/OpenLive acceptance run in A.6, and the real two-computer remote acceptance in section 29.11, with the exact OpenLive build recorded. A real spoken discussion (skill activation, follow-up question, decision and result summary) remains a manual acceptance step.
 - A versioned reproducible adapter archive, embedded SHA-256 verification, safe extraction, atomic content-addressed host cache, packaged-runtime session preparation, and tag-driven release workflow are part of the baseline. Richer ACP activity, generic attachments, and retention policy remain future work.
 - Remote OpenLive through the existing web port is implemented in section 29 (work package C). It uses a local stub folder and `opencode-vm openlive remote`; no SSH access, local project checkout, or client-side base VM is required.
 - Script `0.5.45` / adapter `0.1.5` add the first discussion baseline: the default-active bundled `besprechung` skill with document and turn-based dialogue commands. Every attached OpenLive work turn receives a concise voice primer that points natural review and decision requests to this skill; ordinary questions and the read-only manager remain unchanged. Existing installations receive the package through a one-time, opt-out-preserving skills migration.
 - Script `0.5.46` closes the discussion lifecycle gaps: reconnect refreshes owned skill/command files and applies opt-out while preserving user edits; cache refresh errors are explicit, incomplete packages are retried, and an already-current script can retry asset updates. Regression tests cover the actual attach entry point with a mocked VM launch and standalone Git transport with local fixtures. The adapter bytes and version remain `0.1.5`.
 - Script `0.5.49` / adapter `0.1.6` make Remote OpenLive inherit the HTTPS web session's authentication choice. Unprotected trusted-LAN sessions accept remote calls without a password; protected sessions retain the same Basic credential and setup asks for it only after an unauthenticated discovery receives HTTP 401.
 - Script `0.5.50` keeps self-signed setup portable across macOS TLS implementations: the expected curl trust failure stays quiet, and a valid certificate fingerprint remains usable when `openssl s_client` returns a non-zero status.
+- Script `0.5.51` fixes fresh and resumed web startup exporting the remote gateway's required project identity under the correct environment-variable name.
 
 ## 1. Goal
 
