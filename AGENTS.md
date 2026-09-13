@@ -37,6 +37,7 @@ The entire tool is one Bash script: `opencode-vm.sh`. Two small JSON registries 
 - `~/.opencode-vm/proxmox.env` — Proxmox MCP credentials (mode 0600; only when Proxmox MCP is enabled)
 - `~/.opencode-vm/proxmox-mcp/` — host-side clone of ProxmoxMCP (only when Proxmox MCP is enabled)
 - `~/.opencode-vm/openlive/adapters/` — verified, content-addressed OpenLive adapter release cache
+- `~/.opencode-vm/project-state/<hash>/vscode-trust.json` — an explicit per-project choice to continue without changing VS Code Workspace Trust; the startup check otherwise reads standard VS Code Stable saved trust state and guides users to Restricted Mode
 
 **Extensions split into two subsystems (since v0.4.4):** `skills/` is for knowledge packages (pure markdown mounted as agent context); `mcps/` is for Model Context Protocol servers (tools the agent can call). Two separate registries, two separate CLIs, two separate state files. The distinction is deliberate: skills and MCPs have different lifecycles, different token-cost curves, and different security surfaces (credentials apply only to MCPs). A unified abstraction was rejected as perpetuating the debt of conflating "context" with "capability".
 

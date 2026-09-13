@@ -111,7 +111,7 @@ assert_file "$AUTH"
 assert_eq "$(jq -r '.["acpCommand:opencode"]' "$SETTINGS")" "$SHIM acp"
 jq -e '.__opencode_vm_openlive__ == {"type":"api","key":"opencode-vm-openlive-readiness-v1"}' "$AUTH" >/dev/null ||
   fail "readiness marker missing or unexpected"
-assert_eq "$(HOME="$HOME_ONE" "$SHIM" --version)" "opencode-vm OpenLive bridge 0.5.46"
+assert_eq "$(HOME="$HOME_ONE" "$SHIM" --version)" "opencode-vm OpenLive bridge 0.5.47"
 pass "install creates the managed shim, setting, discovery link, and non-secret marker"
 
 STANDALONE_DIR="$TMP/standalone"
@@ -338,6 +338,10 @@ if grep -qF 'cp -p "$source/src/manager/plugin.mjs"' "$SCRIPT"; then
   fail "voice_sessions is still staged as a server plugin"
 fi
 pass "voice_sessions uses OpenCode's direct custom-tool discovery"
+
+perl -0ne 'exit 0 if /"mode": "primary",\s+"hidden": true,\s+"prompt": \$prompt/; exit 1' "$SCRIPT" ||
+  fail "OpenLive manager is visible in the normal primary-agent selector"
+pass "OpenLive manager stays directly addressable without appearing as a user mode"
 
 grep -qF 'callerMessageId: context.messageID' "$ROOT/adapters/openlive-acp/src/manager/tool.mjs" ||
   fail "voice_sessions does not identify its calling manager message"

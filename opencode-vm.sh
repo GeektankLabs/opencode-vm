@@ -147,7 +147,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.5.46"
+OCVM_VERSION="0.5.47"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -410,6 +410,300 @@ session_share_dir() {
 
 project_state_dir() {
   echo "$PROJECT_STATE_DIR/$(proj_hash "$1")"
+}
+
+# VS Code stores Workspace Trust in its own private SQLite state. This check is
+# deliberately read-only: it advises before sharing a project, but never edits
+# VS Code's data or claims to verify an already-open editor window.
+vscode_trust_preference_file() {
+  echo "$(project_state_dir "$1")/vscode-trust.json"
+}
+
+vscode_trust_has_exemption() {
+  local pref
+  pref="$(vscode_trust_preference_file "$1")"
+  [[ -f "$pref" ]] && grep -qxF '"choice":"leave-unchanged"' "$pref"
+}
+
+vscode_trust_save_exemption() {
+  local proj="$1" pref tmp
+  pref="$(vscode_trust_preference_file "$proj")"
+  mkdir -p "$(dirname "$pref")"
+  tmp="$(mktemp "${pref}.tmp.XXXXXX")" || return 1
+  printf '%s\n' '{' '"version":1,' '"choice":"leave-unchanged"' '}' > "$tmp"
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$pref"
+}
+
+vscode_trust_reset_exemption() {
+  rm -f "$(vscode_trust_preference_file "$1")"
+}
+
+# Prints: status<TAB>detail
+# Supported state is the standard macOS VS Code Stable user-data directory.
+vscode_trust_detect() {
+  local proj="$1" code_user db settings
+  code_user="$HOME/Library/Application Support/Code/User"
+  db="$code_user/globalStorage/state.vscdb"
+  settings="$code_user/settings.json"
+
+  if [[ ! -e "$db" && ! -e "$settings" ]]; then
+    printf 'not_detected\tVS Code Stable user data was not found\n'
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'unknown\tPython 3 is unavailable, so VS Code state cannot be read\n'
+    return 0
+  fi
+
+  python3 - "$proj" "$db" "$settings" <<'PY'
+import json
+import os
+import sqlite3
+import sys
+from pathlib import Path
+from urllib.parse import unquote, urlparse
+
+project, database, settings = sys.argv[1:]
+
+def load_jsonc(path):
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except OSError as error:
+        raise RuntimeError(f"could not read VS Code settings: {error}")
+
+    # Remove comments without touching comment-like text inside JSON strings.
+    output = []
+    index = 0
+    quoted = False
+    escaped = False
+    while index < len(text):
+        char = text[index]
+        if quoted:
+            output.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+            index += 1
+            continue
+        if char == '"':
+            quoted = True
+            output.append(char)
+            index += 1
+        elif text.startswith("//", index):
+            newline = text.find("\n", index)
+            index = len(text) if newline == -1 else newline
+        elif text.startswith("/*", index):
+            end = text.find("*/", index + 2)
+            if end == -1:
+                raise RuntimeError("VS Code settings contain an unterminated comment")
+            index = end + 2
+        else:
+            output.append(char)
+            index += 1
+
+    clean = "".join(output)
+    # VS Code settings permit trailing commas.
+    while True:
+        updated = __import__("re").sub(r",\s*([}\]])", r"\1", clean)
+        if updated == clean:
+            break
+        clean = updated
+    try:
+        return json.loads(clean)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"could not parse VS Code settings: {error.msg}")
+
+def path_from_uri(value):
+    if isinstance(value, dict):
+        if value.get("scheme") != "file":
+            return None
+        path = value.get("path")
+    elif isinstance(value, str):
+        parsed = urlparse(value)
+        if parsed.scheme != "file":
+            return None
+        path = parsed.path
+    else:
+        return None
+    if not isinstance(path, str) or not path:
+        return None
+    return os.path.realpath(unquote(path))
+
+try:
+    config = load_jsonc(settings)
+    if config.get("security.workspace.trust.enabled") is False:
+        print("trust_disabled\tWorkspace Trust is disabled in VS Code settings")
+        raise SystemExit
+
+    if not os.path.exists(database):
+        print("no_saved_trust\tno saved VS Code trust grant was found")
+        raise SystemExit
+
+    uri = Path(database).resolve().as_uri() + "?mode=ro"
+    try:
+        connection = sqlite3.connect(uri, uri=True, timeout=1)
+        row = connection.execute(
+            "SELECT value FROM ItemTable WHERE key = ?",
+            ("content.trust.model.key",),
+        ).fetchone()
+        connection.close()
+    except sqlite3.Error as error:
+        raise RuntimeError(f"could not read VS Code trust storage: {error}")
+
+    if row is None:
+        print("no_saved_trust\tno saved VS Code trust grant was found")
+        raise SystemExit
+    try:
+        entries = json.loads(row[0]).get("uriTrustInfo", [])
+    except (TypeError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"could not parse VS Code trust storage: {error}")
+
+    project = os.path.realpath(project)
+    match = None
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("trusted") is not True:
+            continue
+        trusted_path = path_from_uri(entry.get("uri"))
+        if not trusted_path:
+            continue
+        try:
+            if os.path.commonpath((project, trusted_path)) == trusted_path:
+                if match is None or len(trusted_path) > len(match):
+                    match = trusted_path
+        except ValueError:
+            continue
+    if match is None:
+        print("no_saved_trust\tno saved VS Code trust grant was found")
+    elif match == project:
+        print(f"trusted_direct\t{match}")
+    else:
+        print(f"trusted_parent\t{match}")
+except RuntimeError as error:
+    print(f"unknown\t{error}")
+except Exception as error:
+    print(f"unknown\tunexpected VS Code trust-check error: {error}")
+PY
+}
+
+vscode_trust_print_protection_help() {
+  local status="$1" detail="$2"
+  echo
+  echo "[vscode] Switch this project to Restricted Mode in your Mac's VS Code:"
+  echo "[vscode]"
+  echo "[vscode] 1. In the VS Code window containing this project, press Shift+Command+P."
+  echo "[vscode] 2. Run: Workspaces: Manage Workspace Trust"
+  echo "[vscode] 3. Select: Don't Trust"
+  echo "[vscode] 4. Confirm that VS Code shows Restricted Mode."
+  if [[ "$status" == "trusted_parent" ]]; then
+    echo "[vscode]"
+    echo "[vscode] This project inherits trust from: $detail"
+    echo "[vscode] Remove that parent from Trusted Folders & Workspaces. This also"
+    echo "[vscode] changes inherited trust for other projects beneath that folder."
+  elif [[ "$status" == "trust_disabled" ]]; then
+    echo "[vscode]"
+    echo "[vscode] Enable Security > Workspace > Trust: Enabled in VS Code Settings first."
+  fi
+  echo "[vscode]"
+  echo "[vscode] If Restricted Mode prevents opening VS Code's integrated terminal, use"
+  echo "[vscode] macOS Terminal for this command."
+  echo "[vscode]"
+  echo "[vscode] After completing these steps, rerun your OpenCode VM command from this"
+  echo "[vscode] project directory. The trust check will run again."
+}
+
+# Returns 0 to continue, 10 after printing protection help, or 2 when a
+# non-interactive caller needs an explicit decision.
+vscode_trust_preflight() {
+  local proj="$1" result status detail answer
+  [[ "${VSCODE_TRUST_PREFLIGHT_DONE:-0}" == "1" ]] && return 0
+  if vscode_trust_has_exemption "$proj"; then
+    VSCODE_TRUST_PREFLIGHT_DONE=1
+    return 0
+  fi
+
+  result="$(vscode_trust_detect "$proj")"
+  IFS=$'\t' read -r status detail <<< "$result"
+  case "$status" in
+    no_saved_trust|not_detected)
+      VSCODE_TRUST_PREFLIGHT_DONE=1
+      return 0
+      ;;
+    trusted_direct|trusted_parent|trust_disabled|unknown) ;;
+    *)
+      status="unknown"
+      detail="unrecognized VS Code trust-check result"
+      ;;
+  esac
+
+  echo "[vscode] $detail" >&2
+  echo "[vscode] Agent changes to shared files may be used by tasks or extensions running on your Mac." >&2
+  if [[ ! -t 0 ]] || [[ ! -r /dev/tty ]]; then
+    echo "[vscode] Non-interactive mode requires an explicit VS Code trust decision." >&2
+    return 2
+  fi
+
+  while true; do
+    echo >&2
+    echo "  [p] Show Restricted Mode instructions and exit (recommended)" >&2
+    echo "  [o] Continue unchanged this time" >&2
+    echo "  [a] Continue unchanged; remember for this project" >&2
+    echo "  [c] Cancel" >&2
+    read -r -p "Choose p/o/a/c [p]: " answer </dev/tty || return 2
+    case "${answer:-p}" in
+      p|P)
+        vscode_trust_print_protection_help "$status" "$detail"
+        return 10
+        ;;
+      o|O)
+        VSCODE_TRUST_PREFLIGHT_DONE=1
+        return 0
+        ;;
+      a|A)
+        if ! vscode_trust_save_exemption "$proj"; then
+          echo "[vscode] Could not save this project's choice; nothing was started." >&2
+          return 2
+        fi
+        VSCODE_TRUST_PREFLIGHT_DONE=1
+        return 0
+        ;;
+      c|C)
+        echo "[vscode] Cancelled; no VM session was started or resumed." >&2
+        return 10
+        ;;
+      *) echo "Please enter p, o, a, or c." >&2 ;;
+    esac
+  done
+}
+
+vscode_trust_cmd() {
+  local action="${1:-status}" proj status detail
+  proj="$(pwd)"
+  case "$action" in
+    status)
+      IFS=$'\t' read -r status detail <<< "$(vscode_trust_detect "$proj")"
+      echo "[vscode] Saved-state result: $status"
+      echo "[vscode] Detail: $detail"
+      if vscode_trust_has_exemption "$proj"; then
+        echo "[vscode] OpenCode VM choice: continue unchanged (remembered)"
+      else
+        echo "[vscode] OpenCode VM choice: no remembered exemption"
+      fi
+      ;;
+    reset)
+      vscode_trust_reset_exemption "$proj"
+      echo "[vscode] Removed the remembered choice for this project."
+      ;;
+    *)
+      echo "Usage: opencode-vm vscode-trust {status|reset}" >&2
+      return 2
+      ;;
+  esac
 }
 
 project_history_dir() {
@@ -5991,6 +6285,7 @@ openlive_stage_adapter() {
       .agent = ((.agent // {}) + {($name): {
           "description": $description,
           "mode": "primary",
+          "hidden": true,
           "prompt": $prompt,
           "permission": {"*":"deny", "voice_sessions":"allow"}
         }})
@@ -9532,10 +9827,18 @@ _attach_tunnel_cleanup() {
 }
 
 attach_session() {
-  need limactl
-  sanitize_lima_sock_dir
   local proj senv
   proj="$(pwd)"
+  local trust_rc
+  if vscode_trust_preflight "$proj"; then
+    :
+  else
+    trust_rc=$?
+    [[ "$trust_rc" -eq 10 ]] && return 0
+    return "$trust_rc"
+  fi
+  need limactl
+  sanitize_lima_sock_dir
   senv="$(session_env "$proj")"
 
   if [[ ! -f "$senv" ]]; then
@@ -10464,6 +10767,15 @@ apply_model_enrichment() {
 }
 
 start_session() {
+  proj="$(pwd)"
+  local trust_rc
+  if vscode_trust_preflight "$proj"; then
+    :
+  else
+    trust_rc=$?
+    [[ "$trust_rc" -eq 10 ]] && return 0
+    return "$trust_rc"
+  fi
   need limactl
   need rsync
   sanitize_lima_sock_dir
@@ -10474,8 +10786,6 @@ start_session() {
   backup_host_cfg
   ensure_policy_file
   printf "\r[run] Starting OpenCode VM session... done $(_ts)\n"
-
-  proj="$(pwd)"
 
   # Per-project RAM override (empty = inherit the base VM's size). Loaded before
   # the reconnect branch so a resumed VM can be resized too, not just a fresh clone.
@@ -11754,8 +12064,15 @@ case "$cmd" in
 
 
   shell)
-    need limactl
     proj="$(pwd)"
+    if vscode_trust_preflight "$proj"; then
+      :
+    else
+      _trust_rc=$?
+      [[ "$_trust_rc" -eq 10 ]] && exit 0
+      exit "$_trust_rc"
+    fi
+    need limactl
     senv="$(session_env "$proj")"
     if [[ ! -f "$senv" ]]; then
       echo "[shell] No running session found. Starting one now..."
@@ -11778,6 +12095,10 @@ case "$cmd" in
 
   attach)
     attach_session
+    ;;
+
+  vscode-trust)
+    vscode_trust_cmd "$@"
     ;;
 
   base)
@@ -11863,6 +12184,8 @@ Usage:
                                            #   (default starts with empty session list)
   opencode-vm attach                       # reconnect to the project's session VM
                                            # (auto-starts a stopped-but-kept VM)
+  opencode-vm vscode-trust {status|reset}  # inspect or reset this project's
+                                            # remembered VS Code trust choice
   opencode-vm shell                        # open shell in session VM (auto-starts if missing)
   opencode-vm openlive [install]           # install the OpenLive voice/chat bridge (macOS)
   opencode-vm openlive remote              # map the current local stub to a remote HTTPS web project

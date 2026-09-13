@@ -241,6 +241,7 @@ try {
         "openlive-manager": {
           description: "OpenLive manager integration test",
           mode: "primary",
+          hidden: true,
           prompt: "Always call voice_sessions before answering.",
           permission: { "*": "deny", voice_sessions: "allow" },
         },
@@ -285,6 +286,10 @@ try {
     directory: project,
     throwOnError: true,
   });
+  const agents = await client.app.agents();
+  const manager = agents.data?.find((agent) => agent.name === "openlive-manager");
+  assert.equal(manager?.mode, "primary");
+  assert.equal(manager?.hidden, true);
   const tools = await client.tool.list({
     provider: "integration",
     model: "tool-model",

@@ -59,6 +59,21 @@ or simply in your VS Code open terminal and type `opencode-vm start`
 
 The VM can run docker. So your AI agent can now start up your project in a docker container and run any tests and debug on it.
 
+### VS Code Workspace Trust
+
+`opencode-vm start`, `web`, `attach`, and `shell` check the saved Workspace Trust state of the standard macOS VS Code Stable installation before sharing a project. If the project is trusted, OpenCode VM explains how to switch VS Code to Restricted Mode and returns to your terminal. After changing the setting, rerun the OpenCode VM command; the check runs again.
+
+Restricted Mode still permits browsing and editing, but limits tasks, debugging, sensitive workspace settings, and extensions that could execute agent-modified project content on your Mac. Run builds, tests, and project tooling in the VM while the project is restricted on the host.
+
+You can deliberately continue without changing VS Code and remember that decision for one project. The choice is host-only at `~/.opencode-vm/project-state/<project-hash>/vscode-trust.json`; it never changes VS Code settings. Inspect or remove it from the project directory with:
+
+```bash
+opencode-vm vscode-trust status
+opencode-vm vscode-trust reset
+```
+
+The check reads VS Code's saved state only. It does not modify VS Code and cannot verify the live state of an already-open VS Code window, custom VS Code user-data directories, or other VS Code distributions.
+
 ## Daily Usage
 
 - See all the options:
