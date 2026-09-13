@@ -12,7 +12,7 @@ pass() { printf 'ok - %s\n' "$1"; }
 assert_file() { [[ -f "$1" ]] || fail "missing file: $1"; }
 assert_eq() { [[ "$1" == "$2" ]] || fail "expected '$2', got '$1'"; }
 
-ARTIFACT="$TMP/opencode-vm-openlive-adapter-0.1.5.tar"
+ARTIFACT="$TMP/opencode-vm-openlive-adapter-0.1.6.tar"
 "$ROOT/scripts/build-openlive-adapter.sh" "$ARTIFACT" >/dev/null
 ADAPTER_SHA="$(awk -F'"' '/^OPENLIVE_ADAPTER_SHA256=/ { print $2; exit }' "$SCRIPT")"
 assert_eq "$(sha256sum "$ARTIFACT" | awk '{ print $1 }')" "$ADAPTER_SHA"
@@ -111,7 +111,7 @@ assert_file "$AUTH"
 assert_eq "$(jq -r '.["acpCommand:opencode"]' "$SETTINGS")" "$SHIM acp"
 jq -e '.__opencode_vm_openlive__ == {"type":"api","key":"opencode-vm-openlive-readiness-v1"}' "$AUTH" >/dev/null ||
   fail "readiness marker missing or unexpected"
-assert_eq "$(HOME="$HOME_ONE" "$SHIM" --version)" "opencode-vm OpenLive bridge 0.5.48"
+assert_eq "$(HOME="$HOME_ONE" "$SHIM" --version)" "opencode-vm OpenLive bridge 0.5.49"
 pass "install creates the managed shim, setting, discovery link, and non-secret marker"
 
 STANDALONE_DIR="$TMP/standalone"
@@ -124,16 +124,16 @@ cp -R "$ROOT/skills" "$STANDALONE_DIR/skills"
 export MOCK_ADAPTER_ASSET="$ARTIFACT"
 HOME="$HOME_STANDALONE" bash "$STANDALONE_DIR/opencode-vm" openlive install \
   >"$TMP/standalone-install.out" 2>"$TMP/standalone-install.err"
-STANDALONE_CACHE="$HOME_STANDALONE/.opencode-vm/openlive/adapters/0.1.5-$ADAPTER_SHA"
+STANDALONE_CACHE="$HOME_STANDALONE/.opencode-vm/openlive/adapters/0.1.6-$ADAPTER_SHA"
 assert_file "$STANDALONE_CACHE/dist/main.js"
 assert_file "$STANDALONE_CACHE/dist/remote/client.js"
 assert_file "$STANDALONE_CACHE/dist/remote/server.js"
 assert_file "$STANDALONE_CACHE/manager/tool.mjs"
-jq -e '.schema == 1 and .adapterVersion == "0.1.5" and .remoteProtocol == "ocvm-openlive.v1"' "$STANDALONE_CACHE/manifest.json" >/dev/null ||
+jq -e '.schema == 1 and .adapterVersion == "0.1.6" and .remoteProtocol == "ocvm-openlive.v1"' "$STANDALONE_CACHE/manifest.json" >/dev/null ||
   fail "standalone adapter manifest is missing or invalid"
 HOME="$HOME_STANDALONE" bash "$STANDALONE_DIR/opencode-vm" openlive status \
   >"$TMP/standalone-status.out" || true
-grep -q '0.1.5 (installed release)' "$TMP/standalone-status.out" ||
+grep -q '0.1.6 (installed release)' "$TMP/standalone-status.out" ||
   fail "standalone adapter status is not reported"
 HOME="$HOME_STANDALONE" bash "$STANDALONE_DIR/opencode-vm" openlive install \
   >"$TMP/standalone-reinstall.out" 2>"$TMP/standalone-reinstall.err"
@@ -161,7 +161,7 @@ assert_file "$STANDALONE_CACHE/dist/main.js"
 grep -q 'Updating remote OpenLive runtimes' "$TMP/standalone-migrate.out" ||
   fail "script update did not refresh remote OpenLive runtimes"
 for migrated in "$STANDALONE_REMOTE/openlive-remote.json" "$STANDALONE_REMOTE_TWO/openlive-remote.json"; do
-  jq -e --arg version "0.1.5" --arg sha "$ADAPTER_SHA" \
+  jq -e --arg version "0.1.6" --arg sha "$ADAPTER_SHA" \
     '.adapterVersion == $version and .adapterSha256 == $sha and
      .projectId == "migration-project" and .password == "test-only-password" and
      (.nodePath | type == "string" and length > 0) and (.clientPath | endswith("/dist/remote/client.js"))' \
@@ -191,7 +191,7 @@ if PATH="$MOCK_BIN:$(dirname "$NODE_BIN"):/usr/local/bin:/usr/bin:/bin" HOME="$H
   >"$TMP/mixed-migrate.out" 2>"$TMP/mixed-migrate.err"; then
   fail "migration with an invalid mapping should report failure"
 fi
-jq -e --arg version "0.1.5" --arg sha "$ADAPTER_SHA" \
+jq -e --arg version "0.1.6" --arg sha "$ADAPTER_SHA" \
   '.adapterVersion == $version and .adapterSha256 == $sha' \
   "$MIGRATION_GOOD/openlive-remote.json" >/dev/null ||
   fail "an invalid mapping blocked migration of a later healthy mapping"
@@ -231,8 +231,8 @@ UNSAFE_ARTIFACT="$TMP/unsafe-openlive-adapter.tar"
 UNSAFE_SCRIPT="$STANDALONE_DIR/opencode-vm-unsafe"
 mkdir -p "$UNSAFE_STAGE"
 tar -xf "$ARTIFACT" -C "$UNSAFE_STAGE"
-ln -s /tmp/not-allowed "$UNSAFE_STAGE/opencode-vm-openlive-adapter-0.1.5/unsafe-link"
-tar -cf "$UNSAFE_ARTIFACT" -C "$UNSAFE_STAGE" opencode-vm-openlive-adapter-0.1.5
+ln -s /tmp/not-allowed "$UNSAFE_STAGE/opencode-vm-openlive-adapter-0.1.6/unsafe-link"
+tar -cf "$UNSAFE_ARTIFACT" -C "$UNSAFE_STAGE" opencode-vm-openlive-adapter-0.1.6
 UNSAFE_SHA="$(sha256sum "$UNSAFE_ARTIFACT" | awk '{ print $1 }')"
 perl -pe "s/$ADAPTER_SHA/$UNSAFE_SHA/g" "$STANDALONE_DIR/opencode-vm" > "$UNSAFE_SCRIPT"
 chmod +x "$UNSAFE_SCRIPT"
@@ -253,14 +253,14 @@ pass "adapter archives containing links are rejected before extraction"
 HOME_ACTIVATE="$TMP/home-activate-failure"
 mkdir -p "$HOME_ACTIVATE"
 export MOCK_ADAPTER_ASSET="$ARTIFACT"
-export MOCK_MV_FAIL_PATTERN="/openlive/adapters/0.1.5-$ADAPTER_SHA"
+export MOCK_MV_FAIL_PATTERN="/openlive/adapters/0.1.6-$ADAPTER_SHA"
 if HOME="$HOME_ACTIVATE" bash "$STANDALONE_DIR/opencode-vm" openlive install \
   >"$TMP/activate-install.out" 2>"$TMP/activate-install.err"; then
   fail "adapter activation failure should fail installation"
 fi
 [[ ! -e "$HOME_ACTIVATE/.opencode-vm/openlive/bin/opencode" ]] ||
   fail "activation failure left an OpenLive shim"
-[[ ! -e "$HOME_ACTIVATE/.opencode-vm/openlive/adapters/0.1.5-$ADAPTER_SHA" ]] ||
+[[ ! -e "$HOME_ACTIVATE/.opencode-vm/openlive/adapters/0.1.6-$ADAPTER_SHA" ]] ||
   fail "activation failure left an adapter cache"
 grep -q 'Could not activate the downloaded adapter' "$TMP/activate-install.err" ||
   fail "activation failure is not actionable"
@@ -322,11 +322,15 @@ assert_eq "$(grep -cF 'if openlive_adapter_present; then' "$SCRIPT")" "2"
 assert_eq "$(grep -cF '[ -f "$adapter/package-lock.json" ] || return 0' "$SCRIPT")" "2"
 assert_eq "$(grep -cF 'openlive_unstage_adapter "$openlive_share"' "$SCRIPT")" "3"
 assert_eq "$(grep -cF 'openlive_unstage_adapter "$sess_share"' "$SCRIPT")" "3"
+assert_eq "$(grep -cF 'if ! openlive_adapter_present; then' "$SCRIPT")" "2"
+if grep -qE 'auth\.env.*openlive_adapter_present' "$SCRIPT"; then
+  fail "passwordless web sessions still skip Remote OpenLive adapter preparation"
+fi
 if grep -qF '[[ "$sess_mode" == "web" ]] && openlive_adapter_present' "$SCRIPT" ||
   grep -qF '[[ "$SESSION_MODE" == "web" ]] && openlive_adapter_present' "$SCRIPT"; then
   fail "OpenLive availability gates unrelated web-mode setup"
 fi
-pass "web sessions remain available when the optional OpenLive bridge is not installed"
+pass "web sessions prepare Remote OpenLive with or without web authentication"
 
 grep -qF 'echo "[run] Session command failed."' "$SCRIPT" ||
   fail "fresh session guest failures are still masked"
@@ -472,7 +476,7 @@ jq -n --arg localProject "$REMOTE_STUB" --arg nodePath "$REMOTE_NODE" \
   --arg clientPath "$REMOTE_CLIENT" --arg adapterSha "$ADAPTER_SHA" '{schema:1,protocol:"ocvm-openlive.v1",
     localProject:$localProject,origin:"https://remote.example:4096",projectId:"remote-project",
     displayName:"Remote project",username:"opencode",password:"secret",
-    nodePath:$nodePath,clientPath:$clientPath,adapterVersion:"0.1.5",
+    nodePath:$nodePath,clientPath:$clientPath,adapterVersion:"0.1.6",
     adapterSha256:$adapterSha}' > "$REMOTE_STATE/openlive-remote.json"
 chmod 600 "$REMOTE_STATE/openlive-remote.json"
 export MOCK_REMOTE_NODE_LOG="$TMP/remote-node.log"
@@ -542,8 +546,8 @@ assert_file "$SETUP_STATE"
 SETUP_PORT="$(sed -n '1p' "$SETUP_STATE")"
 SETUP_FINGERPRINT="$(sed -n '2p' "$SETUP_STATE")"
 SETUP_PATH="$SETUP_BIN:$(dirname "$NODE_BIN"):/usr/local/bin:/usr/bin:/bin"
-if ! PATH="$SETUP_PATH" HOME="$SETUP_HOME" OCVM_OPENLIVE_APP_PATH="$SETUP_APP" \
-  OCVM_OPENLIVE_REMOTE_PASSWORD=remote-password-42 \
+if ! printf '%s\n' 'remote-password-42' | \
+  PATH="$SETUP_PATH" HOME="$SETUP_HOME" OCVM_OPENLIVE_APP_PATH="$SETUP_APP" \
   bash "$SCRIPT" openlive remote --stub "$SETUP_STUB" \
   --url "https://127.0.0.1:$SETUP_PORT" --username opencode \
   --fingerprint "$SETUP_FINGERPRINT" --yes >"$TMP/remote-setup.out" 2>"$TMP/remote-setup.err"; then
@@ -558,7 +562,7 @@ assert_file "$SETUP_MAPPING"
 jq -e --arg project "$SETUP_STUB" --arg fingerprint "$SETUP_FINGERPRINT" '
   .localProject == $project and .projectId == "setup-project-id" and
   .displayName == "Setup Remote" and .tlsFingerprint == $fingerprint and
-  .password == "remote-password-42" and .adapterVersion == "0.1.5"
+  .password == "remote-password-42" and .adapterVersion == "0.1.6"
 ' "$SETUP_MAPPING" >/dev/null || fail "remote setup persisted the wrong mapping"
 assert_eq "$(stat -c '%a' "$SETUP_MAPPING")" "600"
 assert_eq "$(stat -c '%a' "$(dirname "$SETUP_MAPPING")")" "700"
@@ -569,6 +573,44 @@ if grep -q -- '--arg password' "$SCRIPT" || ! grep -qF -- '--rawfile password /d
   fail "remote setup passes its password through process arguments"
 fi
 pass "remote setup verifies TLS/auth/project/ACP before atomically saving a private mapping"
+
+NOAUTH_HOME="$TMP/home-remote-no-auth"
+NOAUTH_STUB="$TMP/no-auth stub"
+NOAUTH_STATE="$TMP/no-auth-server.state"
+NOAUTH_CERT="$TMP/no-auth-cert.pem"
+NOAUTH_KEY="$TMP/no-auth-key.pem"
+mkdir -p "$NOAUTH_HOME" "$NOAUTH_STUB"
+"$NODE_BIN" "$ROOT/tests/helpers/remote-setup-server.mjs" "$NOAUTH_CERT" "$NOAUTH_KEY" "$NOAUTH_STATE" \
+  "$ROOT/adapters/openlive-acp/node_modules/ws/wrapper.mjs" --no-auth \
+  >"$TMP/no-auth-server.out" 2>"$TMP/no-auth-server.err" &
+NOAUTH_SERVER_PID=$!
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  [[ -s "$NOAUTH_STATE" ]] && break
+  sleep 0.1
+done
+assert_file "$NOAUTH_STATE"
+NOAUTH_PORT="$(sed -n '1p' "$NOAUTH_STATE")"
+NOAUTH_FINGERPRINT="$(sed -n '2p' "$NOAUTH_STATE")"
+if ! PATH="$SETUP_PATH" HOME="$NOAUTH_HOME" OCVM_OPENLIVE_APP_PATH="$SETUP_APP" \
+  bash "$SCRIPT" openlive remote --stub "$NOAUTH_STUB" \
+  --url "https://127.0.0.1:$NOAUTH_PORT" --username opencode \
+  --fingerprint "$NOAUTH_FINGERPRINT" --yes >"$TMP/no-auth-setup.out" 2>"$TMP/no-auth-setup.err"; then
+  kill "$NOAUTH_SERVER_PID" 2>/dev/null || true
+  wait "$NOAUTH_SERVER_PID" 2>/dev/null || true
+  fail "no-auth remote setup failed: $(<"$TMP/no-auth-setup.err")"
+fi
+kill "$NOAUTH_SERVER_PID" 2>/dev/null || true
+wait "$NOAUTH_SERVER_PID" 2>/dev/null || true
+NOAUTH_MAPPING="$NOAUTH_HOME/.opencode-vm/project-state/openlive-test-hash/openlive-remote.json"
+assert_file "$NOAUTH_MAPPING"
+jq -e --arg project "$NOAUTH_STUB" '
+  .localProject == $project and .projectId == "setup-project-id" and
+  .password == ""
+' "$NOAUTH_MAPPING" >/dev/null || fail "no-auth setup persisted the wrong mapping"
+if grep -qF 'Web password for' "$TMP/no-auth-setup.out" "$TMP/no-auth-setup.err"; then
+  fail "no-auth setup unexpectedly prompted for a password"
+fi
+pass "remote setup detects an unprotected HTTPS gateway without prompting for a password"
 
 PIN_STATE="$TMP/pin-server.state"
 PIN_CERT="$TMP/pin-cert.pem"

@@ -197,13 +197,91 @@ test("remote gateway authenticates discovery and a probe creates no adapter stat
   }
 });
 
-async function websocketProbe(port: number): Promise<Record<string, unknown>> {
+test("remote gateway follows an unprotected web backend without requiring auth", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ocvm-openlive-no-auth-"));
+  const runtimeFile = join(directory, "runtime.json");
+  const managerFile = join(directory, "manager.json");
+  const socketPath = join(directory, "socket", "control.sock");
+  const readyFile = join(directory, "gateway-ready.json");
+  const backend = http.createServer((request, response) => {
+    assert.equal(request.headers.authorization, undefined);
+    const body = request.url?.startsWith("/global/health")
+      ? { healthy: true }
+      : ["voice_sessions"];
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify(body));
+  });
+  await new Promise<void>((resolve) => backend.listen(0, "127.0.0.1", resolve));
+  const backendAddress = backend.address();
+  assert(backendAddress && typeof backendAddress === "object");
+  await mkdir(join(directory, "socket"));
+  await writeFile(
+    runtimeFile,
+    JSON.stringify({
+      schema: 1,
+      project: "/remote/project",
+      backendUrl: `http://127.0.0.1:${backendAddress.port}`,
+      generation: "test-generation",
+      opencodeVersion: "test",
+    }),
+  );
+  const child = spawn(
+    process.execPath,
+    [join(process.cwd(), "dist/remote/server.js")],
+    {
+      env: {
+        ...process.env,
+        OCVM_OPENLIVE_RUNTIME: runtimeFile,
+        OCVM_OPENLIVE_MANAGER_FILE: managerFile,
+        OCVM_OPENLIVE_CONTROL_SOCKET: socketPath,
+        OCVM_OPENLIVE_PROJECT_HASH: "project-id",
+        OCVM_OPENLIVE_GATEWAY_PORT: "0",
+        OCVM_OPENLIVE_GATEWAY_READY: readyFile,
+        OCVM_OPENLIVE_SCRIPT_VERSION: "test-script",
+      },
+      stdio: ["ignore", "ignore", "pipe"],
+    },
+  );
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => {
+    stderr += chunk;
+  });
+  try {
+    await waitFor(() => stderr.includes("gateway ready"));
+    const readyState = JSON.parse(await readFile(readyFile, "utf8")) as {
+      port: number;
+    };
+    const infoResponse = await fetch(
+      `http://127.0.0.1:${readyState.port}/openlive/info`,
+    );
+    assert.equal(infoResponse.status, 200);
+    const ready = await websocketProbe(readyState.port, undefined);
+    assert.equal(ready.projectId, "project-id");
+    await assert.rejects(access(managerFile));
+    await assert.rejects(access(socketPath));
+  } finally {
+    child.kill("SIGTERM");
+    await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+    await new Promise<void>((resolve) => backend.close(() => resolve()));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+async function websocketProbe(
+  port: number,
+  password: string | undefined = "secret",
+): Promise<Record<string, unknown>> {
   const ws = new WebSocket(
     `ws://127.0.0.1:${port}/openlive/acp`,
     REMOTE_PROTOCOL,
     {
       headers: {
-        Authorization: `Basic ${Buffer.from("opencode:secret").toString("base64")}`,
+        ...(password
+          ? {
+              Authorization: `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}`,
+            }
+          : {}),
         "X-OCVM-OpenLive-Project": "project-id",
       },
     },

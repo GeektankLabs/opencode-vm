@@ -29,6 +29,14 @@ export type RemoteMapping = {
   tlsFingerprint?: string;
 };
 
+class RemoteDiscoveryError extends Error {
+  constructor(readonly statusCode: number | undefined) {
+    super(
+      `Remote OpenLive discovery failed (HTTP ${statusCode ?? "unknown"}).`,
+    );
+  }
+}
+
 export async function runRemoteClient(
   mappingFile: string,
   localProject: string,
@@ -45,10 +53,13 @@ export async function runRemoteClient(
     throw new Error("Remote OpenLive requires an HTTPS/WSS endpoint.");
   }
   endpoint.protocol = "wss:";
-  const authorization = `Basic ${Buffer.from(`${mapping.username}:${mapping.password}`).toString("base64")}`;
   const options: ClientOptions = {
     headers: {
-      Authorization: authorization,
+      ...(mapping.password
+        ? {
+            Authorization: `Basic ${Buffer.from(`${mapping.username}:${mapping.password}`).toString("base64")}`,
+          }
+        : {}),
       "X-OCVM-OpenLive-Project": mapping.projectId,
     },
     followRedirects: false,
@@ -167,7 +178,11 @@ export async function runRemoteInfo(mappingFile: string): Promise<void> {
   const options: RequestOptions = {
     method: "GET",
     headers: {
-      Authorization: `Basic ${Buffer.from(`${mapping.username}:${mapping.password}`).toString("base64")}`,
+      ...(mapping.password
+        ? {
+            Authorization: `Basic ${Buffer.from(`${mapping.username}:${mapping.password}`).toString("base64")}`,
+          }
+        : {}),
       Accept: "application/json",
     },
     timeout: 12_000,
@@ -191,11 +206,7 @@ export async function runRemoteInfo(mappingFile: string): Promise<void> {
       });
       response.once("end", () => {
         if (response.statusCode !== 200) {
-          reject(
-            new Error(
-              `Remote OpenLive discovery failed (HTTP ${response.statusCode ?? "unknown"}).`,
-            ),
-          );
+          reject(new RemoteDiscoveryError(response.statusCode));
           return;
         }
         resolve(Buffer.concat(chunks).toString("utf8"));
@@ -395,6 +406,9 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
       ? runRemoteInfo(localProject)
       : runRemoteClient(mappingFile, localProject, mode === "--probe");
   operation.catch((error: unknown) => {
+    if (error instanceof RemoteDiscoveryError && error.statusCode === 401) {
+      process.exit(3);
+    }
     process.stderr.write(`[openlive-remote] ${errorMessage(error)}\n`);
     process.exit(1);
   });

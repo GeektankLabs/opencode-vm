@@ -202,7 +202,7 @@ try {
       displayName: "Remote project",
       username: "opencode",
       password: "secret",
-      adapterVersion: "0.1.5",
+      adapterVersion: "0.1.6",
       adapterSha256: "integration-artifact",
       nodePath: process.execPath,
       clientPath: join(packageRoot, "dist/remote/client.js"),

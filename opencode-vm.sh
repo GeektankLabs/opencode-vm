@@ -32,10 +32,10 @@ OPENLIVE_SETTINGS="$HOME/Library/Application Support/OpenLive/data/settings.json
 OPENLIVE_PREVIOUS_COMMAND="$OPENLIVE_DIR/previous-command"
 OPENLIVE_AUTH_MARKER="__opencode_vm_openlive__"
 OPENLIVE_LOCK_PATH=""
-OPENLIVE_ADAPTER_VERSION="0.1.5"
-OPENLIVE_ADAPTER_TAG="v0.5.48"
-OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.5.tar"
-OPENLIVE_ADAPTER_SHA256="1f320e9ab0274ed589b2c4881eb8aa981b32bf5aa3f7b4bdb57793b052512f17"
+OPENLIVE_ADAPTER_VERSION="0.1.6"
+OPENLIVE_ADAPTER_TAG="v0.5.49"
+OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.6.tar"
+OPENLIVE_ADAPTER_SHA256="06f461873b8b299de98220aa577824eb9807672b26cb069541acebcdd2d973b9"
 OPENLIVE_ACP_SDK_VERSION="1.2.1"
 OPENLIVE_SDK_VERSION="1.18.21"
 OPENLIVE_MANAGER_AGENT="openlive-manager"
@@ -147,7 +147,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.5.48"
+OCVM_VERSION="0.5.49"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -6814,10 +6814,12 @@ openlive_remote_cmd() {
     return
   fi
 
-  local requested url="" username="opencode" password="${OCVM_OPENLIVE_REMOTE_PASSWORD:-}"
+  local requested url="" username="opencode" password=""
+  local configured_password="${OCVM_OPENLIVE_REMOTE_PASSWORD:-}"
   local expected_fingerprint="" force=0 confirmed=0 project mapping existing_action=""
   local runtime node_path client_path origin info strict_config connection_mapping tmp_mapping backup_mapping had_mapping=0
   local connect_host server_name actual_fingerprint project_id display_name answer tls_trusted=0
+  local info_rc=0 password_prompted=0
   requested="$(pwd)"
   unset OCVM_OPENLIVE_REMOTE_PASSWORD
   while [[ "$#" -gt 0 ]]; do
@@ -6895,13 +6897,8 @@ openlive_remote_cmd() {
   if [[ "$url" != "$origin" && "$url" != "$origin/" ]]; then
     echo "[openlive] Using the server origin $origin; the pasted UI path/query is not part of the remote endpoint."
   fi
-  if [[ -z "$password" ]]; then
-    printf 'Web password for %s: ' "$origin"
-    read -r -s password
-    printf '\n'
-  fi
-  [[ -n "$password" && "$password" != *$'\n'* && "$username" != *$'\n'* ]] || {
-    echo "[openlive] A non-empty single-line web password is required." >&2
+  [[ "$configured_password" != *$'\n'* && -n "$username" && "$username" != *$'\n'* ]] || {
+    echo "[openlive] Remote credentials must be single-line values and the username must not be empty." >&2
     return 1
   }
 
@@ -6945,27 +6942,51 @@ openlive_remote_cmd() {
     fi
   fi
 
-  exec 9<<<"$password"
-  if ! jq -n --arg localProject "$project" --arg origin "$origin" \
-    --arg username "$username" --rawfile password /dev/fd/9 \
-    --arg nodePath "$node_path" --arg clientPath "$client_path" \
-    --arg adapterVersion "$OPENLIVE_ADAPTER_VERSION" --arg adapterSha256 "$OPENLIVE_ADAPTER_SHA256" \
-    --arg tlsFingerprint "$actual_fingerprint" '
-      {schema:1,protocol:"ocvm-openlive.v1",localProject:$localProject,origin:$origin,
-        projectId:"pending",displayName:"pending",username:$username,password:($password | rtrimstr("\n")),
-       nodePath:$nodePath,clientPath:$clientPath,adapterVersion:$adapterVersion,
-       adapterSha256:$adapterSha256}
-      + if $tlsFingerprint == "" then {} else {tlsFingerprint:$tlsFingerprint} end
-    ' > "$connection_mapping"; then
+  while true; do
+    exec 9<<<"$password"
+    if ! jq -n --arg localProject "$project" --arg origin "$origin" \
+      --arg username "$username" --rawfile password /dev/fd/9 \
+      --arg nodePath "$node_path" --arg clientPath "$client_path" \
+      --arg adapterVersion "$OPENLIVE_ADAPTER_VERSION" --arg adapterSha256 "$OPENLIVE_ADAPTER_SHA256" \
+      --arg tlsFingerprint "$actual_fingerprint" '
+        {schema:1,protocol:"ocvm-openlive.v1",localProject:$localProject,origin:$origin,
+          projectId:"pending",displayName:"pending",username:$username,password:($password | rtrimstr("\n")),
+         nodePath:$nodePath,clientPath:$clientPath,adapterVersion:$adapterVersion,
+         adapterSha256:$adapterSha256}
+        + if $tlsFingerprint == "" then {} else {tlsFingerprint:$tlsFingerprint} end
+      ' > "$connection_mapping"; then
+      exec 9<&-
+      return 1
+    fi
     exec 9<&-
+    chmod 600 "$connection_mapping"
+    if "$node_path" "$client_path" --info "$connection_mapping" > "$info"; then
+      break
+    else
+      info_rc=$?
+    fi
+    if [[ "$info_rc" -eq 3 && -z "$password" && "$password_prompted" -eq 0 ]]; then
+      if [[ -n "$configured_password" ]]; then
+        password="$configured_password"
+      else
+        printf 'Web password for %s: ' "$origin"
+        if ! read -r -s password; then
+          printf '\n'
+          echo "[openlive] Setup cancelled; no mapping was changed." >&2
+          return 1
+        fi
+        printf '\n'
+      fi
+      password_prompted=1
+      [[ -n "$password" && "$password" != *$'\n'* ]] || {
+        echo "[openlive] This server requires a non-empty single-line web password." >&2
+        return 1
+      }
+      continue
+    fi
+    echo "[openlive] Remote discovery failed. Check URL, password, and web runtime." >&2
     return 1
-  fi
-  exec 9<&-
-  chmod 600 "$connection_mapping"
-  if ! "$node_path" "$client_path" --info "$connection_mapping" > "$info"; then
-    echo "[openlive] Authenticated remote discovery failed. Check URL, password, and web runtime." >&2
-    return 1
-  fi
+  done
   if ! jq -e --arg adapterVersion "$OPENLIVE_ADAPTER_VERSION" '
       .schema == 1 and .protocol == "ocvm-openlive.v1" and .ready == true and
       .adapterVersion == $adapterVersion and
@@ -6985,7 +7006,10 @@ openlive_remote_cmd() {
   echo "[openlive] Confirmed remote project: $display_name at $origin"
   if [[ "$confirmed" != "1" ]]; then
     printf 'Configure this stub for that project? [y/N] '
-    read -r answer
+    if ! read -r answer; then
+      echo "[openlive] Setup cancelled; no mapping was changed." >&2
+      return 1
+    fi
     [[ "$answer" == "y" || "$answer" == "Y" ]] || {
       echo "[openlive] Setup cancelled; no mapping was changed." >&2
       return 1
@@ -9191,10 +9215,6 @@ start_openlive_gateway() {
     echo "[openlive] Remote gateway disabled: HTTPS is required."
     return 0
   }
-  [ -n "$OC_PASSWORD" ] || {
-    echo "[openlive] Remote gateway disabled: configure web with --password."
-    return 0
-  }
   [ -f "$adapter/dist/remote/server.js" ] && [ -f "$SESS_SHARE/openlive/runtime.json" ] || {
     echo "[openlive] Remote gateway unavailable: adapter package is not ready."
     return 0
@@ -9230,7 +9250,11 @@ start_openlive_gateway() {
         ss -ltn "sport = :$port" 2>/dev/null | grep -q LISTEN; then
         OC_OPENLIVE_REMOTE_TARGET="$ready_file"
         OC_OPENLIVE_REMOTE_GENERATION="$expected_generation"
-        echo "[openlive] Remote gateway ready on the existing HTTPS web port."
+        if [ -n "$OC_PASSWORD" ]; then
+          echo "[openlive] Remote gateway ready on the existing HTTPS web port (password protected)."
+        else
+          echo "[openlive] WARNING: Remote gateway ready without authentication on the existing HTTPS web port."
+        fi
         return 0
       fi
     fi
@@ -9953,7 +9977,7 @@ attach_session() {
       stop_web_tunnels "$SESS_NAME" "$_old_base" >/dev/null 2>&1 || true
     done
     install_web_lib "$_web_share" || {
-      echo "[attach] Could not prepare the authenticated web listener; no LAN tunnel was opened." >&2
+      echo "[attach] Could not prepare the HTTPS web listener; no LAN tunnel was opened." >&2
       return 1
     }
     vm_exec "$SESS_NAME" '
@@ -10008,7 +10032,7 @@ attach_session() {
     openlive_share="$(session_share_dir "$proj")"
     if [[ -f "$openlive_share/lib/web.sh" ]]; then
       rm -f "$openlive_share/openlive/runtime.json"
-      if [[ -s "$openlive_share/auth.env" ]] && ! openlive_adapter_present; then
+      if ! openlive_adapter_present; then
         openlive_prepare_adapter_cache ||
           echo "[attach] WARNING: remote OpenLive package preparation failed; web startup will continue." >&2
       fi
@@ -11018,11 +11042,11 @@ start_session() {
   if [[ "$SESSION_MODE" == "web" ]]; then
     resolve_session_auth "$sess_share" || return 1
     install_web_lib "$sess_share" || {
-      echo "[run] Could not prepare the authenticated web listener; no LAN tunnel was opened." >&2
+      echo "[run] Could not prepare the HTTPS web listener; no LAN tunnel was opened." >&2
       return 1
     }
     rm -f "$sess_share/openlive/runtime.json"
-    if [[ -s "$sess_share/auth.env" ]] && ! openlive_adapter_present; then
+    if ! openlive_adapter_present; then
       openlive_prepare_adapter_cache ||
         echo "[run] WARNING: remote OpenLive package preparation failed; web startup will continue." >&2
     fi

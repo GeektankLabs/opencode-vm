@@ -320,6 +320,8 @@ get wrong.
 
 `--password PW` protects every public endpoint with HTTP Basic (username `opencode`). The secret is stored per session at `~/.opencode-vm/sessions/<hash>/auth.env` with mode `0600`, so `opencode-vm attach` resumes a protected session as protected — it previously came back wide open. It is never printed, never written to `session.env`, and never passed on a command line. `--no-auth` removes a stored password; `$OCVM_WEB_PASSWORD` sets one without it appearing in your shell history.
 
+Remote OpenLive follows the same choice: an HTTPS web session without a password exposes its Remote OpenLive endpoint without authentication, while `--password` protects both Web UI and Remote OpenLive with the same credential. Use the unprotected mode only on a trusted LAN or VPN; anyone who can reach the web port can otherwise start an agent with write access to the mounted project.
+
 **About the entry URL.** Use the short root URL exactly as printed — it is the one that makes everything work.
 
 OpenCode's web UI opens a project only through the route `/<base64url(path)>`, and it keeps the list of known projects in browser-local storage. A browser that has never seen this server therefore reaches no project at all. Worse, the UI asks the server for *every* session and then filters the answer against that same local project list — so on a second machine the chat sessions you started elsewhere are fetched but discarded, and the view looks empty.
@@ -684,17 +686,18 @@ The bridge only needs to be installed once. Future `opencode-vm update` runs aut
 
 During `opencode-vm web`, the release package is staged into the session and its pinned production dependencies are installed before the web runtime becomes available. OpenLive's ACP startup itself never downloads, builds, provisions, or resumes anything.
 
-OpenLive remains optional. A password-protected web session prepares the package and remote gateway even when OpenLive itself is not installed on that development computer. An unprotected or `--no-tls` session does not expose remote ACP.
+OpenLive remains optional. An HTTPS web session prepares the package and remote gateway even when OpenLive itself is not installed on that development computer. Remote OpenLive inherits the web session's authentication choice; a `--no-tls` session does not expose remote ACP.
 
 ### Remote OpenLive from another Mac
 
-The OpenLive app and the real project may live on different computers. The development computer needs only the existing password-protected HTTPS web endpoint; Remote OpenLive adds no public port, SSH service, filesystem mount, project copy, or second OpenCode runtime.
+The OpenLive app and the real project may live on different computers. The development computer needs only the existing HTTPS web endpoint; Remote OpenLive adds no public port, SSH service, filesystem mount, project copy, or second OpenCode runtime.
 
 On the development computer:
 
 ```bash
 cd /path/to/real/project
-opencode-vm web --password 'choose-a-password'
+opencode-vm web
+# Optional on an untrusted network: opencode-vm web --password 'choose-a-password'
 ```
 
 On the OpenLive workstation, install/update `opencode-vm` and Node.js 22 or newer, create an empty local stub, and configure it:
@@ -705,9 +708,9 @@ cd ~/Remote-Projekte/MeinProjekt
 opencode-vm openlive remote
 ```
 
-Enter the HTTPS URL printed by the development computer and its web password. For the default self-signed certificate, setup displays the SHA-256 fingerprint and requires explicit confirmation before credentials are sent. It then authenticates discovery, confirms the server-selected project, performs a non-mutating ACP WebSocket probe, installs the shared OpenLive shim, and atomically saves a private per-stub mapping. Select OpenCode and that stub folder in OpenLive afterwards.
+Enter the HTTPS URL printed by the development computer. Setup first tries discovery without credentials and asks for the web password only when the server requires one. For the default self-signed certificate, setup displays the SHA-256 fingerprint and requires explicit confirmation before discovery. It then confirms the server-selected project, performs a non-mutating ACP WebSocket probe, installs the shared OpenLive shim, and atomically saves a private per-stub mapping. Select OpenCode and that stub folder in OpenLive afterwards.
 
-The workstation does not need `opencode-vm init`, Lima, a local session record, or the project files. A mapped folder always routes remotely; invalid credentials, changed certificates, an unavailable server, or a damaged mapping fail explicitly and never fall back to a local VM. The server accepts only one local-or-remote OpenLive call for the project at a time.
+The workstation does not need `opencode-vm init`, Lima, a local session record, or the project files. A mapped folder always routes remotely; required-but-invalid credentials, changed certificates, an unavailable server, or a damaged mapping fail explicitly and never fall back to a local VM. The server accepts only one local-or-remote OpenLive call for the project at a time.
 
 ```bash
 opencode-vm openlive doctor ~/Remote-Projekte/MeinProjekt

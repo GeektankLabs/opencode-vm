@@ -16,7 +16,7 @@ import {
   type RemoteReady,
 } from "./protocol.js";
 
-const ADAPTER_VERSION = "0.1.5";
+const ADAPTER_VERSION = "0.1.6";
 const HEARTBEAT_MS = 15_000;
 const CHILD_GRACE_MS = 5_000;
 
@@ -40,11 +40,6 @@ export async function runRemoteServer(): Promise<void> {
   }
   const expectedAuth = expectedAuthorization();
   const readyFile = process.env.OCVM_OPENLIVE_GATEWAY_READY;
-  if (!expectedAuth) {
-    throw new Error(
-      "Remote OpenLive requires a password-protected web session",
-    );
-  }
 
   let active: Connection | undefined;
   let backendReady = await backendIsReady(runtime, expectedAuth);
@@ -329,7 +324,7 @@ export async function runRemoteServer(): Promise<void> {
 function handleHttp(
   request: IncomingMessage,
   response: ServerResponse,
-  expectedAuth: string,
+  expectedAuth: string | undefined,
   info: RemoteInfo,
 ): void {
   if (request.method !== "GET" || request.url !== "/openlive/info") {
@@ -376,9 +371,9 @@ function expectedAuthorization(): string | undefined {
 
 async function backendIsReady(
   runtime: RuntimeDescriptor,
-  authorization: string,
+  authorization: string | undefined,
 ): Promise<boolean> {
-  const headers = { Authorization: authorization };
+  const headers = authorization ? { Authorization: authorization } : undefined;
   try {
     const [healthResponse, toolsResponse] = await Promise.all([
       fetch(new URL("/global/health", runtime.backendUrl), {
@@ -426,7 +421,11 @@ function childEnvironment(): NodeJS.ProcessEnv {
   return result;
 }
 
-function authorized(request: IncomingMessage, expected: string): boolean {
+function authorized(
+  request: IncomingMessage,
+  expected: string | undefined,
+): boolean {
+  if (!expected) return true;
   const actual = request.headers.authorization ?? "";
   const actualBytes = Buffer.from(actual);
   const expectedBytes = Buffer.from(expected);

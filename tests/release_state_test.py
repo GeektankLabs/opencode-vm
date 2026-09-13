@@ -12,9 +12,9 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = (ROOT / ".github/workflows/release.yml").read_text()
 REPO = "fixture/project"
-TAG = "v0.5.48"
+TAG = "v0.5.49"
 SHA = "a" * 40
-ASSET = "opencode-vm-openlive-adapter-0.1.5.tar"
+ASSET = "opencode-vm-openlive-adapter-0.1.6.tar"
 REF = ["api", f"repos/{REPO}/git/ref/tags/{TAG}"]
 COMMIT = ["api", f"repos/{REPO}/commits/{TAG}", "--jq", ".sha"]
 RELEASE = ["api", f"repos/{REPO}/releases/tags/{TAG}"]

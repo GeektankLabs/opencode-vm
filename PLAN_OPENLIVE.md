@@ -2,13 +2,14 @@
 
 Current status:
 
-- The local, remote, and discussion MVP baselines plus the regular single-script distribution path are implemented at `opencode-vm` `0.5.46` / adapter `0.1.5`, using ACP SDK `1.2.1` and OpenCode SDK/server `1.18.21`.
+- The local, remote, and discussion MVP baselines plus the regular single-script distribution path are implemented at `opencode-vm` `0.5.49` / adapter `0.1.6`, using ACP SDK `1.2.1` and OpenCode SDK/server `1.18.21`.
 - A real OpenLive run has already confirmed ACP setup, reuse of the central runtime, model selection, normal streaming, and per-turn screen sharing. The exact OpenLive build used for that run was not recorded.
-- Remaining release gates are publication of the `v0.5.46` adapter asset before the script reaches the update path, the complete local macOS/OpenLive acceptance run in A.6, and the real two-computer remote acceptance in section 29.11, with the exact OpenLive build recorded. A real spoken discussion (skill activation, follow-up question, decision and result summary) remains a manual acceptance step.
+- Remaining release gates are publication of the `v0.5.49` adapter asset before the script reaches the update path, the complete local macOS/OpenLive acceptance run in A.6, and the real two-computer remote acceptance in section 29.11, with the exact OpenLive build recorded. A real spoken discussion (skill activation, follow-up question, decision and result summary) remains a manual acceptance step.
 - A versioned reproducible adapter archive, embedded SHA-256 verification, safe extraction, atomic content-addressed host cache, packaged-runtime session preparation, and tag-driven release workflow are part of the baseline. Richer ACP activity, generic attachments, and retention policy remain future work.
 - Remote OpenLive through the existing web port is implemented in section 29 (work package C). It uses a local stub folder and `opencode-vm openlive remote`; no SSH access, local project checkout, or client-side base VM is required.
 - Script `0.5.45` / adapter `0.1.5` add the first discussion baseline: the default-active bundled `besprechung` skill with document and turn-based dialogue commands. Every attached OpenLive work turn receives a concise voice primer that points natural review and decision requests to this skill; ordinary questions and the read-only manager remain unchanged. Existing installations receive the package through a one-time, opt-out-preserving skills migration.
 - Script `0.5.46` closes the discussion lifecycle gaps: reconnect refreshes owned skill/command files and applies opt-out while preserving user edits; cache refresh errors are explicit, incomplete packages are retried, and an already-current script can retry asset updates. Regression tests cover the actual attach entry point with a mocked VM launch and standalone Git transport with local fixtures. The adapter bytes and version remain `0.1.5`.
+- Script `0.5.49` / adapter `0.1.6` make Remote OpenLive inherit the HTTPS web session's authentication choice. Unprotected trusted-LAN sessions accept remote calls without a password; protected sessions retain the same Basic credential and setup asks for it only after an unauthenticated discovery receives HTTP 401.
 
 ## 1. Goal
 
@@ -1060,7 +1061,7 @@ Package B has no unconditional exit criterion. For any selected item, its implem
 
 ## 29. Remote OpenLive MVP Implementation Plan (Work Package C)
 
-**Status: MVP baseline implemented in script 0.5.44 / adapter 0.1.4; automated validation passes. Real two-computer OpenLive acceptance in section 29.11 remains pending.**
+**Status: MVP baseline implemented in script 0.5.44 / adapter 0.1.4; optional web-auth inheritance implemented in script 0.5.49 / adapter 0.1.6; automated validation passes. Real two-computer OpenLive acceptance in section 29.11 remains pending.**
 
 This section specifies the implemented remote desktop baseline and its remaining release acceptance. Local behavior remains available for folders without a mapping; the real-application acceptance record is still outstanding.
 
@@ -1078,7 +1079,7 @@ opencode-vm openlive remote
 
 The command configures the current existing folder as a connection stub. OpenLive subsequently selects OpenCode and that folder through its existing UI. The remote project's real files never need to exist in the stub.
 
-On the development computer, the operator updates `opencode-vm` and starts the actual project with the existing password-protected `web` workflow and chosen port. A compatible `web` startup prepares the remote gateway when web authentication is configured, even if no local OpenLive host shim exists there. The development computer does not need the OpenLive app. Gateway/package preparation belongs to web startup, never to an incoming network request; failure leaves the remote feature unavailable with a diagnostic while ordinary web services retain their existing lifecycle.
+On the development computer, the operator updates `opencode-vm` and starts the actual project with the existing HTTPS `web` workflow and chosen port. A compatible `web` startup prepares the remote gateway with the web session's authentication choice, even if no local OpenLive host shim exists there. The development computer does not need the OpenLive app. Gateway/package preparation belongs to web startup, never to an incoming network request; failure leaves the remote feature unavailable with a diagnostic while ordinary web services retain their existing lifecycle.
 
 Important command distinction:
 
@@ -1105,9 +1106,9 @@ Explicit exclusions: remote filesystem browsing or synchronization, SSH fallback
 2. If a mapping exists, show the saved project and sanitized origin, test it again, and offer to keep or change it. Reconfiguration replaces the same mapping; it must not create duplicates or silently convert the folder back to local mode.
 3. Ask for the **actual reachable web address**, for example `https://dev-machine:4444`. Accept DNS names, IPv4, and bracketed IPv6 through a real URL parser. A bare host with port may default to HTTPS. Do not derive internal backend/A2A ports from this input.
 4. Permit a pasted normal OpenCode project deep link by extracting its origin and explaining that the server will confirm the target project. Strip UI path/query/fragment data; reject embedded credentials and unsupported schemes. Custom reverse-proxy subpath deployments are outside the MVP.
-5. Establish TLS trust before sending credentials, request the web username (default `opencode`) and password without echo, and query the authenticated remote capability document.
+5. Establish TLS trust, query the remote capability document without credentials, and request the web username (default `opencode`) and password without echo only after an HTTP 401 response.
 6. Show the server-confirmed project display name and origin and obtain confirmation. The local folder name is only a label, never proof of remote identity.
-7. Check protocol compatibility, server readiness, and a real authenticated WebSocket upgrade through the public web entry point. This probe creates no manager/work session, sends no model prompt, and must not interrupt an existing call. A busy project can still be configured; report that a call is currently active.
+7. Check protocol compatibility, server readiness, and a real WebSocket upgrade with the web session's optional authentication through the public web entry point. This probe creates no manager/work session, sends no model prompt, and must not interrupt an existing call. A busy project can still be configured; report that a call is currently active.
 8. Reuse the prepared local network-bridge runtime and install/reuse the existing managed OpenLive shim, discovery link, and readiness marker. Preserve foreign command overrides under the same explicit replacement rules as the local installer.
 9. Persist the confirmed mapping and credentials atomically only after successful checks and bridge preparation. On failure/cancel preserve the previous mapping and restore changes made to the shared integration in this attempt. A downloaded verified artifact may remain cached.
 10. Print the exact local folder and the next steps: open/restart OpenLive, choose OpenCode, select this folder, and keep the remote web session running. Do not print credentials or the remote filesystem path in the normal completion message.
@@ -1154,20 +1155,20 @@ Stable paths on the supplied web origin:
 
 | Endpoint | Contract |
 | --- | --- |
-| `GET /openlive/info` | Authenticated, bounded JSON capability/project/readiness response; no model call or session creation |
-| `GET /openlive/acp` with WebSocket upgrade | Authenticated ACP transport with the explicit `ocvm-openlive.v1` subprotocol |
+| `GET /openlive/info` | Bounded JSON capability/project/readiness response using the web session's optional authentication; no model call or session creation |
+| `GET /openlive/acp` with WebSocket upgrade | ACP transport using the web session's optional authentication and the explicit `ocvm-openlive.v1` subprotocol |
 
 The capability response contains only the required fields: schema/protocol version, script and adapter versions, stable project ID, bounded display name, readiness, call-busy state, supported frame-size limit, and the relative ACP path. Do not return credentials or accept an advertised cross-origin endpoint. Project identity derives from the server's canonical project identity, not the port number, VM name, or disposable runtime generation.
 
 Connection sequence:
 
-1. The client sends the expected project ID and protocol through bounded handshake headers, plus HTTP authorization. The gateway validates all of them before spawning an adapter or exposing project details.
+1. The client sends the expected project ID and protocol through bounded handshake headers, plus HTTP authorization when the web session requires it. The gateway validates all applicable fields before spawning an adapter or exposing project details.
 2. The gateway sends one bounded transport-level `ready` message identifying the confirmed project, runtime generation, and canonical server-side ACP working directory. The local helper consumes this message; it is never written to OpenLive's ACP stdout.
 3. A setup probe may close immediately after `ready`, without acquiring the call slot or starting the adapter.
 4. The first ACP request within a bounded startup deadline triggers call admission and adapter launch. From then on, each WebSocket text message contains one ACP JSON-RPC object, translated to/from one NDJSON line on the child pipes. Preserve JSON-RPC IDs and notification ordering.
 5. Reject binary messages, unsupported subprotocols, oversized payloads, and malformed framing. Disable WebSocket compression initially; preserve the existing 12 MiB ACP-line and decoded image limits. Bound write queues and propagate backpressure; terminate a persistently slow connection rather than buffer indefinitely.
 
-HTTP failures must distinguish missing/wrong credentials (`401`), authenticated but unavailable/disabled service (`503` with a bounded reason), project mismatch (`409`), unsupported protocol/upgrade (`400`/`426`), and a missing remote feature on older servers (`404`). A call-busy race after upgrade produces a transport failure and closes without starting a second child. Transport errors must never masquerade as successful ACP responses.
+HTTP failures must distinguish required-but-missing/wrong credentials (`401`), unavailable/disabled service (`503` with a bounded reason), project mismatch (`409`), unsupported protocol/upgrade (`400`/`426`), and a missing remote feature on older servers (`404`). A call-busy race after upgrade produces a transport failure and closes without starting a second child. Transport errors must never masquerade as successful ACP responses.
 
 No query-string tokens, secret-bearing URLs, arbitrary launch commands, remote executable paths, or arbitrary backend URLs are accepted. Cross-origin redirects are rejected rather than forwarding credentials. Browser WebSocket origins are rejected for the MVP native-client endpoint; the workstation helper does not need a browser-origin allowance.
 
@@ -1179,25 +1180,25 @@ Persist one per-stub record under the existing private project-state hierarchy, 
 ~/.opencode-vm/project-state/<canonical-stub-hash>/openlive-remote.json
 ```
 
-The versioned record holds the canonical local stub, sanitized web origin, expected server project ID, display name, protocol version, connection credential, and any explicit certificate trust pin. A single atomically replaced mode-0600 JSON record keeps connection/credential updates consistent without a second state registry; containing directories are private. Read it as data, never shell-source or evaluate it. Exclude it from VM config/data sync, generated agent context, logs, and exported patches. Existing OpenCode provider `auth.json` is not the storage location for the remote password.
+The versioned record holds the canonical local stub, sanitized web origin, expected server project ID, display name, protocol version, optional connection credential, and any explicit certificate trust pin. A single atomically replaced mode-0600 JSON record keeps connection/credential updates consistent without a second state registry; containing directories are private. Read it as data, never shell-source or evaluate it. Exclude it from VM config/data sync, generated agent context, logs, and exported patches. Existing OpenCode provider `auth.json` is not the storage location for the remote password.
 
 Dispatch and scope rules:
 
 - Check for a mapping **before** local `need limactl`, session lookup, or provisioning. An unreadable/invalid mapping fails explicitly; it is not equivalent to no mapping.
 - A valid remote mapping selects only the remote helper. Failed network/auth/trust/project checks never fall back to local execution.
-- The helper verifies that ACP `session/new` and `session/load` refer to the selected canonical local stub. It then rewrites only their `cwd` to the authenticated server working directory from `ready`.
+- The helper verifies that ACP `session/new` and `session/load` refer to the selected canonical local stub. It then rewrites only their `cwd` to the confirmed server working directory from `ready`.
 - The server retains the existing strict `validateSessionScope` comparison against its own descriptor. Client parameters cannot select another project. Additional workspaces remain rejected, and ACP-provided MCP definitions remain ignored.
 - Prompt text, session IDs, filenames, and image contents are not subject to blanket path substitution. Local path-based file attachments are not added in this MVP.
 - The server checks the expected stable project ID on every connection. Reuse of the same port by another project requires explicit reconfiguration. A new VM generation for the same project may reconnect in a new call, but never resumes an uncertain active prompt automatically.
 
 ### 29.6 Authentication and certificate trust
 
-Reuse the web session's existing configured username/password from its protected `auth.env`; do not reuse the public default A2A credential or create another account subsystem. Authenticate both discovery and upgrade at the gateway itself, because the existing web redirector normally relies on backend authentication and routing around that backend must not bypass it.
+Inherit the web session's authentication choice. When its protected `auth.env` contains a username/password, reuse that credential for discovery and upgrade at the gateway itself; do not reuse the public default A2A credential or create another account subsystem. When the web session is unprotected, omit the Authorization header throughout discovery, upgrade, and backend access.
 
 MVP defaults and explicit exceptions:
 
 - HTTPS/WSS is the normal setup path. A manually entered HTTP origin may be supported for a user-confirmed trusted LAN/VPN connection, with a clear one-time notice that this transport itself is unencrypted; never silently downgrade HTTPS.
-- A web session without a configured password does not expose remote ACP. The setup command gives the operator the existing password-configuration guidance. Local OpenLive and ordinary `--no-auth` Web UI behavior remain unchanged.
+- A web session without a configured password exposes remote ACP without authentication and prints an explicit trusted-network warning. Setup probes it without credentials and skips the password prompt. Anyone who can reach the web port can start an agent with write access to the mounted project, so this mode is intended only for trusted LANs or VPNs.
 - Standard trusted certificates use normal hostname/chain verification. For a self-signed certificate, setup shows the endpoint and SHA-256 certificate fingerprint, explains the trust decision, and persists an explicit pin after confirmation. Certificate probing sends no credentials.
 - Apply the same trust policy to discovery, setup probing, and every WSS call. A changed pin or invalid certificate fails closed and requires setup again. Do not use global TLS verification disabling; any self-signed exception is scoped to that exact origin and pinned certificate.
 - Credential/certificate changes take effect on subsequent connections; restarting the web service closes existing calls. Do not add live credential rotation machinery to the MVP.
@@ -1215,7 +1216,7 @@ The network credential grants the configured remote service's authority, includi
 - ACP EOF, explicit close, WebSocket close, heartbeat failure, gateway shutdown, and signals reach the existing idempotent call cleanup. If necessary, terminate the adapter child after a bounded grace period; never stop the central runtime or abort an unrelated session.
 - Configure WebSocket ping/pong, for example 15-second heartbeat with a 10-second response deadline. This detects dead network connections and is separate from the adapter's substantive-progress watchdog.
 - After an uncertain disconnect, report the interruption and advise checking Web UI. Do not reconnect and resend an in-flight prompt, recreate an unconfirmed session blindly, or restore a work attachment automatically. A later explicit call starts in the persistent manager as usual.
-- Target a 12-second total client startup budget within OpenLive's characterized 15-second limit, including connection, authenticated upgrade, and the existing bounded adapter preflight. Dependencies, certificate approval, credential prompts, downloads, and builds happen only during setup/update, never in ACP startup.
+- Target a 12-second total client startup budget within OpenLive's characterized 15-second limit, including connection, optional-auth upgrade, and the existing bounded adapter preflight. Dependencies, certificate approval, credential prompts, downloads, and builds happen only during setup/update, never in ACP startup.
 - Preserve stdin from the first buffered OpenLive request onward; protocol stdout carries ACP only. Setup/probe messages and remote child diagnostics remain bounded and on stderr.
 
 ### 29.8 Distribution and workstation runtime
@@ -1231,7 +1232,7 @@ Extend the existing verified adapter artifact with compiled network-client and g
 
 ### 29.9 Implementation sequence and file-level work
 
-C.1 through C.7 and the documentation portion of C.8 are implemented. Automated tests cover the packaged TLS round trip, exact existing-port routing, transactional setup, fail-closed dispatch, authenticated non-mutating probing, shared ownership, and local regressions. C.8 remains open only for the real two-computer macOS/OpenLive acceptance in section 29.11; behavior tests, not implementation-line greps, remain the release criterion.
+C.1 through C.7 and the documentation portion of C.8 are implemented. Automated tests cover the packaged TLS round trip, exact existing-port routing, transactional setup, fail-closed dispatch, protected and unprotected non-mutating probing, shared ownership, and local regressions. C.8 remains open only for the real two-computer macOS/OpenLive acceptance in section 29.11; behavior tests, not implementation-line greps, remain the release criterion.
 
 | Step | Work and expected locations | Exit criterion |
 | --- | --- | --- |
@@ -1241,7 +1242,7 @@ C.1 through C.7 and the documentation portion of C.8 are implemented. Automated 
 | C.4 Existing-port integration | `opencode-vm.sh`: `OCVM_WEB_REDIRECT_PY`, generated web lifecycle, fresh/resumed preparation and cleanup | The same public web port carries discovery and WSS; ordinary Web/API/SSE/A2A traffic remains correct; no additional published port |
 | C.5 Workstation helper | New `src/remote/client.ts` with bounded framing, TLS/auth, cwd mapping, and EOF behavior | A stdio ACP client operates through the public endpoint from a different local path, including spaces and non-ASCII names |
 | C.6 Setup and routing | `opencode-vm.sh`: `openlive_cmd`, `openlive_acp_cmd`, private mapping helpers, host-runtime preparation, status/doctor/remove/uninstall/update | Stub setup is idempotent and transactional; remote dispatch works without Lima/base/session records and never falls back locally |
-| C.7 Artifact and automation | `package.json`/lockfile, `scripts/build-openlive-adapter.sh`, `.github/workflows/release.yml`, focused shell and package tests | Production-only extracted client/gateway packages complete an actual authenticated ACP round trip through the web entry point |
+| C.7 Artifact and automation | `package.json`/lockfile, `scripts/build-openlive-adapter.sh`, `.github/workflows/release.yml`, focused shell and package tests | Production-only extracted client/gateway packages complete an actual ACP round trip through the web entry point while protected and unprotected probes are covered separately |
 | C.8 Documentation and real acceptance | Future README/AGENTS/release-doc changes plus the acceptance record in this plan | A two-computer macOS/OpenLive run over the sole allowed web port meets section 29.11, with versions recorded |
 
 The implementation increments the script to 0.5.44 and the adapter/package to 0.1.4, adds the pinned `ws` runtime, and extends the reproducible artifact with the remote client and gateway. The embedded digest and version fixtures are validated with every release build.
@@ -1250,7 +1251,7 @@ The implementation increments the script to 0.5.44 and the adapter/package to 0.
 
 **Routing and setup:** fresh and existing stubs; keep/change/remove; missing OpenLive/Node; GUI PATH; no local `limactl` or base VM; multiple mappings through one shim; foreign command preservation; failed setup retains old state; secret-free output; changed server/project/port; renamed stub; invalid mapping never selects local mode. Run the actual command paths with controlled dependencies.
 
-**Transport and scope:** real authenticated info and WebSocket upgrade through the generated public web proxy; client cwd differs from server cwd; same-origin endpoint enforcement; missing/wrong credentials; unsupported protocol; older server; wrong project ID; busy call; unauthorized requests never create an adapter, manager, or socket. A setup probe must remain non-mutating even when a call is busy.
+**Transport and scope:** real info and WebSocket upgrade with optional authentication through the generated public web proxy; client cwd differs from server cwd; same-origin endpoint enforcement; missing/wrong required credentials; unsupported protocol; older server; wrong project ID; busy call; unauthorized requests never create an adapter, manager, or socket. A setup probe must remain non-mutating even when a call is busy.
 
 **TLS and limits:** trusted certificates; explicit self-signed trust; changed pin; credentials withheld until trust is established; HTTP confirmation/no automatic downgrade; Unicode and IPv6 URL handling; malformed JSON/NDJSON and binary frames; size limits before parsing; slow peers/backpressure; bounded diagnostics without secrets.
 
