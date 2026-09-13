@@ -25,11 +25,15 @@ The adapter archive is built reproducibly by `scripts/build-openlive-adapter.sh`
    ```
 
 5. Set `OPENLIVE_ADAPTER_SHA256` to that digest and run all validations listed below.
-6. Commit the release candidate. Push the signed or annotated release tag before merging or pushing that commit to `main`.
-7. Wait for `.github/workflows/release.yml` to publish and verify the release assets.
-8. Verify the pinned artifact URL downloads successfully, then make the same commit visible on `main`. This ordering prevents the existing `opencode-vm update` path from distributing a script before its required adapter asset exists.
+6. Commit the release candidate and push it to `main` through the normal host/IDE workflow.
+7. Wait for `.github/workflows/release.yml` to validate the release, create the missing `v<OCVM_VERSION>` tag at that exact commit, and publish the release assets.
+8. Verify that the pinned artifact URL downloads successfully before announcing the release.
 
-Publishing tags and updating `main` are host-side maintainer actions because session VMs intentionally have no Git origin credentials.
+Updating `main` remains a host-side maintainer action because session VMs intentionally have no Git origin credentials. Tag and release publication runs in GitHub Actions.
+
+Because a `main` push starts the release workflow, `main` necessarily contains the candidate while validation is still running. Do not run or announce an update during this window. A failed release workflow must be fixed or rerun before the candidate is considered available.
+
+The workflow also accepts a manually pushed `v*` tag as a recovery path. A normal `git push` or IDE “Sync Changes” does not reliably push local tags, so the default process does not create a local tag at all: GitHub creates the tag after every validation passes, then publishes the release. Release jobs are serialized per version, with the running job and latest pending attempt retained. The first successful same-version candidate publishes; later candidates exit without rebuilding only when their script and adapter build inputs match the published release. An incomplete release, inconsistent tag or asset, unversioned release-input change, or GitHub API failure stops the workflow instead of being mistaken for a successful no-op.
 
 ## Validation
 

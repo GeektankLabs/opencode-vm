@@ -17,6 +17,38 @@ ARTIFACT="$TMP/opencode-vm-openlive-adapter-0.1.5.tar"
 ADAPTER_SHA="$(awk -F'"' '/^OPENLIVE_ADAPTER_SHA256=/ { print $2; exit }' "$SCRIPT")"
 assert_eq "$(sha256sum "$ARTIFACT" | awk '{ print $1 }')" "$ADAPTER_SHA"
 
+RELEASE_WORKFLOW="$ROOT/.github/workflows/release.yml"
+grep -A2 '^    branches:$' "$RELEASE_WORKFLOW" | grep -q '^      - main$' ||
+  fail "release workflow does not run for main pushes"
+grep -A2 '^    tags:$' "$RELEASE_WORKFLOW" | grep -q '^      - "v\*"$' ||
+  fail "release workflow does not retain the manual tag recovery trigger"
+grep -qF 'group: opencode-vm-release-${{ needs.metadata.outputs.release_tag }}' "$RELEASE_WORKFLOW" ||
+  fail "release workflow does not serialize publication per version"
+grep -qF 'compare/$OPENLIVE_RELEASE_TAG...$GITHUB_SHA' "$RELEASE_WORKFLOW" ||
+  fail "release workflow does not compare repeated release inputs"
+grep -qF 'Release inputs changed without incrementing OCVM_VERSION.' "$RELEASE_WORKFLOW" ||
+  fail "release workflow does not reject unversioned release-input changes"
+grep -qF '.draft == false and .prerelease == false' "$RELEASE_WORKFLOW" ||
+  fail "release workflow does not reject draft or prerelease no-ops"
+grep -qF 'index($adapter) != null and index("SHA256SUMS") != null' "$RELEASE_WORKFLOW" ||
+  fail "release workflow does not verify existing release assets"
+grep -qF 'gh release download "$OPENLIVE_RELEASE_TAG"' "$RELEASE_WORKFLOW" ||
+  fail "release workflow does not download existing assets for verification"
+grep -qF '! cmp "$state_dir/assets/opencode-vm.sh" opencode-vm.sh' "$RELEASE_WORKFLOW" ||
+  fail "release workflow does not compare the published and candidate scripts"
+grep -qF 'sha256sum -c SHA256SUMS' "$RELEASE_WORKFLOW" ||
+  fail "release workflow does not verify the published adapter checksum"
+grep -qF 'elif grep -q '\''(HTTP 404)'\'' "$error_file"; then' "$RELEASE_WORKFLOW" ||
+  fail "release workflow does not distinguish missing releases from API failures"
+grep -qF 'gh release create "$OPENLIVE_RELEASE_TAG"' "$RELEASE_WORKFLOW" ||
+  fail "release workflow does not create the version-derived tag"
+grep -qF -- '-f ref="refs/tags/$OPENLIVE_RELEASE_TAG" -f sha="$GITHUB_SHA"' "$RELEASE_WORKFLOW" ||
+  fail "release workflow does not bind an automatic tag to the validated commit"
+grep -qF -- '--verify-tag --generate-notes' "$RELEASE_WORKFLOW" ||
+  fail "release workflow does not verify the explicit tag before publication"
+assert_eq "$(grep -cF "if: steps.state.outputs.release_needed == 'true'" "$RELEASE_WORKFLOW")" "6"
+pass "main pushes create missing version tags and releases after validation"
+
 MOCK_BIN="$TMP/bin"
 mkdir -p "$MOCK_BIN"
 ln -s "$ROOT/tests/helpers/mock-limactl" "$MOCK_BIN/limactl"

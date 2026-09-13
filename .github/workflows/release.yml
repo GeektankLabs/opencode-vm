@@ -2,49 +2,140 @@ name: Release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
+    paths:
+      - opencode-vm.sh
+      - adapters/openlive-acp/**
+      - scripts/build-openlive-adapter.sh
+      - .github/workflows/release.yml
 
 permissions:
   contents: write
 
 jobs:
-  release:
+  metadata:
     runs-on: ubuntu-latest
+    outputs:
+      asset: ${{ steps.metadata.outputs.asset }}
+      release_tag: ${{ steps.metadata.outputs.release_tag }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Verify release metadata
+      - name: Resolve release metadata
+        id: metadata
         run: |
           script_version="$(awk -F'\"' '/^OCVM_VERSION=/ {print $2; exit}' opencode-vm.sh)"
           adapter_version="$(awk -F'\"' '/^OPENLIVE_ADAPTER_VERSION=/ {print $2; exit}' opencode-vm.sh)"
           adapter_tag="$(awk -F'\"' '/^OPENLIVE_ADAPTER_TAG=/ {print $2; exit}' opencode-vm.sh)"
           asset="$(awk -F'\"' '/^OPENLIVE_ADAPTER_FILENAME=/ {print $2; exit}' opencode-vm.sh)"
-          test "$GITHUB_REF_NAME" = "v$script_version"
-          test "$adapter_tag" = "$GITHUB_REF_NAME"
+          release_tag="v$script_version"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            test "$GITHUB_REF_NAME" = "$release_tag"
+          fi
+          test "$adapter_tag" = "$release_tag"
           test "$adapter_version" = "$(jq -r '.version' adapters/openlive-acp/package.json)"
           test "$asset" = "opencode-vm-openlive-adapter-$adapter_version.tar"
           grep -qF "const ADAPTER_VERSION = \"$adapter_version\";" adapters/openlive-acp/src/acp/transport.ts
-          printf 'OPENLIVE_ASSET=%s\n' "$asset" >> "$GITHUB_ENV"
+          printf 'asset=%s\nrelease_tag=%s\n' "$asset" "$release_tag" >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: metadata
+    runs-on: ubuntu-latest
+    concurrency:
+      group: opencode-vm-release-${{ needs.metadata.outputs.release_tag }}
+      cancel-in-progress: false
+    env:
+      OPENLIVE_ASSET: ${{ needs.metadata.outputs.asset }}
+      OPENLIVE_RELEASE_TAG: ${{ needs.metadata.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Check release state
+        id: state
+        run: |
+          state_dir="$(mktemp -d)"
+          trap 'rm -rf "$state_dir"' EXIT
+          error_file="$state_dir/api-error"
+          if release="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$OPENLIVE_RELEASE_TAG" 2>"$error_file")"; then
+            tag_sha="$(gh api "repos/$GITHUB_REPOSITORY/commits/$OPENLIVE_RELEASE_TAG" --jq .sha)"
+            if [[ "$tag_sha" != "$GITHUB_SHA" ]]; then
+              changed_files="$(gh api \
+                "repos/$GITHUB_REPOSITORY/compare/$OPENLIVE_RELEASE_TAG...$GITHUB_SHA" \
+                --paginate --jq '.files[].filename')"
+              if grep -Eq '^(opencode-vm\.sh|scripts/build-openlive-adapter\.sh|adapters/openlive-acp/)' \
+                <<<"$changed_files"; then
+                echo "Release inputs changed without incrementing OCVM_VERSION." >&2
+                exit 1
+              fi
+            fi
+            if ! jq -e --arg script "opencode-vm.sh" --arg adapter "$OPENLIVE_ASSET" '
+              .draft == false and .prerelease == false and
+              ([.assets[].name] | index($script) != null and
+               index($adapter) != null and index("SHA256SUMS") != null)
+            ' <<<"$release" >/dev/null; then
+              echo "Release $OPENLIVE_RELEASE_TAG exists but is incomplete or inconsistent." >&2
+              exit 1
+            fi
+            mkdir "$state_dir/assets"
+            gh release download "$OPENLIVE_RELEASE_TAG" --dir "$state_dir/assets" \
+              --pattern opencode-vm.sh --pattern "$OPENLIVE_ASSET" --pattern SHA256SUMS
+            gh api --method GET "repos/$GITHUB_REPOSITORY/contents/opencode-vm.sh" \
+              -f ref="$OPENLIVE_RELEASE_TAG" --jq .content | base64 --decode > "$state_dir/tag-opencode-vm.sh"
+            expected_sha="$(awk -F'\"' '/^OPENLIVE_ADAPTER_SHA256=/ {print $2; exit}' opencode-vm.sh)"
+            if ! cmp "$state_dir/assets/opencode-vm.sh" "$state_dir/tag-opencode-vm.sh" ||
+              ! cmp "$state_dir/assets/opencode-vm.sh" opencode-vm.sh ||
+              ! grep -qxF "$expected_sha  $OPENLIVE_ASSET" "$state_dir/assets/SHA256SUMS" ||
+              ! (cd "$state_dir/assets" && sha256sum -c SHA256SUMS); then
+              echo "Release $OPENLIVE_RELEASE_TAG exists but its tag or assets are inconsistent." >&2
+              exit 1
+            fi
+            printf 'release_needed=false\n' >> "$GITHUB_OUTPUT"
+            echo "Release $OPENLIVE_RELEASE_TAG already exists and is complete."
+          elif grep -q '(HTTP 404)' "$error_file"; then
+            if tag_sha="$(gh api "repos/$GITHUB_REPOSITORY/commits/$OPENLIVE_RELEASE_TAG" 2>"$error_file" --jq .sha)"; then
+              if [[ "$tag_sha" != "$GITHUB_SHA" ]]; then
+                echo "Tag $OPENLIVE_RELEASE_TAG points to $tag_sha, expected $GITHUB_SHA." >&2
+                exit 1
+              fi
+            elif ! grep -q '(HTTP 404)' "$error_file"; then
+              cat "$error_file" >&2
+              exit 1
+            fi
+            printf 'release_needed=true\n' >> "$GITHUB_OUTPUT"
+          else
+            cat "$error_file" >&2
+            exit 1
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: steps.state.outputs.release_needed == 'true'
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: adapters/openlive-acp/package-lock.json
       - name: Install adapter dependencies
+        if: steps.state.outputs.release_needed == 'true'
         working-directory: adapters/openlive-acp
         run: npm ci --ignore-scripts
       - name: Validate adapter
+        if: steps.state.outputs.release_needed == 'true'
         working-directory: adapters/openlive-acp
         run: npm run check && npm run build && npm test
       - name: Validate shell integration
+        if: steps.state.outputs.release_needed == 'true'
         run: |
           bash -n opencode-vm.sh tests/openlive_test.sh tests/besprechung_test.sh scripts/build-openlive-adapter.sh
           shellcheck --severity=error opencode-vm.sh tests/openlive_test.sh tests/besprechung_test.sh scripts/build-openlive-adapter.sh
           bash tests/besprechung_test.sh
           bash tests/openlive_test.sh
       - name: Build reproducible OpenLive adapter
+        if: steps.state.outputs.release_needed == 'true'
         run: |
           mkdir -p release-a release-b
           scripts/build-openlive-adapter.sh "release-a/$OPENLIVE_ASSET"
@@ -80,11 +171,26 @@ jobs:
           OCVM_OPENLIVE_PACKAGE_ROOT="$PWD/$root" \
             node adapters/openlive-acp/tests/openlive-remote-integration.mjs
       - name: Publish release
+        if: steps.state.outputs.release_needed == 'true'
         run: |
-          gh release create "$GITHUB_REF_NAME" \
+          error_file="$(mktemp)"
+          if tag_sha="$(gh api "repos/$GITHUB_REPOSITORY/commits/$OPENLIVE_RELEASE_TAG" 2>"$error_file" --jq .sha)"; then
+            if [[ "$tag_sha" != "$GITHUB_SHA" ]]; then
+              echo "Tag $OPENLIVE_RELEASE_TAG points to $tag_sha, expected $GITHUB_SHA." >&2
+              exit 1
+            fi
+          elif grep -q '(HTTP 404)' "$error_file"; then
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f ref="refs/tags/$OPENLIVE_RELEASE_TAG" -f sha="$GITHUB_SHA" >/dev/null
+          else
+            cat "$error_file" >&2
+            exit 1
+          fi
+          rm -f "$error_file"
+          gh release create "$OPENLIVE_RELEASE_TAG" \
             opencode-vm.sh \
             "release-a/$OPENLIVE_ASSET" \
             release-a/SHA256SUMS \
-            --verify-tag --generate-notes --title "opencode-vm $GITHUB_REF_NAME"
+            --verify-tag --generate-notes --title "opencode-vm $OPENLIVE_RELEASE_TAG"
         env:
           GH_TOKEN: ${{ github.token }}
