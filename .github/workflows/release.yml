@@ -106,7 +106,8 @@ jobs:
             printf 'release_needed=false\n' >> "$GITHUB_OUTPUT"
             echo "Release $OPENLIVE_RELEASE_TAG already exists and is complete."
           elif grep -q '(HTTP 404)' "$error_file"; then
-            if tag_sha="$(gh api "repos/$GITHUB_REPOSITORY/commits/$OPENLIVE_RELEASE_TAG" 2>"$error_file" --jq .sha)"; then
+            if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$OPENLIVE_RELEASE_TAG" >/dev/null 2>"$error_file"; then
+              tag_sha="$(gh api "repos/$GITHUB_REPOSITORY/commits/$OPENLIVE_RELEASE_TAG" --jq .sha)"
               if [[ "$tag_sha" != "$GITHUB_SHA" ]]; then
                 echo "Tag $OPENLIVE_RELEASE_TAG points to $tag_sha, expected $GITHUB_SHA." >&2
                 exit 1
@@ -140,6 +141,7 @@ jobs:
         if: steps.state.outputs.release_needed == 'true'
         run: |
           python3 tests/release_metadata_test.py
+          python3 tests/release_state_test.py
           bash -n opencode-vm.sh tests/openlive_test.sh tests/besprechung_test.sh scripts/build-openlive-adapter.sh
           shellcheck --severity=error opencode-vm.sh tests/openlive_test.sh tests/besprechung_test.sh scripts/build-openlive-adapter.sh
           bash tests/besprechung_test.sh
@@ -184,7 +186,8 @@ jobs:
         if: steps.state.outputs.release_needed == 'true'
         run: |
           error_file="$(mktemp)"
-          if tag_sha="$(gh api "repos/$GITHUB_REPOSITORY/commits/$OPENLIVE_RELEASE_TAG" 2>"$error_file" --jq .sha)"; then
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$OPENLIVE_RELEASE_TAG" >/dev/null 2>"$error_file"; then
+            tag_sha="$(gh api "repos/$GITHUB_REPOSITORY/commits/$OPENLIVE_RELEASE_TAG" --jq .sha)"
             if [[ "$tag_sha" != "$GITHUB_SHA" ]]; then
               echo "Tag $OPENLIVE_RELEASE_TAG points to $tag_sha, expected $GITHUB_SHA." >&2
               exit 1
