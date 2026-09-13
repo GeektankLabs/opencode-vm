@@ -33,7 +33,7 @@ OPENLIVE_PREVIOUS_COMMAND="$OPENLIVE_DIR/previous-command"
 OPENLIVE_AUTH_MARKER="__opencode_vm_openlive__"
 OPENLIVE_LOCK_PATH=""
 OPENLIVE_ADAPTER_VERSION="0.1.6"
-OPENLIVE_ADAPTER_TAG="v0.5.49"
+OPENLIVE_ADAPTER_TAG="v0.5.50"
 OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.6.tar"
 OPENLIVE_ADAPTER_SHA256="06f461873b8b299de98220aa577824eb9807672b26cb069541acebcdd2d973b9"
 OPENLIVE_ACP_SDK_VERSION="1.2.1"
@@ -147,7 +147,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.5.49"
+OCVM_VERSION="0.5.50"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -6909,7 +6909,7 @@ openlive_remote_cmd() {
   backup_mapping="$(mktemp)"
   trap 'rm -f "$strict_config" "$info" "$connection_mapping" "$tmp_mapping" "$backup_mapping"' RETURN
   openlive_remote_write_curl_config "$strict_config" "$origin/openlive/info" || return 1
-  if curl --config "$strict_config" --output /dev/null; then tls_trusted=1; fi
+  if curl --config "$strict_config" --output /dev/null 2>/dev/null; then tls_trusted=1; fi
   actual_fingerprint=""
   if [[ "$tls_trusted" -ne 1 || -n "$expected_fingerprint" ]]; then
     command -v openssl >/dev/null 2>&1 || {
@@ -6919,7 +6919,7 @@ openlive_remote_cmd() {
     connect_host="$("$node_path" -e 'console.log(new URL(process.argv[1]).host)' "$origin")"
     server_name="$("$node_path" -e 'console.log(new URL(process.argv[1]).hostname)' "$origin")"
     actual_fingerprint="$(openssl s_client -connect "$connect_host" -servername "$server_name" -showcerts </dev/null 2>/dev/null | \
-      openssl x509 -fingerprint -sha256 -noout 2>/dev/null | awk -F= '{print tolower($2)}' | tr -d ':')"
+      openssl x509 -fingerprint -sha256 -noout 2>/dev/null | awk -F= '{print tolower($2)}' | tr -d ':' || true)"
     [[ "$actual_fingerprint" =~ ^[0-9a-f]{64}$ ]] || {
       echo "[openlive] Could not inspect the remote TLS certificate." >&2
       return 1

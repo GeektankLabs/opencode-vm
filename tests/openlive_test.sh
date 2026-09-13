@@ -111,7 +111,7 @@ assert_file "$AUTH"
 assert_eq "$(jq -r '.["acpCommand:opencode"]' "$SETTINGS")" "$SHIM acp"
 jq -e '.__opencode_vm_openlive__ == {"type":"api","key":"opencode-vm-openlive-readiness-v1"}' "$AUTH" >/dev/null ||
   fail "readiness marker missing or unexpected"
-assert_eq "$(HOME="$HOME_ONE" "$SHIM" --version)" "opencode-vm OpenLive bridge 0.5.49"
+assert_eq "$(HOME="$HOME_ONE" "$SHIM" --version)" "opencode-vm OpenLive bridge 0.5.50"
 pass "install creates the managed shim, setting, discovery link, and non-secret marker"
 
 STANDALONE_DIR="$TMP/standalone"
@@ -535,6 +535,16 @@ mkdir -p "$SETUP_HOME" "$SETUP_STUB" "$SETUP_APP" "$SETUP_BIN"
 ln -s "$MOCK_BIN/uname" "$SETUP_BIN/uname"
 ln -s "$MOCK_BIN/md5" "$SETUP_BIN/md5"
 ln -s /usr/bin/curl "$SETUP_BIN/curl"
+cat > "$SETUP_BIN/openssl" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "s_client" ]]; then
+  set +e
+  /usr/bin/openssl "$@"
+  exit 1
+fi
+exec /usr/bin/openssl "$@"
+EOF
+chmod +x "$SETUP_BIN/openssl"
 "$NODE_BIN" "$ROOT/tests/helpers/remote-setup-server.mjs" "$SETUP_CERT" "$SETUP_KEY" "$SETUP_STATE" \
   "$ROOT/adapters/openlive-acp/node_modules/ws/wrapper.mjs" >"$TMP/setup-server.out" 2>"$TMP/setup-server.err" &
 SETUP_SERVER_PID=$!
@@ -546,11 +556,11 @@ assert_file "$SETUP_STATE"
 SETUP_PORT="$(sed -n '1p' "$SETUP_STATE")"
 SETUP_FINGERPRINT="$(sed -n '2p' "$SETUP_STATE")"
 SETUP_PATH="$SETUP_BIN:$(dirname "$NODE_BIN"):/usr/local/bin:/usr/bin:/bin"
-if ! printf '%s\n' 'remote-password-42' | \
+if ! printf '%s\n' 'y' 'remote-password-42' | \
   PATH="$SETUP_PATH" HOME="$SETUP_HOME" OCVM_OPENLIVE_APP_PATH="$SETUP_APP" \
   bash "$SCRIPT" openlive remote --stub "$SETUP_STUB" \
   --url "https://127.0.0.1:$SETUP_PORT" --username opencode \
-  --fingerprint "$SETUP_FINGERPRINT" --yes >"$TMP/remote-setup.out" 2>"$TMP/remote-setup.err"; then
+  --yes >"$TMP/remote-setup.out" 2>"$TMP/remote-setup.err"; then
   kill "$SETUP_SERVER_PID" 2>/dev/null || true
   wait "$SETUP_SERVER_PID" 2>/dev/null || true
   fail "transactional remote setup failed: $(<"$TMP/remote-setup.err")"
@@ -569,10 +579,13 @@ assert_eq "$(stat -c '%a' "$(dirname "$SETUP_MAPPING")")" "700"
 if grep -qF 'remote-password-42' "$TMP/remote-setup.out" "$TMP/remote-setup.err"; then
   fail "remote setup leaked its password"
 fi
+if grep -qF 'curl: (60)' "$TMP/remote-setup.out" "$TMP/remote-setup.err"; then
+  fail "remote setup exposed the expected self-signed curl failure"
+fi
 if grep -q -- '--arg password' "$SCRIPT" || ! grep -qF -- '--rawfile password /dev/fd/9' "$SCRIPT"; then
   fail "remote setup passes its password through process arguments"
 fi
-pass "remote setup verifies TLS/auth/project/ACP before atomically saving a private mapping"
+pass "remote setup tolerates macOS s_client status while verifying TLS/auth/project/ACP"
 
 NOAUTH_HOME="$TMP/home-remote-no-auth"
 NOAUTH_STUB="$TMP/no-auth stub"
