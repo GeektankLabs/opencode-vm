@@ -28,18 +28,27 @@ jobs:
       - name: Resolve release metadata
         id: metadata
         run: |
+          assert_equal() {
+            if [[ "$2" != "$3" ]]; then
+              echo "::error::$1: expected '$3', got '$2'." >&2
+              exit 1
+            fi
+          }
           script_version="$(awk -F'\"' '/^OCVM_VERSION=/ {print $2; exit}' opencode-vm.sh)"
           adapter_version="$(awk -F'\"' '/^OPENLIVE_ADAPTER_VERSION=/ {print $2; exit}' opencode-vm.sh)"
           adapter_tag="$(awk -F'\"' '/^OPENLIVE_ADAPTER_TAG=/ {print $2; exit}' opencode-vm.sh)"
           asset="$(awk -F'\"' '/^OPENLIVE_ADAPTER_FILENAME=/ {print $2; exit}' opencode-vm.sh)"
           release_tag="v$script_version"
           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
-            test "$GITHUB_REF_NAME" = "$release_tag"
+            assert_equal "Pushed tag must match OCVM_VERSION" "$GITHUB_REF_NAME" "$release_tag"
           fi
-          test "$adapter_tag" = "$release_tag"
-          test "$adapter_version" = "$(jq -r '.version' adapters/openlive-acp/package.json)"
-          test "$asset" = "opencode-vm-openlive-adapter-$adapter_version.tar"
-          grep -qF "const ADAPTER_VERSION = \"$adapter_version\";" adapters/openlive-acp/src/acp/transport.ts
+          assert_equal "OPENLIVE_ADAPTER_TAG must match OCVM_VERSION" "$adapter_tag" "$release_tag"
+          assert_equal "OPENLIVE_ADAPTER_VERSION must match package.json" "$adapter_version" "$(jq -r '.version' adapters/openlive-acp/package.json)"
+          assert_equal "OPENLIVE_ADAPTER_FILENAME" "$asset" "opencode-vm-openlive-adapter-$adapter_version.tar"
+          if ! grep -qF "const ADAPTER_VERSION = \"$adapter_version\";" adapters/openlive-acp/src/acp/transport.ts; then
+            echo "::error::transport.ts ADAPTER_VERSION must match OPENLIVE_ADAPTER_VERSION '$adapter_version'." >&2
+            exit 1
+          fi
           printf 'asset=%s\nrelease_tag=%s\n' "$asset" "$release_tag" >> "$GITHUB_OUTPUT"
 
   release:
@@ -130,6 +139,7 @@ jobs:
       - name: Validate shell integration
         if: steps.state.outputs.release_needed == 'true'
         run: |
+          python3 tests/release_metadata_test.py
           bash -n opencode-vm.sh tests/openlive_test.sh tests/besprechung_test.sh scripts/build-openlive-adapter.sh
           shellcheck --severity=error opencode-vm.sh tests/openlive_test.sh tests/besprechung_test.sh scripts/build-openlive-adapter.sh
           bash tests/besprechung_test.sh

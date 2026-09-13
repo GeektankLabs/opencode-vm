@@ -111,7 +111,7 @@ assert_file "$AUTH"
 assert_eq "$(jq -r '.["acpCommand:opencode"]' "$SETTINGS")" "$SHIM acp"
 jq -e '.__opencode_vm_openlive__ == {"type":"api","key":"opencode-vm-openlive-readiness-v1"}' "$AUTH" >/dev/null ||
   fail "readiness marker missing or unexpected"
-assert_eq "$(HOME="$HOME_ONE" "$SHIM" --version)" "opencode-vm OpenLive bridge 0.5.47"
+assert_eq "$(HOME="$HOME_ONE" "$SHIM" --version)" "opencode-vm OpenLive bridge 0.5.48"
 pass "install creates the managed shim, setting, discovery link, and non-secret marker"
 
 STANDALONE_DIR="$TMP/standalone"
