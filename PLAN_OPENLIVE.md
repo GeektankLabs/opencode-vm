@@ -12,6 +12,7 @@ Current status:
 - Script `0.5.49` / adapter `0.1.6` make Remote OpenLive inherit the HTTPS web session's authentication choice. Unprotected trusted-LAN sessions accept remote calls without a password; protected sessions retain the same Basic credential and setup asks for it only after an unauthenticated discovery receives HTTP 401.
 - Script `0.5.50` keeps self-signed setup portable across macOS TLS implementations: the expected curl trust failure stays quiet, and a valid certificate fingerprint remains usable when `openssl s_client` returns a non-zero status.
 - Script `0.5.51` fixes fresh and resumed web startup exporting the remote gateway's required project identity under the correct environment-variable name.
+- Section 30 records OCVM Voice Web as an exploratory idea for later investigation and a bounded prototype. It is not scheduled implementation work and does not change the existing local, remote, or discussion baselines.
 
 ## 1. Goal
 
@@ -1052,6 +1053,7 @@ Future compatibility work:
 - Consider a session-selector config option only if it can preserve exact-ID and busy-state safety.
 - Define manager-history and repeated-screen-frame retention/compaction policies before describing long-running visual use as production-ready.
 - Remote desktop ACP transport now has an approved client workflow and is planned in package C. Passive monitoring, multiple concurrent calls, mobile clients, and in-call project switching remain deferred.
+- A browser-native optional voice surface is recorded separately as the exploratory OCVM Voice Web idea in section 30. It is not part of package B or C.
 
 Package B has no unconditional exit criterion. For any selected item, its implementation is complete only when the corresponding shell, VM, protocol, documentation, and real-application tests pass.
 
@@ -1279,4 +1281,110 @@ The implementation increments the script to 0.5.44 and the adapter/package to 0.
 
 **Remote-MVP release readiness requires all C steps and the above acceptance to pass.** Publish compatible client/gateway artifacts before distributing their referencing script; a new client talking to an older server must produce upgrade guidance. The existing local A.6 acceptance remains a separate required regression gate, not something remote planning or mocks can satisfy.
 
-Further proxy platforms, browser clients, fine-grained multi-user authorization, background reconnection, and filesystem features enter a later plan only after a concrete need. No such work is necessary to deliver the stub-folder remote workflow approved here.
+Further proxy platforms, fine-grained multi-user authorization, background reconnection, and filesystem features enter a later plan only after a concrete need. The browser client idea now recorded in section 30 remains a separate investigation and is not necessary to deliver the stub-folder remote workflow approved here.
+
+## 30. OCVM Voice Web Exploratory Plan
+
+**Status: idea for later investigation and a bounded prototype; not scheduled for implementation.**
+
+This section records an optional browser-based voice surface without changing the confirmed product decisions, current implementation packages, release gates, MVP acceptance criteria, or ongoing work. Every technical approach below remains an investigation option unless a later decision explicitly adopts it.
+
+### 30.1 Motivation and target experience
+
+OpenCode should be usable by voice directly through the web access supplied by `opencode-vm`. A caller using a suitable notebook or smartphone should not need the separate OpenLive application, a local bridge, or additional installed speech software.
+
+`opencode-vm` could deliver an optional voice surface beside or around the unchanged OpenCode Web UI. Both surfaces would use the same central OpenCode runtime and the same project work sessions. Voice would be an additional input/output channel, not a separate agent with an independent conversation history.
+
+The long-term target is a fluid conversation about tasks, results, and decisions. A first prototype may deliberately be simpler and should primarily determine whether this access feels useful and comfortable in normal work.
+
+### 30.2 Proposed user flow
+
+After starting `opencode-vm web`, the user opens an optional voice view under the project's existing web access. The user explicitly enables voice, grants the required browser permissions, and can see model loading and readiness state.
+
+The initial conversation entry should follow the existing manager/session model described in sections 8-12. After explicit attachment to a work session, transcribed speech is submitted there as normal user messages. Responses appear in the same session history and may be spoken aloud. The regular Web UI remains available for code, diffs, permissions, questions, and other detailed interactions.
+
+The voice surface must show its exact target, for example `Voice connected to: Session X`. It must not silently infer that a session visible in an adjacent Web UI window is also the current voice target.
+
+### 30.3 Architecture hypothesis and reuse boundary
+
+`opencode-vm` would remain the delivery and integration layer rather than replacing the OpenCode Web UI. The following target split is an investigation hypothesis:
+
+```text
+Browser on notebook or smartphone
+  Voice surface:
+    microphone -> on-device speech recognition -> text
+    speaker    <- on-device speech synthesis  <- response text
+                              |
+                    browser-capable transport
+                              |
+       OpenCode-VM web access / HTTPS / access control
+                              |
+                 reused Voice Session Core
+                              |
+                  central OpenCode runtime
+                              |
+               same project/work sessions
+                              |
+                   regular OpenCode Web UI
+```
+
+Speech recognition, voice activity detection, and speech synthesis should run on the calling device where practical. WebGPU and suitable alternative browser runtimes are options to evaluate. Actual browser, hardware, and model compatibility must be validated separately; this concept selects neither a specific engine nor Breeze TTS II.
+
+Local speech processing does not mean that the coding LLM also runs in the browser or that the complete application works offline. In the expected normal path, transcribed text is sent to the backend. Raw audio should not automatically be sent to additional services, and there must be no silent fallback to external audio processing.
+
+Suitable OpenLive components should be evaluated for reuse in the speech pipeline. A complete OpenLive fork and a second agent infrastructure are both out of scope. Package boundaries, dependency costs, browser suitability, and license terms remain part of the investigation.
+
+### 30.4 Surface and backend integration options
+
+A separately addressable voice page is the simplest initial option. A later combined surface could place a voice bar above or beside an embedded OpenCode Web UI. An `iframe` is one option to test, not a requirement; embedding policy, navigation, responsive layout, permissions, and mobile usability require practical validation.
+
+Conversation data should come from backend APIs and events, never from scraping the Web UI DOM. Automatically following the session currently open in the Web UI is a possible later convenience and is not part of the first prototype.
+
+A browser-capable transport into the Voice Session Core must be investigated. Neither direct browser use of the native remote endpoint in section 29 nor interchangeability between ACP and an OpenLive frontend protocol may be assumed. A narrow additional transport or bounded protocol translation is preferable to duplicating call/session control. Any reuse of the existing `/openlive/acp` route would require an explicit origin, authentication, browser-security, and protocol compatibility review because section 29 currently rejects browser origins by design.
+
+### 30.5 Product and safety guardrails
+
+- The regular Web UI and native OpenLive access must remain independently usable.
+- The optional surface must not start a second OpenCode runtime or maintain duplicate conversation history.
+- Project binding, access control, and the limit on simultaneous voice calls must remain consistent across native, remote, and browser entry paths.
+- Browser access, authentication, allowed origins, and browser-trusted HTTPS must be investigated explicitly. The design must not disable native endpoint protections broadly or place secrets in URLs.
+- `Stop speaking` and `cancel agent task` are separate actions. Barge-in must not silently abort ongoing coding work.
+- After connection loss, already submitted work must not be sent again automatically. An uncertain result must remain visible and direct the user to inspect the shared session.
+- Speech models load only after explicit activation. Loading progress, cache use, unsupported hardware/browser state, and failures must be understandable.
+- Disabling or failing voice must leave the regular Web UI usable.
+
+These guardrails extend the Voice Session Core's existing exact-session, cancellation, uncertain-outcome, and single-runtime rules rather than replacing them.
+
+### 30.6 Bounded prototype proposal
+
+The first experiment may support one documented notebook/browser setup with explicit record start/stop or push-to-talk, visible transcription, attachment to one exact session, and simple optional speech output. A shared framed interface and automatic end-of-speech detection are not required for that experiment.
+
+Only if this flow proves useful should later experiments consider automatic conversational turn-taking, streamed speech output, echo handling, and controlled interruption. Smartphone testing should be a separate foreground-use experiment, not a promise of support for all devices or for calls while the screen is locked.
+
+The prototype investigation should establish whether:
+
+- Spoken messages and responses reach the same selected OpenCode session without a second runtime or duplicate submissions.
+- Recording, target session, and processing state are understandable, and stopping playback does not accidentally stop the coding task.
+- Model startup, response latency, German speech quality, and resource use are practical on specifically documented devices.
+- Failure, connection loss, and voice deactivation leave independent Web UI use unaffected.
+
+These are investigation questions for deciding whether the idea merits further planning. They are not additions to the release or MVP acceptance criteria in sections 14, 21, 27, or 29.
+
+### 30.7 Deferred extensions
+
+Camera or screen transfer, passive reading of tasks started in Web UI/TUI, automatic following of the Web UI session, background operation, and multiple simultaneous voice users remain outside the first experiment. Each may be assessed separately only after the basic voice flow is useful.
+
+In particular, this idea does not alter the implemented per-turn OpenLive JPEG path, Remote OpenLive's native-client contract, or the current one-call-per-project rule.
+
+### 30.8 Open investigation questions and outcome
+
+Open questions include:
+
+- Which OpenLive speech components can be reused cleanly without importing a second agent/session stack?
+- Which speech recognition, activity detection, and synthesis models provide useful German quality in supported browsers?
+- What model sizes, cache behavior, startup times, and mobile resource budgets are practical?
+- Which browser transport can reach the Voice Session Core without assuming ACP or OpenLive frontend-protocol equivalence?
+- How should frontend code and model assets be versioned, delivered, cached, and updated through the existing `opencode-vm web` lifecycle?
+- Which HTTPS, origin, authentication, permission, and browser lifecycle constraints apply on notebooks and smartphones?
+
+The investigation should end with a reasoned recommendation to develop OCVM Voice Web as an optional feature, simplify the approach, or defer it. A positive prototype does not automatically authorize a broader implementation.
