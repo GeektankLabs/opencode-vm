@@ -467,10 +467,18 @@ Provider management is a first-class top-level command — no `doctor` prefix ne
 
 ```bash
 opencode-vm provider list
+opencode-vm provider login [provider] [--method "method label"]
+opencode-vm provider logout <provider>
 opencode-vm provider new                 # interactive wizard
 opencode-vm provider refresh <id>        # re-discover models for an existing provider
 opencode-vm provider rm <provider-id> [--dry-run]
 ```
+
+`provider list` reports each stored provider's credential kind (`oauth`, `api`, or endpoint-only) without printing credential values. `provider add` will not silently replace an existing OAuth login with an API key; perform that login-method change explicitly inside the project session.
+
+Provider credentials use a separate, baseline-managed synchronization path. Every controlled runtime records the exact host auth state it starts with. At controlled shutdown, provider entries are compared independently against that baseline and the current host state. An unchanged old VM copy cannot overwrite newer host credentials, while independently changed providers are combined. Concurrent OAuth changes use controlled completion order, never token expiry or file mtime. Unresolved candidates are retained under `~/.opencode-vm/auth-sync/` outside disposable session shares.
+
+A deliberate logout creates a global tombstone when that runtime is next finalized. Older runtime generations cannot silently restore the removed credential; a later explicit login can clear the tombstone. `provider login/logout` operate inside the current project's running tracked VM, create a durable checkpoint, and never start a VM or perform a fallback host login. The checkpoint becomes global at controlled runtime finalization. Hard VM/process loss can still lose changes made since the last checkpoint; no auth watcher or background checkpoint service runs.
 
 **Model discovery:** When no `--model` flags are given, `provider add` automatically calls the `/models` endpoint and adds all returned models. If the endpoint is unreachable or returns no models, the provider is **not** added. Pass `--model` flags explicitly to skip auto-discovery. Where available (e.g. LM Studio), the context window size is read from the API and stored automatically.
 
@@ -764,11 +772,12 @@ opencode-vm ram default  # drop the RAM override (8 GiB); 'cpu default' likewise
 opencode-vm ports show   # show host/LAN policy and localhost-forwarding status
 opencode-vm doctor       # inspect synced local auth/model/db state
 opencode-vm provider list
+opencode-vm provider login openai
+opencode-vm provider logout openai
 opencode-vm provider add <id> --base-url <url> --api-key <key> [--name "Display Name"] [--dry-run]
 opencode-vm provider rm <id> [--dry-run]
-opencode-vm auth status  # show OAuth token freshness across VMs/sessions
-opencode-vm auth resync  # adopt the freshest OAuth token into the host auth.json
-                         #   (fix for "401 token refresh failed" across VMs)
+opencode-vm auth status  # show baseline-managed auth synchronization state
+opencode-vm auth resync  # retry finalization for this project's stopped tracked session
 opencode-vm screenshot   # setup guide for browser screenshot capture
 opencode-vm update       # update script from upstream
 opencode-vm create-patch # generate a patch submission for upstream
@@ -781,7 +790,6 @@ All optional; the defaults are the documented behavior.
 | Variable | Default | Effect |
 |---|---|---|
 | `OCVM_ON_EXIT` | `ask` (`keep` for non-TTY) | Session-end action: `keep`, `delete`, or `ask` |
-| `OCVM_AUTH_AUTORESYNC` | `1` | OAuth freshest-token pre-flight before start/attach (`0` disables) |
 | `OCVM_PROVIDER_AUTOREFRESH` | `1` | Auto-refresh local LM Studio/Ollama providers at session start (`0` disables) |
 | `OCVM_MODEL_ENRICH` | `1` | Backfill context/output/vision/reasoning metadata for known frontier models (`0` disables) |
 | `OCVM_MODEL_ENRICH_PROVIDERS` | auto | Comma-separated provider ids to enrich (default: openai-compatible + ai-gateway) |

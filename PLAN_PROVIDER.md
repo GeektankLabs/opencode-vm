@@ -1,8 +1,8 @@
 # Provider-Verwaltung: Umsetzungsplan
 
-Status: Konzept und Implementierungsplan. Noch keine Implementierung.
+Status: MVP in `opencode-vm` 0.5.52 implementiert; reale macOS/Lima- und Provider-Abnahme steht noch aus.
 
-Dieses Dokument plant die Vereinheitlichung der Provider-Bedienung sowie die strukturierte Rueckfuehrung von Zugangsdaten aus wegwerfbaren Projekt-VMs. Die Erstellung dieser Datei veraendert weder Produktivcode noch Anmeldungen, Konfigurationen oder Dienste.
+Dieses Dokument beschreibt die Vereinheitlichung der Provider-Bedienung sowie die strukturierte Rueckfuehrung von Zugangsdaten aus wegwerfbaren Projekt-VMs. Die MVP-Implementierung folgt den verbindlichen Entscheidungen unten; offene manuelle Abnahmen bleiben als solche markiert.
 
 Recherchegrundlage: `opencode-vm.sh` Version `0.5.51` und die in der Untersuchung festgestellte OpenCode-Version `1.18.29`. Vor der Implementierung sind die dann eingesetzte Version und ihre Schnittstellen erneut zu pruefen. Quellcode und Dokumentation wurden untersucht; ein realer Login- oder Mehrprojekt-Dauertest wurde nicht durchgefuehrt.
 

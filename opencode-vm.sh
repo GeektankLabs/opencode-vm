@@ -20,6 +20,7 @@ SHARE_ROOT="$HOME/.opencode-vm"
 BACKUP_DIR="$SHARE_ROOT/backups"
 SESSIONS_DIR="$SHARE_ROOT/sessions"
 PROJECT_STATE_DIR="$SHARE_ROOT/project-state"
+AUTH_SYNC_DIR="$SHARE_ROOT/auth-sync"
 PROJECT_HISTORY_DIR="$SHARE_ROOT/project-history"   # loaded only with --keep-history
 FRESH_HISTORY_DIR="$SHARE_ROOT/fresh-history"       # per-run snapshots from default fresh mode
 KEPT_SESSION_NOTIFIED_MARKER="$SHARE_ROOT/.kept-session-notified"
@@ -33,7 +34,7 @@ OPENLIVE_PREVIOUS_COMMAND="$OPENLIVE_DIR/previous-command"
 OPENLIVE_AUTH_MARKER="__opencode_vm_openlive__"
 OPENLIVE_LOCK_PATH=""
 OPENLIVE_ADAPTER_VERSION="0.1.6"
-OPENLIVE_ADAPTER_TAG="v0.5.51"
+OPENLIVE_ADAPTER_TAG="v0.5.52"
 OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.6.tar"
 OPENLIVE_ADAPTER_SHA256="06f461873b8b299de98220aa577824eb9807672b26cb069541acebcdd2d973b9"
 OPENLIVE_ACP_SDK_VERSION="1.2.1"
@@ -136,7 +137,7 @@ export LIMA_SSH_PORT_FORWARDER=true
 
 # Excludes for xdg-data rsync: bin/ (375M, 28k files — downloaded on demand),
 # log/ (old session logs), tool-output/ (previous session artifacts)
-DATA_RSYNC_EXCLUDES=(--exclude='bin/' --exclude='log/' --exclude='tool-output/')
+DATA_RSYNC_EXCLUDES=(--exclude='bin/' --exclude='log/' --exclude='tool-output/' --exclude='auth.json')
 
 # Defaults
 DEFAULT_HOST_TCP_PORTS="1234 8888 11434"   # LM Studio + SearXNG (MCP) + Ollama
@@ -147,7 +148,7 @@ DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.5.51"
+OCVM_VERSION="0.5.52"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -393,7 +394,7 @@ get_host_ip() {
 }
 
 ensure_dirs() {
-  mkdir -p "$HOST_CFG_DIR" "$BACKUP_DIR" "$SESSIONS_DIR" "$PROJECT_STATE_DIR" "$PROJECT_HISTORY_DIR" "$FRESH_HISTORY_DIR"
+  mkdir -p "$HOST_CFG_DIR" "$BACKUP_DIR" "$SESSIONS_DIR" "$PROJECT_STATE_DIR" "$PROJECT_HISTORY_DIR" "$FRESH_HISTORY_DIR" "$AUTH_SYNC_DIR"
 }
 
 proj_hash() {
@@ -406,6 +407,79 @@ session_env() {
 
 session_share_dir() {
   echo "$SESSIONS_DIR/$(proj_hash "$1")"
+}
+
+LIFECYCLE_LOCK_LINK=""
+LIFECYCLE_LOCK_CLAIM=""
+
+_ocvm_recover_symlink_lock() {
+  local link="$1" root="$2"
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 - "$link" "$root" <<'PY'
+import fcntl
+import os
+import shutil
+import sys
+
+link, root = sys.argv[1:]
+with open(link + ".recovery", "a+") as recovery:
+    fcntl.flock(recovery, fcntl.LOCK_EX)
+    try:
+        target = os.readlink(link)
+        with open(os.path.join(root, target, "pid"), encoding="ascii") as handle:
+            owner = int(handle.read().strip())
+        os.kill(owner, 0)
+    except ProcessLookupError:
+        try:
+            os.unlink(link)
+        except FileNotFoundError:
+            pass
+        shutil.rmtree(os.path.join(root, target), ignore_errors=True)
+    except (FileNotFoundError, OSError, ValueError):
+        pass
+PY
+}
+
+lifecycle_lock_acquire() {
+  local project="$1" lock_root key link claim target owner tries=0
+  lock_root="$SESSIONS_DIR/.locks"
+  key="$(proj_hash "$project")"
+  link="$lock_root/$key.lock"
+  claim="$lock_root/$key.claim.$$.$RANDOM"
+  mkdir -p "$lock_root" "$claim"
+  printf '%s\n' "$$" > "$claim/pid"
+  while true; do
+    if ln -sn "$(basename "$claim")" "$link" 2>/dev/null; then
+      LIFECYCLE_LOCK_LINK="$link"
+      LIFECYCLE_LOCK_CLAIM="$claim"
+      return 0
+    fi
+    target="$(readlink "$link" 2>/dev/null || true)"
+    owner="$(cat "$lock_root/$target/pid" 2>/dev/null || true)"
+    if [[ -n "$target" && -n "$owner" ]] && ! kill -0 "$owner" 2>/dev/null; then
+      _ocvm_recover_symlink_lock "$link" "$lock_root" || true
+      continue
+    fi
+    tries=$((tries + 1))
+    if (( tries >= 300 )); then
+      rm -rf "$claim"
+      echo "[session] Timed out waiting for lifecycle ownership: $link" >&2
+      return 1
+    fi
+    sleep 0.1
+  done
+}
+
+lifecycle_lock_release() {
+  local target
+  [[ -n "$LIFECYCLE_LOCK_LINK" && -n "$LIFECYCLE_LOCK_CLAIM" ]] || return 0
+  target="$(readlink "$LIFECYCLE_LOCK_LINK" 2>/dev/null || true)"
+  if [[ "$target" == "$(basename "$LIFECYCLE_LOCK_CLAIM")" ]]; then
+    rm -f "$LIFECYCLE_LOCK_LINK"
+  fi
+  rm -rf "$LIFECYCLE_LOCK_CLAIM"
+  LIFECYCLE_LOCK_LINK=""
+  LIFECYCLE_LOCK_CLAIM=""
 }
 
 project_state_dir() {
@@ -4463,19 +4537,12 @@ doctor_cmd() {
       fi
       echo ""
 
-      echo "[doctor] OAuth token freshness (host vs. running VMs + saved sessions)"
-      if [[ -f "$auth_file" ]] && command -v jq >/dev/null 2>&1; then
-        if [[ -n "$(auth_oauth_provider_ids "$auth_file")" ]]; then
-          auth_collect_freshest_oauth report
-        else
-          if openlive_owned_auth_marker && [[ "$(jq --arg marker "$OPENLIVE_AUTH_MARKER" 'del(.[$marker]) | length' "$auth_file")" -eq 0 ]]; then
-            echo "  <OpenLive readiness marker only; no credential>"
-          else
-            echo "  <no OAuth providers; static API credentials only>"
-          fi
-        fi
+      echo "[doctor] Baseline-managed auth synchronization"
+      if [[ -f "$AUTH_SYNC_DIR/state.json" ]] && command -v jq >/dev/null 2>&1; then
+        echo "  managed providers: $(jq -r '.providers | length' "$AUTH_SYNC_DIR/state.json")"
+        echo "  controlled completions: $(( $(jq -r '.nextCompletion' "$AUTH_SYNC_DIR/state.json") - 1 ))"
       else
-        echo "  <none>"
+        echo "  <no managed runtime has started yet>"
       fi
       echo ""
 
@@ -4766,178 +4833,435 @@ provider_refresh_all_quiet() {
   done
 }
 
-# ----------------------------------------------------------------------------
-# OAuth subscription token helpers (e.g. OpenAI/ChatGPT, GitHub Copilot).
-#
-# Unlike static API keys (auth.json entries of type "key"), OAuth logins use a
-# single-use *rotating* refresh token: each ~hourly refresh yields a new
-# access+refresh pair and invalidates the previous refresh token. Because
-# opencode-vm snapshots auth.json into every per-project VM, two VMs seeded from
-# the same auth.json end up fighting over one rotating chain — the first to
-# refresh invalidates the others, which then fail with "401 token refresh
-# failed". These helpers locate whichever copy currently holds the freshest
-# (latest-`expires`) OAuth token and adopt it into the host auth.json so the
-# next session that reads it picks up the live token.
-#
-# Scope: OAuth entries only (type=="oauth", or a "refresh" field present).
-# type:"key" entries are never read or modified by anything below.
-# ----------------------------------------------------------------------------
-
-# List provider ids in an auth.json file that are OAuth (refreshable).
-auth_oauth_provider_ids() {
+# Auth synchronization uses a baseline per controlled runtime. Entries are
+# compared structurally; token expiry and file mtimes are diagnostic only.
+_auth_sync_hash_file() {
   local file="$1"
-  [[ -f "$file" ]] || return 0
-  command -v jq >/dev/null 2>&1 || return 0
-  jq -r 'to_entries[]
-         | select((.value.type? == "oauth") or (.value | has("refresh")))
-         | .key' "$file" 2>/dev/null || true
+  [[ -f "$file" ]] || { printf 'absent\n'; return 0; }
+  jq -cS . "$file" 2>/dev/null | shasum | awk '{print $1}'
 }
 
-# Echo the `expires` value (epoch-ms; 0 when absent/invalid) for one provider.
-auth_oauth_expires() {
+_auth_sync_entry() {
   local file="$1" provider="$2"
-  { [[ -f "$file" ]] && command -v jq >/dev/null 2>&1; } || { echo 0; return 0; }
-  jq -r --arg p "$provider" '(.[$p].expires // 0) | floor' "$file" 2>/dev/null \
-    | grep -Ex '[0-9]+' || echo 0
+  [[ -f "$file" ]] || { printf '__OCVM_ABSENT__\n'; return 0; }
+  jq -cS --arg p "$provider" 'if has($p) then .[$p] else "__OCVM_ABSENT__" end' "$file"
 }
 
-# Format an epoch-ms timestamp for humans (macOS/BSD date).
-_auth_fmt_expires() {
-  local ms="$1"
-  [[ "$ms" =~ ^[0-9]+$ ]] && (( ms > 0 )) || { echo "n/a"; return 0; }
-  date -r "$(( ms / 1000 ))" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "$ms"
+_auth_sync_entry_hash() {
+  local file="$1" provider="$2"
+  _auth_sync_entry "$file" "$provider" | shasum | awk '{print $1}'
 }
 
-# Human label for where a candidate auth.json came from.
-# Args: <path> <host_auth_path> [tmpfiles...] (tmpfiles are VM-sourced copies)
-_auth_src_label() {
-  local path="$1" host="$2"; shift 2
-  local t
-  for t in "$@"; do
-    [[ "$path" == "$t" ]] && { echo "a running session VM"; return 0; }
+_auth_sync_lock() {
+  local lock="$AUTH_SYNC_DIR/.lock" claim target owner tries=0
+  mkdir -p "$AUTH_SYNC_DIR"
+  claim="$AUTH_SYNC_DIR/.claim.$$.$RANDOM"
+  mkdir "$claim"
+  printf '%s\n' "$$" > "$claim/pid"
+  while true; do
+    if ln -sn "$(basename "$claim")" "$lock" 2>/dev/null; then
+      AUTH_SYNC_LOCK_CLAIM="$claim"
+      return 0
+    fi
+    target="$(readlink "$lock" 2>/dev/null || true)"
+    owner="$(cat "$AUTH_SYNC_DIR/$target/pid" 2>/dev/null || true)"
+    if [[ -n "$target" && -n "$owner" ]] && ! kill -0 "$owner" 2>/dev/null; then
+      _ocvm_recover_symlink_lock "$lock" "$AUTH_SYNC_DIR" || true
+      continue
+    fi
+    tries=$((tries + 1))
+    if (( tries >= 300 )); then
+      rm -rf "$claim"
+      echo "[auth] Timed out waiting for the auth synchronization lock." >&2
+      return 1
+    fi
+    sleep 0.1
   done
-  if   [[ "$path" == "$host" ]];                 then echo "host"
-  elif [[ "$path" == "$SESSIONS_DIR"/* ]];       then echo "a saved session"
-  elif [[ "$path" == "$PROJECT_STATE_DIR"/* ]];  then echo "a project cache"
-  else echo "$path"; fi
 }
 
-# Core: scan the host auth.json, every per-project session/state copy, and the
-# live copy inside each running session VM; for each OAuth provider adopt the
-# entry with the latest `expires` into the host auth.json. Pure no-op for files
-# with no OAuth entries; type:"key" entries are never touched.
-#   $1 = mode: "report" (read-only, default) | "apply" (writes host auth.json)
-auth_collect_freshest_oauth() {
-  local mode="${1:-report}"
-  if ! command -v jq >/dev/null 2>&1; then
-    echo "[auth] jq is required for OAuth token sync." >&2
-    return 1
+_auth_sync_unlock() {
+  local lock="$AUTH_SYNC_DIR/.lock" target
+  target="$(readlink "$lock" 2>/dev/null || true)"
+  if [[ -n "${AUTH_SYNC_LOCK_CLAIM:-}" && "$target" == "$(basename "$AUTH_SYNC_LOCK_CLAIM")" ]]; then
+    rm -f "$lock"
   fi
+  [[ -n "${AUTH_SYNC_LOCK_CLAIM:-}" ]] && rm -rf "$AUTH_SYNC_LOCK_CLAIM"
+  AUTH_SYNC_LOCK_CLAIM=""
+}
+
+_auth_sync_atomic_json() {
+  local source="$1" destination="$2" tmp
+  mkdir -p "$(dirname "$destination")"
+  tmp="$(mktemp "${destination}.tmp.XXXXXX")" || return 1
+  if jq -e 'select(type == "object")' "$source" > "$tmp" 2>/dev/null; then
+    chmod 600 "$tmp"
+    mv -f "$tmp" "$destination"
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+_auth_sync_init_state() {
+  local state="$AUTH_SYNC_DIR/state.json" tmp
+  [[ -f "$state" ]] && jq -e '.schema == 1 and (.providers | type == "object")' "$state" >/dev/null 2>&1 && return 0
+  tmp="$(mktemp)"
+  jq -n '{schema:1,nextRevision:1,nextCompletion:1,providers:{}}' > "$tmp"
+  _auth_sync_atomic_json "$tmp" "$state"
+  rm -f "$tmp"
+}
+
+# Reconcile metadata with the current host file. A mismatch is an external
+# revision, so it never inherits controlled-session completion priority.
+_auth_sync_reconcile_state() {
+  local auth="$1" mode="${2:-external}" state="$AUTH_SYNC_DIR/state.json" provider hash stored revision tmp
+  local providers
+  providers="$({ jq -r --arg marker "$OPENLIVE_AUTH_MARKER" 'keys[] | select(. != $marker)' "$auth" 2>/dev/null || true; jq -r '.providers | keys[]' "$state" 2>/dev/null || true; } | sort -u)"
+  for provider in $providers; do
+    hash="$(_auth_sync_entry_hash "$auth" "$provider")"
+    stored="$(jq -r --arg p "$provider" '.providers[$p].hash // ""' "$state")"
+    [[ "$hash" == "$stored" ]] && continue
+    revision="$(jq -r '.nextRevision' "$state")"
+    tmp="$(mktemp)"
+    jq --arg p "$provider" --arg h "$hash" --arg mode "$mode" --argjson r "$revision" \
+      --argjson present "$(jq -e --arg p "$provider" 'has($p)' "$auth")" '
+      (.providers[$p] // {}) as $old
+      | .providers[$p] = {
+          hash:$h, revision:$r, completion:null,
+          tombstone:($old.tombstone // null),
+          loginRevision:(if $mode == "external" and $present then $r else ($old.loginRevision // 0) end)
+        }
+      | .nextRevision = ($r + 1)
+    ' "$state" > "$tmp"
+    _auth_sync_atomic_json "$tmp" "$state" || { rm -f "$tmp"; return 1; }
+    rm -f "$tmp"
+  done
+}
+
+# Record the exact auth state seeded into a new controlled runtime.
+auth_sync_begin() {
+  local project="$1" generation="$2" seed_destination="${3:-}" host_auth="$HOST_DATA_DIR/auth.json"
+  local run_dir="$AUTH_SYNC_DIR/runs/$generation" baseline tmp
+  baseline="$run_dir/baseline.json"
+  command -v jq >/dev/null 2>&1 || { echo "[auth] jq is required for auth synchronization." >&2; return 1; }
   ensure_dirs
   ensure_host_opencode_dirs
-  local host_auth="$HOST_DATA_DIR/auth.json"
-
-  # Candidate auth.json paths (host first, then saved sessions + project caches).
-  local -a candidates=()
-  [[ -f "$host_auth" ]] && candidates+=("$host_auth")
-  local f
-  for f in "$SESSIONS_DIR"/*/xdg-data/opencode/auth.json \
-           "$PROJECT_STATE_DIR"/*/xdg-data/opencode/auth.json; do
-    [[ -f "$f" ]] && candidates+=("$f")
-  done
-
-  # Live copy from each running session VM — a running VM holds its freshest
-  # (post-refresh) token only in its own /tmp until the session exits.
-  local -a tmpfiles=()
-  local vm tmp
-  while read -r vm; do
-    [[ -n "$vm" ]] || continue
-    tmp="$(mktemp)"
-    # The live auth.json inside the VM is mode 0600 (owned by the VM user, but
-    # may be root-owned on VMs seeded by older versions); read it via the
-    # guest's passwordless sudo so either ownership works. Web-mode
-    # XDG_DATA_HOME is /tmp/oc-xdg-data.
-    if limactl shell --workdir / "$vm" -- sudo cat /tmp/oc-xdg-data/opencode/auth.json >"$tmp" 2>/dev/null \
-        && [[ -s "$tmp" ]] && jq -e . "$tmp" >/dev/null 2>&1; then
-      candidates+=("$tmp")
-      tmpfiles+=("$tmp")
-    else
-      rm -f "$tmp"
-    fi
-  done < <(limactl list --format '{{.Name}} {{.Status}}' 2>/dev/null \
-             | awk -v base="$BASE_NAME" '$2=="Running" && $1 ~ /^oc-/ && $1!=base {print $1}')
-
-  _auth_cleanup_tmp() { local x; for x in ${tmpfiles[@]+"${tmpfiles[@]}"}; do rm -f "$x"; done; }
-
-  if [[ ${#candidates[@]} -eq 0 ]]; then
-    echo "[auth] No auth.json found on host or in any session."
-    _auth_cleanup_tmp; return 0
+  [[ "$generation" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "[auth] Invalid runtime generation." >&2; return 1; }
+  mkdir -p "$run_dir"
+  chmod 700 "$AUTH_SYNC_DIR" "$AUTH_SYNC_DIR/runs" "$run_dir" 2>/dev/null || true
+  _auth_sync_lock || return 1
+  tmp="$(mktemp)"
+  if [[ -f "$host_auth" ]]; then cp -p "$host_auth" "$tmp"; else printf '{}\n' > "$tmp"; fi
+  jq -e 'type == "object"' "$tmp" >/dev/null 2>&1 || { _auth_sync_unlock; rm -f "$tmp"; echo "[auth] Host auth.json is not a JSON object." >&2; return 1; }
+  if ! _auth_sync_init_state || ! _auth_sync_reconcile_state "$tmp" || ! _auth_sync_atomic_json "$tmp" "$baseline"; then
+    _auth_sync_unlock; rm -f "$tmp"; return 1
   fi
-
-  # Union of OAuth provider ids across all candidates.
-  local providers
-  providers="$(for f in "${candidates[@]}"; do auth_oauth_provider_ids "$f"; done | sort -u)"
-  if [[ -z "$providers" ]]; then
-    echo "[auth] No OAuth (refreshable) providers found — nothing to sync."
-    _auth_cleanup_tmp; return 0
+  local manifest_tmp
+  manifest_tmp="$(mktemp)"
+  jq -n --arg project "$project" --arg generation "$generation" \
+    --slurpfile state "$AUTH_SYNC_DIR/state.json" '
+      {schema:1,project:$project,generation:$generation,completion:null,candidateHash:null,
+       baselineRevisions:($state[0].providers | with_entries(.value = .value.revision))}
+    ' > "$manifest_tmp"
+  if ! _auth_sync_atomic_json "$manifest_tmp" "$run_dir/manifest.json"; then
+    _auth_sync_unlock; rm -f "$tmp" "$manifest_tmp"; return 1
   fi
+  if [[ -n "$seed_destination" ]] && ! _auth_sync_atomic_json "$tmp" "$seed_destination"; then
+    _auth_sync_unlock; rm -f "$tmp" "$manifest_tmp"; return 1
+  fi
+  _auth_sync_unlock
+  rm -f "$tmp" "$manifest_tmp"
+}
 
-  local now_ms backup_done=0 updated=0 p
-  now_ms="$(( $(date +%s) * 1000 ))"
-  for p in $providers; do
-    local best_file="" best_exp=-1 host_exp exp has
-    for f in "${candidates[@]}"; do
-      has="$(jq -r --arg p "$p" '(.[$p] // empty) | if (.type? == "oauth" or has("refresh")) then "y" else empty end' "$f" 2>/dev/null || true)"
-      [[ "$has" == "y" ]] || continue
-      exp="$(auth_oauth_expires "$f" "$p")"
-      if (( exp > best_exp )); then best_exp="$exp"; best_file="$f"; fi
-    done
-    [[ -n "$best_file" ]] || continue
-    host_exp="$(auth_oauth_expires "$host_auth" "$p")"
+_auth_sync_supported_entry() {
+  local entry="$1"
+  [[ "$entry" != '"__OCVM_ABSENT__"' ]] || return 1
+  printf '%s\n' "$entry" | jq -e 'type == "object" and (.type == "oauth" or .type == "api" or .type == "key" or .type == "wellknown")' >/dev/null 2>&1
+}
 
-    local note=""
-    (( best_exp <= now_ms )) && note="  [all copies expired — re-login: 'opencode auth login' inside a session]"
-    local src
-    src="$(_auth_src_label "$best_file" "$host_auth" ${tmpfiles[@]+"${tmpfiles[@]}"})"
-    echo "  $p: host=$(_auth_fmt_expires "$host_exp")  freshest=$(_auth_fmt_expires "$best_exp") (from $src)$note"
+_auth_sync_is_oauth_entry() {
+  local entry="$1"
+  printf '%s\n' "$entry" | jq -e 'type == "object" and (.type == "oauth" or has("refresh"))' >/dev/null 2>&1
+}
 
-    if (( best_exp > host_exp )) && [[ "$best_file" != "$host_auth" ]]; then
-      if [[ "$mode" == "apply" ]]; then
-        if (( backup_done == 0 )); then
-          local ts backup_dir
-          ts="$(date +%Y%m%d-%H%M%S)"
-          backup_dir="$BACKUP_DIR/auth-$ts"
-          mkdir -p "$backup_dir"
-          [[ -f "$host_auth" ]] && cp -p "$host_auth" "$backup_dir/auth.json.bak"
-          echo "  (backup: $backup_dir/auth.json.bak)"
-          backup_done=1
+# Merge one stopped runtime's final auth state. A valid candidate is copied
+# outside the session share before any merge, so unresolved conflicts remain
+# recoverable. Provider deletion is intentionally not automatic until the
+# logout/tombstone product rule is approved.
+auth_sync_finalize() {
+  local generation="$1" candidate_source="$2"
+  local run_dir="$AUTH_SYNC_DIR/runs/$generation" manifest baseline candidate
+  manifest="$run_dir/manifest.json"
+  baseline="$run_dir/baseline.json"
+  candidate="$run_dir/candidate.json"
+  local host_auth="$HOST_DATA_DIR/auth.json" state="$AUTH_SYNC_DIR/state.json"
+  local tmp candidate_tmp output providers provider b h v base_rev host_rev host_completion host_login_revision
+  local completion changed=0 conflicts=0 entry_file state_tmp manifest_tmp candidate_hash adopted_file explicit_login explicit_login_revision
+  local publishing_hash host_hash published_providers reconcile_mode="external"
+  command -v jq >/dev/null 2>&1 || return 1
+  [[ -f "$candidate_source" ]] || { echo "[auth] No final auth candidate was available for $generation." >&2; return 1; }
+  jq -e 'type == "object"' "$candidate_source" >/dev/null 2>&1 || { echo "[auth] Final auth candidate for $generation is invalid; session data was retained." >&2; return 1; }
+  mkdir -p "$run_dir"
+  candidate_tmp="$(mktemp)"
+  cp -p "$candidate_source" "$candidate_tmp"
+  _auth_sync_atomic_json "$candidate_tmp" "$candidate" || { rm -f "$candidate_tmp"; return 1; }
+  rm -f "$candidate_tmp"
+  if [[ ! -f "$manifest" || ! -f "$baseline" ]]; then
+    echo "[auth] Preserved legacy candidate for $generation; no baseline exists, so it was not applied." >&2
+    return 0
+  fi
+  _auth_sync_lock || return 1
+  if ! _auth_sync_init_state; then _auth_sync_unlock; return 1; fi
+  tmp="$(mktemp)"
+  if [[ -f "$host_auth" ]]; then cp -p "$host_auth" "$tmp"; else printf '{}\n' > "$tmp"; fi
+  publishing_hash="$(jq -r '.publishingHash // empty' "$manifest")"
+  host_hash="$(_auth_sync_hash_file "$tmp")"
+  [[ -n "$publishing_hash" && "$host_hash" == "$publishing_hash" ]] && reconcile_mode="controlled"
+  if ! jq -e 'type == "object"' "$tmp" >/dev/null 2>&1 || ! _auth_sync_reconcile_state "$tmp" "$reconcile_mode"; then
+    _auth_sync_unlock; rm -f "$tmp"; return 1
+  fi
+  completion="$(jq -r '.completion // empty' "$manifest")"
+  if [[ -z "$completion" ]]; then
+    completion="$(jq -r '.nextCompletion' "$state")"
+    state_tmp="$(mktemp)"
+    jq --argjson c "$completion" '.nextCompletion = ($c + 1)' "$state" > "$state_tmp"
+    _auth_sync_atomic_json "$state_tmp" "$state" || { _auth_sync_unlock; rm -f "$tmp" "$state_tmp"; return 1; }
+    rm -f "$state_tmp"
+    manifest_tmp="$(mktemp)"
+    jq --argjson c "$completion" '.completion = $c' "$manifest" > "$manifest_tmp"
+    _auth_sync_atomic_json "$manifest_tmp" "$manifest" || { _auth_sync_unlock; rm -f "$tmp" "$manifest_tmp"; return 1; }
+    rm -f "$manifest_tmp"
+  fi
+  if [[ -n "$publishing_hash" ]]; then
+    if [[ "$host_hash" == "$publishing_hash" ]]; then
+      published_providers="$(jq -r '.publishingProviders[]?' "$manifest")"
+      for provider in $published_providers; do
+        v="$(_auth_sync_entry "$candidate" "$provider")"
+        base_rev="$(jq -r --arg p "$provider" '.baselineRevisions[$p] // 0' "$manifest")"
+        explicit_login="$(jq -r --arg p "$provider" '.explicitLogins[$p] // false' "$manifest")"
+        explicit_login_revision="$(jq -r --arg p "$provider" '.explicitLoginRevisions[$p] // empty' "$manifest")"
+        if [[ "$explicit_login" != "true" ]] && _auth_sync_is_oauth_entry "$v" \
+           && [[ "$(_auth_sync_entry "$baseline" "$provider")" == '"__OCVM_ABSENT__"' ]]; then
+          explicit_login=true
         fi
-        local newentry tmp_out
-        newentry="$(jq -c --arg p "$p" '.[$p]' "$best_file")"
-        tmp_out="$(mktemp)"
-        if [[ -f "$host_auth" ]]; then
-          jq --arg p "$p" --argjson v "$newentry" '.[$p] = $v' "$host_auth" >"$tmp_out" \
-            && mv "$tmp_out" "$host_auth" && updated=1 || rm -f "$tmp_out"
+        state_tmp="$(mktemp)"
+        if [[ "$v" == '"__OCVM_ABSENT__"' ]]; then
+          jq --arg p "$provider" --argjson c "$completion" '.providers[$p].completion=$c | .providers[$p].tombstone=$c' "$state" > "$state_tmp"
+        elif _auth_sync_is_oauth_entry "$v"; then
+          jq --arg p "$provider" --argjson c "$completion" --argjson login "$explicit_login" \
+            --argjson loginrev "${explicit_login_revision:-$((base_rev + 1))}" '
+            .providers[$p].completion=$c | .providers[$p].tombstone=null
+            | if $login then
+                .providers[$p].revision = ([.providers[$p].revision, $loginrev] | max)
+                | .providers[$p].loginRevision = ([.providers[$p].loginRevision, $loginrev] | max)
+                | .nextRevision = ([.nextRevision, ($loginrev + 1)] | max)
+              else . end
+          ' "$state" > "$state_tmp"
         else
-          jq -n --arg p "$p" --argjson v "$newentry" '{($p): $v}' >"$tmp_out" \
-            && mv "$tmp_out" "$host_auth" && updated=1 || rm -f "$tmp_out"
+          jq --arg p "$provider" '.providers[$p].tombstone=null' "$state" > "$state_tmp"
         fi
-        echo "    -> adopted into host auth.json"
-      else
-        echo "    -> a fresher token exists; run 'opencode-vm auth resync' to adopt it"
+        _auth_sync_atomic_json "$state_tmp" "$state" || { _auth_sync_unlock; rm -f "$tmp" "$state_tmp"; return 1; }
+        rm -f "$state_tmp"
+      done
+      candidate_hash="$(_auth_sync_hash_file "$candidate")"
+      manifest_tmp="$(mktemp)"
+      jq --arg hash "$candidate_hash" '.candidateHash=$hash | .publishingHash=null | .publishingProviders=[]' "$manifest" > "$manifest_tmp"
+      _auth_sync_atomic_json "$manifest_tmp" "$manifest" || { _auth_sync_unlock; rm -f "$tmp" "$manifest_tmp"; return 1; }
+      _auth_sync_unlock
+      rm -f "$tmp" "$manifest_tmp"
+      return 0
+    fi
+  fi
+  output="$(mktemp)"
+  adopted_file="$(mktemp)"
+  cp -p "$tmp" "$output"
+  providers="$({ jq -r --arg marker "$OPENLIVE_AUTH_MARKER" 'keys[] | select(. != $marker)' "$baseline"; jq -r --arg marker "$OPENLIVE_AUTH_MARKER" 'keys[] | select(. != $marker)' "$tmp"; jq -r --arg marker "$OPENLIVE_AUTH_MARKER" 'keys[] | select(. != $marker)' "$candidate"; } | sort -u)"
+  for provider in $providers; do
+    b="$(_auth_sync_entry "$baseline" "$provider")"
+    h="$(_auth_sync_entry "$tmp" "$provider")"
+    v="$(_auth_sync_entry "$candidate" "$provider")"
+    explicit_login="$(jq -r --arg p "$provider" '.explicitLogins[$p] // false' "$manifest")"
+    if [[ "$v" == "$b" || "$h" == "$v" ]]; then
+      [[ "$explicit_login" == "true" ]] && _auth_sync_is_oauth_entry "$v" || continue
+    fi
+    base_rev="$(jq -r --arg p "$provider" '.baselineRevisions[$p] // 0' "$manifest")"
+    host_rev="$(jq -r --arg p "$provider" '.providers[$p].revision // 0' "$state")"
+    host_completion="$(jq -r --arg p "$provider" '.providers[$p].completion // empty' "$state")"
+    host_login_revision="$(jq -r --arg p "$provider" '.providers[$p].loginRevision // 0' "$state")"
+    local adopt=0
+    if [[ "$h" == "$b" && "$host_rev" == "$base_rev" ]]; then
+      if [[ "$v" == '"__OCVM_ABSENT__"' ]] || _auth_sync_supported_entry "$v"; then adopt=1; fi
+    elif [[ "$v" == '"__OCVM_ABSENT__"' && "$b" != '"__OCVM_ABSENT__"' \
+           && -n "$host_completion" ]] && (( completion > host_completion && host_login_revision <= base_rev )); then
+      adopt=1
+    elif _auth_sync_is_oauth_entry "$h" && _auth_sync_is_oauth_entry "$v" \
+         && [[ -n "$host_completion" ]] && (( completion > host_completion )); then
+      adopt=1
+    elif [[ "$explicit_login" == "true" ]] && _auth_sync_is_oauth_entry "$v"; then
+      adopt=1
+    fi
+    if (( adopt == 0 )); then
+      conflicts=$((conflicts + 1))
+      echo "[auth] Preserved unresolved provider candidate '$provider' from $generation." >&2
+      continue
+    fi
+    if [[ "$explicit_login" == "true" ]] && _auth_sync_is_oauth_entry "$v"; then
+      explicit_login_revision="$(jq -r --arg p "$provider" '.explicitLoginRevisions[$p] // empty' "$manifest")"
+      if [[ -z "$explicit_login_revision" ]]; then
+        explicit_login_revision="$(jq -r '.nextRevision' "$state")"
+        state_tmp="$(mktemp)"
+        jq --argjson next "$((explicit_login_revision + 1))" '.nextRevision=$next' "$state" > "$state_tmp"
+        _auth_sync_atomic_json "$state_tmp" "$state" || { _auth_sync_unlock; rm -f "$tmp" "$output" "$adopted_file" "$state_tmp"; return 1; }
+        rm -f "$state_tmp"
+        manifest_tmp="$(mktemp)"
+        jq --arg p "$provider" --argjson revision "$explicit_login_revision" \
+          '.explicitLoginRevisions = ((.explicitLoginRevisions // {}) + {($p):$revision})' "$manifest" > "$manifest_tmp"
+        _auth_sync_atomic_json "$manifest_tmp" "$manifest" || { _auth_sync_unlock; rm -f "$tmp" "$output" "$adopted_file" "$manifest_tmp"; return 1; }
+        rm -f "$manifest_tmp"
       fi
     fi
-  done
-
-  if [[ "$mode" == "apply" ]]; then
-    if (( updated == 1 )); then
-      echo "[auth] Host auth.json updated. Restart (or 'opencode-vm attach') the failing session so it re-reads the token."
+    local next_output
+    next_output="$(mktemp)"
+    if [[ "$v" == '"__OCVM_ABSENT__"' ]]; then
+      if ! jq --arg p "$provider" 'del(.[$p])' "$output" > "$next_output"; then
+        _auth_sync_unlock; rm -f "$tmp" "$output" "$next_output"; return 1
+      fi
     else
-      echo "[auth] Host already holds the freshest OAuth token — nothing to do."
+      entry_file="$(mktemp)"
+      printf '%s\n' "$v" > "$entry_file"
+      chmod 600 "$entry_file"
+      if ! jq --arg p "$provider" --slurpfile v "$entry_file" '.[$p] = $v[0]' "$output" > "$next_output"; then
+        _auth_sync_unlock; rm -f "$tmp" "$output" "$entry_file" "$next_output"; return 1
+      fi
+      rm -f "$entry_file"
     fi
+    mv -f "$next_output" "$output"
+    printf '%s\n' "$provider" >> "$adopted_file"
+    changed=1
+  done
+  if (( changed == 1 )); then
+    local output_hash adopted_json
+    output_hash="$(_auth_sync_hash_file "$output")"
+    adopted_json="$(jq -Rsc 'split("\n") | map(select(length > 0))' "$adopted_file")"
+    manifest_tmp="$(mktemp)"
+    jq --arg hash "$output_hash" --argjson providers "$adopted_json" \
+      '.publishingHash=$hash | .publishingProviders=$providers' "$manifest" > "$manifest_tmp"
+    _auth_sync_atomic_json "$manifest_tmp" "$manifest" || { _auth_sync_unlock; rm -f "$tmp" "$output" "$adopted_file" "$manifest_tmp"; return 1; }
+    rm -f "$manifest_tmp"
+    if ! _auth_sync_atomic_json "$output" "$host_auth"; then
+      _auth_sync_unlock; rm -f "$tmp" "$output"; return 1
+    fi
+    if ! _auth_sync_reconcile_state "$host_auth" controlled; then
+      _auth_sync_unlock; rm -f "$tmp" "$output"; return 1
+    fi
+    while IFS= read -r provider; do
+      [[ -n "$provider" ]] || continue
+      v="$(_auth_sync_entry "$candidate" "$provider")"
+      base_rev="$(jq -r --arg p "$provider" '.baselineRevisions[$p] // 0' "$manifest")"
+      explicit_login="$(jq -r --arg p "$provider" '.explicitLogins[$p] // false' "$manifest")"
+      explicit_login_revision="$(jq -r --arg p "$provider" '.explicitLoginRevisions[$p] // empty' "$manifest")"
+      if [[ "$explicit_login" != "true" ]] && _auth_sync_is_oauth_entry "$v" \
+         && [[ "$(_auth_sync_entry "$baseline" "$provider")" == '"__OCVM_ABSENT__"' ]]; then
+        explicit_login=true
+      fi
+      state_tmp="$(mktemp)"
+      if [[ "$v" == '"__OCVM_ABSENT__"' ]]; then
+        jq --arg p "$provider" --argjson c "$completion" '.providers[$p].completion=$c | .providers[$p].tombstone=$c' "$state" > "$state_tmp"
+      elif _auth_sync_is_oauth_entry "$v"; then
+        jq --arg p "$provider" --argjson c "$completion" --argjson login "$explicit_login" \
+          --argjson loginrev "${explicit_login_revision:-$((base_rev + 1))}" '
+          .providers[$p].completion=$c | .providers[$p].tombstone=null
+          | if $login then
+              .providers[$p].revision = ([.providers[$p].revision, $loginrev] | max)
+              | .providers[$p].loginRevision = ([.providers[$p].loginRevision, $loginrev] | max)
+              | .nextRevision = ([.nextRevision, ($loginrev + 1)] | max)
+            else . end
+        ' "$state" > "$state_tmp"
+      else
+        jq --arg p "$provider" '.providers[$p].tombstone=null' "$state" > "$state_tmp"
+      fi
+      _auth_sync_atomic_json "$state_tmp" "$state" || { _auth_sync_unlock; rm -f "$tmp" "$output" "$adopted_file" "$state_tmp"; return 1; }
+      rm -f "$state_tmp"
+    done < "$adopted_file"
   fi
-  _auth_cleanup_tmp
+  candidate_hash="$(_auth_sync_hash_file "$candidate")"
+  manifest_tmp="$(mktemp)"
+  jq --arg hash "$candidate_hash" --argjson conflicts "$conflicts" '
+    .candidateHash=$hash | .conflicts=$conflicts | .publishingHash=null | .publishingProviders=[]
+  ' "$manifest" > "$manifest_tmp"
+  _auth_sync_atomic_json "$manifest_tmp" "$manifest" || { _auth_sync_unlock; rm -f "$tmp" "$output" "$manifest_tmp"; return 1; }
+  _auth_sync_unlock
+  rm -f "$tmp" "$output" "$adopted_file" "$manifest_tmp"
+  (( changed == 0 )) || echo "[auth] Merged provider changes from $generation."
   return 0
+}
+
+auth_sync_mark_intent() {
+  local generation="$1" provider="$2" action="$3" manifest tmp field
+  manifest="$AUTH_SYNC_DIR/runs/$generation/manifest.json"
+  [[ -f "$manifest" ]] || return 1
+  [[ "$action" == "login" ]] && field="explicitLogins" || field="explicitLogouts"
+  _auth_sync_lock || return 1
+  tmp="$(mktemp)"
+  if ! jq --arg field "$field" --arg p "$provider" '.[$field] = ((.[$field] // {}) + {($p):true})' "$manifest" > "$tmp" \
+     || ! _auth_sync_atomic_json "$tmp" "$manifest"; then
+    _auth_sync_unlock
+    rm -f "$tmp"
+    return 1
+  fi
+  _auth_sync_unlock
+  rm -f "$tmp"
+}
+
+auth_sync_finalize_share() {
+  local generation="$1" share="$2" candidate
+  candidate="$share/xdg-data/opencode/auth.json"
+  local baseline="$AUTH_SYNC_DIR/runs/$generation/baseline.json"
+  if [[ -f "$candidate" ]]; then
+    auth_sync_finalize "$generation" "$candidate"
+  elif [[ -f "$baseline" ]] && jq -e 'length == 0' "$baseline" >/dev/null 2>&1; then
+    auth_sync_finalize "$generation" "$baseline"
+  elif [[ ! -f "$baseline" && ! -f "$HOST_DATA_DIR/auth.json" ]]; then
+    local empty
+    empty="$(mktemp)"
+    printf '{}\n' > "$empty"
+    auth_sync_finalize "$generation" "$empty"
+    local rc=$?
+    rm -f "$empty"
+    return "$rc"
+  else
+    echo "[auth] No final auth file was available for $generation; preserving the session." >&2
+    return 1
+  fi
+}
+
+auth_sync_capture_stopped_vm() {
+  local vm="$1" share="$2"
+  vm_exec "$vm" '
+    set -e
+    if pgrep -x opencode >/dev/null 2>&1; then
+      echo "[auth] An OpenCode writer is still running; refusing to replace its auth state." >&2
+      exit 3
+    fi
+    source=/tmp/oc-xdg-data/opencode/auth.json
+    destination="$1/xdg-data/opencode/auth.json"
+    [ -f "$source" ] || exit 0
+    mkdir -p "$(dirname "$destination")"
+    tmp="${destination}.$$.tmp"
+    jq -e "select(type == \"object\")" "$source" > "$tmp"
+    chmod 600 "$tmp"
+    mv -f "$tmp" "$destination"
+  ' "$share"
+}
+
+auth_sync_prune_resolved_run() {
+  local generation="$1" run_dir manifest
+  run_dir="$AUTH_SYNC_DIR/runs/$generation"
+  manifest="$run_dir/manifest.json"
+  [[ -f "$manifest" ]] || return 0
+  if jq -e '(.candidateHash // "") != "" and (.conflicts // 0) == 0 and (.publishingHash // null) == null' "$manifest" >/dev/null 2>&1; then
+    rm -f "$run_dir/baseline.json" "$run_dir/candidate.json"
+  fi
 }
 
 # `opencode-vm auth {status|resync}`
@@ -4946,18 +5270,45 @@ auth_cmd() {
   shift || true
   case "$op" in
     status)
-      echo "[auth] OAuth provider token freshness (host vs. running VMs + saved sessions)"
-      auth_collect_freshest_oauth report
+      ensure_dirs
+      echo "[auth] Baseline-managed provider synchronization"
+      if [[ -f "$AUTH_SYNC_DIR/state.json" ]]; then
+        echo "  managed providers: $(jq -r '.providers | length' "$AUTH_SYNC_DIR/state.json")"
+        echo "  controlled completions: $(( $(jq -r '.nextCompletion' "$AUTH_SYNC_DIR/state.json") - 1 ))"
+      else
+        echo "  no managed runtime has started yet"
+      fi
+      local conflicts
+      conflicts="$(jq -s '[.[] | select((.conflicts // 0) > 0)] | length' "$AUTH_SYNC_DIR"/runs/*/manifest.json 2>/dev/null || echo 0)"
+      echo "  runs with preserved conflicts: $conflicts"
       ;;
     resync)
-      auth_collect_freshest_oauth apply
+      local proj senv share generation
+      proj="$(pwd)"
+      senv="$(session_env "$proj")"
+      [[ -f "$senv" ]] || { echo "[auth] No tracked session exists for this project." >&2; return 1; }
+      lifecycle_lock_acquire "$proj" || return 1
+      if [[ ! -f "$senv" ]]; then lifecycle_lock_release; return 1; fi
+      # shellcheck disable=SC1090
+      source "$senv"
+      if is_vm_running "$SESS_NAME"; then
+        echo "[auth] Refusing to finalize while the project VM is running; stop the runtime first." >&2
+        lifecycle_lock_release
+        return 1
+      fi
+      share="$(session_share_dir "$proj")"
+      generation="${SESS_AUTH_GENERATION:-$SESS_NAME}"
+      if ! auth_sync_finalize_share "$generation" "$share"; then
+        lifecycle_lock_release
+        return 1
+      fi
+      lifecycle_lock_release
       ;;
     -h|--help|help)
       cat <<'EOF'
 Usage: opencode-vm auth {status|resync}
-  status   show OAuth providers and which copy holds the freshest token (read-only)
-  resync   adopt the freshest OAuth token (across running VMs + saved sessions)
-           into the host auth.json, then restart/attach the failing session
+  status   show baseline-managed synchronization state (never prints secrets)
+  resync   retry finalization for this project's stopped, tracked session
 EOF
       ;;
     *)
@@ -4965,6 +5316,106 @@ EOF
       return 2
       ;;
   esac
+}
+
+provider_auth_action() {
+  local action="$1" provider="$2" method="${3:-}" proj senv share expected_vm expected_generation expected_controller
+  [[ "$provider" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "[provider] Invalid provider id: '$provider'" >&2; return 2; }
+  proj="$(pwd)"
+  senv="$(session_env "$proj")"
+  [[ -f "$senv" ]] || {
+    echo "[provider] No tracked session exists for this project. Start or resume it first." >&2
+    return 1
+  }
+  lifecycle_lock_acquire "$proj" || return 1
+  # shellcheck disable=SC1090
+  source "$senv"
+  expected_vm="$SESS_NAME"
+  expected_generation="${SESS_AUTH_GENERATION:-$SESS_NAME}"
+  expected_controller="${SESS_CONTROLLER:-$expected_generation}"
+  is_vm_running "$expected_vm" || {
+    echo "[provider] The tracked project VM is stopped. Resume it before $action." >&2
+    lifecycle_lock_release
+    return 1
+  }
+  share="$(session_share_dir "$proj")"
+  vm_exec "$expected_vm" '
+    runtime="$1/openlive/runtime.json"
+    [ -f "$runtime" ] || exit 0
+    url="$(jq -r ".backendUrl // empty" "$runtime")"
+    [ -n "$url" ] || exit 0
+    if [ -f "$1/auth.env" ]; then . "$1/auth.env"; fi
+    auth_args=()
+    if [ -n "${OPENCODE_SERVER_USERNAME:-}" ]; then auth_args=(-u "$OPENCODE_SERVER_USERNAME:$OPENCODE_SERVER_PASSWORD"); fi
+    curl -fsS --max-time 5 "${auth_args[@]}" -X POST "$url/instance/dispose" >/dev/null 2>&1 || true
+  ' "$share" >/dev/null 2>&1 || true
+  if [[ "$action" == "login" ]]; then
+    if [[ -n "$method" ]]; then
+      if ! vm_exec "$expected_vm" '
+        export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$PATH"
+        export XDG_CONFIG_HOME="$1/config" XDG_DATA_HOME=/tmp/oc-xdg-data XDG_STATE_HOME=/tmp/oc-xdg-state
+        cd "$2"
+        opencode auth login --provider "$3" --method "$4"
+      ' "$share" "$proj" "$provider" "$method"; then lifecycle_lock_release; return 1; fi
+    else
+      if ! vm_exec "$expected_vm" '
+        export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$PATH"
+        export XDG_CONFIG_HOME="$1/config" XDG_DATA_HOME=/tmp/oc-xdg-data XDG_STATE_HOME=/tmp/oc-xdg-state
+        cd "$2"
+        opencode auth login --provider "$3"
+      ' "$share" "$proj" "$provider"; then lifecycle_lock_release; return 1; fi
+    fi
+  else
+    if ! vm_exec "$expected_vm" '
+      export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$PATH"
+      export XDG_CONFIG_HOME="$1/config" XDG_DATA_HOME=/tmp/oc-xdg-data XDG_STATE_HOME=/tmp/oc-xdg-state
+      cd "$2"
+      opencode auth logout "$3"
+    ' "$share" "$proj" "$provider"; then lifecycle_lock_release; return 1; fi
+  fi
+  [[ -f "$senv" ]] || { lifecycle_lock_release; echo "[provider] Session ownership changed before checkpoint." >&2; return 1; }
+  # shellcheck disable=SC1090
+  source "$senv"
+  if [[ "$SESS_NAME" != "$expected_vm" \
+        || "${SESS_AUTH_GENERATION:-$SESS_NAME}" != "$expected_generation" \
+        || "${SESS_CONTROLLER:-${SESS_AUTH_GENERATION:-$SESS_NAME}}" != "$expected_controller" ]]; then
+    lifecycle_lock_release
+    echo "[provider] Session ownership changed during $action; refusing an ambiguous checkpoint." >&2
+    return 1
+  fi
+  # Durable checkpoint only. Global merge/tombstone publication remains tied
+  # to controlled runtime finalization.
+  if ! vm_exec "$expected_vm" '
+    set -e
+    source=/tmp/oc-xdg-data/opencode/auth.json
+    destination="$1/xdg-data/opencode/auth.json"
+    mkdir -p "$(dirname "$destination")"
+    tmp="${destination}.$$.tmp"
+    if [ -f "$source" ]; then jq -e "select(type == \"object\")" "$source" > "$tmp"; else printf "{}\n" > "$tmp"; fi
+    chmod 600 "$tmp"
+    mv -f "$tmp" "$destination"
+  ' "$share"; then
+    lifecycle_lock_release
+    return 1
+  fi
+  if ! auth_sync_mark_intent "$expected_generation" "$provider" "$action"; then
+    lifecycle_lock_release
+    echo "[provider] Could not record $action intent; the VM checkpoint was retained." >&2
+    return 1
+  fi
+  vm_exec "$expected_vm" '
+    runtime="$1/openlive/runtime.json"
+    [ -f "$runtime" ] || exit 0
+    url="$(jq -r ".backendUrl // empty" "$runtime")"
+    [ -n "$url" ] || exit 0
+    if [ -f "$1/auth.env" ]; then . "$1/auth.env"; fi
+    auth_args=()
+    if [ -n "${OPENCODE_SERVER_USERNAME:-}" ]; then auth_args=(-u "$OPENCODE_SERVER_USERNAME:$OPENCODE_SERVER_PASSWORD"); fi
+    curl -fsS --max-time 5 "${auth_args[@]}" -X POST "$url/instance/dispose" >/dev/null 2>&1 || true
+  ' "$share" >/dev/null 2>&1 || true
+  lifecycle_lock_release
+  echo "[provider] $provider $action completed in $expected_vm."
+  echo "[provider] The checkpoint becomes global at this runtime's controlled finalization."
 }
 
 provider_cmd() {
@@ -4979,6 +5430,27 @@ provider_cmd() {
   shift || true
 
   case "$op" in
+    login)
+      local provider="${1:-openai}" method=""
+      shift || true
+      while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+          --method) shift; method="${1:-}" ;;
+          --method=*) method="${1#*=}" ;;
+          *) echo "Usage: opencode-vm provider login [provider] [--method <label>]" >&2; return 2 ;;
+        esac
+        shift || true
+      done
+      provider_auth_action login "$provider" "$method"
+      ;;
+
+    logout)
+      local provider="${1:-}"
+      [[ -n "$provider" ]] || { echo "Usage: opencode-vm provider logout <provider>" >&2; return 2; }
+      [[ "$#" -eq 1 ]] || { echo "Usage: opencode-vm provider logout <provider>" >&2; return 2; }
+      provider_auth_action logout "$provider"
+      ;;
+
     new)
       provider_cmd add
       return $?
@@ -5202,14 +5674,17 @@ provider_cmd() {
       local cfg_file
       cfg_file="$(pick_host_cfg)"
 
-      if [[ ! -f "$auth_file" ]]; then
-        echo '{}' > "$auth_file"
+      _auth_sync_lock || return 1
+      if [[ ! -f "$auth_file" ]] && ! printf '{}\n' > "$auth_file"; then
+        _auth_sync_unlock
+        return 1
       fi
-
       if ! jq -e . "$auth_file" >/dev/null 2>&1; then
+        _auth_sync_unlock
         echo "[provider] auth.json is not valid JSON: $auth_file" >&2
-        exit 1
+        return 1
       fi
+      _auth_sync_unlock
 
       if ! jq -e . "$cfg_file" >/dev/null 2>&1; then
         echo "[provider] Config file is not valid JSON and cannot be auto-edited: $cfg_file" >&2
@@ -5287,15 +5762,26 @@ provider_cmd() {
       backup_dir="$BACKUP_DIR/provider-$ts"
       mkdir -p "$backup_dir"
 
+      _auth_sync_lock || return 1
+      if jq -e --arg p "$provider" \
+        '.[$p] | (.type == "oauth" or has("refresh"))' "$auth_file" >/dev/null 2>&1; then
+        _auth_sync_unlock
+        echo "[provider] '$provider' currently uses OAuth; refusing to replace it with an API key." >&2
+        echo "[provider] Change the login method inside the project session so the auth transition is explicit." >&2
+        return 2
+      fi
       cp -p "$auth_file" "$backup_dir/auth.json.bak"
+      if ! jq_inplace "$auth_file" --arg p "$provider" --arg k "$api_key" \
+        '.[$p] = {"type":"api","key":$k}'; then
+        _auth_sync_unlock
+        return 1
+      fi
+      _auth_sync_unlock
       cp -p "$cfg_file" "$backup_dir/$(basename "$cfg_file").bak"
 
       # OpenCode's auth.json discriminates on "type" with values oauth|api|wellknown.
       # A static API key MUST be type "api" (not "key", which OpenCode ignores ->
       # "API key not present" at runtime even though the key sits in the file).
-      jq_inplace "$auth_file" --arg p "$provider" --arg k "$api_key" \
-        '.[$p] = {"type":"api","key":$k}'
-
       jq_inplace "$cfg_file" \
         --arg p "$provider" \
         --arg n "$provider_name" \
@@ -5571,17 +6057,22 @@ provider_cmd() {
       backup_dir="$BACKUP_DIR/provider-$ts"
       mkdir -p "$backup_dir"
 
-      [[ -f "$auth_file" ]] && cp -p "$auth_file" "$backup_dir/auth.json.bak"
       [[ -f "$cfg_file" ]] && cp -p "$cfg_file" "$backup_dir/$(basename "$cfg_file").bak"
       [[ -f "$model_file" ]] && cp -p "$model_file" "$backup_dir/model.json.bak"
       [[ -f "$db_file" ]] && cp -p "$db_file" "$backup_dir/opencode.db.bak"
 
       if [[ -f "$auth_file" ]]; then
+        _auth_sync_lock || return 1
+        cp -p "$auth_file" "$backup_dir/auth.json.bak"
         if command -v jq >/dev/null 2>&1; then
-          jq_inplace "$auth_file" --arg p "$provider" 'del(.[$p])'
+          if ! jq_inplace "$auth_file" --arg p "$provider" 'del(.[$p])'; then
+            _auth_sync_unlock
+            return 1
+          fi
         else
           echo "[provider] WARNING: jq missing, auth.json not modified." >&2
         fi
+        _auth_sync_unlock
       fi
 
       if [[ -f "$cfg_file" ]] && command -v jq >/dev/null 2>&1; then
@@ -5621,16 +6112,48 @@ provider_cmd() {
       ;;
 
     list|show|"")
-      if [[ -f "$auth_file" ]] && command -v jq >/dev/null 2>&1; then
-        echo "[provider] Configured providers:"
-        jq -r --arg marker "$OPENLIVE_AUTH_MARKER" 'keys[] | select(. != $marker)' "$auth_file" | sed 's/^/  - /'
+      command -v jq >/dev/null 2>&1 || { echo "[provider] jq is required for provider list." >&2; return 1; }
+      local list_cfg list_auth
+      list_cfg="$(pick_host_cfg)"
+      list_auth="$auth_file"
+      [[ -f "$list_cfg" ]] || list_cfg="/dev/null"
+      [[ -f "$list_auth" ]] || list_auth="/dev/null"
+      echo "[provider] Stored providers:"
+      jq -nr --arg marker "$OPENLIVE_AUTH_MARKER" --slurpfile auth "$list_auth" --slurpfile cfg "$list_cfg" '
+        (($auth[0] // {}) | del(.[$marker])) as $a
+        | (($cfg[0].provider // {})) as $c
+        | (($a | keys) + ($c | keys) | unique)[]
+        | ($a[.] // null) as $credential
+        | "  - \(.)\t" +
+          (if $credential == null then "endpoint"
+           elif ($credential.type == "oauth" or ($credential | has("refresh"))) then "oauth"
+           else ($credential.type // "credential") end) +
+          (if $c[.] != null then " + config" else "" end)
+      ' 2>/dev/null || { echo "[provider] Stored provider data is invalid JSON." >&2; return 1; }
+      local list_senv list_vm=""
+      list_senv="$(session_env "$(pwd)")"
+      if [[ -f "$list_senv" ]]; then
+        list_vm="$(
+          unset SESS_NAME
+          # shellcheck disable=SC1090
+          source "$list_senv" 2>/dev/null || exit 0
+          printf '%s' "${SESS_NAME:-}"
+        )"
+      fi
+      if [[ -n "$list_vm" ]] && is_vm_running "$list_vm"; then
+        echo "[provider] Live credentials in $list_vm:"
+        vm_exec "$list_vm" '
+          file=/tmp/oc-xdg-data/opencode/auth.json
+          [ -f "$file" ] || exit 0
+          jq -r --arg marker "$1" "to_entries[] | select(.key != \$marker) | \"  - \(.key)\\t\(if (.value.type == \\\"oauth\\\" or (.value | has(\\\"refresh\\\"))) then \\\"oauth\\\" else (.value.type // \\\"credential\\\") end)\"" "$file"
+        ' "$OPENLIVE_AUTH_MARKER" 2>/dev/null || echo "  <unavailable>"
       else
-        echo "Usage: opencode-vm provider {list|add|rm ...}"
+        echo "[provider] Live credentials: no running tracked VM for this project"
       fi
       ;;
 
     *)
-      echo "Usage: opencode-vm provider {list|new|add [<id>] [--base-url <url>] [--api-key <key>] [--name <display-name>] [--vision] [--model <id>[:<name>[:<context>]]] [--dry-run]|refresh <id> [--prompt-new] [--skip-new] [--no-context-update] [--dry-run] [--quiet]|rm <id> [--dry-run]}" >&2
+      echo "Usage: opencode-vm provider {list|login [id] [--method label]|logout <id>|new|add [<id>] [--base-url <url>] [--api-key <key>] [--name <display-name>] [--vision] [--model <id>[:<name>[:<context>]]] [--dry-run]|refresh <id> [--prompt-new] [--skip-new] [--no-context-update] [--dry-run] [--quiet]|rm <id> [--dry-run]}" >&2
       exit 2
       ;;
   esac
@@ -5638,28 +6161,67 @@ provider_cmd() {
 
 cleanup_sessions() {
   sanitize_lima_sock_dir
+  local cleanup_failed=0
 
   # Clean tracked sessions
   if [[ -d "$SESSIONS_DIR" ]]; then
     for senv in "$SESSIONS_DIR"/*.env; do
       [[ -f "$senv" ]] || continue
+      local _cleanup_proj
+      _cleanup_proj="$(
+        unset SESS_PROJ
+        # shellcheck disable=SC1090
+        source "$senv" 2>/dev/null || exit 0
+        printf '%s' "${SESS_PROJ:-}"
+      )"
+      if [[ -z "$_cleanup_proj" ]] || ! lifecycle_lock_acquire "$_cleanup_proj"; then
+        echo "[cleanup] Could not obtain lifecycle ownership for ${senv##*/}; preserving it." >&2
+        cleanup_failed=1
+        continue
+      fi
+      if [[ ! -f "$senv" ]]; then lifecycle_lock_release; continue; fi
       # shellcheck disable=SC1090
       source "$senv"
-      echo "[cleanup] $SESS_NAME (${SESS_PROJ:-unknown})"
-      limactl stop "$SESS_NAME" 2>/dev/null || true
+      if [[ "${SESS_PROJ:-}" != "$_cleanup_proj" ]]; then
+        lifecycle_lock_release
+        cleanup_failed=1
+        continue
+      fi
+      echo "[cleanup] $SESS_NAME ($SESS_PROJ)"
+      local _cleanup_generation="${SESS_AUTH_GENERATION:-$SESS_NAME}"
+      local _cleanup_controller
+      _cleanup_controller="${SESS_NAME}-cleanup-$(date +%s)-$$"
+      write_senv "$senv" "$SESS_NAME" "${SESS_PROJ:-unknown}" "${CFG_HASH_AT_START:-}" \
+        "${SESS_MODE:-tui}" "${SESS_PORT:-}" "${SESS_KEEP_HISTORY:-0}" "${SESS_TLS:-0}" \
+        "$_cleanup_generation" "$_cleanup_controller"
+      if is_vm_running "$SESS_NAME" && ! limactl stop "$SESS_NAME" 2>/dev/null; then
+        echo "[cleanup] Could not stop $SESS_NAME; preserving it." >&2
+        cleanup_failed=1
+        lifecycle_lock_release
+        continue
+      fi
+      local _cleanup_share="${senv%.env}"
+      if ! auth_sync_finalize_share "$_cleanup_generation" "$_cleanup_share"; then
+        echo "[cleanup] Auth could not be preserved; refusing to delete $SESS_NAME." >&2
+        cleanup_failed=1
+        lifecycle_lock_release
+        continue
+      fi
+      auth_sync_prune_resolved_run "$_cleanup_generation"
       limactl delete -f "$SESS_NAME" 2>/dev/null || true
       rm -rf "${senv%.env}"
       rm -f "$senv"
+      lifecycle_lock_release
     done
   fi
   # Catch orphaned oc-* VMs not tracked by env files
   local orphans
   orphans="$(limactl list -q 2>/dev/null | grep '^oc-' | grep -v "^${BASE_NAME}$" || true)"
   for s in $orphans; do
-    echo "[cleanup] orphan: $s"
-    limactl stop "$s" 2>/dev/null || true
-    limactl delete -f "$s" 2>/dev/null || true
+    echo "[cleanup] orphan preserved (no safe auth baseline): $s" >&2
+    cleanup_failed=1
   done
+  (( cleanup_failed == 0 ))
 }
 
 screenshot_cmd() {
@@ -6323,14 +6885,18 @@ openlive_install_auth_marker() {
   need jq
   ensure_host_opencode_dirs || return 1
   local auth_file="$HOST_DATA_DIR/auth.json" tmp
+  _auth_sync_lock || return 1
   if [[ -f "$auth_file" ]] && ! jq -e 'type == "object"' "$auth_file" >/dev/null 2>&1; then
+    _auth_sync_unlock
     echo "[openlive] Refusing to modify invalid JSON: $auth_file" >&2
     return 1
   fi
   if [[ -f "$auth_file" ]] && [[ "$(jq 'length' "$auth_file")" -gt 0 ]]; then
+    _auth_sync_unlock
     return 0
   fi
   if ! tmp="$(mktemp "$HOST_DATA_DIR/.auth.openlive.XXXXXX")"; then
+    _auth_sync_unlock
     echo "[openlive] Could not prepare the readiness marker." >&2
     return 1
   fi
@@ -6341,25 +6907,33 @@ openlive_install_auth_marker() {
       {($id): {"type":"api", "key":"opencode-vm-openlive-readiness-v1"}}
     ' > "$tmp"; then
       rm -f "$tmp"
+      _auth_sync_unlock
       echo "[openlive] Could not create the readiness marker." >&2
       return 1
     fi
   fi
   if ! chmod 600 "$tmp" || ! mv -f "$tmp" "$auth_file"; then
     rm -f "$tmp"
+    _auth_sync_unlock
     echo "[openlive] Could not install the readiness marker." >&2
     return 1
   fi
+  _auth_sync_unlock
   echo "[openlive] Installed non-secret OpenLive readiness marker."
 }
 
 openlive_remove_auth_marker() {
-  openlive_owned_auth_marker || return 0
   local auth_file="$HOST_DATA_DIR/auth.json" tmp
-  tmp="$(mktemp "$HOST_DATA_DIR/.auth.openlive.XXXXXX")"
-  jq --arg id "$OPENLIVE_AUTH_MARKER" 'del(.[$id])' "$auth_file" > "$tmp"
-  chmod 600 "$tmp"
-  mv -f "$tmp" "$auth_file"
+  _auth_sync_lock || return 1
+  if ! openlive_owned_auth_marker; then _auth_sync_unlock; return 0; fi
+  if ! tmp="$(mktemp "$HOST_DATA_DIR/.auth.openlive.XXXXXX")" \
+     || ! jq --arg id "$OPENLIVE_AUTH_MARKER" 'del(.[$id])' "$auth_file" > "$tmp" \
+     || ! chmod 600 "$tmp" || ! mv -f "$tmp" "$auth_file"; then
+    rm -f "${tmp:-}"
+    _auth_sync_unlock
+    return 1
+  fi
+  _auth_sync_unlock
   echo "[openlive] Removed readiness marker."
 }
 
@@ -9871,8 +10445,13 @@ attach_session() {
     exit 1
   fi
 
+  lifecycle_lock_acquire "$proj" || return 1
+  if [[ ! -f "$senv" ]]; then lifecycle_lock_release; return 1; fi
   # shellcheck disable=SC1090
   source "$senv"
+  local old_auth_generation="${SESS_AUTH_GENERATION:-$SESS_NAME}"
+  local attach_controller
+  attach_controller="${SESS_NAME}-attach-$(date +%s)-$$"
 
   if ! is_vm_running "$SESS_NAME"; then
     # Session was kept on a previous exit (stop-but-keep). Resume it.
@@ -9906,37 +10485,6 @@ attach_session() {
   _att_cfg="$(session_share_dir "$proj")/config/opencode/opencode.json"
   [[ -f "$_att_cfg" ]] && apply_model_enrichment "$_att_cfg"
 
-  # OAuth pre-flight before reconnect: adopt the freshest token (from any other
-  # running VM or saved session) into the host auth.json, then push it into this
-  # resumed VM — its own /tmp copy may hold a refresh token that another VM has
-  # since rotated, which would 401. The fresh-mtime write survives the later
-  # in-VM 'rsync --update' merge from the share. Opt out with
-  # OCVM_AUTH_AUTORESYNC=0; non-fatal.
-  if [[ "${OCVM_AUTH_AUTORESYNC:-1}" != "0" ]] && command -v jq >/dev/null 2>&1 \
-     && [[ -n "$(auth_oauth_provider_ids "$HOST_DATA_DIR/auth.json")" ]]; then
-    echo "[attach] OAuth pre-flight: adopting freshest provider token..."
-    auth_collect_freshest_oauth apply 2>&1 | sed 's/^/[attach]   /' || true
-    if [[ -f "$HOST_DATA_DIR/auth.json" ]]; then
-      # Write as the normal VM user (NOT sudo): opencode runs unprivileged and
-      # must be able to read this auth.json AND create log/ + repos/ siblings
-      # under /tmp/oc-xdg-data/opencode. A root-owned tree here makes opencode
-      # web crash-loop with EACCES on mkdir. The leading chown heals any
-      # root-owned remnant left by older versions (which did push via sudo).
-      if vm_exec "$SESS_NAME" '
-        set -e
-        d=/tmp/oc-xdg-data/opencode
-        if [ -e "$d" ] && [ ! -O "$d" ]; then
-          sudo chown -R "$(id -u):$(id -g)" /tmp/oc-xdg-data 2>/dev/null || true
-        fi
-        mkdir -p "$d"
-        cat > "$d/auth.json"
-        chmod 600 "$d/auth.json"
-      ' < "$HOST_DATA_DIR/auth.json" 2>/dev/null; then
-        echo "[attach]   pushed freshest auth.json into running VM $(_ts)"
-      fi
-    fi
-  fi
-
   local sess_mode="${SESS_MODE:-tui}"
   local sess_port="${SESS_PORT:-$DEFAULT_OC_PORT}"
   # TLS is a property of the session, not of the attach invocation, so a bare
@@ -9949,7 +10497,7 @@ attach_session() {
     _tls_senv="$(session_env "$proj")"
     if [[ -f "$_tls_senv" ]]; then
       write_senv "$_tls_senv" "$SESS_NAME" "${SESS_PROJ:-$proj}" "${CFG_HASH_AT_START:-}" \
-        "${SESS_MODE:-tui}" "${SESS_PORT:-$DEFAULT_OC_PORT}" "${SESS_KEEP_HISTORY:-0}" "$sess_tls"
+        "${SESS_MODE:-tui}" "${SESS_PORT:-$DEFAULT_OC_PORT}" "${SESS_KEEP_HISTORY:-0}" "$sess_tls" "$old_auth_generation" "${SESS_CONTROLLER:-$old_auth_generation}"
       SESS_TLS="$sess_tls"
     fi
   fi
@@ -9969,6 +10517,37 @@ attach_session() {
   # Self-heal graphify venv before OpenCode tries to launch its MCP server.
   # No-op when graphify isn't installed; injects mcp extras when missing.
   graphify_ensure_mcp_in_vm "$SESS_NAME"
+  local transition_backup transition_committed=0 auth_share_backup="" auth_share_had=0 new_auth_generation=""
+  transition_backup="$(mktemp)"
+  cp -p "$senv" "$transition_backup"
+  _attach_transition_fail() {
+    if (( transition_committed == 0 )); then
+      cp -p "$transition_backup" "$senv"
+      if [[ -n "$auth_share_backup" ]]; then
+        if (( auth_share_had == 1 )); then
+          cp -p "$auth_share_backup" "$(session_share_dir "$proj")/xdg-data/opencode/auth.json"
+          vm_exec "$SESS_NAME" '
+            set -e
+            d=/tmp/oc-xdg-data/opencode; mkdir -p "$d"
+            tmp="$d/auth.json.$$.tmp"; cat > "$tmp"; chmod 600 "$tmp"; mv -f "$tmp" "$d/auth.json"
+          ' < "$auth_share_backup" >/dev/null 2>&1 || true
+        else
+          rm -f "$(session_share_dir "$proj")/xdg-data/opencode/auth.json"
+          vm_exec "$SESS_NAME" 'rm -f /tmp/oc-xdg-data/opencode/auth.json' >/dev/null 2>&1 || true
+        fi
+      fi
+      [[ -n "$new_auth_generation" ]] && rm -rf "$AUTH_SYNC_DIR/runs/$new_auth_generation"
+    fi
+    lifecycle_lock_release
+    rm -f "$transition_backup"
+    return 1
+  }
+  write_senv "$senv" "$SESS_NAME" "${SESS_PROJ:-$proj}" "${CFG_HASH_AT_START:-}" \
+    "$sess_mode" "$sess_port" "${SESS_KEEP_HISTORY:-0}" "$sess_tls" "$old_auth_generation" "$attach_controller" || {
+      _attach_transition_fail
+      return 1
+    }
+  SESS_CONTROLLER="$attach_controller"
   if [[ "$sess_mode" == "web" ]]; then
     a2a_ensure_installed_in_vm "$SESS_NAME"
     local _web_share _old_base
@@ -9978,6 +10557,7 @@ attach_session() {
     done
     install_web_lib "$_web_share" || {
       echo "[attach] Could not prepare the HTTPS web listener; no LAN tunnel was opened." >&2
+      _attach_transition_fail
       return 1
     }
     vm_exec "$SESS_NAME" '
@@ -9992,10 +10572,74 @@ attach_session() {
       done
     ' "$proj" "$_web_share" "$sess_port" "$host_lan_ip" "$sess_tls" || {
       echo "[attach] Could not stop the previous web/OpenLive runtime safely." >&2
+      _attach_transition_fail
       return 1
     }
-    resolve_session_auth "$_web_share" || return 1
+    resolve_session_auth "$_web_share" || { _attach_transition_fail; return 1; }
   fi
+
+  # The previous runtime is stopped now, so its final share can be merged
+  # before the accepted host state is seeded into the resumed runtime.
+  local resume_share
+  resume_share="$(session_share_dir "$proj")"
+  auth_share_backup="$(mktemp)"
+  if [[ -f "$resume_share/xdg-data/opencode/auth.json" ]]; then
+    cp -p "$resume_share/xdg-data/opencode/auth.json" "$auth_share_backup"
+    auth_share_had=1
+  fi
+  skills_sync_besprechung_for_session "$resume_share" || { _attach_transition_fail; return 1; }
+  if [[ -f "$AUTH_SYNC_DIR/runs/$old_auth_generation/baseline.json" \
+        || -f "$HOST_DATA_DIR/auth.json" \
+        || -f "$resume_share/xdg-data/opencode/auth.json" ]]; then
+    if ! auth_sync_capture_stopped_vm "$SESS_NAME" "$resume_share"; then
+      echo "[attach] The previous runtime still owns auth state; refusing replacement." >&2
+      _attach_transition_fail
+      return 1
+    fi
+  fi
+  if [[ ! -f "$AUTH_SYNC_DIR/runs/$old_auth_generation/baseline.json" \
+        && -f "$resume_share/xdg-data/opencode/auth.json" ]]; then
+    auth_sync_finalize "$old_auth_generation" "$resume_share/xdg-data/opencode/auth.json" || true
+    echo "[attach] Preserved legacy auth candidate for $old_auth_generation, but no baseline exists." >&2
+    echo "[attach] Refusing to choose between legacy and host credentials automatically." >&2
+    _attach_transition_fail
+    return 1
+  fi
+  if ! auth_sync_finalize_share "$old_auth_generation" "$resume_share"; then
+    echo "[attach] Auth finalization failed; the previous runtime was not replaced." >&2
+    _attach_transition_fail
+    return 1
+  fi
+  new_auth_generation="${SESS_NAME}-$(date +%s)-$$"
+  mkdir -p "$resume_share/xdg-data/opencode"
+  auth_sync_begin "$proj" "$new_auth_generation" "$resume_share/xdg-data/opencode/auth.json" || { _attach_transition_fail; return 1; }
+  if ! vm_exec "$SESS_NAME" '
+      set -e
+      d=/tmp/oc-xdg-data/opencode
+      if [ -e "$d" ] && [ ! -O "$d" ]; then
+        sudo chown -R "$(id -u):$(id -g)" /tmp/oc-xdg-data 2>/dev/null || true
+      fi
+      mkdir -p "$d"
+      tmp="$d/auth.json.$$.tmp"
+      cat > "$tmp"
+      jq -e "select(type == \"object\")" "$tmp" >/dev/null
+      chmod 600 "$tmp"
+      mv -f "$tmp" "$d/auth.json"
+    ' < "$resume_share/xdg-data/opencode/auth.json"; then
+    echo "[attach] Could not seed accepted auth state into the resumed VM." >&2
+    _attach_transition_fail
+    return 1
+  fi
+  write_senv "$senv" "$SESS_NAME" "${SESS_PROJ:-$proj}" "${CFG_HASH_AT_START:-}" \
+    "$sess_mode" "$sess_port" "${SESS_KEEP_HISTORY:-0}" "$sess_tls" "$new_auth_generation" "$attach_controller" || {
+      _attach_transition_fail
+      return 1
+    }
+  transition_committed=1
+  SESS_AUTH_GENERATION="$new_auth_generation"
+  auth_sync_prune_resolved_run "$old_auth_generation"
+  lifecycle_lock_release
+  rm -f "$transition_backup" "$auth_share_backup"
 
   # Web mode: open the four LAN forwards for this session's port block and tear
   # them down when this attach ends. Tunnel failure is non-fatal: the session
@@ -10307,6 +10951,25 @@ attach_session() {
     # Sync-back happens via the EXIT trap installed above (covers Ctrl+C as
     # well as normal exit).
   ' "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$effective_base" "$host_lan_ip" "${OC_WEB_TUI:-false}" "$sess_tls" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up" "$(proj_hash "$proj")" "$OCVM_VERSION"
+  lifecycle_lock_acquire "$proj" || return 1
+  if [[ ! -f "$senv" ]]; then
+    lifecycle_lock_release
+    echo "[attach] Session ownership changed; skipping stale auth finalization." >&2
+    return 0
+  fi
+  # shellcheck disable=SC1090
+  source "$senv"
+  if [[ "${SESS_CONTROLLER:-}" != "$attach_controller" || "${SESS_AUTH_GENERATION:-}" != "$new_auth_generation" ]]; then
+    lifecycle_lock_release
+    echo "[attach] Session ownership changed; skipping stale auth finalization." >&2
+    return 0
+  fi
+  if ! auth_sync_finalize_share "$new_auth_generation" "$(session_share_dir "$proj")"; then
+    lifecycle_lock_release
+    echo "[attach] Auth finalization failed; the session VM and share were retained." >&2
+    return 1
+  fi
+  lifecycle_lock_release
 }
 
 # --- Session Basic-auth secret -------------------------------------------
@@ -10382,9 +11045,16 @@ resolve_session_auth() {
 # Serialize session tracking state to $senv (loaded back via `source`).
 # printf '%q' safely escapes paths with spaces/special chars.
 write_senv() {
-  local senv="$1" name="$2" proj="$3" cfg_hash="$4" mode="$5" port="$6" keep="$7" tls="${8:-0}"
-  printf 'SESS_NAME=%q\nSESS_PROJ=%q\nCFG_HASH_AT_START=%q\nSESS_MODE=%q\nSESS_PORT=%q\nSESS_KEEP_HISTORY=%q\nSESS_TLS=%q\n' \
-    "$name" "$proj" "$cfg_hash" "$mode" "$port" "$keep" "$tls" > "$senv"
+  local senv="$1" name="$2" proj="$3" cfg_hash="$4" mode="$5" port="$6" keep_history="$7" tls="${8:-0}" auth_generation controller
+  local tmp
+  auth_generation="${9:-$name}"
+  controller="${10:-$auth_generation}"
+  mkdir -p "$(dirname "$senv")"
+  tmp="$(mktemp "${senv}.tmp.XXXXXX")" || return 1
+  printf 'SESS_NAME=%q\nSESS_PROJ=%q\nCFG_HASH_AT_START=%q\nSESS_MODE=%q\nSESS_PORT=%q\nSESS_KEEP_HISTORY=%q\nSESS_TLS=%q\nSESS_AUTH_GENERATION=%q\nSESS_CONTROLLER=%q\n' \
+    "$name" "$proj" "$cfg_hash" "$mode" "$port" "$keep_history" "$tls" "$auth_generation" "$controller" > "$tmp"
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$senv"
 }
 
 # Resolve OpenLive's physical cwd back to the project spelling stored in a
@@ -10465,7 +11135,7 @@ _update_senv_mode() {
   [[ -f "$senv" ]] || return 0
   # shellcheck disable=SC1090
   ( source "$senv"
-    write_senv "$senv" "$SESS_NAME" "$SESS_PROJ" "${CFG_HASH_AT_START:-}" "$new_mode" "$new_port" "${SESS_KEEP_HISTORY:-0}" "${SESS_TLS:-0}"
+    write_senv "$senv" "$SESS_NAME" "$SESS_PROJ" "${CFG_HASH_AT_START:-}" "$new_mode" "$new_port" "${SESS_KEEP_HISTORY:-0}" "${SESS_TLS:-0}" "${SESS_AUTH_GENERATION:-$SESS_NAME}" "${SESS_CONTROLLER:-${SESS_AUTH_GENERATION:-$SESS_NAME}}"
   )
 }
 
@@ -10476,10 +11146,17 @@ _destroy_prev_session() {
   local senv
   senv="$(session_env "$proj")"
   [[ -f "$senv" ]] || return 0
+  lifecycle_lock_acquire "$proj" || return 1
 
   # shellcheck disable=SC1090
   source "$senv"
   local old_sess="$SESS_NAME"
+  local old_auth_generation="${SESS_AUTH_GENERATION:-$old_sess}"
+  local destroy_controller
+  destroy_controller="${old_sess}-destroy-$(date +%s)-$$"
+  write_senv "$senv" "$old_sess" "${SESS_PROJ:-$proj}" "${CFG_HASH_AT_START:-}" \
+    "${SESS_MODE:-tui}" "${SESS_PORT:-}" "${SESS_KEEP_HISTORY:-0}" "${SESS_TLS:-0}" \
+    "$old_auth_generation" "$destroy_controller"
   local old_sess_share
   old_sess_share="$(session_share_dir "$proj")"
   local old_proj_state
@@ -10487,6 +11164,19 @@ _destroy_prev_session() {
 
   echo ""
   echo "[cleanup] Syncing old session data back before destroy... $(_ts)"
+
+  # Stop the managed writer first. Its guest EXIT trap synchronizes VM-local
+  # auth into the mounted share before we take the durable candidate.
+  if is_vm_running "$old_sess" && ! limactl stop "$old_sess"; then
+    echo "[cleanup] Could not stop old session; refusing to destroy it." >&2
+    lifecycle_lock_release
+    return 1
+  fi
+  if ! auth_sync_finalize_share "$old_auth_generation" "$old_sess_share"; then
+    echo "[cleanup] Auth could not be preserved; refusing to destroy the old session." >&2
+    lifecycle_lock_release
+    return 1
+  fi
 
   mkdir -p "$old_proj_state/config/opencode" "$old_proj_state/xdg-data/opencode" "$old_proj_state/xdg-state/opencode"
   mkdir -p "$HOST_DATA_DIR" "$HOST_STATE_DIR"
@@ -10506,14 +11196,6 @@ _destroy_prev_session() {
       _host_cfg="$(pick_host_cfg)"
       if [[ ! -f "$_host_cfg" ]] || [[ "$old_cfg" -nt "$_host_cfg" ]]; then
         cp -p "$old_cfg" "$_host_cfg"
-      fi
-    fi
-
-    # Propagate only auth.json back to host (if newer) so provider changes stick.
-    local _old_sess_auth="$old_sess_share/xdg-data/opencode/auth.json"
-    if [[ -f "$_old_sess_auth" ]]; then
-      if [[ ! -f "$HOST_DATA_DIR/auth.json" ]] || [[ "$_old_sess_auth" -nt "$HOST_DATA_DIR/auth.json" ]]; then
-        cp -p "$_old_sess_auth" "$HOST_DATA_DIR/auth.json"
       fi
     fi
 
@@ -10546,10 +11228,11 @@ _destroy_prev_session() {
   echo "[old-session] Synced old session data back $(_ts)"
 
   echo "[cleanup] Removing old session VM: $old_sess $(_ts)"
-  limactl stop "$old_sess" 2>/dev/null || true
+  auth_sync_prune_resolved_run "$old_auth_generation"
   limactl delete -f "$old_sess" >/dev/null 2>&1 || true
   rm -f "$senv"
   rm -rf "$old_sess_share"
+  lifecycle_lock_release
   echo "[cleanup] Old session removed $(_ts)"
 }
 
@@ -10866,6 +11549,7 @@ start_session() {
   fi
 
   sess="oc-$(date +%Y%m%d-%H%M%S)"
+  local controller_id="${sess}-controller-$$"
 
   if ! base_exists; then
     echo "Base VM '$BASE_NAME' not found. Running: opencode-vm init $(_ts)" >&2
@@ -10920,25 +11604,6 @@ start_session() {
       rm -f "$_model_keep"
     fi
     echo "[run] Fresh session (no history loaded) $(_ts)"
-  fi
-
-  # OAuth pre-flight: subscription logins (e.g. OpenAI) use a single-use rotating
-  # refresh token, so two VMs seeded from the same auth.json fight over one chain
-  # and the loser hits "401 token refresh failed". BEFORE seeding this VM, adopt
-  # the freshest live token — from any running session VM or saved session — into
-  # the host auth.json, so the new VM starts with a working token instead of a
-  # stale snapshot. Runs only when the host has OAuth providers; non-fatal.
-  # Opt out with OCVM_AUTH_AUTORESYNC=0.
-  if [[ "${OCVM_AUTH_AUTORESYNC:-1}" != "0" ]] && command -v jq >/dev/null 2>&1 \
-     && [[ -n "$(auth_oauth_provider_ids "$HOST_DATA_DIR/auth.json")" ]]; then
-    echo "[run] OAuth pre-flight: adopting freshest provider token before start... $(_ts)"
-    auth_collect_freshest_oauth apply 2>&1 | sed 's/^/[run]   /' || true
-  fi
-
-  # Carry (the now-freshened) host auth.json into the project state so provider
-  # credentials work.
-  if [[ -f "$HOST_DATA_DIR/auth.json" ]]; then
-    cp -p "$HOST_DATA_DIR/auth.json" "$proj_state/xdg-data/opencode/auth.json"
   fi
 
   # Per-session share directory for config/state
@@ -11073,6 +11738,9 @@ start_session() {
 
   rsync -a "${DATA_RSYNC_EXCLUDES[@]}" "$proj_state/xdg-data/opencode/" "$sess_share/xdg-data/opencode/"
   rsync -a "$proj_state/xdg-state/opencode/" "$sess_share/xdg-state/opencode/"
+  # Auth is not history. Seed only the current accepted host state and record
+  # that exact state as this runtime's three-way merge baseline.
+  auth_sync_begin "$proj" "$sess" "$sess_share/xdg-data/opencode/auth.json" || return 1
   echo "[run] Copied project state into session share $(_ts)"
 
   # Check integrity + backup in a single pass (avoids scanning directories twice)
@@ -11208,10 +11876,31 @@ start_session() {
   echo "[run] Clone complete, lock released $(_ts)"
 
   # Track session
-  write_senv "$senv" "$sess" "$proj" "$cfg_hash" "$SESSION_MODE" "${SESSION_PORT:-}" "${KEEP_HISTORY:-0}" "${SESSION_TLS:-0}"
+  write_senv "$senv" "$sess" "$proj" "$cfg_hash" "$SESSION_MODE" "${SESSION_PORT:-}" "${KEEP_HISTORY:-0}" "${SESSION_TLS:-0}" "$sess" "$controller_id"
 
   cleanup() {
+    trap - EXIT HUP TERM
     echo "[cleanup] Starting cleanup... $(_ts)"
+    if ! lifecycle_lock_acquire "$proj"; then
+      echo "[cleanup] Could not obtain lifecycle ownership; preserving the session." >&2
+      return 1
+    fi
+    _cleanup_controller_is_current() {
+      local current_controller
+      current_controller="$(
+        unset SESS_CONTROLLER
+        # shellcheck disable=SC1090
+        source "$senv" 2>/dev/null || exit 0
+        printf '%s' "${SESS_CONTROLLER:-}"
+      )"
+      [[ -n "$current_controller" && "$current_controller" == "$controller_id" ]]
+    }
+    if ! _cleanup_controller_is_current; then
+      echo "[cleanup] Controller was superseded; leaving the active session untouched. $(_ts)"
+      [[ -n "${clean_link:-}" ]] && rm -f "$clean_link"
+      lifecycle_lock_release
+      return 0
+    fi
     # Tear down web-mode SSH tunnel (no-op if not web mode or already gone).
     # Sweep the actual base first, then the search window start_web_tunnels uses.
     if [[ "${SESSION_MODE:-}" == "web" && -n "${sess:-}" ]]; then
@@ -11300,15 +11989,18 @@ start_session() {
       rm -f "$persist_cfg" "$_hmerge"
     fi
 
-    # Propagate only auth.json back to the host so provider changes made in
-    # the UI stick — the global opencode.db is intentionally never touched.
+    # Auth has a separate baseline-backed merge path; history/config rsync is
+    # never an authority for credentials.
     echo "[cleanup] Persisting session data... $(_ts)"
-    local _sess_auth="$sess_share/xdg-data/opencode/auth.json"
-    if [[ -f "$_sess_auth" ]]; then
-      mkdir -p "$HOST_DATA_DIR"
-      if [[ ! -f "$HOST_DATA_DIR/auth.json" ]] || [[ "$_sess_auth" -nt "$HOST_DATA_DIR/auth.json" ]]; then
-        cp -p "$_sess_auth" "$HOST_DATA_DIR/auth.json"
-      fi
+    local _auth_sync_ok=1
+    if ! _cleanup_controller_is_current; then
+      echo "[cleanup] Controller was superseded before auth finalization; leaving the active session untouched." >&2
+      lifecycle_lock_release
+      return 0
+    fi
+    if ! auth_sync_finalize_share "$sess" "$sess_share"; then
+      _auth_sync_ok=0
+      echo "[cleanup] Auth finalization failed; the session will be retained." >&2
     fi
 
     # Persist history to the mode-appropriate project-local destination.
@@ -11399,8 +12091,21 @@ start_session() {
             _notify_kept_session_once
             ;;
           delete)
+            if ! _cleanup_controller_is_current; then
+              echo "[cleanup] Controller was superseded; refusing stale session deletion." >&2
+              lifecycle_lock_release
+              return 0
+            fi
+            if (( _auth_sync_ok == 0 )); then
+              echo "[cleanup] Refusing to delete the session because auth was not safely preserved." >&2
+              stop_host_port_forwards_in_vm "$sess"
+              limactl stop "$sess" 2>/dev/null || true
+              lifecycle_lock_release
+              return 0
+            fi
             echo "[cleanup] Stopping and deleting session VM: $sess $(_ts)"
             stop_host_port_forwards_in_vm "$sess"
+            auth_sync_prune_resolved_run "$sess"
             rm -f "$senv"
             rm -rf "$sess_share"
             limactl stop "$sess" 2>/dev/null || true
@@ -11413,6 +12118,7 @@ start_session() {
     fi
     # Remove clean mount symlink if created
     [[ -n "${clean_link:-}" ]] && rm -f "$clean_link"
+    lifecycle_lock_release
     return 0
   }
   # HUP/TERM as well as EXIT: a closed terminal window kills the shell without
@@ -12267,16 +12973,17 @@ Usage:
   opencode-vm ports lan udp {show|add|rm|clear} IP[:PORT]
   opencode-vm doctor [show]                # inspect local sync/auth/model/db state
   opencode-vm provider list                # list configured providers
+  opencode-vm provider login [id]          # log in inside this project's running VM
+  opencode-vm provider logout <id>         # log out in the VM; global tombstone on finalization
   opencode-vm provider new                 # add new openai-compatible provider (interactive)
   opencode-vm provider add <id> --base-url <url> [--api-key <key>] [--name <n>] [--dry-run]
                                            # add provider non-interactively
   opencode-vm provider refresh <id>        # re-discover models from /v1/models (auto-runs at session start
                                            #   for local providers; OCVM_PROVIDER_AUTOREFRESH=0 disables)
   opencode-vm provider rm <id> [--dry-run] # remove provider from auth/config/model state
-  opencode-vm auth status                  # show OAuth token freshness across VMs/sessions
-  opencode-vm auth resync                  # adopt the freshest OAuth token into host auth.json
-                                           #   (fix for '401 token refresh failed' across VMs;
-                                           #    restart/attach the failing session afterwards)
+  opencode-vm auth status                  # show baseline-managed auth synchronization state
+  opencode-vm auth resync                  # retry auth finalization for this project's
+                                           #   stopped, tracked session
   opencode-vm screenshot                   # setup guide for browser screenshot capture
   opencode-vm base                         # shell into base VM
   opencode-vm prune                        # cleanup unused Lima data
