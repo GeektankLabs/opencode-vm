@@ -113,7 +113,7 @@ test("readiness publication is private, atomic, and ownership-aware", async () =
       schema: 1,
       projectHash: "hash",
       generation: "generation",
-      adapterVersion: "0.1.0",
+      adapterVersion: "0.1.2",
       pid: process.pid,
       host: "127.0.0.1",
       port: 40960,

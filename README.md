@@ -258,7 +258,9 @@ opencode-vm web --mcp-port 40960
 opencode-vm web --no-mcp
 ```
 
-New sessions select a free loopback port from `40960..41059`; the first available endpoint is `http://127.0.0.1:40960/mcp`. Explicit ports and reconnects keep their selected port. The adapter uses stateless Streamable HTTP and exposes five tools: `list_sessions`, `get_session`, `get_session_status`, `get_session_history`, and asynchronous `send_message`. It does not create sessions or answer OpenCode permission requests and questions.
+New sessions select a free loopback port from `40960..41059`; the first available endpoint is `http://127.0.0.1:40960/mcp`. Explicit ports and reconnects keep their selected port. The adapter uses stateless Streamable HTTP and exposes ten tools: `list_sessions`, `create_session`, `get_session`, `get_session_status`, `get_session_history`, asynchronous `send_message`, `get_session_runtime_options`, `update_session_runtime`, `get_project_activity`, and `wait_for_project_activity`. `create_session` accepts an optional title and creates an empty work session using the project's default work agent/model; send its first prompt with `send_message`. OpenCode permission requests and questions are handled in Web UI/TUI.
+
+Since 0.5.66, clients can query live agent/provider/model/variant options, update idle sessions, and follow all project sessions through a private persistent activity journal. Retain `next_cursor` to retrieve later completion/error/input-required events without polling every session. Receipts preserve `message_id` and add an activity cursor; status remains authoritative and response text stays in history. The journal retains 5,000 events across adapter restarts, reports expired cursors explicitly, and supports waits up to 15 seconds. Collection and cross-client concurrency limits are documented in [`PLAN_MCP_ACTIVITY.md`](PLAN_MCP_ACTIVITY.md).
 
 Every request requires the dedicated token in the `X-OCVM-MCP-Token` header. The startup banner prints the credential **path**, never the token. This authentication is independent of Web UI Basic auth and remains required with `--no-auth`.
 
@@ -269,15 +271,18 @@ The token grants access to bounded project-session history and to `send_message`
 To connect through OpenAI Secure MCP Tunnel, configure each project from its directory on the Mac:
 
 ```bash
-opencode-vm provider mcp new openai     # select a stored tunnel API key/tunnel, or enter new values
+opencode-vm provider mcp               # interactive action menu: list/add/status/rm
+opencode-vm provider mcp new openai     # select a stored tunnel API key/tunnel, or enter new values (alias: add)
 opencode-vm start                      # TUI and configured MCP tunnel share one local server
 opencode-vm web                        # alternatively: Web UI and this project's configured tunnel
 opencode-vm provider mcp list          # all project assignments and reusable entries
 opencode-vm provider mcp status openai
-opencode-vm provider mcp rm openai     # removes this project's assignment; retains reusable entries
+opencode-vm provider mcp rm            # choose project connection, tunnel API key, or tunnel ID, then an entry
 ```
 
 Project assignments and reusable tunnel API keys/tunnel IDs are stored centrally in `~/.opencode-vm/mcp-tunnel/openai/registry.json`. The key needs Tunnels **Read + Use**. Different projects can use the same key with separate tunnels. **Reuse a tunnel ID only for projects operated one at a time:** opencode-vm warns during setup but does not block simultaneous reuse, which can route requests to the wrong project. `start --no-mcp` and `web --no-mcp` suppress the connection for one run. Tunnel failures leave the local session available. See [`docs/MCP-TUNNEL.md`](docs/MCP-TUNNEL.md) for selection menus, list/removal, migration, dated ChatGPT plan information and external acceptance status.
+
+Interactive menus accept `q` to cancel. Explicit `--project`, `--key-id`, or `--tunnel-id` selectors run directly. Bare `provider mcp`/`provider mcp rm` require a terminal; the existing noninteractive `provider mcp rm openai` keeps its current-project default. To remove the current project directly in either mode, use `provider mcp rm openai --project "$PWD"`.
 
 ### A2A
 
@@ -524,7 +529,8 @@ opencode-vm provider subscription rm <id> # removes the stored credential (host-
 opencode-vm provider mcp new openai        # assign a tunnel API key and tunnel ID to this project
 opencode-vm provider mcp list              # all projects and reusable entries, with origins/usage
 opencode-vm provider mcp status openai     # current project configuration + runtime status
-opencode-vm provider mcp rm openai         # stop/remove this project assignment; retain register entries
+opencode-vm provider mcp rm                # interactive type + entry selection
+opencode-vm provider mcp rm openai --project "$PWD" # remove current project; retain register entries
 opencode-vm provider mcp rm openai --project <project-id>
 opencode-vm provider mcp rm openai --key-id <key-id>        # unreferenced key only
 opencode-vm provider mcp rm openai --tunnel-id <tunnel-id> # unreferenced tunnel only
@@ -851,7 +857,7 @@ opencode-vm provider subscription rm <id>  # remove a stored subscription creden
 opencode-vm provider mcp new openai       # configure this project's OpenAI MCP connection
 opencode-vm provider mcp list             # all project assignments and reusable keys/tunnels
 opencode-vm provider mcp status openai    # inspect this project's configuration and runtime
-opencode-vm provider mcp rm openai        # stop/remove this project's assignment
+opencode-vm provider mcp rm               # choose a project connection, key, or tunnel to remove
 opencode-vm auth status  # show baseline-managed auth synchronization state
 opencode-vm auth resync  # retry finalization for this project's stopped tracked session
 opencode-vm screenshot   # setup guide for browser screenshot capture

@@ -24,6 +24,7 @@ export async function main(): Promise<void> {
   const token = await loadCredential(runtime.credentialFile);
   const gateway = new OpenCodeGateway(runtime);
   await gateway.compatibilityCheck();
+  await gateway.enableActivity(join(dirname(runtimePath), "activity.json"));
 
   const server = new McpHttpServer(runtime, token, gateway);
   const readyPath = join(dirname(runtimePath), "ready.json");
@@ -32,11 +33,13 @@ export async function main(): Promise<void> {
     if (stopped) return;
     stopped = true;
     await server.close();
+    await gateway.close();
     await removeOwnedReadyFile(readyPath, runtime.generation, process.pid);
   };
 
   try {
     const port = await server.start();
+    gateway.startActivityCollection();
     const ready: ReadyDescriptor = {
       schema: 1,
       projectHash: runtime.projectHash,

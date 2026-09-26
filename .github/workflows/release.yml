@@ -18,6 +18,15 @@ permissions:
   contents: write
 
 jobs:
+  host-shell:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Validate native macOS Bash lock cleanup
+        run: /bin/bash tests/mcp_lock_test.sh
+
   metadata:
     runs-on: ubuntu-latest
     outputs:
@@ -67,7 +76,7 @@ jobs:
           printf 'openlive_asset=%s\nmcp_asset=%s\nrelease_tag=%s\n' "$openlive_asset" "$mcp_asset" "$release_tag" >> "$GITHUB_OUTPUT"
 
   release:
-    needs: metadata
+    needs: [metadata, host-shell]
     runs-on: ubuntu-latest
     concurrency:
       group: opencode-vm-release-${{ needs.metadata.outputs.release_tag }}
@@ -173,6 +182,7 @@ jobs:
           bash -n opencode-vm.sh tests/mcp_adapter_test.sh tests/openlive_test.sh tests/besprechung_test.sh scripts/build-mcp-adapter.sh scripts/build-openlive-adapter.sh
           shellcheck --severity=error opencode-vm.sh tests/mcp_adapter_test.sh tests/openlive_test.sh tests/besprechung_test.sh scripts/build-mcp-adapter.sh scripts/build-openlive-adapter.sh
           bash tests/besprechung_test.sh
+          bash tests/mcp_lock_test.sh
           bash tests/mcp_adapter_test.sh
           bash tests/openlive_test.sh
       - name: Build reproducible adapters

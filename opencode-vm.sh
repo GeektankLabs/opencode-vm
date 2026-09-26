@@ -34,7 +34,7 @@ OPENLIVE_PREVIOUS_COMMAND="$OPENLIVE_DIR/previous-command"
 OPENLIVE_AUTH_MARKER="__opencode_vm_openlive__"
 OPENLIVE_LOCK_PATH=""
 OPENLIVE_ADAPTER_VERSION="0.1.6"
-OPENLIVE_ADAPTER_TAG="v0.5.62"
+OPENLIVE_ADAPTER_TAG="v0.5.66"
 OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.6.tar"
 OPENLIVE_ADAPTER_SHA256="06f461873b8b299de98220aa577824eb9807672b26cb069541acebcdd2d973b9"
 OPENLIVE_ACP_SDK_VERSION="1.2.1"
@@ -44,10 +44,10 @@ OPENLIVE_MANAGER_DESCRIPTION="Read-only OpenLive voice session manager"
 OPENLIVE_MANAGER_PROMPT="You manage an OpenLive voice call. The voice_sessions tool is available and you must call it before listing, inspecting, summarizing, checking, attaching to, or creating project sessions. Never claim session details without a successful tool result. Ask for clarification if a requested session is ambiguous. Create a new work session only when the user explicitly asks for one. Apart from that explicit create action, you are read-only: do not edit files, run shell commands, create tasks, or mutate sessions. Keep responses brief and conversational: one or two plain sentences without Markdown, paths, URLs, code, or stray symbols. When attachment or creation succeeds, tell the user the next voice prompt will continue in that session."
 MCP_CONNECTOR_DIR="$SHARE_ROOT/mcp-connector"
 MCP_ADAPTER_CACHE_ROOT="$MCP_CONNECTOR_DIR/adapters"
-MCP_ADAPTER_VERSION="0.1.0"
-MCP_ADAPTER_TAG="v0.5.62"
-MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.0.tar"
-MCP_ADAPTER_SHA256="8234d7247f00d4f9d89006cc2747011dcf627c12ee59244739244c5302e237f0"
+MCP_ADAPTER_VERSION="0.1.2"
+MCP_ADAPTER_TAG="v0.5.66"
+MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.2.tar"
+MCP_ADAPTER_SHA256="372015fde88dfbc734a0e9799888eb7f1b233dce1f524473643d05de1612f247"
 MCP_SDK_VERSION="1.30.1"
 MCP_OPENCODE_SDK_VERSION="1.18.21"
 MCP_TESTED_PROTOCOL_VERSION="2025-11-25"
@@ -159,7 +159,7 @@ DEFAULT_MCP_PORT=40960                # private incoming MCP connector
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.5.62"
+OCVM_VERSION="0.5.66"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -5784,7 +5784,11 @@ mcp_tunnel_reuse_note() {
 # Only serialize this project's own start/stop, using its existing lifecycle
 # lock. No key/tunnel-use lock, owner registry, or cross-project admission check.
 mcp_tunnel_with_project() (
-  local project="$1" LIFECYCLE_LOCK_LINK="" LIFECYCLE_LOCK_CLAIM=""
+  local project="$1"
+  # Bash 3.2 can unwind function locals before EXIT traps. These assignments
+  # remain private to this subshell but must survive until lock cleanup runs.
+  LIFECYCLE_LOCK_LINK=""
+  LIFECYCLE_LOCK_CLAIM=""
   shift
   lifecycle_lock_acquire "$project" || exit 1
   trap lifecycle_lock_release EXIT
@@ -5916,19 +5920,110 @@ mcp_tunnel_choices() {
   ' <<<"$view"
 }
 
+# Menus write presentation to stderr and return only the selected value on
+# stdout. Exit 3 means cancel/empty selection, so callers never mutate state.
+mcp_tunnel_action_menu() {
+  local choice
+  cat >&2 <<'EOF'
+[provider] OpenAI MCP — choose an action:
+  1) list    Show all project connections and registered entries
+  2) add     Set up or update this project (alias: new)
+  3) status  Inspect a project's connection
+  4) rm      Remove a project connection, tunnel API key, or tunnel ID
+  q) Cancel
+EOF
+  while true; do
+    read -r -p "MCP action [1-4/list/add/status/rm/q]: " choice || return 3
+    case "$choice" in
+      1|list) printf 'list\n'; return 0 ;;
+      2|add|new) printf 'new\n'; return 0 ;;
+      3|status) printf 'status\n'; return 0 ;;
+      4|rm) printf 'rm\n'; return 0 ;;
+      0|q|Q) echo "[mcp-tunnel] Cancelled." >&2; return 3 ;;
+      *) echo "Please choose list, add, status, rm, or q." >&2 ;;
+    esac
+  done
+}
+
+mcp_tunnel_pick_entry() {
+  local view="$1" kind="$2" choice count
+  count="$(jq -r --arg kind "$kind" '.[$kind] | length' <<<"$view")" || return 1
+  if [[ "$count" == 0 ]]; then
+    echo "[mcp-tunnel] No registered $kind to select." >&2
+    return 3
+  fi
+  if [[ "$kind" == projects ]]; then
+    echo "[mcp-tunnel] Project connections:" >&2
+    jq -r '.projects | to_entries | to_entries[] |
+      "  \(.key + 1)) \(.value.value.name) [\(.value.key)]\n     path: \(.value.value.path)\n     tunnel API key: \(.value.value.keyId)\n     tunnel: \(.value.value.tunnelId)"' <<<"$view" >&2
+  else
+    mcp_tunnel_choices "$view" "$kind" >&2
+  fi
+  while true; do
+    read -r -p "Select $kind entry [1-$count/q]: " choice || return 3
+    case "$choice" in 0|q|Q) echo "[mcp-tunnel] Cancelled." >&2; return 3 ;; esac
+    if [[ "$choice" =~ ^[1-9][0-9]*$ && "${#choice}" -le 6 ]] && (( choice <= count )); then
+      jq -er --arg kind "$kind" --argjson n "$choice" '.[$kind] | keys_unsorted | .[$n - 1]' <<<"$view"
+      return $?
+    fi
+    echo "Please enter a number from 1 to $count, or q." >&2
+  done
+}
+
+mcp_tunnel_remove_menu() {
+  local view kind choice selected
+  view="$(mcp_tunnel_registry view)" || return 1
+  cat >&2 <<'EOF'
+[mcp-tunnel] What would you like to remove?
+  1) Project connection (keep reusable keys/tunnels)
+  2) Registered tunnel API key
+  3) Registered tunnel ID
+  q) Cancel
+EOF
+  while true; do
+    read -r -p "Remove [1-3/project/key/tunnel/q]: " choice || return 3
+    case "$choice" in
+      1|project) kind=projects; break ;;
+      2|key) kind=keys; break ;;
+      3|tunnel) kind=tunnels; break ;;
+      0|q|Q) echo "[mcp-tunnel] Cancelled." >&2; return 3 ;;
+      *) echo "Please choose project, key, tunnel, or q." >&2 ;;
+    esac
+  done
+  selected="$(mcp_tunnel_pick_entry "$view" "$kind")" || return $?
+  printf '%s\t%s\n' "$kind" "$selected"
+}
+
 provider_mcp_cmd() {
-  local operation="${1:-}" provider="${2:-}" tunnel_id="" key="" reference="" key_id="" project="" view choice count result rc=0
-  [[ "$operation" != list || -n "$provider" ]] || provider=openai
-  if [[ "$provider" != openai || ! "$operation" =~ ^(new|status|list|rm)$ ]]; then
-    echo "Usage: opencode-vm provider mcp {new|status|list|rm} [openai] (see provider help)" >&2
+  local operation="${1:-}" provider=openai explicit_provider=0 guided=0
+  local tunnel_id="" key="" reference="" key_id="" project="" view choice count result rc=0
+  case "$operation" in help|-h|--help) _provider_usage; return 0 ;; esac
+  if [[ -z "$operation" ]]; then
+    [[ -t 0 ]] || { echo "Usage: opencode-vm provider mcp {list|add|new|status|rm} [openai] (interactive menu requires a terminal)" >&2; return 2; }
+    operation="$(mcp_tunnel_action_menu)" || rc=$?
+    [[ "$rc" != 3 ]] || return 0
+    [[ "$rc" == 0 ]] || return "$rc"
+    guided=1
+  else
+    shift
+  fi
+  [[ "$operation" != add ]] || operation=new
+  if [[ ! "$operation" =~ ^(new|status|list|rm)$ ]]; then
+    echo "Usage: opencode-vm provider mcp {list|add|new|status|rm} [openai] (see provider help)" >&2
+    return 2
+  fi
+  if [[ -n "${1:-}" && "$1" != -* ]]; then
+    provider="$1"; explicit_provider=1; shift
+  fi
+  if [[ "$provider" != openai ]]; then
+    echo "[mcp-tunnel] Supported MCP provider: openai." >&2
     return 2
   fi
   need jq
   need python3
-  shift
-  [[ "${1:-}" != openai ]] || shift
   while [[ "$#" -gt 0 ]]; do
     case "$1" in
+      -h|--help) _provider_usage; return 0 ;;
       --tunnel-id|--api-key|--tunnel-api-key|--key-id|--project)
         [[ "$#" -ge 2 && -n "$2" ]] || { echo "[mcp-tunnel] Missing option value." >&2; return 2; }
         case "$1" in
@@ -5954,10 +6049,33 @@ provider_mcp_cmd() {
       ;;
     status)
       [[ -z "$key_id$tunnel_id$reference" ]] || return 2
+      if [[ -z "$project" && -t 0 && ( "$guided" == 1 || "$explicit_provider" == 0 ) ]]; then
+        view="$(mcp_tunnel_registry view)" || return 1
+        project="$(mcp_tunnel_pick_entry "$view" projects)" || rc=$?
+        [[ "$rc" != 3 ]] || return 0
+        [[ "$rc" == 0 ]] || return "$rc"
+      fi
       mcp_tunnel_status "${project:-$PWD}"; return $?
       ;;
     rm)
       [[ -z "$reference" ]] || return 2
+      if [[ -z "$project$key_id$tunnel_id" ]]; then
+        if [[ -t 0 ]]; then
+          result="$(mcp_tunnel_remove_menu)" || rc=$?
+          [[ "$rc" != 3 ]] || return 0
+          [[ "$rc" == 0 ]] || return "$rc"
+          local kind selected
+          IFS=$'\t' read -r kind selected <<<"$result"
+          case "$kind" in
+            projects) project="$selected" ;;
+            keys) key_id="$selected" ;;
+            tunnels) tunnel_id="$selected" ;;
+          esac
+        elif [[ "$explicit_provider" == 0 ]]; then
+          echo "[mcp-tunnel] Without a terminal, specify --project, --key-id, or --tunnel-id." >&2
+          return 2
+        fi
+      fi
       if [[ -n "$key_id" ]]; then
         [[ -z "$project$tunnel_id" ]] || return 2
         mcp_tunnel_registry drop key "$key_id" || return 1
@@ -5991,7 +6109,8 @@ provider_mcp_cmd() {
     count="$(jq '.keys | length' <<<"$view")"
     if (( count > 0 )); then
       mcp_tunnel_choices "$view" keys
-      read -r -p "Tunnel API key: choose a number or n for a new key: " choice || return 1
+      read -r -p "Tunnel API key: choose a number, n for a new key, or q to cancel: " choice || return 1
+      case "$choice" in 0|q|Q) echo "[mcp-tunnel] Cancelled."; return 0 ;; esac
       if [[ "$choice" != n && "$choice" != N ]]; then
         [[ "$choice" =~ ^[1-9][0-9]*$ && "${#choice}" -le 6 ]] || return 2
         key_id="$(jq -er --argjson n "$choice" '.keys | keys_unsorted | .[$n - 1] // empty' <<<"$view")" || return 2
@@ -6019,7 +6138,8 @@ provider_mcp_cmd() {
     count="$(jq '.tunnels | length' <<<"$view")"
     if (( count > 0 )); then
       mcp_tunnel_choices "$view" tunnels
-      read -r -p "Tunnel: choose a number or n to register another tunnel ID: " choice || return 1
+      read -r -p "Tunnel: choose a number, n to register another tunnel ID, or q to cancel: " choice || return 1
+      case "$choice" in 0|q|Q) echo "[mcp-tunnel] Cancelled."; return 0 ;; esac
       if [[ "$choice" != n && "$choice" != N ]]; then
         [[ "$choice" =~ ^[1-9][0-9]*$ && "${#choice}" -le 6 ]] || return 2
         tunnel_id="$(jq -er --argjson n "$choice" '.tunnels | keys_unsorted | .[$n - 1] // empty' <<<"$view")" || return 2
@@ -6092,14 +6212,19 @@ Subscriptions (OAuth sign-in; connected in the OpenCode Web UI):
   provider subscription rm <id>  remove the stored subscription credential
 
 MCP connections (project assignments in a user-wide register):
-  provider mcp new openai        configure the current project; select stored entries or enter new ones
+  provider mcp                   interactive action menu (list/add/status/rm)
+  provider mcp {add|new} [openai] configure the current project; select stored entries or enter new ones
       [--tunnel-id ID] [--tunnel-api-key KEY|env:NAME|file:PATH | --key-id ID]
       --api-key remains an alias for --tunnel-api-key
   provider mcp list [openai]     list all project assignments and reusable keys/tunnels
-  provider mcp status openai [--project ID]   show project configuration and live status
-  provider mcp rm openai [--project ID]       stop/remove a project assignment (default: cwd)
+  provider mcp status [openai] [--project ID] show project configuration and live status
+  provider mcp rm [openai]                   interactive type + entry selection
+  provider mcp rm openai --project ID       stop/remove a project assignment
   provider mcp rm openai --key-id ID          remove an unreferenced tunnel API key
   provider mcp rm openai --tunnel-id ID       remove an unreferenced tunnel ID
+  Menus accept q to cancel. Explicit selectors run directly.
+  Without a terminal, bare 'mcp'/'mcp rm' require arguments;
+  'mcp rm openai' retains the existing noninteractive current-project default.
 EOF
 }
 
@@ -7846,7 +7971,7 @@ mcp_adapter_dev_valid() {
   local dir="$1"
   [[ -f "$dir/package.json" && -f "$dir/package-lock.json" && -f "$dir/tsconfig.json" \
     && -f "$dir/src/main.ts" && -f "$dir/src/types.ts" && -f "$dir/src/http.ts" \
-    && -f "$dir/src/opencode.ts" && -f "$dir/src/tools.ts" ]] || return 1
+    && -f "$dir/src/opencode.ts" && -f "$dir/src/tools.ts" && -f "$dir/src/activity.ts" ]] || return 1
   [[ "$(jq -r '.version // empty' "$dir/package.json" 2>/dev/null)" == "$MCP_ADAPTER_VERSION" ]]
 }
 
@@ -7854,7 +7979,7 @@ mcp_adapter_release_valid() {
   local dir="$1"
   [[ -f "$dir/manifest.json" && -f "$dir/package.json" && -f "$dir/package-lock.json" \
     && -f "$dir/dist/main.js" && -f "$dir/dist/types.js" && -f "$dir/dist/http.js" \
-    && -f "$dir/dist/opencode.js" && -f "$dir/dist/tools.js" && -f "$dir/.archive-sha256" ]] || return 1
+    && -f "$dir/dist/opencode.js" && -f "$dir/dist/tools.js" && -f "$dir/dist/activity.js" && -f "$dir/.archive-sha256" ]] || return 1
   [[ "$(<"$dir/.archive-sha256")" == "$MCP_ADAPTER_SHA256" ]] || return 1
   jq -e --arg version "$MCP_ADAPTER_VERSION" --arg mcp "$MCP_SDK_VERSION" \
     --arg opencode "$MCP_OPENCODE_SDK_VERSION" --arg protocol "$MCP_TESTED_PROTOCOL_VERSION" '
@@ -12974,7 +13099,10 @@ mcp_wait_host_port_available() {
 # be reused only when the actual listener and host policy also permit it.
 mcp_reserve_host_port() (
   local project="$1" requested="${2:-}" port pid owner key root sessions="$SESSIONS_DIR"
-  local LIFECYCLE_LOCK_LINK="" LIFECYCLE_LOCK_CLAIM=""
+  # Keep trap state at subshell scope: Bash 3.2 drops locals before an explicit
+  # exit, otherwise the short port lock leaks for the host controller's lifetime.
+  LIFECYCLE_LOCK_LINK=""
+  LIFECYCLE_LOCK_CLAIM=""
   root="$MCP_CONNECTOR_DIR/ports"
   mkdir -p "$root" || exit 1
   SESSIONS_DIR="$root"
@@ -15150,11 +15278,13 @@ Usage:
   opencode-vm provider subscription new    # show how to connect an OAuth subscription in the Web UI
   opencode-vm provider subscription rm <id>
                                             # remove a stored subscription credential (host-side)
-  opencode-vm provider mcp new openai       # configure this project; reuse stored entries or enter new ones
+  opencode-vm provider mcp                  # interactive action menu (OpenAI)
+  opencode-vm provider mcp {add|new} [openai] # configure this project; reuse entries or enter new ones
                                             # [--tunnel-id ID] [--tunnel-api-key KEY|env:NAME|file:PATH | --key-id ID]
   opencode-vm provider mcp list [openai]    # all project assignments, tunnel API keys (hidden), and tunnels
   opencode-vm provider mcp status openai [--project ID] # project configuration and runtime status
-  opencode-vm provider mcp rm openai [--project ID]     # stop/remove project assignment; keep reusable entries
+  opencode-vm provider mcp rm [openai]                 # choose type and entry interactively
+  opencode-vm provider mcp rm openai --project ID      # stop/remove project assignment; keep reusable entries
   opencode-vm provider mcp rm openai --key-id ID        # remove an unreferenced tunnel API key
   opencode-vm provider mcp rm openai --tunnel-id ID     # remove an unreferenced tunnel ID
   opencode-vm auth status                  # show baseline-managed auth synchronization state

@@ -1,10 +1,20 @@
 # MCP Connector Baseline Plan
 
-Status: Local MCP MVP and project-based managed tunnel register implemented; real macOS/Lima and hosted OpenAI/ChatGPT/Voice acceptance remain external.
+Status: Local MCP MVP, project-based managed tunnel register and requested session creation implemented; real macOS/Lima and hosted OpenAI/ChatGPT/Voice acceptance remain external.
 
 Date: 2026-09-25
 
 Last updated: 2026-09-26
+
+## Phase 5: Runtime Configuration and Project Activity (0.5.66 / Adapter 0.1.2)
+
+The user requested a baseline without further questions. `create_session` was reviewed and its variant/enabled-model checks extended while preserving lazy custom-provider compatibility. Four tools extend the existing six: runtime options, partial idle-session runtime update, persistent project activity and short activity wait. Message IDs and current-status correlation remain unchanged; receipt cursors/timestamps and machine-readable error metadata are additive. The detailed decisions, acceptance evidence and explicit follow-ups are maintained in `PLAN_MCP_ACTIVITY.md` and `docs/MCP-INTERFACE.md`. Historical no-runtime-update/no-journal statements below are superseded by this phase.
+
+## Phase 4: Create Work Sessions (0.5.65 / Adapter 0.1.1)
+
+The user explicitly requested session creation through MCP, superseding the historical five-tool/no-creation baseline below. `create_session` accepts only an optional bounded title and creates an empty root session in the endpoint's fixed project. The configured visible primary agent and connected model defaults are persisted so `send_message` can start the first turn; the backend normalizes an unspecified variant to `default`. Scope/parent/permission overrides are rejected. Creation is non-idempotent; unconfirmed results use `CREATION_UNCERTAIN` and are never automatically retried or deleted. The adapter re-reads and validates the new session before returning its identity.
+
+The real OpenCode integration starts with no work sessions, creates one through MCP without a model call, verifies empty history and project ownership, then submits and correlates its first prompt. Unit/wire tests cover defaults, annotations, schema rejection, scope filtering and uncertain creation. Clients must refresh their tool catalog after runtime reconnect to discover the sixth tool. The protocol/runbook documents the current contract; older phase sections remain historical where superseded.
 
 ## Phase 3: Project Assignments and Reusable Entries (0.5.62)
 

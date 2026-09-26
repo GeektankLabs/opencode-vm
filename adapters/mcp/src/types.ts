@@ -1,7 +1,7 @@
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { dirname, isAbsolute } from "node:path";
 
-export const ADAPTER_VERSION = "0.1.0";
+export const ADAPTER_VERSION = "0.1.2";
 export const MCP_TRANSPORT = "streamable-http-stateless";
 export const MAX_HISTORY_TEXT = 32_000;
 
@@ -109,6 +109,98 @@ export type SendMessageResult = {
   session_id: string;
   message_id: string;
   state: "submitted";
+  submitted_at?: string;
+  activity_cursor?: string;
+};
+
+export type SessionRuntime = {
+  agent: string;
+  provider_id: string;
+  model_id: string;
+  variant: string;
+};
+export type RuntimePatch = Partial<SessionRuntime>;
+export type RuntimeOptions = {
+  agents: string[];
+  providers: Array<{ provider_id: string; name: string }>;
+  models: Array<{
+    provider_id: string;
+    model_id: string;
+    name: string;
+    variants: string[];
+  }>;
+  truncated: boolean;
+  current?: SessionRuntime;
+};
+export type RuntimeUpdateResult = {
+  session_id: string;
+  previous: SessionRuntime;
+  current: SessionRuntime;
+  state: "updated";
+};
+
+export const ACTIVITY_TYPES = [
+  "message.submitted",
+  "message.running",
+  "message.completed",
+  "message.failed",
+  "message.aborted",
+  "session.input_required",
+  "session.permission_required",
+  "session.idle",
+  "session.busy",
+  "session.runtime_changed",
+] as const;
+export type ActivityType = (typeof ACTIVITY_TYPES)[number];
+export type ActivityEvent = {
+  event_id: string;
+  cursor: string;
+  timestamp: string;
+  session_id: string;
+  session_title: string;
+  message_id?: string;
+  type: ActivityType;
+  state: string;
+  assistant_message_ids: string[];
+  pending_input?: PendingInput;
+  previous?: SessionRuntime;
+  current?: SessionRuntime;
+  source: "mcp" | "observed" | "reconciled";
+};
+export type ActivityQuery = {
+  after_cursor?: string;
+  limit?: number;
+  session_ids?: string[];
+  event_types?: ActivityType[];
+};
+export type ActivityResult = {
+  events: ActivityEvent[];
+  next_cursor: string;
+  has_more: boolean;
+  tracking: {
+    connected: boolean;
+    partial: boolean;
+    last_reconciled_at?: string;
+  };
+};
+export type ActivitySnapshot = {
+  session_id: string;
+  session_title: string;
+  activity: SessionActivity;
+  pending_input: PendingInput;
+  runtime?: SessionRuntime;
+  messages: SessionStatusResult[];
+};
+
+export type CreateSessionResult = {
+  project: ProjectIdentity;
+  session_id: string;
+  title: string;
+  agent: string;
+  provider_id: string;
+  model_id: string;
+  variant?: string;
+  state: "created";
 };
 
 export const ADAPTER_ERROR_CODES = [
@@ -119,6 +211,15 @@ export const ADAPTER_ERROR_CODES = [
   "BACKEND_UNAVAILABLE",
   "BACKEND_INCOMPATIBLE",
   "SUBMISSION_UNCERTAIN",
+  "CREATION_UNCERTAIN",
+  "INVALID_AGENT",
+  "INVALID_PROVIDER",
+  "INVALID_MODEL",
+  "INVALID_VARIANT",
+  "UNSUPPORTED_CONFIGURATION",
+  "RUNTIME_UPDATE_FAILED",
+  "CURSOR_EXPIRED",
+  "ACTIVITY_UNAVAILABLE",
   "INTERNAL_ERROR",
 ] as const;
 

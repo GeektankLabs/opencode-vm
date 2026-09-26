@@ -41,6 +41,37 @@ test("generated OpenCode client uses the expected scoped routes and 204 admissio
     });
     const path = new URL(request.url ?? "", "http://127.0.0.1").pathname;
     if (path === "/global/health") return json(response, { healthy: true });
+    if (path === "/config")
+      return json(response, {
+        default_agent: "build",
+        model: "provider/model",
+      });
+    if (path === "/api/model")
+      return json(response, {
+        data: [
+          {
+            id: "model",
+            providerID: "provider",
+            name: "Model",
+            enabled: true,
+            variants: [{ id: "high" }],
+          },
+        ],
+      });
+    if (path === "/agent")
+      return json(response, [
+        { name: "build", mode: "primary", variant: "high" },
+      ]);
+    if (path === "/provider")
+      return json(response, {
+        all: [
+          { id: "provider", models: { model: { variants: { high: {} } } } },
+        ],
+        connected: ["provider"],
+        default: { provider: "model" },
+      });
+    if (path === "/session" && request.method === "POST")
+      return json(response, { id: "ses_wire" });
     if (path === "/project/current") {
       return json(response, {
         id: "project-id",
@@ -118,6 +149,8 @@ test("generated OpenCode client uses the expected scoped routes and 204 admissio
   try {
     const gateway = new OpenCodeGateway(runtime);
     await gateway.compatibilityCheck();
+    const created = await gateway.createSession("Wire session");
+    assert.equal(created.session_id, "ses_wire");
     assert.equal((await gateway.listSessions()).sessions[0]?.id, "ses_wire");
     assert.equal(
       (await gateway.getSessionHistory("ses_wire")).messages[0]?.text,
@@ -127,6 +160,23 @@ test("generated OpenCode client uses the expected scoped routes and 204 admissio
     assert.match(receipt.message_id, /^msg_[a-f0-9]{32}$/u);
 
     const expectedAuthorization = `Basic ${Buffer.from("backend-user:backend-password").toString("base64")}`;
+    const creations = requests.filter(
+      (request) =>
+        request.method === "POST" &&
+        new URL(request.url, "http://127.0.0.1").pathname === "/session",
+    );
+    assert.equal(creations.length, 1);
+    assert.equal(
+      new URL(creations[0]!.url, "http://127.0.0.1").searchParams.get(
+        "directory",
+      ),
+      project,
+    );
+    assert.deepEqual(creations[0]!.body, {
+      title: "Wire session",
+      agent: "build",
+      model: { providerID: "provider", id: "model", variant: "high" },
+    });
     assert.ok(requests.length > 8);
     assert.ok(
       requests.every(

@@ -6,7 +6,13 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { McpHttpServer, MAX_REQUEST_BODY_BYTES } from "./http.js";
 import type { SessionGateway } from "./opencode.js";
 import type {
+  ActivityQuery,
+  ActivityResult,
+  RuntimeOptions,
+  RuntimePatch,
+  RuntimeUpdateResult,
   ListSessionsResult,
+  CreateSessionResult,
   RuntimeDescriptor,
   SendMessageResult,
   SessionDetailsResult,
@@ -32,8 +38,67 @@ function runtime(): RuntimeDescriptor {
 }
 
 class FakeGateway implements SessionGateway {
+  async getSessionRuntimeOptions(): Promise<RuntimeOptions> {
+    return {
+      agents: ["plan", "build"],
+      providers: [{ provider_id: "provider", name: "Provider" }],
+      models: [
+        {
+          provider_id: "provider",
+          model_id: "model",
+          name: "Model",
+          variants: ["default", "high"],
+        },
+      ],
+      truncated: false,
+    };
+  }
+  async updateSessionRuntime(
+    id: string,
+    patch: RuntimePatch,
+  ): Promise<RuntimeUpdateResult> {
+    const previous = {
+      agent: "plan",
+      provider_id: "provider",
+      model_id: "model",
+      variant: "default",
+    };
+    return {
+      session_id: id,
+      previous,
+      current: { ...previous, ...patch },
+      state: "updated",
+    };
+  }
+  async getProjectActivity(_query?: ActivityQuery): Promise<ActivityResult> {
+    return {
+      events: [],
+      next_cursor: "cursor",
+      has_more: false,
+      tracking: { connected: true, partial: false },
+    };
+  }
+  async waitForProjectActivity(
+    query: ActivityQuery & { after_cursor: string; timeout_ms?: number },
+  ): Promise<ActivityResult & { timeout: boolean }> {
+    return { ...(await this.getProjectActivity(query)), timeout: true };
+  }
   listEntered: (() => void) | undefined;
   listBarrier: Promise<void> | undefined;
+  createCalls: Array<string | undefined> = [];
+
+  async createSession(title?: string): Promise<CreateSessionResult> {
+    this.createCalls.push(title);
+    return {
+      project: { id: "hash", name: "project" },
+      session_id: "ses_new",
+      title: title ?? "MCP Work Session",
+      agent: "build",
+      provider_id: "provider",
+      model_id: "model",
+      state: "created",
+    };
+  }
 
   async listSessions(): Promise<ListSessionsResult> {
     this.listEntered?.();
@@ -78,7 +143,7 @@ class FakeGateway implements SessionGateway {
   }
 }
 
-test("official MCP client discovers and invokes the five stateless HTTP tools", async () => {
+test("official MCP client discovers and invokes the ten stateless HTTP tools", async () => {
   const gateway = new FakeGateway();
   const server = new McpHttpServer(runtime(), token, gateway);
   const port = await server.start();
@@ -91,17 +156,53 @@ test("official MCP client discovers and invokes the five stateless HTTP tools", 
     await client.connect(transport);
     const listed = await client.listTools();
     assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), [
+      "create_session",
+      "get_project_activity",
       "get_session",
       "get_session_history",
+      "get_session_runtime_options",
       "get_session_status",
       "list_sessions",
       "send_message",
+      "update_session_runtime",
+      "wait_for_project_activity",
     ]);
     const listTool = listed.tools.find((tool) => tool.name === "list_sessions");
     const sendTool = listed.tools.find((tool) => tool.name === "send_message");
     assert.equal(listTool?.annotations?.readOnlyHint, true);
     assert.equal(sendTool?.annotations?.destructiveHint, true);
     assert.equal(sendTool?.annotations?.idempotentHint, false);
+    const createTool = listed.tools.find(
+      (tool) => tool.name === "create_session",
+    );
+    assert.equal(createTool?.annotations?.readOnlyHint, false);
+    assert.equal(createTool?.annotations?.idempotentHint, false);
+    assert.equal(createTool?.annotations?.destructiveHint, false);
+    const created = await client.callTool({
+      name: "create_session",
+      arguments: { title: "  New work  " },
+    });
+    assert.equal(
+      (created.structuredContent as Record<string, unknown>)?.session_id,
+      "ses_new",
+    );
+    assert.deepEqual(gateway.createCalls, ["New work"]);
+    for (const request of [
+      { name: "get_session_runtime_options", arguments: {} },
+      {
+        name: "update_session_runtime",
+        arguments: { session_id: "ses", agent: "build" },
+      },
+      { name: "get_project_activity", arguments: {} },
+      {
+        name: "wait_for_project_activity",
+        arguments: { after_cursor: "cursor", timeout_ms: 1 },
+      },
+    ]) {
+      const result = await client.callTool(request);
+      assert.ok(!result.isError);
+      assert.ok(result.structuredContent);
+    }
 
     const result = await client.callTool({
       name: "list_sessions",
@@ -146,6 +247,24 @@ test("official MCP client discovers and invokes the five stateless HTTP tools", 
     );
 
     for (const request of [
+      { name: "update_session_runtime", arguments: { session_id: "ses" } },
+      { name: "get_project_activity", arguments: { limit: 101 } },
+      {
+        name: "wait_for_project_activity",
+        arguments: { after_cursor: "cursor", timeout_ms: 15001 },
+      },
+      { name: "create_session", arguments: { directory: "/other" } },
+      { name: "create_session", arguments: { parentID: "ses" } },
+      { name: "create_session", arguments: { agent: "openlive-manager" } },
+      {
+        name: "create_session",
+        arguments: {
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        },
+      },
+      { name: "create_session", arguments: { title: " " } },
+      { name: "create_session", arguments: { title: "x".repeat(161) } },
+      { name: "create_session", arguments: { title: "bad\nname" } },
       { name: "list_sessions", arguments: { limit: 0 } },
       {
         name: "get_session_history",
@@ -167,6 +286,11 @@ test("official MCP client discovers and invokes the five stateless HTTP tools", 
         },
       ]);
     }
+    assert.equal(
+      gateway.createCalls.length,
+      1,
+      "invalid creation input reached the backend",
+    );
 
     const failed = await client.callTool({
       name: "get_session",

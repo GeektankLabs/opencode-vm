@@ -11,6 +11,7 @@ mkdir -p "$HOME" "$TMP/a" "$TMP/b" "$TMP/c" "$TMP/d" "$TMP/e" "$TMP/unconfigured
 source "$ROOT/opencode-vm.sh"
 if [[ "$(uname -s)" == Linux ]]; then
   md5() { printf '%s' "$(md5sum | cut -d' ' -f1)"; }
+  export -f md5
 fi
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
@@ -37,7 +38,7 @@ grep -q 'wrong project' "$TMP/new.log" || fail 'missing tunnel reuse notice'
 pass 'private project registry, redacted status/list, reuse notice and dated plan information'
 
 cp "$registry" "$TMP/before.json"
-for args in 'new openai --tunnel-id bad --api-key value' 'new openai' 'rm other' 'status openai extra' 'new openai --key-id absent --tunnel-id tunnel_0123456789abcdef0123456789abcdef'; do
+for args in '' 'rm' 'new openai --tunnel-id bad --api-key value' 'new openai' 'rm other' 'status openai extra' 'new openai --key-id absent --tunnel-id tunnel_0123456789abcdef0123456789abcdef'; do
   # shellcheck disable=SC2086
   if in_project "$TMP/a" provider_cmd mcp $args </dev/null >"$TMP/error.log" 2>&1; then fail "accepted invalid input: $args"; fi
 done
@@ -195,11 +196,12 @@ pass 'attach re-evaluates suppression and cleans prior web ports/services before
 pass 'legacy global credentials become a reusable pool with explicit project binding'
 
 python3 - "$ROOT/opencode-vm.sh" "$ID" "$TMP" <<'PY'
-import errno, json, os, select, signal, sys, time
+import errno, hashlib, json, os, select, signal, sys, time
 script, tunnel, root = sys.argv[1:]
 os.environ["HOME"] = root + "/pty-home"
 os.mkdir(os.environ["HOME"])
 config = os.environ["HOME"] + "/.opencode-vm/mcp-tunnel/openai/registry.json"
+captured = []
 def wizard(command, directory, exchanges, expected=0):
     pid, fd = os.forkpty()
     if pid == 0:
@@ -225,6 +227,7 @@ def wizard(command, directory, exchanges, expected=0):
             output += chunk
         _, status = os.waitpid(pid, 0)
         assert os.waitstatus_to_exitcode(status) == expected, output.decode()
+        captured.append(output)
         return output
     finally:
         os.close(fd)
@@ -241,8 +244,56 @@ assert len(value["keys"]) == 1 and len(value["tunnels"]) == 1 and len(value["pro
 before = open(config, "rb").read()
 wizard("provider_cmd mcp new openai", root + "/b", [(b"Tunnel API key: choose", b"n\n"), (b"New tunnel API key (Read + Use):", b"sk-cancelled\n"), (b"Tunnel: choose", b"n\n"), (b"Tunnel ID:", b"\x03")], -signal.SIGINT)
 assert open(config, "rb").read() == before, "cancelled setup left partial pool entries"
+
+# Start at either the action menu or a partially specified command. Missing
+# deletion targets must be chosen explicitly, including when cwd is configured.
+out = wizard("provider_cmd mcp", root + "/a", [(b"MCP action", b"invalid\nlist\n")])
+assert b"Please choose list" in out and b"OpenAI MCP project connections" in out
+assert open(config, "rb").read() == before
+out = wizard("provider_cmd mcp", root + "/a", [(b"MCP action", b"status\n"), (b"Select projects entry", b"2\n")])
+assert ("project:       " + root + "/b").encode() in out
+out = wizard("provider_cmd mcp", root + "/c", [(b"MCP action", b"add\n"), (b"Tunnel API key: choose", b"1\n"), (b"Tunnel: choose", b"1\n")])
+key_id = next(iter(json.load(open(config))["keys"]))
+out = wizard(f"provider_cmd mcp add --key-id {key_id} --tunnel-id {tunnel}", root + "/d", [])
+assert b"MCP action" not in out and b"Saved project connection" in out
+assert len(json.load(open(config))["projects"]) == 4
+
+before = open(config, "rb").read()
+for command, exchanges in [
+    ("provider_cmd mcp", [(b"MCP action", b"q\n")]),
+    ("provider_cmd mcp rm", [(b"Remove [", b"q\n")]),
+    ("provider_cmd mcp rm openai", [(b"Remove [", b"1\n"), (b"Select projects entry", b"q\n")]),
+    ("provider_cmd mcp rm", [(b"Remove [", b"3\n"), (b"Select tunnels entry", b"\x04")]),
+    ("provider_cmd mcp add", [(b"Tunnel API key: choose", b"q\n")]),
+]:
+    wizard(command, root + "/a", exchanges)
+    assert open(config, "rb").read() == before, "cancel/EOF changed registry"
+out = wizard("provider_cmd mcp rm", root + "/a", [(b"Remove [", b"key\n"), (b"Select keys entry", b"1\n")], 1)
+assert b"Still referenced by projects" in out and secret not in out
+assert open(config, "rb").read() == before
+
+out = wizard("provider_cmd mcp rm", root + "/a", [(b"Remove [", b"invalid\nproject\n"), (b"Select projects entry", b"2\n")])
+value = json.load(open(config))
+pid = lambda name: hashlib.md5(os.fsencode(root + "/" + name)).hexdigest()
+assert pid("b") not in value["projects"] and pid("a") in value["projects"], "menu removed cwd instead of chosen project"
+assert len(value["keys"]) == 1 and len(value["tunnels"]) == 1
+for name in ("a", "c", "d"):
+    out = wizard(f"provider_cmd mcp rm openai --project {pid(name)}", root + "/a", [])
+    assert b"What would you like to remove" not in out, "complete command entered menu"
+
+out = wizard("provider_cmd mcp rm", root + "/a", [(b"Remove [", b"2\n"), (b"Select keys entry", b"99\n1\n")])
+assert b"Please enter a number" in out
+value = json.load(open(config))
+assert len(value["keys"]) == 0 and len(value["tunnels"]) == 1
+out = wizard("provider_cmd mcp", root + "/a", [(b"MCP action", b"rm\n"), (b"Remove [", b"tunnel\n"), (b"Select tunnels entry", b"1\n")])
+assert len(json.load(open(config))["tunnels"]) == 0
+before = open(config, "rb").read()
+out = wizard("provider_cmd mcp rm", root + "/a", [(b"Remove [", b"2\n")])
+assert b"No registered keys to select" in out
+assert open(config, "rb").read() == before
+assert all(secret not in output for output in captured), "key leaked in menu output"
 PY
-pass 'interactive new/reuse selection shows provenance, hides key values and cancels atomically'
+pass 'interactive action/add/status/remove flows select exact entries, handle empty/invalid/cancel/EOF and hide keys'
 
 mcp_host_port_available() { [[ "$1" != 40961 ]]; }
 first="$(mcp_reserve_host_port "$TMP/a")"

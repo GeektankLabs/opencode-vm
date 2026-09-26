@@ -65,12 +65,14 @@ python3 tests/release_state_test.py
 bash -n opencode-vm.sh tests/mcp_adapter_test.sh tests/openlive_test.sh scripts/build-mcp-adapter.sh scripts/build-openlive-adapter.sh
 shellcheck --severity=error opencode-vm.sh tests/mcp_adapter_test.sh tests/openlive_test.sh scripts/build-mcp-adapter.sh scripts/build-openlive-adapter.sh
 bash tests/mcp_adapter_test.sh
+bash tests/mcp_lock_test.sh
 bash tests/openlive_test.sh
 git diff --check
 ```
 
 The release workflow additionally performs these checks:
 
+- A native macOS `/bin/bash` job checks short lock cleanup (including Bash 3.2 EXIT-trap behavior); publication depends on that job. Linux runs the same lock regression.
 - It compares two builds of each archive for reproducibility and compares each digest to the script pin.
 - It installs production-only dependencies from each extracted package with lifecycle scripts disabled.
 - It starts the packaged OpenLive entry point far enough to verify its required runtime descriptor and runs the real OpenCode manager-tool integration from the package.

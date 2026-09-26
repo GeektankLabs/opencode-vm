@@ -7,7 +7,7 @@ import type {
 import { CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod/v4";
 import type { SessionGateway } from "./opencode.js";
-import { ADAPTER_VERSION, AdapterError } from "./types.js";
+import { ACTIVITY_TYPES, ADAPTER_VERSION, AdapterError } from "./types.js";
 
 const sessionId = z
   .string()
@@ -71,6 +71,126 @@ export const sendMessageInputSchema = z
     session_id: sessionId,
     message: z.string().min(1).max(32_000),
   })
+  .strict();
+
+export const createSessionInputSchema = z
+  .object({
+    title: z
+      .string()
+      .trim()
+      .min(1)
+      .max(160)
+      .regex(/^[^\x00-\x1f\x7f]+$/u)
+      .optional(),
+  })
+  .strict();
+
+const runtimeFields = {
+  agent: sessionId,
+  provider_id: sessionId,
+  model_id: sessionId,
+  variant: sessionId,
+};
+const runtimeSchema = z.object(runtimeFields).strict();
+const runtimeOptionsInput = z
+  .object({ session_id: sessionId.optional() })
+  .strict();
+const runtimeUpdateInput = z
+  .object({
+    session_id: sessionId,
+    agent: sessionId.optional(),
+    provider_id: sessionId.optional(),
+    model_id: sessionId.optional(),
+    variant: sessionId.optional(),
+  })
+  .strict()
+  .refine(
+    (value) =>
+      value.agent !== undefined ||
+      value.provider_id !== undefined ||
+      value.model_id !== undefined ||
+      value.variant !== undefined,
+  );
+const runtimeOptionsOutput = z
+  .object({
+    agents: z.array(z.string()),
+    providers: z.array(
+      z.object({ provider_id: z.string(), name: z.string() }).strict(),
+    ),
+    models: z.array(
+      z
+        .object({
+          provider_id: z.string(),
+          model_id: z.string(),
+          name: z.string(),
+          variants: z.array(z.string()),
+        })
+        .strict(),
+    ),
+    truncated: z.boolean(),
+    current: runtimeSchema.optional(),
+  })
+  .strict();
+const runtimeUpdateOutput = z
+  .object({
+    session_id: z.string(),
+    previous: runtimeSchema,
+    current: runtimeSchema,
+    state: z.literal("updated"),
+  })
+  .strict();
+const activityFields = {
+  after_cursor: z.string().min(1).max(128).optional(),
+  limit: z.number().int().min(1).max(100).default(50),
+  session_ids: z.array(sessionId).min(1).max(50).optional(),
+  event_types: z
+    .array(z.enum(ACTIVITY_TYPES))
+    .min(1)
+    .max(ACTIVITY_TYPES.length)
+    .optional(),
+};
+const activityInput = z.object(activityFields).strict();
+const waitActivityInput = z
+  .object({
+    ...activityFields,
+    after_cursor: z.string().min(1).max(128),
+    timeout_ms: z.number().int().min(1).max(15000).default(10000),
+  })
+  .strict();
+const activityOutput = z
+  .object({
+    events: z.array(
+      z
+        .object({
+          event_id: z.string(),
+          cursor: z.string(),
+          timestamp: z.string(),
+          session_id: z.string(),
+          session_title: z.string(),
+          message_id: z.string().optional(),
+          type: z.enum(ACTIVITY_TYPES),
+          state: z.string(),
+          assistant_message_ids: z.array(z.string()),
+          pending_input: pendingSchema.optional(),
+          previous: runtimeSchema.optional(),
+          current: runtimeSchema.optional(),
+          source: z.enum(["mcp", "observed", "reconciled"]),
+        })
+        .strict(),
+    ),
+    next_cursor: z.string(),
+    has_more: z.boolean(),
+    tracking: z
+      .object({
+        connected: z.boolean(),
+        partial: z.boolean(),
+        last_reconciled_at: z.string().optional(),
+      })
+      .strict(),
+  })
+  .strict();
+const waitActivityOutput = activityOutput
+  .extend({ timeout: z.boolean() })
   .strict();
 
 const listSessionsOutputSchema = z
@@ -139,6 +259,21 @@ const sendMessageOutputSchema = z
     session_id: z.string(),
     message_id: z.string(),
     state: z.literal("submitted"),
+    submitted_at: z.string().optional(),
+    activity_cursor: z.string().optional(),
+  })
+  .strict();
+
+const createSessionOutputSchema = z
+  .object({
+    project: projectSchema,
+    session_id: z.string(),
+    title: z.string(),
+    agent: z.string(),
+    provider_id: z.string(),
+    model_id: z.string(),
+    variant: z.string().optional(),
+    state: z.literal("created"),
   })
   .strict();
 
@@ -220,6 +355,117 @@ export function createMcpServer(gateway: SessionGateway): McpServer {
     },
   );
 
+  const createSessionHandler = safeHandler(
+    async ({ title }: z.output<typeof createSessionInputSchema>) => {
+      const result = await gateway.createSession(title);
+      return success(
+        result,
+        `Created session ${result.session_id} (${result.title}) for ${result.project.name} using ${result.agent} and ${result.provider_id}/${result.model_id}. Use send_message with this session_id to start work.`,
+      );
+    },
+  );
+
+  const optionsHandler = safeHandler(
+    async ({ session_id }: z.output<typeof runtimeOptionsInput>) =>
+      success(
+        await gateway.getSessionRuntimeOptions(session_id),
+        "Available primary agents, connected providers, models and variants.",
+      ),
+  );
+  const updateHandler = safeHandler(
+    async ({ session_id, ...patch }: z.output<typeof runtimeUpdateInput>) =>
+      success(
+        await gateway.updateSessionRuntime(session_id, patch),
+        `Updated runtime settings for session ${session_id}.`,
+      ),
+  );
+  const activityHandler = safeHandler(
+    async (query: z.output<typeof activityInput>) => {
+      const result = await gateway.getProjectActivity(query);
+      return success(
+        result,
+        `Returned ${result.events.length} project activity events. Save next_cursor for the next read.`,
+      );
+    },
+  );
+  const waitHandler = safeHandler(
+    async (query: z.output<typeof waitActivityInput>) => {
+      const result = await gateway.waitForProjectActivity(query);
+      return success(
+        result,
+        result.timeout
+          ? "Activity wait timed out; save next_cursor."
+          : `Returned ${result.events.length} activity events.`,
+      );
+    },
+  );
+  server.registerTool(
+    "get_session_runtime_options",
+    {
+      title: "Get Session Runtime Options",
+      description:
+        "List available primary agents and connected provider/model/variant combinations. Optionally include a session's current runtime.",
+      inputSchema: runtimeOptionsInput,
+      outputSchema: runtimeOptionsOutput,
+      annotations: readOnlyAnnotations,
+    },
+    optionsHandler,
+  );
+  server.registerTool(
+    "update_session_runtime",
+    {
+      title: "Update Session Runtime",
+      description:
+        "Change specified agent/provider/model/variant fields of an idle project session. Omitted fields stay unchanged. Query options first. Busy sessions are rejected; failed updates may be partial and must not be retried automatically.",
+      inputSchema: runtimeUpdateInput,
+      outputSchema: runtimeUpdateOutput,
+      annotations: { ...writeAnnotations, openWorldHint: false },
+    },
+    updateHandler,
+  );
+  server.registerTool(
+    "get_project_activity",
+    {
+      title: "Get Project Activity",
+      description:
+        "Read the bounded persistent activity journal across project sessions since after_cursor. Completion events reference message IDs; fetch history separately. Save next_cursor; CURSOR_EXPIRED requires a fresh read. Check tracking for collector outages/limits.",
+      inputSchema: activityInput,
+      outputSchema: activityOutput,
+      annotations: readOnlyAnnotations,
+    },
+    activityHandler,
+  );
+  server.registerTool(
+    "wait_for_project_activity",
+    {
+      title: "Wait For Project Activity",
+      description:
+        "Wait up to 15 seconds for matching project activity after a cursor; returns timeout=true when no matching event arrives. This is short polling, not external push.",
+      inputSchema: waitActivityInput,
+      outputSchema: waitActivityOutput,
+      annotations: readOnlyAnnotations,
+    },
+    waitHandler,
+  );
+
+  server.registerTool(
+    "create_session",
+    {
+      title: "Create OpenCode Session",
+      description:
+        "Create an empty root work session in this configured project using OpenCode's default work agent/model. Use when the user requests a new session. Returns session_id; call send_message separately to start work. Non-idempotent: do not retry automatically if creation is uncertain.",
+      inputSchema: createSessionInputSchema,
+      outputSchema: createSessionOutputSchema,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+    },
+    createSessionHandler,
+  );
+
   server.registerTool(
     "list_sessions",
     {
@@ -288,6 +534,41 @@ export function createMcpServer(gateway: SessionGateway): McpServer {
   server.server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const input = request.params.arguments ?? {};
     switch (request.params.name) {
+      case "get_session_runtime_options":
+        return validatedToolCall(
+          runtimeOptionsInput,
+          runtimeOptionsOutput,
+          input,
+          optionsHandler,
+        );
+      case "update_session_runtime":
+        return validatedToolCall(
+          runtimeUpdateInput,
+          runtimeUpdateOutput,
+          input,
+          updateHandler,
+        );
+      case "get_project_activity":
+        return validatedToolCall(
+          activityInput,
+          activityOutput,
+          input,
+          activityHandler,
+        );
+      case "wait_for_project_activity":
+        return validatedToolCall(
+          waitActivityInput,
+          waitActivityOutput,
+          input,
+          waitHandler,
+        );
+      case "create_session":
+        return validatedToolCall(
+          createSessionInputSchema,
+          createSessionOutputSchema,
+          input,
+          createSessionHandler,
+        );
       case "list_sessions":
         return validatedToolCall(
           listSessionsInputSchema,
@@ -386,6 +667,13 @@ function errorResult(
   process.stderr.write(`[mcp] request=${requestId} error=${error.code}\n`);
   return {
     isError: true,
+    _meta: {
+      "opencode-vm/error": {
+        code: error.code,
+        message: error.message,
+        ...(error.correlationId ? { message_id: error.correlationId } : {}),
+      },
+    },
     content: [
       {
         type: "text",

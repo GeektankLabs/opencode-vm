@@ -23,8 +23,14 @@ const key = "sk-test-runtime-key-must-not-leak";
 const token = "test-local-token-must-not-leak";
 const summary = { id: "ses_fixture", title: "Fixture", created: 1, updated: 2, activity: "idle" };
 const pending = { permissions: 0, questions: 0 };
-let submissions = 0;
+const fixtureRuntime = { agent: "build", provider_id: "fixture", model_id: "model", variant: "default" };
+let submissions = 0, creations = 0;
 const gateway = {
+  async getSessionRuntimeOptions() { return { agents: ["build", "plan"], providers: [{ provider_id: "fixture", name: "Fixture" }], models: [{ provider_id: "fixture", model_id: "model", name: "Model", variants: ["default"] }], truncated: false }; },
+  async updateSessionRuntime(sessionId, patch) { return { session_id: sessionId, previous: fixtureRuntime, current: { ...fixtureRuntime, ...patch }, state: "updated" }; },
+  async getProjectActivity() { return { events: [], next_cursor: "fixture-cursor", has_more: false, tracking: { connected: true, partial: false } }; },
+  async waitForProjectActivity() { return { ...await this.getProjectActivity(), timeout: true }; },
+  async createSession(title) { creations++; return { project: { id: "fixture", name: "fixture" }, session_id: summary.id, title: title ?? "MCP Work Session", agent: "build", provider_id: "fixture", model_id: "model", state: "created" }; },
   async listSessions() { return { project: { id: "fixture", name: "fixture" }, sessions: [summary], truncated: false }; },
   async getSessionDetails() { return { ...summary, pending_input: pending }; },
   async getSessionStatus() { return { session_id: summary.id, message_id: "msg_fixture", backend_activity: "idle", state: "completed", pending_input: pending, assistant_message_ids: ["msg_reply"] }; },
@@ -89,7 +95,19 @@ try {
   client = new Client({ name: "ocvm-tunnel-test", version: "1.0.0" });
   await client.connect(new StreamableHTTPClientTransport(new URL(connection.mcp_url)));
   const tools = await client.listTools();
-  assert.equal(tools.tools.length, 5);
+  assert.equal(tools.tools.length, 10);
+  for (const [name, args] of [
+    ["get_session_runtime_options", {}],
+    ["update_session_runtime", { session_id: summary.id, agent: "plan" }],
+    ["get_project_activity", {}],
+    ["wait_for_project_activity", { after_cursor: "fixture-cursor", timeout_ms: 1 }],
+  ]) {
+    const result = await client.callTool({ name, arguments: args });
+    assert.ok(!result.isError, JSON.stringify(result));
+  }
+  const created = await client.callTool({ name: "create_session", arguments: { title: "Tunnel session" } });
+  assert.equal(created.structuredContent?.session_id, summary.id);
+  assert.ok(!created.isError);
   for (const name of ["list_sessions", "get_session", "send_message", "get_session_status", "get_session_history"]) {
     const args = name === "list_sessions" ? {} : { session_id: summary.id };
     if (name === "send_message") args.message = "Fixture request";
@@ -99,10 +117,11 @@ try {
     assert.ok(result.structuredContent);
   }
   assert.equal(submissions, 1);
+  assert.equal(creations, 1);
   const direct = await fetch(`http://127.0.0.1:${port}/healthz`);
   assert.equal(direct.status, 401, "the local endpoint still requires its token");
   assert.ok(!diagnostics.includes(key) && !diagnostics.includes(token), "credentials leaked into tunnel diagnostics");
-  console.log("PASS: tunnel-client v0.0.15 discovers and invokes all five tools through its local tunnel control plane using the generated profile.");
+  console.log("PASS: tunnel-client v0.0.15 discovers and invokes all ten tools through its local tunnel control plane using the generated profile.");
 
   // Optional Linux/systemd check: real checksum installer and managed service,
   // with outbound traffic confined to a disposable local control-plane fixture.

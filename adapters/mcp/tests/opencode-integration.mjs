@@ -36,6 +36,7 @@ let opencode;
 let mcp;
 let provider;
 let mcpClient;
+const heldPrompts = new Map();
 
 try {
   await mkdir(configDirectory, { recursive: true });
@@ -77,7 +78,21 @@ try {
       response.writeHead(404).end();
       return;
     }
-    providerRequests.push(JSON.parse(await readBody(request)));
+    const requestBody = JSON.parse(await readBody(request));
+    providerRequests.push(requestBody);
+    const content = requestBody.messages?.at(-1)?.content;
+    const lastText =
+      typeof content === "string"
+        ? content
+        : Array.isArray(content)
+          ? content
+              .filter((part) => part.type === "text")
+              .map((part) => part.text)
+              .join("")
+          : "";
+    if (lastText === "parallel-A" || lastText === "parallel-B") {
+      await new Promise((resolve) => heldPrompts.set(lastText, resolve));
+    }
     response.writeHead(200, {
       "content-type": "text/event-stream",
       "cache-control": "no-cache",
@@ -129,6 +144,16 @@ try {
             "test-model": {
               name: "Test model",
               tool_call: true,
+              reasoning: true,
+              variants: { medium: {}, high: {} },
+              modalities: { input: ["text"], output: ["text"] },
+              limit: { context: 32_000, output: 4_096 },
+            },
+            "other-model": {
+              name: "Other test model",
+              tool_call: true,
+              reasoning: true,
+              variants: { medium: {}, high: {} },
               modalities: { input: ["text"], output: ["text"] },
               limit: { context: 32_000, output: 4_096 },
             },
@@ -174,14 +199,6 @@ try {
   process.stderr.write(
     `[integration] OpenCode project id=${currentProject.data?.id ?? "missing"} worktree=${currentProject.data?.worktree ?? "missing"}\n`,
   );
-  const created = await backend.session.create({
-    title: "MCP integration session",
-    agent: "build",
-    model: { providerID: "integration", id: "test-model" },
-  });
-  assert.ok(created.data?.id);
-  const sessionId = created.data.id;
-
   await writeFile(credentialFile, token, { mode: 0o600 });
   await writeFile(
     runtimeFile,
@@ -202,6 +219,52 @@ try {
 
   ({ child: mcp } = await startAdapter(runtimeFile, readyFile));
   mcpClient = await connectMcp(mcpPort, token);
+  const beforeCreation = structured(
+    await mcpClient.callTool({ name: "list_sessions", arguments: {} }),
+  );
+  assert.equal(beforeCreation.sessions.length, 0);
+  const creationReply = await mcpClient.callTool({
+    name: "create_session",
+    arguments: { title: "MCP integration session" },
+  });
+  if (creationReply.isError) {
+    console.error(
+      "[integration] enabled models",
+      (
+        await backend.v2.model.list({ location: { directory: project } })
+      ).data?.data
+        ?.filter((model) => model.providerID === "integration")
+        .map(({ id, enabled }) => ({ id, enabled })),
+    );
+    const observed = await backend.v2.session.list({ directory: project });
+    console.error(
+      "[integration] creation metadata",
+      observed.data?.data?.map(({ id, agent, model, location, parentID }) => ({
+        id,
+        agent,
+        model,
+        location,
+        parentID,
+      })),
+    );
+  }
+  const created = structured(creationReply);
+  const sessionId = created.session_id;
+  assert.ok(sessionId);
+  assert.equal(created.agent, "build");
+  assert.equal(created.provider_id, "integration");
+  assert.equal(created.model_id, "test-model");
+  const empty = structured(
+    await mcpClient.callTool({
+      name: "get_session_history",
+      arguments: { session_id: sessionId },
+    }),
+  );
+  assert.equal(empty.messages.length, 0);
+  assert.equal(providerRequests.length, 0, "creation started a model turn");
+  const backendCreated = await backend.v2.session.get({ sessionID: sessionId });
+  assert.equal(backendCreated.data?.data?.location.directory, project);
+  assert.equal(backendCreated.data?.data?.parentID, undefined);
   const listed = structured(
     await mcpClient.callTool({
       name: "list_sessions",
@@ -216,6 +279,68 @@ try {
     }),
   );
   assert.equal(details.id, sessionId);
+
+  const options = structured(
+    await mcpClient.callTool({
+      name: "get_session_runtime_options",
+      arguments: { session_id: sessionId },
+    }),
+  );
+  assert.ok(
+    options.agents.includes("plan") && options.agents.includes("build"),
+  );
+  assert.ok(
+    options.models.some(
+      (model) =>
+        model.provider_id === "integration" &&
+        model.model_id === "other-model" &&
+        model.variants.includes("high"),
+    ),
+  );
+  for (const agent of ["plan", "build"]) {
+    const update = structured(
+      await mcpClient.callTool({
+        name: "update_session_runtime",
+        arguments: { session_id: sessionId, agent },
+      }),
+    );
+    assert.equal(update.current.agent, agent);
+    assert.equal(
+      structured(
+        await mcpClient.callTool({
+          name: "get_session",
+          arguments: { session_id: sessionId },
+        }),
+      ).agent,
+      agent,
+    );
+  }
+  const update = structured(
+    await mcpClient.callTool({
+      name: "update_session_runtime",
+      arguments: {
+        session_id: sessionId,
+        model_id: "other-model",
+        variant: "high",
+      },
+    }),
+  );
+  assert.equal(update.current.model_id, "other-model");
+  assert.equal(update.current.variant, "high");
+  const invalid = await mcpClient.callTool({
+    name: "update_session_runtime",
+    arguments: { session_id: sessionId, model_id: "missing-model" },
+  });
+  assert.equal(invalid.isError, true);
+  assert.equal(invalid._meta["opencode-vm/error"].code, "INVALID_MODEL");
+  assert.equal(
+    providerRequests.length,
+    0,
+    "runtime changes started model work",
+  );
+  const activityStart = structured(
+    await mcpClient.callTool({ name: "get_project_activity", arguments: {} }),
+  ).next_cursor;
 
   const receipt = structured(
     await mcpClient.callTool({
@@ -245,6 +370,31 @@ try {
     await delay(250);
   }
   assert.equal(finalStatus?.state, "completed");
+  let activity;
+  for (let attempt = 0; attempt < 80; attempt++) {
+    activity = structured(
+      await mcpClient.callTool({
+        name: "get_project_activity",
+        arguments: {
+          after_cursor: activityStart,
+          event_types: ["message.completed"],
+        },
+      }),
+    );
+    if (
+      activity.events.some((event) => event.message_id === receipt.message_id)
+    )
+      break;
+    await delay(100);
+  }
+  assert.ok(
+    activity.events.some(
+      (event) =>
+        event.message_id === receipt.message_id &&
+        event.session_id === sessionId,
+    ),
+    JSON.stringify(activity),
+  );
   const history = structured(
     await mcpClient.callTool({
       name: "get_session_history",
@@ -314,12 +464,98 @@ try {
   );
   assert.ok(providerRequests.length > 0);
 
+  const secondSession = structured(
+    await mcpClient.callTool({
+      name: "create_session",
+      arguments: { title: "Parallel B" },
+    }),
+  ).session_id;
+  const parallelCursor = structured(
+    await mcpClient.callTool({ name: "get_project_activity", arguments: {} }),
+  ).next_cursor;
+  const [parallelA, parallelB] = await Promise.all([
+    mcpClient.callTool({
+      name: "send_message",
+      arguments: { session_id: sessionId, message: "parallel-A" },
+    }),
+    mcpClient.callTool({
+      name: "send_message",
+      arguments: { session_id: secondSession, message: "parallel-B" },
+    }),
+  ]).then((results) => results.map(structured));
+  for (let i = 0; i < 100 && heldPrompts.size < 2; i++) await delay(100);
+  assert.equal(
+    heldPrompts.size,
+    2,
+    "both independent sessions must start work",
+  );
+  const busyUpdate = await mcpClient.callTool({
+    name: "update_session_runtime",
+    arguments: { session_id: sessionId, agent: "plan" },
+  });
+  assert.equal(busyUpdate._meta["opencode-vm/error"].code, "SESSION_BUSY");
+  heldPrompts.get("parallel-A")();
+  let firstCompletion;
+  for (let i = 0; i < 100; i++) {
+    firstCompletion = structured(
+      await mcpClient.callTool({
+        name: "get_project_activity",
+        arguments: {
+          after_cursor: parallelCursor,
+          event_types: ["message.completed"],
+        },
+      }),
+    );
+    if (firstCompletion.events.length) break;
+    await delay(100);
+  }
+  assert.deepEqual(
+    firstCompletion.events.map((event) => event.message_id),
+    [parallelA.message_id],
+  );
+  const wait = mcpClient.callTool({
+    name: "wait_for_project_activity",
+    arguments: {
+      after_cursor: firstCompletion.next_cursor,
+      event_types: ["message.completed"],
+      timeout_ms: 15000,
+    },
+  });
+  heldPrompts.get("parallel-B")();
+  const secondCompletion = structured(await wait);
+  assert.equal(secondCompletion.timeout, false);
+  assert.deepEqual(
+    secondCompletion.events.map((event) => event.message_id),
+    [parallelB.message_id],
+  );
+  const runtimeEvents = structured(
+    await mcpClient.callTool({
+      name: "get_project_activity",
+      arguments: { event_types: ["session.runtime_changed"] },
+    }),
+  );
+  assert.ok(runtimeEvents.events.length >= 3);
+
   await mcpClient.close();
   mcpClient = undefined;
   await stopChild(mcp);
   mcp = undefined;
   ({ child: mcp } = await startAdapter(runtimeFile, readyFile));
   mcpClient = await connectMcp(mcpPort, token);
+  const persisted = structured(
+    await mcpClient.callTool({
+      name: "get_project_activity",
+      arguments: {
+        after_cursor: parallelCursor,
+        event_types: ["message.completed"],
+      },
+    }),
+  );
+  assert.deepEqual(
+    persisted.events.map((event) => event.message_id),
+    [parallelA.message_id, parallelB.message_id],
+  );
+  assert.ok(persisted.next_cursor >= secondCompletion.next_cursor);
   const recovered = structured(
     await mcpClient.callTool({
       name: "get_session_status",
@@ -335,6 +571,7 @@ try {
   );
   process.stdout.write("MCP real OpenCode integration passed.\n");
 } finally {
+  for (const release of heldPrompts.values()) release();
   await mcpClient?.close().catch(() => undefined);
   await stopChild(mcp);
   await stopChild(opencode);

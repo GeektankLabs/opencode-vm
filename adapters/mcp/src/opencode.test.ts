@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -60,10 +60,44 @@ type FakeState = {
   questions: Array<Record<string, unknown>>;
   promptCalls: Array<Record<string, unknown>>;
   promptAsync?: (parameters: Record<string, unknown>) => Promise<unknown>;
+  config: { default_agent?: string; model?: string };
+  agents: Array<{
+    name: string;
+    mode: string;
+    hidden?: boolean;
+    model?: { providerID: string; modelID: string };
+    variant?: string;
+  }>;
+  providers: {
+    all: Array<{ id: string; models: Record<string, object> }>;
+    connected: string[];
+    default: Record<string, string>;
+  };
+  createCalls: Array<Record<string, unknown>>;
+  runtimeCalls: Array<Record<string, unknown>>;
+  create?: (
+    parameters: Record<string, unknown>,
+    options: { signal: AbortSignal },
+  ) => Promise<unknown>;
 };
 
 function fakeClient(state: FakeState) {
   return {
+    config: {
+      async get() {
+        return { data: state.config };
+      },
+    },
+    app: {
+      async agents() {
+        return { data: state.agents };
+      },
+    },
+    provider: {
+      async list() {
+        return { data: state.providers };
+      },
+    },
     global: {
       async health() {
         return { data: { healthy: true } };
@@ -75,7 +109,43 @@ function fakeClient(state: FakeState) {
       },
     },
     v2: {
+      model: {
+        async list() {
+          return {
+            data: {
+              data: state.providers.all.flatMap((provider) =>
+                Object.entries(provider.models).map(([id, value]) => ({
+                  id,
+                  providerID: provider.id,
+                  name: id,
+                  enabled: true,
+                  variants: Object.keys(
+                    (value as { variants?: object }).variants ?? {},
+                  ).map((id) => ({ id })),
+                })),
+              ),
+            },
+          };
+        },
+      },
       session: {
+        async switchAgent(parameters: { sessionID: string; agent: string }) {
+          state.runtimeCalls.push(parameters);
+          state.sessions.find(
+            (item) => item.id === parameters.sessionID,
+          )!.agent = parameters.agent;
+          return { data: {} };
+        },
+        async switchModel(parameters: {
+          sessionID: string;
+          model: NonNullable<SessionV2Info["model"]>;
+        }) {
+          state.runtimeCalls.push(parameters);
+          state.sessions.find(
+            (item) => item.id === parameters.sessionID,
+          )!.model = parameters.model;
+          return { data: {} };
+        },
         async list(parameters: { cursor?: string; limit?: number }) {
           const start = parameters.cursor ? Number(parameters.cursor) : 0;
           const limit = parameters.limit ?? 20;
@@ -95,23 +165,61 @@ function fakeClient(state: FakeState) {
           return { data: { data: found } };
         },
         permission: {
-          async list() {
-            return { data: { data: state.permissions } };
+          async list(parameters: { sessionID: string }) {
+            return {
+              data: {
+                data: state.permissions.filter(
+                  (item) =>
+                    !item.sessionID || item.sessionID === parameters.sessionID,
+                ),
+              },
+            };
           },
         },
         question: {
-          async list() {
-            return { data: { data: state.questions } };
+          async list(parameters: { sessionID: string }) {
+            return {
+              data: {
+                data: state.questions.filter(
+                  (item) =>
+                    !item.sessionID || item.sessionID === parameters.sessionID,
+                ),
+              },
+            };
           },
         },
       },
     },
     session: {
+      async create(
+        parameters: Record<string, unknown>,
+        options: { signal: AbortSignal },
+      ) {
+        state.createCalls.push(parameters);
+        if (state.create) return state.create(parameters, options);
+        const model = parameters.model as NonNullable<SessionV2Info["model"]>;
+        const created = session("ses_created", {
+          title: parameters.title as string,
+          agent: parameters.agent as string,
+          model: { ...model, variant: model.variant ?? "default" },
+        });
+        state.sessions.push(created);
+        return { data: { id: created.id } };
+      },
       async status() {
         return { data: state.statuses };
       },
-      async messages(parameters: { limit: number; before?: string }) {
-        let end = state.messages.length;
+      async messages(parameters: {
+        sessionID: string;
+        limit: number;
+        before?: string;
+      }) {
+        const messages = state.messages.filter(
+          (item) =>
+            !item.info.sessionID ||
+            item.info.sessionID === parameters.sessionID,
+        );
+        let end = messages.length;
         if (parameters.before) {
           const match = /^opaque\.(\d+)$/u.exec(parameters.before);
           if (!match)
@@ -121,7 +229,7 @@ function fakeClient(state: FakeState) {
         const start = Math.max(0, end - parameters.limit);
         const next = start > 0 ? `opaque.${start}` : undefined;
         return {
-          data: state.messages.slice(start, end),
+          data: messages.slice(start, end),
           response: {
             headers: new Headers(next ? { "x-next-cursor": next } : {}),
           },
@@ -143,8 +251,477 @@ function baseState(sessions = [session("ses_work")]): FakeState {
     permissions: [],
     questions: [],
     promptCalls: [],
+    config: { default_agent: "plan", model: "provider/model" },
+    agents: [
+      { name: "build", mode: "primary" },
+      { name: "plan", mode: "primary" },
+    ],
+    providers: {
+      all: [
+        {
+          id: "provider",
+          models: { model: { variants: { high: {}, medium: {} } } },
+        },
+      ],
+      connected: ["provider"],
+      default: { provider: "model" },
+    },
+    createCalls: [],
+    runtimeCalls: [],
   };
 }
+
+test("creation binds runtime defaults and a root project session without sending a prompt", async () => {
+  const state = baseState([]);
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  const created = await gateway.createSession("  New task  ");
+  assert.deepEqual(state.createCalls, [
+    {
+      directory: project,
+      title: "New task",
+      agent: "plan",
+      model: { providerID: "provider", id: "model" },
+    },
+  ]);
+  assert.deepEqual(created, {
+    project: { id: "project-hash", name: "project-name" },
+    session_id: "ses_created",
+    title: "New task",
+    agent: "plan",
+    provider_id: "provider",
+    model_id: "model",
+    variant: "default",
+    state: "created",
+  });
+  assert.equal(state.promptCalls.length, 0);
+  assert.equal(
+    (await gateway.listSessions()).sessions[0]?.id,
+    created.session_id,
+  );
+  await gateway.sendMessage(created.session_id, "Start work");
+  assert.equal(state.promptCalls[0]?.agent, "plan");
+  assert.deepEqual(state.promptCalls[0]?.model, {
+    providerID: "provider",
+    modelID: "model",
+  });
+});
+
+test("creation resolves agent model/variant, nested model IDs, and provider defaults", async () => {
+  for (const mode of ["agent", "configured", "fallback"] as const) {
+    const state = baseState([]);
+    state.providers.all[0]!.models["family/model"] = { variants: { high: {} } };
+    if (mode === "agent") {
+      state.agents[1]!.model = {
+        providerID: "provider",
+        modelID: "family/model",
+      };
+      state.agents[1]!.variant = "high";
+    } else if (mode === "configured") {
+      state.config.model = "provider/family/model";
+    } else {
+      state.config = {};
+    }
+    const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+    const created = await gateway.createSession();
+    assert.equal(created.title, "MCP Work Session");
+    assert.equal(created.agent, mode === "fallback" ? "build" : "plan");
+    assert.equal(
+      created.model_id,
+      mode === "fallback" ? "model" : "family/model",
+    );
+    assert.equal(created.variant, mode === "agent" ? "high" : "default");
+  }
+});
+
+test("invalid creation defaults and titles fail before any write", async () => {
+  for (const mode of [
+    "manager",
+    "hidden",
+    "subagent",
+    "disconnected",
+    "missing-model",
+    "invalid-title",
+    "invalid-variant",
+  ]) {
+    const state = baseState([]);
+    if (mode === "manager") {
+      state.config.default_agent = "openlive-manager";
+      state.agents.push({ name: "openlive-manager", mode: "primary" });
+    }
+    if (mode === "hidden") state.agents[1]!.hidden = true;
+    if (mode === "subagent") state.agents[1]!.mode = "subagent";
+    if (mode === "disconnected") state.providers.connected = [];
+    if (mode === "missing-model") state.config.model = "provider/absent";
+    if (mode === "invalid-variant") state.agents[1]!.variant = "not-available";
+    const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+    await assert.rejects(
+      gateway.createSession(mode === "invalid-title" ? "  " : "new"),
+      (error) =>
+        error instanceof AdapterError &&
+        error.code ===
+          (mode === "invalid-title"
+            ? "INVALID_ARGUMENT"
+            : "BACKEND_INCOMPATIBLE"),
+    );
+    assert.equal(state.createCalls.length, 0, mode);
+    assert.equal(state.promptCalls.length, 0, mode);
+  }
+});
+
+test("uncertain creation is never retried and does not expose unverified IDs", async () => {
+  for (const mode of [
+    "timeout",
+    "missing",
+    "foreign",
+    "child",
+    "archived",
+    "manager",
+  ] as const) {
+    const state = baseState([]);
+    let aborted = false;
+    state.create = async (_parameters, options) => {
+      if (mode === "timeout") {
+        state.sessions.push(
+          session("ses_accepted_before_timeout", { agent: "plan" }),
+        );
+        return new Promise((_resolve, reject) => {
+          const timer = setTimeout(
+            () => reject(new Error("deadline was not applied")),
+            100,
+          );
+          options.signal.addEventListener(
+            "abort",
+            () => {
+              aborted = true;
+              clearTimeout(timer);
+              reject(new Error("backend-secret"));
+            },
+            { once: true },
+          );
+        });
+      }
+      if (mode === "missing") return { data: {} };
+      const created = session("ses_private_id", {
+        ...(mode === "foreign" ? { location: { directory: "/other" } } : {}),
+        ...(mode === "child" ? { parentID: "ses_other" } : {}),
+        ...(mode === "archived"
+          ? { time: { created: 1, updated: 2, archived: 3 } }
+          : {}),
+        ...(mode === "manager" ? { agent: "openlive-manager" } : {}),
+      });
+      state.sessions.push(created);
+      return { data: { id: created.id } };
+    };
+    const gateway = new OpenCodeGateway(
+      runtime(),
+      fakeClient(state) as never,
+      10,
+    );
+    await assert.rejects(gateway.createSession(), (error) => {
+      assert.ok(error instanceof AdapterError);
+      assert.equal(error.code, "CREATION_UNCERTAIN");
+      assert.match(error.message, /do not retry automatically/u);
+      assert.doesNotMatch(
+        error.message,
+        /ses_private_id|backend-secret|\/other/u,
+      );
+      return true;
+    });
+    assert.equal(state.createCalls.length, 1, mode);
+    assert.equal(state.promptCalls.length, 0, mode);
+    if (mode === "timeout") {
+      assert.equal(aborted, true, "creation deadline was not applied");
+      assert.equal(
+        (await gateway.listSessions()).sessions[0]?.id,
+        "ses_accepted_before_timeout",
+      );
+    }
+  }
+});
+
+test("creation verifies the exact read-back identity and requested settings", async () => {
+  for (const mode of ["id", "agent", "model", "variant"] as const) {
+    const state = baseState([]);
+    state.agents[1]!.variant = "high";
+    const client = fakeClient(state);
+    const get = client.v2.session.get;
+    client.v2.session.get = async (parameters) => {
+      const response = await get(parameters);
+      const actual = response.data.data;
+      return {
+        data: {
+          data: {
+            ...actual,
+            ...(mode === "id" ? { id: "ses_unverified_other" } : {}),
+            ...(mode === "agent" ? { agent: "build" } : {}),
+            ...(mode === "model" ? { model: undefined } : {}),
+            ...(mode === "variant"
+              ? { model: { ...actual.model!, variant: "default" } }
+              : {}),
+          },
+        },
+      };
+    };
+    const gateway = new OpenCodeGateway(runtime(), client as never);
+    await assert.rejects(
+      gateway.createSession(),
+      (error) =>
+        error instanceof AdapterError &&
+        error.code === "CREATION_UNCERTAIN" &&
+        !error.message.includes("ses_unverified_other"),
+    );
+    assert.equal(state.createCalls.length, 1);
+    assert.equal(state.sessions.length, 1, "unverified creation was removed");
+  }
+});
+
+test("A-D: runtime options and partial updates preserve settings and refuse busy/invalid writes", async () => {
+  const state = baseState([session("ses_work", { agent: "plan" })]);
+  state.providers.all[0]!.models.other = { variants: { high: {}, medium: {} } };
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  const options = await gateway.getSessionRuntimeOptions("ses_work");
+  assert.deepEqual(options.agents, ["build", "plan"]);
+  assert.deepEqual(options.models[0]?.variants, ["default", "high", "medium"]);
+  const changed = await gateway.updateSessionRuntime("ses_work", {
+    agent: "build",
+  });
+  assert.equal(changed.previous.agent, "plan");
+  assert.equal(changed.current.agent, "build");
+  assert.equal(changed.current.variant, "high");
+  assert.equal((await gateway.getSessionDetails("ses_work")).agent, "build");
+  await gateway.updateSessionRuntime("ses_work", {
+    model_id: "other",
+    variant: "medium",
+  });
+  const actual = await gateway.getSessionDetails("ses_work");
+  assert.equal(actual.model_id, "other");
+  assert.equal(actual.variant, "medium");
+  state.providers.all.push({
+    id: "second-provider",
+    models: { other: { variants: { medium: {} } } },
+  });
+  state.providers.connected.push("second-provider");
+  state.providers.default["second-provider"] = "other";
+  const switchedProvider = await gateway.updateSessionRuntime("ses_work", {
+    provider_id: "second-provider",
+  });
+  assert.deepEqual(switchedProvider.current, {
+    agent: "build",
+    provider_id: "second-provider",
+    model_id: "other",
+    variant: "medium",
+  });
+  assert.equal(
+    (await gateway.getSessionDetails("ses_work")).provider_id,
+    "second-provider",
+  );
+  const count = state.runtimeCalls.length;
+  for (const [patch, code] of [
+    [{ agent: "openlive-manager" }, "INVALID_AGENT"],
+    [{ provider_id: "absent" }, "INVALID_PROVIDER"],
+    [{ model_id: "absent" }, "INVALID_MODEL"],
+    [{ variant: "absent" }, "INVALID_VARIANT"],
+  ] as const) {
+    await assert.rejects(
+      gateway.updateSessionRuntime("ses_work", patch),
+      (error) => error instanceof AdapterError && error.code === code,
+    );
+  }
+  state.statuses.ses_work = { type: "busy" };
+  await assert.rejects(
+    gateway.updateSessionRuntime("ses_work", { agent: "plan" }),
+    (error) => error instanceof AdapterError && error.code === "SESSION_BUSY",
+  );
+  assert.equal(state.runtimeCalls.length, count);
+});
+
+test("runtime catalog supports lazy custom-provider bridging and honors native disabling", async () => {
+  const state = baseState([]);
+  state.agents[1]!.variant = "high";
+  const client = fakeClient(state);
+  const nativeList = client.v2.model.list;
+  client.v2.model.list = async () => ({ data: { data: [] } });
+  const gateway = new OpenCodeGateway(runtime(), client as never);
+  assert.equal(
+    (await gateway.getSessionRuntimeOptions()).models[0]?.model_id,
+    "model",
+  );
+  assert.equal((await gateway.createSession()).variant, "high");
+  client.v2.model.list = async () => {
+    const result = await nativeList();
+    return {
+      data: {
+        data: result.data.data.map((model) => ({ ...model, enabled: false })),
+      },
+    };
+  };
+  assert.equal((await gateway.getSessionRuntimeOptions()).models.length, 0);
+  await assert.rejects(
+    gateway.updateSessionRuntime("ses_created", { agent: "build" }),
+    (error) => error instanceof AdapterError && error.code === "INVALID_MODEL",
+  );
+  await assert.rejects(
+    gateway.createSession(),
+    (error) =>
+      error instanceof AdapterError && error.code === "BACKEND_INCOMPATIBLE",
+  );
+  assert.equal(state.createCalls.length, 1);
+});
+
+test("runtime update serializes with send_message and reports partial failures without retry", async () => {
+  const state = baseState();
+  const client = fakeClient(state);
+  const gateway = new OpenCodeGateway(runtime(), client as never);
+  client.v2.session.switchAgent = async (parameters) => {
+    state.runtimeCalls.push(parameters);
+    state.sessions[0]!.agent = parameters.agent;
+    await assert.rejects(
+      gateway.sendMessage("ses_work", "racing prompt"),
+      (error) => error instanceof AdapterError && error.code === "SESSION_BUSY",
+    );
+    return { data: {} };
+  };
+  client.v2.session.switchModel = async (parameters) => {
+    state.runtimeCalls.push(parameters);
+    throw new Error("backend-secret");
+  };
+  await assert.rejects(
+    gateway.updateSessionRuntime("ses_work", { agent: "plan" }),
+    (error) =>
+      error instanceof AdapterError &&
+      error.code === "RUNTIME_UPDATE_FAILED" &&
+      !error.message.includes("backend-secret"),
+  );
+  assert.equal(state.runtimeCalls.length, 2);
+  assert.equal(state.promptCalls.length, 0);
+  assert.equal((await gateway.getSessionDetails("ses_work")).agent, "plan");
+});
+
+test("E-I: activity correlates parallel receipts, pending input and restart without storing history", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "ocvm-activity-test-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "activity.json");
+  const state = baseState([
+    session("ses_a"),
+    session("ses_b"),
+    session("ses_c"),
+  ]);
+  const client = fakeClient(state);
+  let gateway = new OpenCodeGateway(runtime(), client as never);
+  await gateway.enableActivity(path);
+  state.promptAsync = async (parameters) => {
+    const id = parameters.sessionID as string;
+    state.statuses[id] = { type: "busy" };
+    state.messages.push({
+      info: {
+        id: parameters.messageID,
+        sessionID: id,
+        role: "user",
+        time: { created: Date.now() },
+      },
+      parts: [{ type: "text", text: "SECRET_PROMPT" }],
+    });
+  };
+  const anchor = (await gateway.getProjectActivity()).next_cursor;
+  const [a, b] = await Promise.all([
+    gateway.sendMessage("ses_a", "a"),
+    gateway.sendMessage("ses_b", "b"),
+  ]);
+  assert.ok(a.activity_cursor && a.submitted_at);
+  const finish = async (id: string, messageId: string, suffix: string) => {
+    state.messages.push({
+      info: {
+        id: `msg_${suffix}`,
+        sessionID: id,
+        parentID: messageId,
+        role: "assistant",
+        time: { created: 2, completed: 3 },
+        finish: "stop",
+      },
+      parts: [{ type: "text", text: "SECRET_RESPONSE" }],
+    });
+    state.statuses[id] = { type: "idle" };
+    await gateway.captureActivity(id);
+  };
+  await gateway.captureActivity("ses_a");
+  await gateway.captureActivity("ses_b");
+  await finish("ses_a", a.message_id, "reply_a");
+  const first = await gateway.getProjectActivity({
+    after_cursor: anchor,
+    event_types: ["message.completed"],
+  });
+  assert.equal(first.events.length, 1);
+  assert.equal(first.events[0]?.session_id, "ses_a");
+  assert.equal(first.events[0]?.message_id, a.message_id);
+  assert.deepEqual(first.events[0]?.assistant_message_ids, ["msg_reply_a"]);
+  await finish("ses_b", b.message_id, "reply_b");
+  const second = await gateway.getProjectActivity({
+    after_cursor: first.next_cursor,
+    event_types: ["message.completed"],
+  });
+  assert.equal(second.events.length, 1);
+  assert.equal(second.events[0]?.message_id, b.message_id);
+  const c = await gateway.sendMessage("ses_c", "c");
+  state.permissions = [
+    { id: "p", sessionID: "ses_c", metadata: { secret: "SECRET_PERMISSION" } },
+  ];
+  await gateway.captureActivity("ses_c");
+  const blocked = await gateway.getProjectActivity({
+    after_cursor: second.next_cursor,
+    event_types: ["session.input_required", "session.permission_required"],
+  });
+  assert.equal(blocked.events.length, 2);
+  assert.equal(blocked.events[0]?.message_id, c.message_id);
+  assert.deepEqual(blocked.events[0]?.pending_input, {
+    permissions: 1,
+    questions: 0,
+  });
+  state.permissions = [];
+  state.questions = [
+    {
+      id: "q",
+      sessionID: "ses_c",
+      questions: [{ question: "SECRET_QUESTION" }],
+    },
+  ];
+  await gateway.captureActivity("ses_c");
+  const question = await gateway.getProjectActivity({
+    after_cursor: blocked.next_cursor,
+    event_types: ["session.input_required", "session.permission_required"],
+  });
+  assert.equal(question.events.length, 1);
+  assert.deepEqual(question.events[0]?.pending_input, {
+    permissions: 0,
+    questions: 1,
+  });
+  await gateway.close();
+  gateway = new OpenCodeGateway(runtime(), client as never);
+  await gateway.enableActivity(path);
+  const restored = await gateway.getProjectActivity({
+    after_cursor: first.next_cursor,
+    event_types: ["message.completed"],
+  });
+  assert.deepEqual(restored.events, second.events);
+  assert.doesNotMatch(await readFile(path, "utf8"), /SECRET_/u);
+  const waiting = gateway.waitForProjectActivity({
+    after_cursor: (await gateway.getProjectActivity()).next_cursor,
+    timeout_ms: 10,
+  });
+  assert.equal((await waiting).timeout, true);
+  // Existing I semantics: a transport failure is a single admission attempt.
+  state.statuses.ses_a = { type: "idle" };
+  state.promptAsync = async () => {
+    throw new Error("uncertain transport");
+  };
+  const calls = state.promptCalls.length;
+  await assert.rejects(
+    gateway.sendMessage("ses_a", "uncertain"),
+    (error) =>
+      error instanceof AdapterError && error.code === "SUBMISSION_UNCERTAIN",
+  );
+  assert.equal(state.promptCalls.length, calls + 1);
+  await gateway.close();
+});
 
 test("session listing and direct lookup enforce all exposure rules", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ocvm-mcp-manager-"));

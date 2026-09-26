@@ -14,6 +14,20 @@ The VM needs outbound HTTPS to `api.openai.com:443` and access to the pinned Git
 
 ## 2. Configure from each project directory
 
+Since 0.5.63, entering the command tree without an action opens a terminal menu:
+
+```bash
+opencode-vm provider mcp          # choose list, add/new, status, or rm
+opencode-vm provider mcp add      # start project setup directly (alias: new)
+opencode-vm provider mcp rm       # choose what to remove, then the exact entry
+```
+
+OpenAI is the default provider. The guided `status` action offers project selection; the guided `rm` action offers project connections, tunnel API keys, or tunnel IDs, followed by a numbered entry list. Key values remain hidden; creation origins and current references are displayed. Invalid selections in the action/status/removal menus are requested again, `q` cancels, and an empty list is reported without changing anything. A chosen removal uses the same project lifecycle and reference checks as an explicit command; selecting an in-use key/tunnel never cascades into project deletions.
+
+Each invocation performs one selected action and exits. Explicit selectors bypass menus. Without a terminal, bare `provider mcp` and `provider mcp rm` require arguments and fail without changing state. For compatibility, the previously supported noninteractive `provider mcp rm openai` still removes the current project's assignment. In a terminal, `rm` without a selector opens the selection menus, including when `openai` is supplied.
+
+The fully specified setup form also remains available:
+
 ```bash
 opencode-vm provider mcp new openai
 ```
@@ -32,7 +46,7 @@ Setup explicitly warns:
 
 There is **no tunnel occupancy manager**, cross-project start blocking, scheduling or automatic takeover. The operator manages simultaneous use. Reusing one key with different tunnel IDs is supported, as is registering one tunnel for projects operated sequentially.
 
-`opencode-vm provider new` also offers **MCP connection (OpenAI MCP)**.
+`opencode-vm provider new` also offers **MCP connection (OpenAI MCP)**. Both `add` and `new` accept the same setup parameters, with optional `openai`.
 
 ### Noninteractive setup
 
@@ -85,6 +99,22 @@ opencode-vm web --reconnect --no-mcp
 
 The next normal start/reconnect enables the configured connection again. Suppression does not erase project assignments or reusable entries.
 
+### Recovery from a pre-0.5.64 port-lock timeout
+
+Versions 0.5.61–0.5.63 can leave the short MCP port-allocation lock behind under macOS Bash 3.2. The shell discards the helper's local variables before its EXIT trap runs. Subsequent starts can time out at `mcp-connector/ports/.locks/5bdb347e8420bfe74dc815a17bfca37d.lock`, even while the original controller is still alive. Version 0.5.64 keeps cleanup state at subshell scope and fixes the leak.
+
+If this lock is already stranded, first ensure no other project start or reconnect is currently in progress. Existing idle/running sessions can remain running. Remove only this allocation-lock symlink once on the Mac, then retry using 0.5.64 or the corrected source checkout:
+
+```bash
+lock="$HOME/.opencode-vm/mcp-connector/ports/.locks/5bdb347e8420bfe74dc815a17bfca37d.lock"
+if [ -L "$lock" ]; then unlink "$lock"; fi
+opencode-vm web --port 5555
+```
+
+The lock is not a tunnel assignment or API credential. A Lima `use of closed network connection` message during a successfully completed VM shutdown is separate from this lock timeout.
+
+### Service lifecycle
+
 After authenticated MCP readiness, the host resolves this project's pair, verifies the current runtime generation, and installs **tunnel-client v0.0.15** on demand in the session VM using pinned Linux ARM64/AMD64 release checksums. It starts the transient `ocvm-mcp-tunnel.service` as the guest user under the sandbox profile. Different project VMs start independently, including when the operator has deliberately assigned the same tunnel ID.
 
 The generated `<session-share>/mcp/tunnel.yaml` is JSON-compatible YAML. It references the private `tunnel-key` file and injects `X-OCVM-MCP-Token` through both `mcp.extra_headers` and `mcp.discovery_extra_headers`, using `file:` references. The upstream is the actual guest MCP loopback port. Health uses a guest Unix socket; the optional Cloudflare companion is not used.
@@ -105,7 +135,8 @@ opencode-vm doctor
 `list` is a stored-configuration overview, not a claim that every connection is live. `status` queries only the selected project's tracked VM and shows process state, startup readiness, polling connectivity, and HTTP failures where available. The configured and runtime tunnel IDs are displayed separately. Keys are never printed. Logs are at `<session-share>/mcp/tunnel.log` (`0600`); the server-backed terminal backend also logs to `mcp/backend.log`.
 
 ```bash
-opencode-vm provider mcp rm openai                         # current project assignment
+opencode-vm provider mcp rm                                # interactive type + entry selection
+opencode-vm provider mcp rm openai --project "$PWD"         # current project assignment, directly
 opencode-vm provider mcp rm openai --project <project-id>   # another recorded project
 opencode-vm provider mcp rm openai --key-id <key-id>         # unused registered key
 opencode-vm provider mcp rm openai --tunnel-id <tunnel-id>   # unused registered tunnel
@@ -117,9 +148,15 @@ Project removal stops only that project's managed tunnel, removes its staged key
 
 In [ChatGPT connector settings](https://chatgpt.com/#settings/Connectors), create a custom app, name it for the project, select **Tunnel**, and choose that project's tunnel ID. For sequential projects sharing one tunnel, a shared app can be used; the app name does not control routing. Keep the selected project running during discovery and calls.
 
-Verify all five tools, inspect the expected project/session IDs, submit one harmless unique prompt, and poll its receipt until terminal. Compare the result with the same session in TUI/Web UI. Resolve `input_required` in the first-party UI and never automatically replay `SUBMISSION_UNCERTAIN`. Repeat after reconnect and suppression/removal. Test Voice independently, including any on-screen approvals; text success does not prove Voice support.
+Verify all ten tools, inspect the expected project/session IDs, and call `create_session` with an optional title to create an empty work session. Query `get_session_runtime_options` and test an idle `update_session_runtime`. Submit harmless unique prompts to two sessions with `send_message`, then use one `get_project_activity` cursor to collect their completion events (or `wait_for_project_activity` for a short active wait). Compare correlated status/history with the same sessions in TUI/Web UI. Resolve input requirements in the first-party UI and never automatically replay uncertain submissions, creations or runtime changes. Repeat after adapter restart and verify the saved activity cursor still reads unconsumed events. Test Voice independently, including any on-screen approvals; text success does not prove Voice support.
 
-Local coverage includes registry concurrency and migration, hidden-input/reuse/cancellation dialogs, same-tunnel parallel startup without occupancy blocking, per-project removal, port reservations, and fresh/reconnected server-backed TUI lifecycle with final auth capture. Real v0.0.15 local-control-plane tests exercise all five tools and Linux/systemd installation, readiness, failure diagnostics, logs and cleanup.
+`create_session` is available from adapter 0.1.1 / opencode-vm 0.5.65. Reconnect after updating and refresh the ChatGPT app's tool catalog (or republish/recreate the app where required) so its saved tool list includes the new write-capable action.
+
+Local coverage includes registry concurrency and migration, hidden-input/reuse/cancellation dialogs, same-tunnel parallel startup without occupancy blocking, per-project removal, port reservations, and fresh/reconnected server-backed TUI lifecycle with final auth capture. Real v0.0.15 local-control-plane tests exercise all ten tools and Linux/systemd installation, readiness, failure diagnostics, logs and cleanup. Adapter 0.1.2 / script 0.5.66 adds runtime options/updates and persistent activity; its collection bounds and follow-ups are documented in [PLAN_MCP_ACTIVITY.md](../PLAN_MCP_ACTIVITY.md).
+
+PTY dialog tests also cover the action menu, add alias, selected-project status, all three removal types, exact entry selection, referenced-entry refusal, invalid input, cancellation/EOF, empty lists, and noninteractive compatibility.
+
+`tests/mcp_lock_test.sh` verifies release of short port/project locks on success, failure and explicit exit, parent-lock isolation, and dead-owner recovery. Run it with macOS `/bin/bash` as well as a current Bash; CI gates publication on the native macOS check.
 
 Optional real-client checks, after building `adapters/mcp`:
 
