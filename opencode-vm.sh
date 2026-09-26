@@ -34,7 +34,7 @@ OPENLIVE_PREVIOUS_COMMAND="$OPENLIVE_DIR/previous-command"
 OPENLIVE_AUTH_MARKER="__opencode_vm_openlive__"
 OPENLIVE_LOCK_PATH=""
 OPENLIVE_ADAPTER_VERSION="0.1.6"
-OPENLIVE_ADAPTER_TAG="v0.5.52"
+OPENLIVE_ADAPTER_TAG="v0.5.62"
 OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.6.tar"
 OPENLIVE_ADAPTER_SHA256="06f461873b8b299de98220aa577824eb9807672b26cb069541acebcdd2d973b9"
 OPENLIVE_ACP_SDK_VERSION="1.2.1"
@@ -42,6 +42,16 @@ OPENLIVE_SDK_VERSION="1.18.21"
 OPENLIVE_MANAGER_AGENT="openlive-manager"
 OPENLIVE_MANAGER_DESCRIPTION="Read-only OpenLive voice session manager"
 OPENLIVE_MANAGER_PROMPT="You manage an OpenLive voice call. The voice_sessions tool is available and you must call it before listing, inspecting, summarizing, checking, attaching to, or creating project sessions. Never claim session details without a successful tool result. Ask for clarification if a requested session is ambiguous. Create a new work session only when the user explicitly asks for one. Apart from that explicit create action, you are read-only: do not edit files, run shell commands, create tasks, or mutate sessions. Keep responses brief and conversational: one or two plain sentences without Markdown, paths, URLs, code, or stray symbols. When attachment or creation succeeds, tell the user the next voice prompt will continue in that session."
+MCP_CONNECTOR_DIR="$SHARE_ROOT/mcp-connector"
+MCP_ADAPTER_CACHE_ROOT="$MCP_CONNECTOR_DIR/adapters"
+MCP_ADAPTER_VERSION="0.1.0"
+MCP_ADAPTER_TAG="v0.5.62"
+MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.0.tar"
+MCP_ADAPTER_SHA256="8234d7247f00d4f9d89006cc2747011dcf627c12ee59244739244c5302e237f0"
+MCP_SDK_VERSION="1.30.1"
+MCP_OPENCODE_SDK_VERSION="1.18.21"
+MCP_TESTED_PROTOCOL_VERSION="2025-11-25"
+MCP_TUNNEL_DIR="$SHARE_ROOT/mcp-tunnel/openai"
 
 # Per-project VM sizing. The shared base VM is always provisioned at these
 # values; a project that needs more (or less) stores an override in its own
@@ -145,10 +155,11 @@ DEFAULT_LAN_ALLOW_TCP=""              # z.B. "192.168.178.10:443 10.0.0.5:22" (o
 DEFAULT_LAN_ALLOW_UDP=""              # z.B. "192.168.178.20:53"              (ohne :PORT = alle UDP-Ports dieser IP)
 DEFAULT_HOST_LOCALHOST_FORWARD="yes"  # expose HOST_TCP_PORTS inside VM as localhost:PORT
 DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
+DEFAULT_MCP_PORT=40960                # private incoming MCP connector
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.5.52"
+OCVM_VERSION="0.5.62"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -162,6 +173,9 @@ SESSION_PORT=""
 SESSION_PASSWORD=""
 OC_WEB_TUI=false
 KEEP_HISTORY=0
+SESSION_MCP_MODE=""
+SESSION_MCP_PORT=""
+SESSION_LAUNCH_MODE=""                 # explicit start/web intent; bare attach uses the saved UI mode
 
 need() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -273,6 +287,14 @@ validate_web_port() {
   return 0
 }
 
+validate_mcp_port() {
+  local p="$1"
+  if ! is_valid_port "$p"; then
+    echo "Invalid --mcp-port value: $p (expected 1..65535)." >&2
+    exit 2
+  fi
+}
+
 # True when something already holds 0.0.0.0:<port>. Listeners bound only to
 # 127.0.0.1 are not a conflict — that is how our tunnels coexist with Lima's
 # own loopback auto-forward.
@@ -318,7 +340,9 @@ parse_web_flags() {
   SESSION_AUTH_MODE=""
   SESSION_REQUIRE_A2A=0
   SESSION_A2A="${OCVM_A2A:-1}"
-  local _saw_password="" _saw_no_auth=""
+  SESSION_MCP_MODE=""
+  SESSION_MCP_PORT=""
+  local _saw_password="" _saw_no_auth="" _saw_mcp="" _saw_no_mcp="" _saw_mcp_port=""
   OC_WEB_TUI=false
   # HTTPS by default: opencode hashes attachments via crypto.subtle, which
   # browsers expose only to secure origins, so plain HTTP over a LAN address
@@ -335,6 +359,10 @@ parse_web_flags() {
       --no-auth) SESSION_AUTH_MODE="clear"; SESSION_PASSWORD=""; _saw_no_auth=1 ;;
       --require-a2a) SESSION_REQUIRE_A2A=1 ;;
       --no-a2a) SESSION_A2A=0 ;;
+      --mcp) SESSION_MCP_MODE="enable"; _saw_mcp=1 ;;
+      --mcp-port) shift; SESSION_MCP_PORT="${1:?Missing MCP port value}"; _saw_mcp_port=1 ;;
+      --mcp-port=*) SESSION_MCP_PORT="${1#*=}"; _saw_mcp_port=1 ;;
+      --no-mcp) SESSION_MCP_MODE="disable"; _saw_no_mcp=1 ;;
       --tui) OC_WEB_TUI=true ;;
       --tls) SESSION_TLS=1 ;;
       --no-tls) SESSION_TLS=0 ;;
@@ -352,6 +380,16 @@ parse_web_flags() {
     echo "--password and --no-auth are mutually exclusive." >&2
     exit 2
   fi
+  if [[ -n "${_saw_mcp:-}" && -n "${_saw_no_mcp:-}" ]]; then
+    echo "--mcp and --no-mcp are mutually exclusive." >&2
+    exit 2
+  fi
+  if [[ -n "${_saw_mcp_port:-}" && -n "${_saw_no_mcp:-}" ]]; then
+    echo "--mcp-port and --no-mcp are mutually exclusive." >&2
+    exit 2
+  fi
+  [[ -z "${_saw_mcp_port:-}" ]] || SESSION_MCP_MODE="enable"
+  [[ -z "${SESSION_MCP_PORT:-}" ]] || validate_mcp_port "$SESSION_MCP_PORT"
 
   # Host environment as a fallback source of the secret, so it never has to
   # appear on a command line (where it lands in the shell history and in ps).
@@ -369,12 +407,14 @@ parse_web_flags() {
 parse_start_flags() {
   KEEP_HISTORY=0
   ON_EXISTING=""   # "", "reconnect", "fresh", "cancel"
+  SESSION_MCP_MODE=""
   while [[ "$#" -gt 0 ]]; do
     case "$1" in
       --keep-history) KEEP_HISTORY=1 ;;
       --reconnect) ON_EXISTING="reconnect" ;;
       --fresh) ON_EXISTING="fresh" ;;
       --cancel-if-exists) ON_EXISTING="cancel" ;;
+      --no-mcp) SESSION_MCP_MODE="disable" ;;
       *) echo "Unknown option: $1" >&2; exit 2 ;;
     esac
     shift
@@ -818,23 +858,55 @@ ensure_host_opencode_dirs() {
 # $2 (overlay) wins on conflicting keys; keys present only in $1 (base) survive.
 # `jq '.[0] * .[1]'` merges recursively with the right operand winning. Returns
 # non-zero and writes nothing when jq is missing or the result is empty/invalid,
-# so every caller can fall back to a plain copy. This is the single place that
+# so publication callers can handle failure. This is the single place that
 # defines "merge, don't clobber" for the host/project/session config triangle.
-# Caveat: union semantics mean an intentional provider deletion must be applied
-# to every copy (or via `provider rm`) — anything still present in the other
-# copy is re-added on the next merge.
+# `provider rm` records removed IDs outside the config. Only an explicit host
+# definition can reintroduce those IDs; stale project/session copies cannot.
 _cfg_merge() {
   local base="$1" overlay="$2" out="$3"
   command -v jq >/dev/null 2>&1 || return 1
   [[ -f "$base" && -f "$overlay" ]] || return 1
+  local removed='[]' host='{}' host_cfg
+  if [[ -f "$SHARE_ROOT/removed-providers.json" ]]; then
+    removed="$(jq -ce 'if type == "array" then . else error("invalid removed providers") end' "$SHARE_ROOT/removed-providers.json")" || return 1
+    for host_cfg in "$HOST_CFG_JSON" "$HOST_CFG_JSONC" "$HOST_CFG_DOT_JSON"; do
+      [[ -f "$host_cfg" ]] || continue
+      host="$(jq -ce . "$host_cfg")" || return 1
+      break
+    done
+  fi
   local tmp; tmp="$(mktemp)"
-  if jq -s '.[0] * .[1]' "$base" "$overlay" > "$tmp" 2>/dev/null \
+  if jq -s --argjson removed "$removed" --argjson host "$host" '
+       .[0] * .[1]
+       | reduce $removed[] as $p (.;
+           if ($host.provider // {} | has($p))
+           then .provider[$p] = $host.provider[$p]
+           else del(.provider[$p]) end)
+       | reduce ((.provider // {}) | keys[]) as $p (.;
+           if (.provider[$p].options.baseURL | type) == "string"
+           then .provider[$p].options.baseURL |= sub("^http(?<tls>s?)://(host\\.lima\\.internal|192\\.168\\.5\\.2)(?=[:/]|$)"; "http\(.tls)://localhost")
+           else . end)
+     ' "$base" "$overlay" > "$tmp" 2>/dev/null \
      && [[ -s "$tmp" ]] && jq -e . "$tmp" >/dev/null 2>&1; then
     mv "$tmp" "$out"
     return 0
   fi
   rm -f "$tmp"
   return 1
+}
+
+# Legacy copy fallback is safe only when there are no recorded removals.
+_cfg_merge_for_publish() {
+  local base="$1" overlay="$2" out="$3"
+  [[ -f "$base" ]] || base="$overlay"
+  if _cfg_merge "$base" "$overlay" "$out"; then
+    return 0
+  fi
+  if [[ -e "$SHARE_ROOT/removed-providers.json" ]]; then
+    echo "[config] Could not filter removed providers; refusing to publish $overlay." >&2
+    return 1
+  fi
+  cp -p "$overlay" "$out"
 }
 
 # Run a jq filter over a JSON file and replace it atomically. Guarded: the
@@ -879,20 +951,20 @@ sync_cfg_between_host_and_project() {
       # BOTH files so they converge and stop ping-ponging.
       local _merged
       _merged="$(mktemp)"
-      if _cfg_merge "$older" "$newer" "$_merged"; then
-        cp -p "$_merged" "$host_cfg"
-        cp -p "$_merged" "$proj_cfg"
-      else
-        # No jq / merge failed — preserve the legacy newer-wins wholesale copy.
-        cp -p "$newer" "$host_cfg"
-        cp -p "$newer" "$proj_cfg"
+      if ! _cfg_merge_for_publish "$older" "$newer" "$_merged"; then
+        rm -f "$_merged"
+        return 1
       fi
+      cp -p "$_merged" "$host_cfg"
+      cp -p "$_merged" "$proj_cfg"
       rm -f "$_merged"
     fi
   elif [[ -f "$host_cfg" ]]; then
     cp -p "$host_cfg" "$proj_cfg"
   elif [[ -f "$proj_cfg" ]]; then
-    cp -p "$proj_cfg" "$host_cfg"
+    # Even a lone old project copy must respect provider removals.
+    _cfg_merge_for_publish "$proj_cfg" "$proj_cfg" "$host_cfg" || return 1
+    cp -p "$host_cfg" "$proj_cfg"
   fi
 }
 
@@ -4665,6 +4737,57 @@ doctor_cmd() {
       else
         echo "  registry:  not available (bundle or fetch mcps/registry.json)"
       fi
+      echo ""
+
+      # ---- Incoming MCP connector (external clients -> OpenCode) ----
+      echo "[doctor] MCP connector"
+      local _connector_proj _connector_senv _connector_share _connector_enabled=0 _connector_port=""
+      _connector_proj="$(pwd)"
+      _connector_senv="$(session_env "$_connector_proj")"
+      _connector_share="$(session_share_dir "$_connector_proj")"
+      if [[ -f "$_connector_senv" ]]; then
+        unset SESS_MCP_ENABLED SESS_MCP_PORT
+        # shellcheck disable=SC1090
+        source "$_connector_senv"
+        _connector_enabled="${SESS_MCP_ENABLED:-0}"
+        _connector_port="${SESS_MCP_PORT:-$DEFAULT_MCP_PORT}"
+        echo "  enabled:   $([[ "$_connector_enabled" == "1" ]] && echo yes || echo no)"
+        echo "  port:      $_connector_port"
+        if validate_mcp_credential "$_connector_share"; then
+          echo "  credential: $_connector_share/mcp/credential (valid; value not shown)"
+        else
+          echo "  credential: missing or unsafe"
+        fi
+        if [[ -f "$_connector_share/mcp/adapter/.ocvm-managed" ]]; then
+          echo "  adapter:   staged"
+        else
+          echo "  adapter:   not staged"
+        fi
+        local _connector_token="" _connector_health=""
+        if validate_mcp_credential "$_connector_share"; then
+          _connector_token="$(<"$_connector_share/mcp/credential")"
+        fi
+        if [[ "$_connector_enabled" == "1" && -f "$_connector_share/mcp/ready.json" && -n "$_connector_token" ]] &&
+           jq -e --arg project "$(proj_hash "$_connector_proj")" --arg generation "${SESS_CONTROLLER:-}" \
+             --argjson port "$_connector_port" '
+               .schema == 1 and .projectHash == $project and .generation == $generation and .port == $port
+             ' "$_connector_share/mcp/ready.json" >/dev/null 2>&1 &&
+           _connector_health="$(printf 'header = "X-OCVM-MCP-Token: %s"\n' "$_connector_token" |
+             curl -fsS --config - --max-time 2 "http://127.0.0.1:$_connector_port/healthz" 2>/dev/null)" &&
+           jq -e --arg project "$(proj_hash "$_connector_proj")" --arg generation "${SESS_CONTROLLER:-}" '
+             .healthy == true and .project.id == $project and .generation == $generation
+           ' <<<"$_connector_health" >/dev/null 2>&1; then
+          echo "  readiness: authenticated; endpoint http://127.0.0.1:$_connector_port/mcp"
+        else
+          echo "  readiness: not ready"
+        fi
+        echo "  recovery:  opencode-vm web --reconnect --mcp --mcp-port $_connector_port"
+      else
+        echo "  session:   no tracked session for current project"
+        echo "  start:     opencode-vm web"
+      fi
+      echo ""
+      mcp_tunnel_status || true
 
       # Proxmox detail (regardless of whether the MCP is currently active)
       if [[ -f "$PROXMOX_ENV" ]]; then
@@ -4827,8 +4950,8 @@ provider_refresh_all_quiet() {
 
   local p
   for p in $local_providers; do
-    if ! provider_cmd refresh "$p" --quiet >/dev/null 2>&1; then
-      echo "[provider] refresh skipped ($p): unreachable" >&2
+    if ! provider_cmd _custom_sync "$p" --quiet >/dev/null 2>&1; then
+      echo "[provider] model sync skipped ($p): unreachable" >&2
     fi
   done
 }
@@ -4956,11 +5079,16 @@ auth_sync_begin() {
   if ! _auth_sync_init_state || ! _auth_sync_reconcile_state "$tmp" || ! _auth_sync_atomic_json "$tmp" "$baseline"; then
     _auth_sync_unlock; rm -f "$tmp"; return 1
   fi
-  local manifest_tmp
+  local manifest_tmp fallback=false
+  if ! _auth_sync_merge_supported "$tmp"; then
+    fallback=true
+    echo "[auth] WARNING: host auth.json contains an entry format the baseline merge does not understand; this session will publish the newest state wholesale. The provider merge or OpenCode compatibility needs updating." >&2
+  fi
   manifest_tmp="$(mktemp)"
-  jq -n --arg project "$project" --arg generation "$generation" \
+  jq -n --arg project "$project" --arg generation "$generation" --argjson fallback "$fallback" \
     --slurpfile state "$AUTH_SYNC_DIR/state.json" '
       {schema:1,project:$project,generation:$generation,completion:null,candidateHash:null,
+       mergeFallback:$fallback,
        baselineRevisions:($state[0].providers | with_entries(.value = .value.revision))}
     ' > "$manifest_tmp"
   if ! _auth_sync_atomic_json "$manifest_tmp" "$run_dir/manifest.json"; then
@@ -4982,6 +5110,49 @@ _auth_sync_supported_entry() {
 _auth_sync_is_oauth_entry() {
   local entry="$1"
   printf '%s\n' "$entry" | jq -e 'type == "object" and (.type == "oauth" or has("refresh"))' >/dev/null 2>&1
+}
+
+# True only when every provider entry has a shape the baseline merge
+# understands. A new or unknown OpenCode auth format makes the three-way merge
+# meaningless, so callers fall back to a wholesale copy of the newest state.
+_auth_sync_merge_supported() {
+  local file="$1"
+  [[ -f "$file" ]] || return 1
+  jq -e '
+    type == "object"
+    and all(.[];
+      (type == "object")
+      and ((.type == "oauth" or .type == "api" or .type == "key" or .type == "wellknown") or has("refresh")))
+  ' "$file" >/dev/null 2>&1
+}
+
+# Fallback for an auth format the baseline merge does not understand (for
+# example after an OpenCode update). The newest runtime file is published
+# wholesale, which is the pre-baseline behaviour, and the operator is told that
+# the merge needs adapting.
+_auth_sync_whole_copy() {
+  local generation="$1" candidate="$2" manifest="$3"
+  local candidate_hash manifest_tmp
+  if ! _auth_sync_atomic_json "$candidate" "$HOST_DATA_DIR/auth.json"; then
+    echo "[auth] Whole-copy fallback failed for $generation." >&2
+    return 1
+  fi
+  if ! _auth_sync_reconcile_state "$HOST_DATA_DIR/auth.json" external; then
+    echo "[auth] Whole-copy fallback could not record state for $generation." >&2
+    return 1
+  fi
+  candidate_hash="$(_auth_sync_hash_file "$candidate")"
+  manifest_tmp="$(mktemp)"
+  if ! jq --arg hash "$candidate_hash" '
+        .candidateHash=$hash | .conflicts=0 | .mergeFallback=true
+        | .publishingHash=null | .publishingProviders=[]
+      ' "$manifest" > "$manifest_tmp" \
+     || ! _auth_sync_atomic_json "$manifest_tmp" "$manifest"; then
+    rm -f "$manifest_tmp"
+    return 1
+  fi
+  rm -f "$manifest_tmp"
+  echo "[auth] WARNING: the auth format from $generation is not supported by the baseline merge; copied the newest runtime auth.json wholesale. The provider merge (or OpenCode compatibility) needs updating." >&2
 }
 
 # Merge one stopped runtime's final auth state. A valid candidate is copied
@@ -5019,6 +5190,20 @@ auth_sync_finalize() {
   [[ -n "$publishing_hash" && "$host_hash" == "$publishing_hash" ]] && reconcile_mode="controlled"
   if ! jq -e 'type == "object"' "$tmp" >/dev/null 2>&1 || ! _auth_sync_reconcile_state "$tmp" "$reconcile_mode"; then
     _auth_sync_unlock; rm -f "$tmp"; return 1
+  fi
+  # An unrecognized auth format (host or runtime) cannot be three-way merged.
+  # Fall back to publishing the newest runtime state wholesale with a warning.
+  if [[ "$(jq -r '.mergeFallback // false' "$manifest")" == "true" ]] \
+     || ! _auth_sync_merge_supported "$candidate" \
+     || ! _auth_sync_merge_supported "$tmp"; then
+    if _auth_sync_whole_copy "$generation" "$candidate" "$manifest"; then
+      _auth_sync_unlock
+      rm -f "$tmp"
+      return 0
+    fi
+    _auth_sync_unlock
+    rm -f "$tmp"
+    return 1
   fi
   completion="$(jq -r '.completion // empty' "$manifest")"
   if [[ -z "$completion" ]]; then
@@ -5298,7 +5483,7 @@ auth_cmd() {
       fi
       share="$(session_share_dir "$proj")"
       generation="${SESS_AUTH_GENERATION:-$SESS_NAME}"
-      if ! auth_sync_finalize_share "$generation" "$share"; then
+      if ! lifecycle_finalize_runtime "$SESS_NAME" "$generation" "$share"; then
         lifecycle_lock_release
         return 1
       fi
@@ -5318,104 +5503,689 @@ EOF
   esac
 }
 
-provider_auth_action() {
-  local action="$1" provider="$2" method="${3:-}" proj senv share expected_vm expected_generation expected_controller
-  [[ "$provider" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "[provider] Invalid provider id: '$provider'" >&2; return 2; }
-  proj="$(pwd)"
-  senv="$(session_env "$proj")"
-  [[ -f "$senv" ]] || {
-    echo "[provider] No tracked session exists for this project. Start or resume it first." >&2
-    return 1
-  }
-  lifecycle_lock_acquire "$proj" || return 1
-  # shellcheck disable=SC1090
-  source "$senv"
-  expected_vm="$SESS_NAME"
-  expected_generation="${SESS_AUTH_GENERATION:-$SESS_NAME}"
-  expected_controller="${SESS_CONTROLLER:-$expected_generation}"
-  is_vm_running "$expected_vm" || {
-    echo "[provider] The tracked project VM is stopped. Resume it before $action." >&2
-    lifecycle_lock_release
-    return 1
-  }
-  share="$(session_share_dir "$proj")"
-  vm_exec "$expected_vm" '
-    runtime="$1/openlive/runtime.json"
-    [ -f "$runtime" ] || exit 0
-    url="$(jq -r ".backendUrl // empty" "$runtime")"
-    [ -n "$url" ] || exit 0
-    if [ -f "$1/auth.env" ]; then . "$1/auth.env"; fi
-    auth_args=()
-    if [ -n "${OPENCODE_SERVER_USERNAME:-}" ]; then auth_args=(-u "$OPENCODE_SERVER_USERNAME:$OPENCODE_SERVER_PASSWORD"); fi
-    curl -fsS --max-time 5 "${auth_args[@]}" -X POST "$url/instance/dispose" >/dev/null 2>&1 || true
-  ' "$share" >/dev/null 2>&1 || true
-  if [[ "$action" == "login" ]]; then
-    if [[ -n "$method" ]]; then
-      if ! vm_exec "$expected_vm" '
-        export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$PATH"
-        export XDG_CONFIG_HOME="$1/config" XDG_DATA_HOME=/tmp/oc-xdg-data XDG_STATE_HOME=/tmp/oc-xdg-state
-        cd "$2"
-        opencode auth login --provider "$3" --method "$4"
-      ' "$share" "$proj" "$provider" "$method"; then lifecycle_lock_release; return 1; fi
-    else
-      if ! vm_exec "$expected_vm" '
-        export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$PATH"
-        export XDG_CONFIG_HOME="$1/config" XDG_DATA_HOME=/tmp/oc-xdg-data XDG_STATE_HOME=/tmp/oc-xdg-state
-        cd "$2"
-        opencode auth login --provider "$3"
-      ' "$share" "$proj" "$provider"; then lifecycle_lock_release; return 1; fi
+# Runs only in the tracked VM. Discovery follows the managed web command,
+# including proxy fallback ports, rather than optional OpenLive metadata.
+read -r -d '' OCVM_PROVIDER_VM_SH <<'PROVIDER_VM' || true
+set -euo pipefail
+action="$1"; SESS_SHARE="$2"; project="$3"; marker="$4"
+export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$PATH"
+export XDG_CONFIG_HOME="$SESS_SHARE/config" XDG_DATA_HOME=/tmp/oc-xdg-data XDG_STATE_HOME=/tmp/oc-xdg-state
+cd "$project"
+project="$(pwd -P)"
+file="$XDG_DATA_HOME/opencode/auth.json"
+die() { echo "[provider] $*" >&2; exit 1; }
+[[ "$action" == list ]] || die "Unsupported provider action."
+version="$(opencode --version)"
+# No exact-version gate: OpenCode ships patch releases continuously and the
+# interfaces this adapter uses are validated live below (health, /path,
+# provider list). An unsupported interface fails closed with a message naming
+# the detected version instead of pinning one release.
+url=""
+for pid in $(pgrep -x opencode || [[ "$?" == 1 ]]); do
+  [[ "$(readlink "/proc/$pid/cwd")" == "$project" ]] || continue
+  mapfile -d '' -t args < "/proc/$pid/cmdline"
+  [[ "${args[1]:-}" == web && "${args[2]:-}" == --hostname && "${args[3]:-}" == 127.0.0.1 && "${args[4]:-}" == --port ]] || continue
+  port="${args[5]:-}"
+  [[ "$port" =~ ^[0-9]+$ && "$port" -gt 0 && "$port" -lt 65536 ]] || die "Invalid runtime port."
+  [[ -z "$url" ]] || die "Multiple project web servers; refusing ambiguous discovery."
+  url="http://127.0.0.1:$port"
+done
+# No running web server is a normal state (TUI/shell session, stopped server),
+# not a failure: report it as unknown and exit with a reserved benign code.
+if [[ -z "$url" ]]; then
+  echo "[provider] No running web server for this project; live availability is unknown (stored data is not a live status)." >&2
+  exit 3
+fi
+[[ -f "$SESS_SHARE/lib/web.sh" ]] || die "Session web library is missing."
+# OC_PORT is consumed when the shared web library is sourced.
+# shellcheck disable=SC2034
+OC_PORT="$port"
+# shellcheck disable=SC1091
+. "$SESS_SHARE/lib/web.sh"
+load_session_auth
+directory="$(printf '%s' "$project" | jq -sRr @uri)"
+request() {
+  local verb="${2:-GET}" timeout="${3:-10}"
+  # Keep the Basic credential out of process arguments and diagnostic output.
+  {
+    if [[ -n "$OC_PASSWORD" ]]; then
+      printf 'header = "Authorization: Basic %s"\n' "$(printf '%s' "$OC_USERNAME:$OC_PASSWORD" | base64 -w0)"
     fi
-  else
-    if ! vm_exec "$expected_vm" '
-      export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$PATH"
-      export XDG_CONFIG_HOME="$1/config" XDG_DATA_HOME=/tmp/oc-xdg-data XDG_STATE_HOME=/tmp/oc-xdg-state
-      cd "$2"
-      opencode auth logout "$3"
-    ' "$share" "$proj" "$provider"; then lifecycle_lock_release; return 1; fi
+  } | curl -q -fsS --max-time "$timeout" --config - -X "$verb" "$url$1?directory=$directory"
+}
+runtime="$(request /provider)" || die "Provider API unavailable."
+jq -e 'type == "object" and (.all | type == "array") and (.connected | type == "array") and all(.connected[]; type == "string") and all(.all[]; (.id | type == "string"))' <<< "$runtime" >/dev/null || die "Unsupported provider response for OpenCode $version; the provider adapter may need updating."
+request /global/health | jq -e --arg version "$version" '.healthy == true and .version == $version' >/dev/null || die "Server version/health check failed for OpenCode $version; the provider adapter may need updating."
+request /path | jq -e --arg project "$project" --arg config "$XDG_CONFIG_HOME/opencode" '.directory == $project and .config == $config' >/dev/null || die "Server project/config context does not match the tracked VM."
+[[ -f "$file" ]] || file=/dev/null
+printf '%s' "$runtime" | jq -r --arg marker "$marker" --slurpfile auth "$file" '
+. as $runtime | ($auth[0] // {}) as $auth
+| ((.all | map(.id)) + ($auth | keys) | unique)[] | select(. != $marker)
+| . as $id | ($auth[$id] // null) as $credential
+| [$id, (if $credential == null then "endpoint" elif $credential.type == "oauth" or ($credential | has("refresh")) then "oauth" elif $credential.type == "api" then "api" else "other" end),
+   "live", (if $credential == null then "credentials=no" else "credentials=yes" end),
+   (if $runtime.connected | index($id) then "available=yes" else "available=no" end)] | @tsv'
+PROVIDER_VM
+
+# Run the provider VM payload, dropping the known cosmetic bash 5.2 internal
+# error ("pop_var_context: ...") from stderr while keeping real messages. Stdout
+# is passed through so callers can capture or stream it.
+_provider_vm_exec() {
+  local vm="$1"; shift
+  local err rc=0
+  err="$(mktemp)"
+  vm_exec "$vm" "$OCVM_PROVIDER_VM_SH" "$@" 2>"$err" || rc=$?
+  grep -v 'pop_var_context: head of shell_variables not a function context' "$err" >&2 || true
+  rm -f "$err"
+  return "$rc"
+}
+
+# Host-only registry. Its short file lock protects atomic edits, not tunnel
+# occupancy: shared tunnel IDs are deliberately an operator responsibility.
+read -r -d '' OCVM_MCP_REGISTRY_PY <<'MCPREGISTRY' || true
+import fcntl, hashlib, json, os, re, stat, sys, tempfile, uuid
+from pathlib import Path
+
+root = Path(sys.argv[1])
+operation = sys.argv[2]
+args = sys.argv[3:]
+
+def private_dir(path, create=False):
+    if create:
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    st = path.lstat()
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
+        raise ValueError("Registry directories must be private, user-owned, and not symlinks.")
+
+def read_json(name):
+    fd = os.open(root / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd) as handle:
+        st = os.fstat(handle.fileno())
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or stat.S_IMODE(st.st_mode) != 0o600 or st.st_size > 4 * 1024 * 1024:
+            raise ValueError("Unsafe registry file; expected a private (0600) regular file.")
+        return json.load(handle)
+
+def tunnel_id(value):
+    return isinstance(value, str) and re.fullmatch(r"tunnel_[0-9a-f]{32}", value)
+
+def valid_key(value):
+    return isinstance(value, str) and re.fullmatch(r"[!-~]{1,4096}", value)
+
+def identity(path):
+    path = os.path.realpath(path)
+    return hashlib.md5(os.fsencode(path)).hexdigest(), path
+
+def load():
+    empty = {"schema": 2, "keys": {}, "tunnels": {}, "projects": {}}
+    if not os.path.lexists(root):
+        return empty
+    private_dir(root.parent)
+    private_dir(root)
+    if not os.path.lexists(root / "registry.json"):
+        if os.path.lexists(root / "config.json"):
+            old = read_json("config.json")
+            if old.get("schema") != 1 or not valid_key(old.get("apiKey")) or not tunnel_id(old.get("tunnelId")):
+                raise ValueError("Invalid legacy tunnel configuration.")
+            origin = "<legacy global configuration>"
+            if os.path.lexists(root / "owner.json"):
+                owner = read_json("owner.json")
+                if isinstance(owner.get("project"), str):
+                    origin = owner["project"]
+            empty["keys"]["key_legacy"] = {"value": old["apiKey"], "createdIn": origin}
+            empty["tunnels"][old["tunnelId"]] = {"createdIn": origin}
+        return empty
+    value = read_json("registry.json")
+    if value.get("schema") != 2 or not all(isinstance(value.get(k), dict) for k in ("keys", "tunnels", "projects")):
+        raise ValueError("Unsupported tunnel registry schema.")
+    for key, entry in value["keys"].items():
+        if not re.fullmatch(r"key_[a-zA-Z0-9]+", key) or not valid_key(entry.get("value")) or not isinstance(entry.get("createdIn"), str):
+            raise ValueError("Invalid tunnel API key entry.")
+    for tunnel, entry in value["tunnels"].items():
+        if not tunnel_id(tunnel) or not isinstance(entry.get("createdIn"), str):
+            raise ValueError("Invalid tunnel entry.")
+    for key, entry in value["projects"].items():
+        if not isinstance(entry.get("path"), str) or not os.path.isabs(entry["path"]) or not isinstance(entry.get("name"), str):
+            raise ValueError("Invalid project entry.")
+        if key != hashlib.md5(os.fsencode(entry["path"])).hexdigest() or entry.get("keyId") not in value["keys"] or entry.get("tunnelId") not in value["tunnels"]:
+            raise ValueError("Invalid project references.")
+    return value
+
+def project(value, selector):
+    key = selector if selector in value["projects"] else identity(selector)[0]
+    if key not in value["projects"]:
+        sys.exit(3)
+    return {"id": key, **value["projects"][key]}
+
+def publish(value):
+    fd, temporary = tempfile.mkstemp(prefix=".registry-", dir=root)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            json.dump(value, handle, indent=2)
+            handle.write("\n")
+        os.replace(temporary, root / "registry.json")
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    # Migration commits the pool before removing obsolete global activation.
+    for name in ("config.json", "owner.json"):
+        if os.path.lexists(root / name):
+            os.unlink(root / name)
+
+def run():
+    if operation in ("put", "drop"):
+        private_dir(root.parent, True)
+        private_dir(root, True)
+        fd = os.open(root / "registry.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or stat.S_IMODE(st.st_mode) != 0o600:
+            raise ValueError("Unsafe registry lock.")
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    value = load()
+    if operation == "view":
+        for entry in value["keys"].values():
+            del entry["value"]
+        print(json.dumps(value))
+    elif operation in ("project", "resolve"):
+        item = project(value, args[0])
+        if operation == "resolve":
+            item["apiKey"] = value["keys"][item["keyId"]]["value"]
+        print(json.dumps(item))
+    elif operation == "put":
+        path, tunnel, key_id = args
+        key = sys.stdin.read()
+        if not tunnel_id(tunnel):
+            raise ValueError("Expected tunnel_ followed by 32 lowercase hex digits.")
+        pid, path = identity(path)
+        if not os.path.isdir(path):
+            raise ValueError("Run setup from an existing project directory.")
+        if key_id:
+            if key or key_id not in value["keys"]:
+                raise ValueError("Unknown key ID or conflicting key input.")
+        else:
+            if not valid_key(key):
+                raise ValueError("Tunnel API key must be nonempty and contain no whitespace.")
+            key_id = next((k for k, entry in value["keys"].items() if entry["value"] == key), None)
+            if key_id is None:
+                key_id = "key_" + uuid.uuid4().hex[:12]
+                value["keys"][key_id] = {"value": key, "createdIn": path}
+        value["tunnels"].setdefault(tunnel, {"createdIn": path})
+        value["projects"][pid] = {"path": path, "name": os.path.basename(path) or path, "keyId": key_id, "tunnelId": tunnel}
+        publish(value)
+        print(json.dumps({"id": pid, **value["projects"][pid]}))
+    elif operation == "drop":
+        kind, selector = args
+        if kind == "project":
+            del value["projects"][project(value, selector)["id"]]
+        else:
+            field, pool = ("keyId", "keys") if kind == "key" else ("tunnelId", "tunnels")
+            users = [p["path"] for p in value["projects"].values() if p[field] == selector]
+            if users:
+                raise ValueError("Still referenced by projects: " + ", ".join(users))
+            if selector not in value[pool]:
+                raise ValueError("Register entry not found.")
+            del value[pool][selector]
+        publish(value)
+    else:
+        raise ValueError("Unknown registry operation.")
+
+try:
+    run()
+except (OSError, TypeError, AttributeError, KeyError, IndexError, json.JSONDecodeError):
+    sys.exit("[mcp-tunnel] Missing, invalid, or unsafe registry data.")
+except ValueError as error:
+    sys.exit("[mcp-tunnel] " + str(error))
+MCPREGISTRY
+
+mcp_tunnel_registry() {
+  python3 -c "$OCVM_MCP_REGISTRY_PY" "$MCP_TUNNEL_DIR" "$@"
+}
+
+mcp_tunnel_legacy_note() {
+  if [[ -e "$MCP_TUNNEL_DIR/config.json" || -L "$MCP_TUNNEL_DIR/config.json" ]]; then
+    echo "[mcp-tunnel] Legacy global credentials are available for reuse; assign them to this project with: opencode-vm provider mcp new openai" >&2
   fi
-  [[ -f "$senv" ]] || { lifecycle_lock_release; echo "[provider] Session ownership changed before checkpoint." >&2; return 1; }
-  # shellcheck disable=SC1090
-  source "$senv"
-  if [[ "$SESS_NAME" != "$expected_vm" \
-        || "${SESS_AUTH_GENERATION:-$SESS_NAME}" != "$expected_generation" \
-        || "${SESS_CONTROLLER:-${SESS_AUTH_GENERATION:-$SESS_NAME}}" != "$expected_controller" ]]; then
-    lifecycle_lock_release
-    echo "[provider] Session ownership changed during $action; refusing an ambiguous checkpoint." >&2
+}
+
+# Keep the terminal UI for start/attach, backed by the same server used by MCP
+# only when this project has a connection. Suppression is invocation-local.
+mcp_session_mode() {
+  local mode="$1" project="$2" rc=0
+  case "$mode" in
+    tui|tui-mcp)
+      if [[ "${SESSION_MCP_MODE:-}" == disable ]]; then printf 'tui\n'; return 0; fi
+      if [[ ! -e "$MCP_TUNNEL_DIR/registry.json" && ! -L "$MCP_TUNNEL_DIR/registry.json" ]]; then mcp_tunnel_legacy_note; printf 'tui\n'; return 0; fi
+      mcp_tunnel_registry project "$project" >/dev/null || rc=$?
+      case "$rc" in
+        0) printf 'tui-mcp\n' ;;
+        3) printf 'tui\n' ;;
+        *) return "$rc" ;;
+      esac
+      ;;
+    *) printf '%s\n' "$mode" ;;
+  esac
+}
+
+mcp_tunnel_product_note() {
+  cat <<'EOF'
+[mcp-tunnel] ChatGPT plans (research: 2026-09-26): Developer docs list Plus/Pro
+  and Business/Enterprise/Edu with read/write tools; the Help Center restricts
+  full/write MCP to Business/Enterprise/Edu. Verify availability in your workspace.
+  https://developers.openai.com/api/docs/guides/developer-mode
+  https://help.openai.com/en/articles/12584461
+EOF
+}
+
+mcp_tunnel_reuse_note() {
+  echo "[mcp-tunnel] Important: reuse a tunnel ID only when one project uses it at a time."
+  echo "  For parallel projects, create separate tunnels in OpenAI Platform."
+  echo "  Concurrent reuse is not blocked and can route requests to the wrong project."
+}
+
+# Only serialize this project's own start/stop, using its existing lifecycle
+# lock. No key/tunnel-use lock, owner registry, or cross-project admission check.
+mcp_tunnel_with_project() (
+  local project="$1" LIFECYCLE_LOCK_LINK="" LIFECYCLE_LOCK_CLAIM=""
+  shift
+  lifecycle_lock_acquire "$project" || exit 1
+  trap lifecycle_lock_release EXIT
+  "$@"
+)
+
+# Empty output means the VM no longer exists; errors do not prove shutdown.
+mcp_tunnel_vm_state() {
+  limactl list "$1" --format '{{.Status}}' 2>/dev/null
+}
+
+mcp_tunnel_remote() {
+  local session="$1" operation="$2"
+  vm_exec "$(jq -r .vm <<<"$session")" '
+    set -euo pipefail
+    SESS_SHARE="$1"; PROJ_DIR="$2"; operation="$3"; OC_PORT=4096
+    if [ ! -f "$SESS_SHARE/lib/web.sh" ]; then
+      state="$(sudo systemctl show ocvm-mcp-tunnel.service -p LoadState --value 2>/dev/null)" || [ "$state" = not-found ]
+      [ "$state" = not-found ] || exit 1
+      if [ "$operation" = status ]; then
+        printf "{\"process\":\"inactive\",\"ready\":false,\"connected\":false,\"controlPlane\":\"unknown\"}\n"
+      fi
+      exit 0
+    fi
+    . "$SESS_SHARE/lib/web.sh"
+    if [ "$operation" = status ]; then
+      mcp_tunnel_guest_status
+    else
+      exec 7>/tmp/ocvm-mcp-tunnel.lock
+      flock -w 180 7
+      stop_mcp_tunnel
+    fi
+  ' "$(jq -r .share <<<"$session")" "$(jq -r .project <<<"$session")" "$operation"
+}
+
+# Reuse normal session tracking for status and cleanup, including existing
+# sessions whose path spelling predates canonical registry identities.
+mcp_tunnel_session() (
+  local project="$1" candidate record canonical
+  for record in "$SESSIONS_DIR"/*.env; do
+    [[ -f "$record" ]] || continue
+    unset SESS_PROJ SESS_NAME SESS_CONTROLLER
+    # shellcheck disable=SC1090
+    source "$record" || return 1
+    [[ -n "${SESS_PROJ:-}" && -n "${SESS_NAME:-}" ]] || continue
+    candidate="$SESS_PROJ"
+    canonical="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$candidate")" || return 1
+    [[ "$canonical" == "$project" ]] || continue
+    jq -n --arg vm "$SESS_NAME" --arg project "$candidate" --arg share "$(session_share_dir "$candidate")" \
+      --arg generation "${SESS_CONTROLLER:-}" '{vm:$vm,project:$project,share:$share,generation:$generation}'
+    return 0
+  done
+  printf '{}\n'
+)
+
+mcp_tunnel_remove_project() {
+  local project="$1" session state share
+  session="$(mcp_tunnel_session "$project")" || return 1
+  if [[ "$(jq -r '.vm // empty' <<<"$session")" != "" ]]; then
+    state="$(mcp_tunnel_vm_state "$(jq -r .vm <<<"$session")")" || return 1
+    case "$state" in
+      Running) mcp_tunnel_remote "$session" stop || return 1 ;;
+      Stopped|"")
+        share="$(jq -r .share <<<"$session")"
+        if [[ -d "$share/mcp" || -L "$share/mcp" ]]; then
+          validate_mcp_credential "$share" || return 1
+          rm -f "$share/mcp/tunnel.yaml" "$share/mcp/tunnel-key"
+        fi
+        ;;
+      *) echo "[mcp-tunnel] Cannot verify this project's shutdown (VM state: $state)." >&2; return 1 ;;
+    esac
+  fi
+  mcp_tunnel_registry drop project "$project" || return 1
+  echo "[mcp-tunnel] Project connection removed. Registered keys and tunnels remain reusable."
+}
+
+mcp_tunnel_status() {
+  local project="${1:-$PWD}" config session state status rc=0
+  echo "[provider] OpenAI MCP"
+  config="$(mcp_tunnel_registry project "$project")" || rc=$?
+  if [[ "$rc" == 3 ]]; then echo "  configuration: not configured for this project"; return 0; fi
+  [[ "$rc" == 0 ]] || return "$rc"
+  echo "  project:       $(jq -r .path <<<"$config")"
+  echo "  project ID:    $(jq -r .id <<<"$config")"
+  echo "  tunnel API key: $(jq -r .keyId <<<"$config") (value not shown)"
+  echo "  tunnel ID:     $(jq -r .tunnelId <<<"$config")"
+  session="$(mcp_tunnel_session "$(jq -r .path <<<"$config")")" || return 1
+  if [[ "$(jq -r '.vm // empty' <<<"$session")" == "" ]]; then
+    echo "  runtime:       inactive; starts with this project's next start/web"
+    return 0
+  fi
+  echo "  logs:          $(jq -r .share <<<"$session")/mcp/tunnel.log"
+  state="$(mcp_tunnel_vm_state "$(jq -r .vm <<<"$session")")" || {
+    echo "  runtime:       unknown (VM status unavailable)"; return 1;
+  }
+  case "$state" in
+    Running)
+      status="$(mcp_tunnel_remote "$session" status)" || {
+        echo "  runtime:       unknown (guest status unavailable)"; return 1;
+      }
+      printf '%s\n' "$status" | jq -r '"  runtime tunnel: \(.tunnelId // "unknown")", "  process:       \(.process)", "  readiness:     \(.ready)", "  control plane: \(.controlPlane)", "  connected:     \(.connected // false)", (if .httpStatus > 0 then "  HTTP error:    \(.httpStatus)" else empty end)'
+      ;;
+    Stopped|"") echo "  runtime:       inactive (VM stopped or removed)" ;;
+    *) echo "  runtime:       unknown (VM state: $state)" ;;
+  esac
+}
+
+mcp_tunnel_list() {
+  local view
+  view="$(mcp_tunnel_registry view)" || return 1
+  echo "[provider] OpenAI MCP project connections"
+  jq -r '.projects | to_entries[] | "  \(.value.name) [\(.key)]\n    path: \(.value.path)\n    tunnel API key: \(.value.keyId)\n    tunnel: \(.value.tunnelId)"' <<<"$view"
+  [[ "$(jq '.projects | length' <<<"$view")" != 0 ]] || echo "  (no projects configured)"
+  mcp_tunnel_choices "$view" keys
+  mcp_tunnel_choices "$view" tunnels
+  mcp_tunnel_product_note
+}
+
+mcp_tunnel_choices() {
+  local view="$1" kind="$2"
+  if [[ "$kind" == keys ]]; then echo "[mcp-tunnel] Registered tunnel API keys (values hidden)"
+  else echo "[mcp-tunnel] Registered tunnel IDs"
+  fi
+  jq -r --arg kind "$kind" '
+    . as $r | .[$kind] | to_entries | to_entries[] |
+    .value.key as $id | "  \(.key + 1)) \($id)\n     created in: \(.value.value.createdIn)\n     used by: " +
+    ([$r.projects[] | select((if $kind == "keys" then .keyId else .tunnelId end) == $id) | .path] |
+      if length == 0 then "(none)" else join(", ") end)
+  ' <<<"$view"
+}
+
+provider_mcp_cmd() {
+  local operation="${1:-}" provider="${2:-}" tunnel_id="" key="" reference="" key_id="" project="" view choice count result rc=0
+  [[ "$operation" != list || -n "$provider" ]] || provider=openai
+  if [[ "$provider" != openai || ! "$operation" =~ ^(new|status|list|rm)$ ]]; then
+    echo "Usage: opencode-vm provider mcp {new|status|list|rm} [openai] (see provider help)" >&2
+    return 2
+  fi
+  need jq
+  need python3
+  shift
+  [[ "${1:-}" != openai ]] || shift
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      --tunnel-id|--api-key|--tunnel-api-key|--key-id|--project)
+        [[ "$#" -ge 2 && -n "$2" ]] || { echo "[mcp-tunnel] Missing option value." >&2; return 2; }
+        case "$1" in
+          --tunnel-id) tunnel_id="$2" ;;
+          --key-id) key_id="$2" ;;
+          --project) project="$2" ;;
+          *) reference="$2" ;;
+        esac
+        shift
+        ;;
+      --tunnel-id=*) tunnel_id="${1#*=}" ;;
+      --api-key=*|--tunnel-api-key=*) reference="${1#*=}" ;;
+      --key-id=*) key_id="${1#*=}" ;;
+      --project=*) project="${1#*=}" ;;
+      *) echo "[mcp-tunnel] Unknown option (see provider help)." >&2; return 2 ;;
+    esac
+    shift
+  done
+  case "$operation" in
+    list)
+      [[ -z "$project$key_id$tunnel_id$reference" ]] || return 2
+      mcp_tunnel_list; return $?
+      ;;
+    status)
+      [[ -z "$key_id$tunnel_id$reference" ]] || return 2
+      mcp_tunnel_status "${project:-$PWD}"; return $?
+      ;;
+    rm)
+      [[ -z "$reference" ]] || return 2
+      if [[ -n "$key_id" ]]; then
+        [[ -z "$project$tunnel_id" ]] || return 2
+        mcp_tunnel_registry drop key "$key_id" || return 1
+      elif [[ -n "$tunnel_id" ]]; then
+        [[ -z "$project" ]] || return 2
+        mcp_tunnel_registry drop tunnel "$tunnel_id" || return 1
+      else
+        result="$(mcp_tunnel_registry project "${project:-$PWD}")" || rc=$?
+        if [[ "$rc" == 3 ]]; then echo "[mcp-tunnel] Project is not configured."; return 0; fi
+        [[ "$rc" == 0 ]] || return "$rc"
+        project="$(jq -r .path <<<"$result")"
+        local session
+        session="$(mcp_tunnel_session "$project")" || return 1
+        if ! mcp_tunnel_with_project "$(jq -r --arg path "$project" '.project // $path' <<<"$session")" mcp_tunnel_remove_project "$project"; then
+          echo "[mcp-tunnel] Removal failed; project configuration retained for recovery." >&2
+          return 1
+        fi
+        return 0
+      fi
+      echo "[mcp-tunnel] Register entry removed."
+      return 0
+      ;;
+  esac
+  [[ -z "$project" && ( -z "$key_id" || -z "$reference" ) ]] || { echo "[mcp-tunnel] new runs in the project directory; choose a key ID or key value." >&2; return 2; }
+  project="$(pwd -P)"
+  view="$(mcp_tunnel_registry view)" || return 1
+  mcp_tunnel_product_note
+  echo "[mcp-tunnel] Configure project: $project"
+  mcp_tunnel_reuse_note
+  if [[ -z "$reference$key_id" && -t 0 ]]; then
+    count="$(jq '.keys | length' <<<"$view")"
+    if (( count > 0 )); then
+      mcp_tunnel_choices "$view" keys
+      read -r -p "Tunnel API key: choose a number or n for a new key: " choice || return 1
+      if [[ "$choice" != n && "$choice" != N ]]; then
+        [[ "$choice" =~ ^[1-9][0-9]*$ && "${#choice}" -le 6 ]] || return 2
+        key_id="$(jq -er --argjson n "$choice" '.keys | keys_unsorted | .[$n - 1] // empty' <<<"$view")" || return 2
+      fi
+    fi
+    if [[ -z "$key_id" ]]; then
+      echo "Runtime keys: https://platform.openai.com/settings/organization/api-keys"
+      read -r -s -p "New tunnel API key (Read + Use): " key || return 1
+      echo ""
+    fi
+  fi
+  case "$reference" in
+    env:*)
+      local name="${reference#env:}"
+      [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || return 2
+      key="${!name:-}"
+      ;;
+    file:*) key="$(<"${reference#file:}")" || return 1 ;;
+    "") ;;
+    *) key="$reference" ;;
+  esac
+  [[ -n "$key$key_id" ]] || { echo "[mcp-tunnel] Supply --tunnel-api-key or --key-id, or run in a terminal." >&2; return 2; }
+  if [[ -z "$tunnel_id" ]]; then
+    [[ -t 0 ]] || { echo "[mcp-tunnel] Supply --tunnel-id, or run in a terminal." >&2; return 2; }
+    count="$(jq '.tunnels | length' <<<"$view")"
+    if (( count > 0 )); then
+      mcp_tunnel_choices "$view" tunnels
+      read -r -p "Tunnel: choose a number or n to register another tunnel ID: " choice || return 1
+      if [[ "$choice" != n && "$choice" != N ]]; then
+        [[ "$choice" =~ ^[1-9][0-9]*$ && "${#choice}" -le 6 ]] || return 2
+        tunnel_id="$(jq -er --argjson n "$choice" '.tunnels | keys_unsorted | .[$n - 1] // empty' <<<"$view")" || return 2
+      fi
+    fi
+    if [[ -z "$tunnel_id" ]]; then
+      echo "Create a tunnel first: https://platform.openai.com/settings/organization/tunnels"
+      read -r -p "Tunnel ID: " tunnel_id || return 1
+    fi
+  fi
+  result="$(printf '%s' "$key" | mcp_tunnel_registry put "$project" "$tunnel_id" "$key_id")" || return 1
+  echo "[mcp-tunnel] Saved project connection: $(jq -r '.name + " [" + .id + "]"' <<<"$result")"
+  echo "  tunnel API key: $(jq -r .keyId <<<"$result"); tunnel: $tunnel_id"
+  echo "[mcp-tunnel] Activates on this project's next start/web/reconnect; connection not yet verified."
+}
+
+# Called after authenticated MCP readiness. Other projects (even with the same
+# tunnel ID) are not inspected or blocked. Only this project's lifecycle is held.
+mcp_tunnel_start() {
+  if [[ ! -e "$MCP_TUNNEL_DIR/registry.json" && ! -L "$MCP_TUNNEL_DIR/registry.json" ]]; then mcp_tunnel_legacy_note; return 0; fi
+  mcp_tunnel_with_project "$2" mcp_tunnel_start_project "$@"
+}
+
+mcp_tunnel_start_project() {
+  local vm="$1" proj="$2" share="$3" generation="$4" config current rc=0
+  config="$(mcp_tunnel_registry resolve "$proj")" || rc=$?
+  [[ "$rc" != 3 ]] || return 0
+  [[ "$rc" == 0 ]] || return "$rc"
+  current="$(
+    unset SESS_CONTROLLER
+    # shellcheck disable=SC1090
+    source "$(session_env "$proj")" || exit 1
+    printf '%s' "${SESS_CONTROLLER:-}"
+  )" || return 1
+  [[ "$current" == "$generation" ]] || return 0
+  printf '%s' "$config" | vm_exec "$vm" '
+    set -euo pipefail
+    SESS_SHARE="$1"; PROJ_DIR="$2"; OC_MCP_GENERATION="$3"; OC_PORT=4096
+    . "$SESS_SHARE/lib/web.sh"
+    # Downloads and remote readiness must not delay the runtime shutdown lock.
+    install_mcp_tunnel
+    exec 7>/tmp/ocvm-mcp-tunnel.lock
+    flock -w 20 7
+    # Shutdown takes the same lock and removes runtime.json before releasing it.
+    jq -e --arg generation "$OC_MCP_GENERATION" ".generation == \$generation" "$SESS_SHARE/mcp/runtime.json" >/dev/null
+    prepare_mcp_tunnel
+    start_mcp_tunnel
+    flock -u 7
+    exec 7>&-
+    wait_for_mcp_tunnel
+  ' "$share" "$proj" "$generation"
+}
+
+_provider_usage() {
+  cat <<'EOF'
+Usage: opencode-vm provider {list|new|custom|subscription|mcp}
+
+  provider list                  list model providers and MCP connections
+  provider new                   interactive; custom endpoint, subscription, or MCP
+
+Custom endpoints (own endpoint + API key; host-side, no session needed):
+  provider custom new            interactive wizard
+  provider custom add <id> --base-url <url> --api-key <key> [--name <n>] [--model <id>[:<name>[:<context>]]] [--dry-run]
+  provider custom sync <id>      reconcile the model list from <base-url>/models
+                                 [--prompt-new|--skip-new] [--no-context-update] [--dry-run] [--quiet]
+  provider custom rm <id>        remove the provider definition and its API key [--dry-run]
+
+Subscriptions (OAuth sign-in; connected in the OpenCode Web UI):
+  provider subscription new      show how to connect in the Web UI
+  provider subscription rm <id>  remove the stored subscription credential
+
+MCP connections (project assignments in a user-wide register):
+  provider mcp new openai        configure the current project; select stored entries or enter new ones
+      [--tunnel-id ID] [--tunnel-api-key KEY|env:NAME|file:PATH | --key-id ID]
+      --api-key remains an alias for --tunnel-api-key
+  provider mcp list [openai]     list all project assignments and reusable keys/tunnels
+  provider mcp status openai [--project ID]   show project configuration and live status
+  provider mcp rm openai [--project ID]       stop/remove a project assignment (default: cwd)
+  provider mcp rm openai --key-id ID          remove an unreferenced tunnel API key
+  provider mcp rm openai --tunnel-id ID       remove an unreferenced tunnel ID
+EOF
+}
+
+_provider_subscription_guidance() {
+  cat <<'EOF'
+[provider] Subscriptions (OAuth sign-in) are connected in the OpenCode Web UI:
+  1) opencode-vm web             # start/attach the web session, open the printed URL
+  2) type /model in the prompt   # opens the model selector
+  3) click "+" ("Connect provider" / "Anbieter verbinden")
+  Alternative: Settings -> Providers -> Connect provider.
+EOF
+}
+
+# Host-side OAuth credential removal. No VM or web server is required: the
+# stored credential is deleted and a tombstone is recorded in the auth-sync
+# state so running or older runtimes cannot restore it at finalization. A later
+# explicit login clears the tombstone.
+provider_subscription_remove() {
+  local provider="${1:-}" dry_run="no"
+  shift || true
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      --dry-run) dry_run="yes" ;;
+      *) echo "Usage: opencode-vm provider subscription rm <provider-id> [--dry-run]" >&2; return 2 ;;
+    esac
+    shift
+  done
+  if [[ -z "$provider" ]]; then
+    echo "Usage: opencode-vm provider subscription rm <provider-id> [--dry-run]" >&2
+    return 2
+  fi
+  if [[ ! "$provider" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "[provider] Invalid provider id: '$provider'" >&2
+    return 2
+  fi
+  command -v jq >/dev/null 2>&1 || { echo "[provider] jq is required." >&2; return 1; }
+
+  local auth_file="$HOST_DATA_DIR/auth.json" entry=""
+  if [[ -f "$auth_file" ]]; then
+    entry="$(jq -cS --arg p "$provider" '.[$p] // empty' "$auth_file" 2>/dev/null || true)"
+  fi
+  if [[ -z "$entry" ]]; then
+    echo "[provider] No stored credential for '$provider'." >&2
     return 1
   fi
-  # Durable checkpoint only. Global merge/tombstone publication remains tied
-  # to controlled runtime finalization.
-  if ! vm_exec "$expected_vm" '
-    set -e
-    source=/tmp/oc-xdg-data/opencode/auth.json
-    destination="$1/xdg-data/opencode/auth.json"
-    mkdir -p "$(dirname "$destination")"
-    tmp="${destination}.$$.tmp"
-    if [ -f "$source" ]; then jq -e "select(type == \"object\")" "$source" > "$tmp"; else printf "{}\n" > "$tmp"; fi
-    chmod 600 "$tmp"
-    mv -f "$tmp" "$destination"
-  ' "$share"; then
-    lifecycle_lock_release
+  if ! printf '%s' "$entry" | jq -e 'type == "object" and (.type == "oauth" or has("refresh"))' >/dev/null 2>&1; then
+    echo "[provider] '$provider' is not a subscription credential; use 'opencode-vm provider custom rm $provider'." >&2
     return 1
   fi
-  if ! auth_sync_mark_intent "$expected_generation" "$provider" "$action"; then
-    lifecycle_lock_release
-    echo "[provider] Could not record $action intent; the VM checkpoint was retained." >&2
+
+  if [[ "$dry_run" == "yes" ]]; then
+    echo "[provider] Would remove the stored subscription credential for '$provider' and record a logout tombstone."
+    echo "[provider] Dry-run only. No changes made."
+    return 0
+  fi
+
+  _auth_sync_lock || return 1
+  if ! _auth_sync_init_state; then _auth_sync_unlock; return 1; fi
+  if ! jq_inplace "$auth_file" --arg p "$provider" 'del(.[$p])'; then
+    _auth_sync_unlock
+    echo "[provider] Could not update $auth_file." >&2
     return 1
   fi
-  vm_exec "$expected_vm" '
-    runtime="$1/openlive/runtime.json"
-    [ -f "$runtime" ] || exit 0
-    url="$(jq -r ".backendUrl // empty" "$runtime")"
-    [ -n "$url" ] || exit 0
-    if [ -f "$1/auth.env" ]; then . "$1/auth.env"; fi
-    auth_args=()
-    if [ -n "${OPENCODE_SERVER_USERNAME:-}" ]; then auth_args=(-u "$OPENCODE_SERVER_USERNAME:$OPENCODE_SERVER_PASSWORD"); fi
-    curl -fsS --max-time 5 "${auth_args[@]}" -X POST "$url/instance/dispose" >/dev/null 2>&1 || true
-  ' "$share" >/dev/null 2>&1 || true
-  lifecycle_lock_release
-  echo "[provider] $provider $action completed in $expected_vm."
-  echo "[provider] The checkpoint becomes global at this runtime's controlled finalization."
+  local revision completion hash state_tmp
+  revision="$(jq -r '.nextRevision' "$AUTH_SYNC_DIR/state.json")"
+  completion="$(jq -r '.nextCompletion' "$AUTH_SYNC_DIR/state.json")"
+  hash="$(_auth_sync_entry_hash "$auth_file" "$provider")"
+  state_tmp="$(mktemp)"
+  if ! jq --arg p "$provider" --arg h "$hash" --argjson r "$revision" --argjson c "$completion" '
+        .providers[$p] = {
+          hash:$h, revision:$r, completion:$c, tombstone:$c,
+          loginRevision:((.providers[$p].loginRevision // 0))
+        }
+        | .nextRevision = ($r + 1)
+        | .nextCompletion = ($c + 1)
+      ' "$AUTH_SYNC_DIR/state.json" > "$state_tmp" \
+     || ! _auth_sync_atomic_json "$state_tmp" "$AUTH_SYNC_DIR/state.json"; then
+    rm -f "$state_tmp"
+    _auth_sync_unlock
+    echo "[provider] Could not record the logout tombstone." >&2
+    return 1
+  fi
+  rm -f "$state_tmp"
+  _auth_sync_unlock
+  echo "[provider] Removed the stored subscription credential for '$provider'."
+  echo "[provider] A later explicit login (Web UI) clears the tombstone; runtime availability was not checked."
 }
 
 provider_cmd() {
@@ -5426,37 +6196,62 @@ provider_cmd() {
   local model_file="$HOST_STATE_DIR/model.json"
   local db_file="$HOST_DATA_DIR/opencode.db"
 
-  local op="${1:-list}"
+  local op="${1:-help}"
   shift || true
 
   case "$op" in
-    login)
-      local provider="${1:-openai}" method=""
-      shift || true
-      while [[ "$#" -gt 0 ]]; do
-        case "$1" in
-          --method) shift; method="${1:-}" ;;
-          --method=*) method="${1#*=}" ;;
-          *) echo "Usage: opencode-vm provider login [provider] [--method <label>]" >&2; return 2 ;;
-        esac
-        shift || true
-      done
-      provider_auth_action login "$provider" "$method"
-      ;;
-
-    logout)
-      local provider="${1:-}"
-      [[ -n "$provider" ]] || { echo "Usage: opencode-vm provider logout <provider>" >&2; return 2; }
-      [[ "$#" -eq 1 ]] || { echo "Usage: opencode-vm provider logout <provider>" >&2; return 2; }
-      provider_auth_action logout "$provider"
+    help|-h|--help|"")
+      _provider_usage
+      return 0
       ;;
 
     new)
-      provider_cmd add
-      return $?
+      if [[ ! -t 0 ]]; then
+        _provider_usage
+        return 2
+      fi
+      local _class=""
+      echo "[provider] What do you want to add?"
+      echo "  c) Custom endpoint (own URL + API key)"
+      echo "  s) Subscription (OAuth sign-in in the Web UI)"
+      echo "  m) MCP connection (OpenAI MCP)"
+      while true; do
+        read -r -p "[provider] Choice [c/s/m]: " _class
+        case "$_class" in
+          c|C|custom|Custom) provider_cmd _custom_add; return $? ;;
+          s|S|subscription|Subscription) _provider_subscription_guidance; return 0 ;;
+          m|M|mcp|MCP) provider_mcp_cmd new openai; return $? ;;
+          *) echo "  Please enter c, s, or m." >&2 ;;
+        esac
+      done
       ;;
 
-    add)
+    mcp)
+      provider_mcp_cmd "$@"
+      ;;
+
+    custom)
+      local _sub="${1:-}"
+      shift || true
+      case "$_sub" in
+        new|add) provider_cmd _custom_add "$@" ;;
+        sync) provider_cmd _custom_sync "$@" ;;
+        rm) provider_cmd _custom_rm "$@" ;;
+        *) echo "Usage: opencode-vm provider custom {new|add|sync|rm}" >&2; return 2 ;;
+      esac
+      ;;
+
+    subscription)
+      local _sub="${1:-}"
+      shift || true
+      case "$_sub" in
+        new) _provider_subscription_guidance ;;
+        rm) provider_subscription_remove "$@" ;;
+        *) echo "Usage: opencode-vm provider subscription {new|rm}" >&2; return 2 ;;
+      esac
+      ;;
+
+    _custom_add)
       local provider="${1:-}"
       shift || true
 
@@ -5527,7 +6322,7 @@ provider_cmd() {
       # --- Interactive prompts for missing required fields ---
       if [[ -z "$provider" ]]; then
         if [[ ! -t 0 ]]; then
-          echo "Usage: opencode-vm provider add [<provider-id>] [--base-url <url>] [--api-key <key>] [--name <display-name>] [--model <model-id>[:<display-name>]] [--dry-run]" >&2
+          echo "Usage: opencode-vm provider custom add [<provider-id>] [--base-url <url>] [--api-key <key>] [--name <display-name>] [--model <model-id>[:<display-name>]] [--dry-run]" >&2
           exit 2
         fi
         while true; do
@@ -5803,7 +6598,7 @@ provider_cmd() {
       echo "[provider] Tip: restart your session (opencode-vm prune && opencode-vm start)."
       ;;
 
-    refresh)
+    _custom_sync)
       local provider="${1:-}"
       shift || true
       local prompt_new="no" skip_new="no" no_context_update="no" dry_run="no" quiet="no"
@@ -5821,7 +6616,7 @@ provider_cmd() {
       done
 
       if [[ -z "$provider" ]]; then
-        echo "Usage: opencode-vm provider refresh <provider-id> [--prompt-new] [--skip-new] [--no-context-update] [--dry-run] [--quiet]" >&2
+        echo "Usage: opencode-vm provider custom sync <provider-id> [--prompt-new] [--skip-new] [--no-context-update] [--dry-run] [--quiet]" >&2
         return 2
       fi
 
@@ -5843,7 +6638,7 @@ provider_cmd() {
 
       if ! jq -e --arg p "$provider" '(.provider // {}) | has($p)' "$cfg_file" >/dev/null 2>&1; then
         echo "[provider] No such provider in config: '$provider'" >&2
-        echo "[provider] Run 'opencode-vm provider add $provider ...' first." >&2
+        echo "[provider] Run 'opencode-vm provider custom add $provider ...' first." >&2
         return 1
       fi
 
@@ -5992,13 +6787,13 @@ provider_cmd() {
       jq_inplace "$cfg_file" --arg p "$provider" --argjson m "$updated_models" \
         '.provider[$p].models = $m'
 
-      [[ "$quiet" == "no" ]] && {
+      if [[ "$quiet" == "no" ]]; then
         echo "[provider] Updated config: $cfg_file"
         echo "[provider] Backup: $backup_dir"
-      }
+      fi
       ;;
 
-    rm|remove|forget|delete)
+    _custom_rm)
       local provider="${1:-}"
       shift || true
       local dry_run="no"
@@ -6012,7 +6807,7 @@ provider_cmd() {
       done
 
       if [[ -z "$provider" ]]; then
-        echo "Usage: opencode-vm provider rm <provider-id> [--dry-run]" >&2
+        echo "Usage: opencode-vm provider custom rm <provider-id> [--dry-run]" >&2
         exit 2
       fi
       if [[ ! "$provider" =~ ^[A-Za-z0-9._-]+$ ]]; then
@@ -6083,6 +6878,16 @@ provider_cmd() {
         fi
       fi
 
+      # Keep the removal durable across projects and already-running sessions.
+      # Do not store metadata in opencode.json (OpenCode validates its schema).
+      if command -v jq >/dev/null 2>&1; then
+        local removed_file="$SHARE_ROOT/removed-providers.json"
+        if [[ ! -f "$removed_file" ]]; then
+          printf '[]\n' > "$removed_file"
+        fi
+        jq_inplace "$removed_file" --arg p "$provider" '. + [$p] | unique' || return 1
+      fi
+
       if [[ -f "$model_file" ]]; then
         if command -v jq >/dev/null 2>&1; then
           jq_inplace "$model_file" --arg p "$provider" '
@@ -6111,25 +6916,14 @@ provider_cmd() {
       echo "[provider] Tip: restart your session (opencode-vm prune && opencode-vm start)."
       ;;
 
-    list|show|"")
+    list)
       command -v jq >/dev/null 2>&1 || { echo "[provider] jq is required for provider list." >&2; return 1; }
       local list_cfg list_auth
       list_cfg="$(pick_host_cfg)"
       list_auth="$auth_file"
       [[ -f "$list_cfg" ]] || list_cfg="/dev/null"
       [[ -f "$list_auth" ]] || list_auth="/dev/null"
-      echo "[provider] Stored providers:"
-      jq -nr --arg marker "$OPENLIVE_AUTH_MARKER" --slurpfile auth "$list_auth" --slurpfile cfg "$list_cfg" '
-        (($auth[0] // {}) | del(.[$marker])) as $a
-        | (($cfg[0].provider // {})) as $c
-        | (($a | keys) + ($c | keys) | unique)[]
-        | ($a[.] // null) as $credential
-        | "  - \(.)\t" +
-          (if $credential == null then "endpoint"
-           elif ($credential.type == "oauth" or ($credential | has("refresh"))) then "oauth"
-           else ($credential.type // "credential") end) +
-          (if $c[.] != null then " + config" else "" end)
-      ' 2>/dev/null || { echo "[provider] Stored provider data is invalid JSON." >&2; return 1; }
+
       local list_senv list_vm=""
       list_senv="$(session_env "$(pwd)")"
       if [[ -f "$list_senv" ]]; then
@@ -6140,21 +6934,162 @@ provider_cmd() {
           printf '%s' "${SESS_NAME:-}"
         )"
       fi
+
+      # Live runtime data (RUNTIME column) is optional: a running web session is
+      # needed, otherwise the stored view is shown and runtime stays unknown.
+      local live_json='{}' live_note="" live_fail=0 live_available=0 list_rc=0 list_out=""
       if [[ -n "$list_vm" ]] && is_vm_running "$list_vm"; then
-        echo "[provider] Live credentials in $list_vm:"
-        vm_exec "$list_vm" '
-          file=/tmp/oc-xdg-data/opencode/auth.json
-          [ -f "$file" ] || exit 0
-          jq -r --arg marker "$1" "to_entries[] | select(.key != \$marker) | \"  - \(.key)\\t\(if (.value.type == \\\"oauth\\\" or (.value | has(\\\"refresh\\\"))) then \\\"oauth\\\" else (.value.type // \\\"credential\\\") end)\"" "$file"
-        ' "$OPENLIVE_AUTH_MARKER" 2>/dev/null || echo "  <unavailable>"
+        list_out="$(mktemp)"
+        _provider_vm_exec "$list_vm" list "$(session_share_dir "$(pwd)")" "$(pwd)" "$OPENLIVE_AUTH_MARKER" >"$list_out" || list_rc=$?
+        if [[ "$list_rc" == 0 ]]; then
+          live_json="$(jq -Rsc 'split("\n") | map(select(length > 0) | split("\t")) | map({key: .[0], value: {type: .[1], available: ((.[4] // "unknown") | sub("^available="; ""))}}) | from_entries' "$list_out" 2>/dev/null || printf '{}')"
+          live_available=1
+        elif [[ "$list_rc" == 3 ]]; then
+          live_note="[provider] Live runtime status unavailable: no running web server for this session."
+        else
+          live_fail=1
+          live_note="[provider] Live runtime status could not be verified; stored data below is not a live status."
+        fi
+        rm -f "$list_out"
       else
-        echo "[provider] Live credentials: no running tracked VM for this project"
+        live_note="[provider] Live runtime status unavailable: no running tracked VM for this project."
       fi
+      [[ -n "$live_json" ]] || live_json='{}'
+
+      echo "[provider] Providers"
+
+      local list_table
+      list_table="$(jq -nr --arg marker "$OPENLIVE_AUTH_MARKER" --argjson live "$live_json" --slurpfile auth "$list_auth" --slurpfile cfg "$list_cfg" '
+        (($auth[0] // {}) | del(.[$marker])) as $a
+        | (($cfg[0].provider // {}) | del(.[$marker])) as $c
+        | (($a | keys) + ($c | keys) + ($live | keys) | unique)[]
+        | . as $id
+        | ($a[$id] // null) as $credential
+        | (if $credential == null then ($live[$id].type // "endpoint")
+           elif $credential.type == "oauth" or ($credential | has("refresh")) then "oauth"
+           elif $credential.type == "api" then "api" else "other" end) as $type
+        | [(if $type == "oauth" then 0 else 1 end), $id, $type,
+           (if $credential == null then "no" else "yes" end),
+           (if $c[$id] != null then "yes" else "no" end),
+           ($live[$id].available // "unknown")] | @tsv
+      ' 2>/dev/null | LC_ALL=C sort -t$'\t' -k1,1n -k2,2 | awk -F'\t' '
+        function header(title) {
+          if (started) print ""
+          print "[provider] " title ":"
+          printf "  %-20s %-7s %-12s %-7s %s\n", "ID", "AUTH", "CREDENTIALS", "CONFIG", "RUNTIME"
+          started = 1
+        }
+        {
+          if (NR == 1 || $1 != group) {
+            group = $1
+            header(group == "0" ? "Subscriptions — OAuth sign-in (Web UI)" : "Custom endpoints — host-side, no session needed")
+          }
+          printf "  %-20s %-7s %-12s %-7s %s\n", $2, $3, $4, $5, $6
+        }
+      ')" || { echo "[provider] Stored provider data is invalid JSON." >&2; return 1; }
+      if [[ -n "$list_table" ]]; then
+        printf '%s\n' "$list_table"
+      else
+        echo "  (no model providers configured)"
+      fi
+
+      [[ -z "$live_note" ]] || echo "$live_note"
+      echo ""
+      mcp_tunnel_list || live_fail=1
+      cat <<'EOF'
+
+[provider] Next steps
+  Connect/re-auth a subscription:  opencode-vm provider subscription new
+  Remove a subscription:           opencode-vm provider subscription rm <id>
+  Add/update a custom endpoint:    opencode-vm provider custom new
+                                   opencode-vm provider custom sync <id>
+  Remove a custom endpoint:        opencode-vm provider custom rm <id>
+  Configure OpenAI MCP:            opencode-vm provider mcp new openai
+EOF
+      if (( live_available == 0 )); then
+        echo "  Live runtime status:             opencode-vm web   (then re-run: opencode-vm provider list)"
+      fi
+      (( live_fail == 0 )) || return 1
       ;;
 
     *)
-      echo "Usage: opencode-vm provider {list|login [id] [--method label]|logout <id>|new|add [<id>] [--base-url <url>] [--api-key <key>] [--name <display-name>] [--vision] [--model <id>[:<name>[:<context>]]] [--dry-run]|refresh <id> [--prompt-new] [--skip-new] [--no-context-update] [--dry-run] [--quiet]|rm <id> [--dry-run]}" >&2
-      exit 2
+      _provider_usage
+      return 2
+      ;;
+  esac
+}
+
+# Caller holds the project lifecycle lock. Only SSH-captured, host-retained
+# snapshots are eligible for stopped-VM recovery; the share may be a seed.
+lifecycle_finalize_runtime() {
+  local vm="$1" generation="$2" share="$3" snapshot tmp
+  snapshot="$AUTH_SYNC_DIR/runs/$generation/lifecycle-final.json"
+  if is_vm_running "$vm"; then
+    mkdir -p "${snapshot%/*}" || return 1
+    rm -f "$snapshot" || return 1
+    tmp="$(mktemp "${snapshot}.XXXXXX")" || return 1
+    if ! vm_exec "$vm" '
+      set -euo pipefail
+      lock=/tmp/ocvm-runtime.lock
+      if [ -f /tmp/ocvm-runtime.pid ]; then
+        read -r pid < /tmp/ocvm-runtime.pid
+        case "$pid" in ""|*[!0-9]*) exit 1 ;; esac
+        if [ "$(readlink "/proc/$pid/fd/9" 2>/dev/null)" = "$lock" ]; then
+          kill -TERM "$pid"
+          # A foreground wait defers supervisor traps. Signal only its
+          # registered interactive child, keeping stdin and job control intact.
+          if [ -f /tmp/ocvm-runtime.child ]; then
+            read -r child stop_signal < /tmp/ocvm-runtime.child
+            case "$child" in ""|*[!0-9]*) exit 1 ;; esac
+            case "$stop_signal" in TERM|HUP) ;; *) exit 1 ;; esac
+            parent="$(ps -o ppid= -p "$child" 2>/dev/null)" || parent=""
+            if [ "${parent//[[:space:]]/}" = "$pid" ] &&
+               [ "$(readlink "/proc/$child/fd/9" 2>/dev/null)" = "$lock" ]; then
+              kill -s "$stop_signal" "$child" 2>/dev/null || true
+            fi
+          fi
+        fi
+      fi
+      exec 8>"$lock"
+      flock -w 30 8
+      if pgrep -x opencode >/dev/null 2>&1; then
+        echo "[auth] An unmanaged OpenCode writer remains; preserving the VM." >&2
+        exit 1
+      fi
+      jq -e "select(type == \"object\")" /tmp/oc-xdg-data/opencode/auth.json
+    ' > "$tmp" || ! _auth_sync_atomic_json "$tmp" "$snapshot"; then
+      rm -f "$tmp"
+      echo "[auth] Final live capture failed; VM and share must be retained." >&2
+      return 1
+    fi
+    rm -f "$tmp"
+  fi
+  if [[ ! -f "$snapshot" ]]; then
+    echo "[auth] No trusted final snapshot for $generation; preserving VM and share." >&2
+    return 1
+  fi
+  auth_sync_finalize "$generation" "$snapshot" || return 1
+  _auth_sync_atomic_json "$snapshot" "$share/xdg-data/opencode/auth.json"
+}
+
+_confirm_preserved_cleanup() {
+  local name="$1"
+  if [[ ! -t 0 ]] || [[ ! -r /dev/tty ]]; then
+    echo "[cleanup] Refusing to delete preserved session $name without an interactive terminal." >&2
+    return 1
+  fi
+
+  echo "" >&2
+  echo "[cleanup] Preserved session detected: $name" >&2
+  echo "[cleanup] It has no trusted final auth snapshot, so deleting it will discard any unsynced auth state." >&2
+  local ans
+  read -r -p "Delete it anyway and clean its VM/share? [y/N]: " ans </dev/tty || ans=""
+  case "$ans" in
+    y|Y|yes|YES)
+      return 0
+      ;;
+    *)
+      return 1
       ;;
   esac
 }
@@ -6180,6 +7115,7 @@ cleanup_sessions() {
         continue
       fi
       if [[ ! -f "$senv" ]]; then lifecycle_lock_release; continue; fi
+      unset SESS_MCP_ENABLED SESS_MCP_PORT
       # shellcheck disable=SC1090
       source "$senv"
       if [[ "${SESS_PROJ:-}" != "$_cleanup_proj" ]]; then
@@ -6193,22 +7129,41 @@ cleanup_sessions() {
       _cleanup_controller="${SESS_NAME}-cleanup-$(date +%s)-$$"
       write_senv "$senv" "$SESS_NAME" "${SESS_PROJ:-unknown}" "${CFG_HASH_AT_START:-}" \
         "${SESS_MODE:-tui}" "${SESS_PORT:-}" "${SESS_KEEP_HISTORY:-0}" "${SESS_TLS:-0}" \
-        "$_cleanup_generation" "$_cleanup_controller"
-      if is_vm_running "$SESS_NAME" && ! limactl stop "$SESS_NAME" 2>/dev/null; then
-        echo "[cleanup] Could not stop $SESS_NAME; preserving it." >&2
+        "$_cleanup_generation" "$_cleanup_controller" "${SESS_MCP_ENABLED:-0}" "${SESS_MCP_PORT:-}" || {
+        cleanup_failed=1
+        lifecycle_lock_release
+        continue
+      }
+      local _cleanup_share="${senv%.env}"
+      if ! lifecycle_finalize_runtime "$SESS_NAME" "$_cleanup_generation" "$_cleanup_share"; then
+        echo "[cleanup] Auth could not be preserved; refusing to delete $SESS_NAME." >&2
+        if _confirm_preserved_cleanup "$SESS_NAME"; then
+          if { is_vm_running "$SESS_NAME" && ! limactl stop "$SESS_NAME" 2>/dev/null; } \
+             || ! limactl delete -f "$SESS_NAME" 2>/dev/null; then
+            echo "[cleanup] Could not delete $SESS_NAME; preserving it." >&2
+            cleanup_failed=1
+            lifecycle_lock_release
+            continue
+          fi
+          auth_sync_prune_resolved_run "$_cleanup_generation"
+          rm -f "$AUTH_SYNC_DIR/runs/$_cleanup_generation/lifecycle-final.json"
+          rm -rf "${senv%.env}"
+          rm -f "$senv"
+          lifecycle_lock_release
+          continue
+        fi
         cleanup_failed=1
         lifecycle_lock_release
         continue
       fi
-      local _cleanup_share="${senv%.env}"
-      if ! auth_sync_finalize_share "$_cleanup_generation" "$_cleanup_share"; then
-        echo "[cleanup] Auth could not be preserved; refusing to delete $SESS_NAME." >&2
+      if { is_vm_running "$SESS_NAME" && ! limactl stop "$SESS_NAME" 2>/dev/null; } \
+         || ! limactl delete -f "$SESS_NAME" 2>/dev/null; then
         cleanup_failed=1
         lifecycle_lock_release
         continue
       fi
       auth_sync_prune_resolved_run "$_cleanup_generation"
-      limactl delete -f "$SESS_NAME" 2>/dev/null || true
+      rm -f "$AUTH_SYNC_DIR/runs/$_cleanup_generation/lifecycle-final.json"
       rm -rf "${senv%.env}"
       rm -f "$senv"
       lifecycle_lock_release
@@ -6219,7 +7174,14 @@ cleanup_sessions() {
   orphans="$(limactl list -q 2>/dev/null | grep '^oc-' | grep -v "^${BASE_NAME}$" || true)"
   for s in $orphans; do
     echo "[cleanup] orphan preserved (no safe auth baseline): $s" >&2
-    cleanup_failed=1
+    if _confirm_preserved_cleanup "$s"; then
+      if ! limactl delete -f "$s" 2>/dev/null; then
+        echo "[cleanup] Could not delete orphan VM $s; preserving it." >&2
+        cleanup_failed=1
+      fi
+    else
+      cleanup_failed=1
+    fi
   done
   (( cleanup_failed == 0 ))
 }
@@ -6869,6 +7831,301 @@ openlive_unstage_adapter() {
       ' || true
     fi
     rm -rf "$share/openlive/adapter"
+  fi
+}
+
+mcp_adapter_release_url() {
+  printf '%s\n' "${OCVM_MCP_ADAPTER_URL:-https://github.com/$OCVM_UPDATE_REPO/releases/download/$MCP_ADAPTER_TAG/$MCP_ADAPTER_FILENAME}"
+}
+
+mcp_adapter_cache_dir() {
+  printf '%s\n' "$MCP_ADAPTER_CACHE_ROOT/$MCP_ADAPTER_VERSION-$MCP_ADAPTER_SHA256"
+}
+
+mcp_adapter_dev_valid() {
+  local dir="$1"
+  [[ -f "$dir/package.json" && -f "$dir/package-lock.json" && -f "$dir/tsconfig.json" \
+    && -f "$dir/src/main.ts" && -f "$dir/src/types.ts" && -f "$dir/src/http.ts" \
+    && -f "$dir/src/opencode.ts" && -f "$dir/src/tools.ts" ]] || return 1
+  [[ "$(jq -r '.version // empty' "$dir/package.json" 2>/dev/null)" == "$MCP_ADAPTER_VERSION" ]]
+}
+
+mcp_adapter_release_valid() {
+  local dir="$1"
+  [[ -f "$dir/manifest.json" && -f "$dir/package.json" && -f "$dir/package-lock.json" \
+    && -f "$dir/dist/main.js" && -f "$dir/dist/types.js" && -f "$dir/dist/http.js" \
+    && -f "$dir/dist/opencode.js" && -f "$dir/dist/tools.js" && -f "$dir/.archive-sha256" ]] || return 1
+  [[ "$(<"$dir/.archive-sha256")" == "$MCP_ADAPTER_SHA256" ]] || return 1
+  jq -e --arg version "$MCP_ADAPTER_VERSION" --arg mcp "$MCP_SDK_VERSION" \
+    --arg opencode "$MCP_OPENCODE_SDK_VERSION" --arg protocol "$MCP_TESTED_PROTOCOL_VERSION" '
+      .schema == 1 and .adapterVersion == $version and
+      .mcpSdkVersion == $mcp and .opencodeSdkVersion == $opencode and
+      .transport == "streamable-http-stateless" and .testedProtocolVersion == $protocol
+    ' "$dir/manifest.json" >/dev/null 2>&1
+}
+
+mcp_adapter_source_dir() {
+  local dev="$SCRIPT_DIR/adapters/mcp" cached
+  if [[ -e "$dev" ]]; then
+    if ! mcp_adapter_dev_valid "$dev"; then
+      echo "[mcp] Adjacent adapter source is incomplete or has the wrong version: $dev" >&2
+      return 1
+    fi
+    printf '%s\n' "$dev"
+    return 0
+  fi
+  cached="$(mcp_adapter_cache_dir)"
+  if ! mcp_adapter_release_valid "$cached"; then
+    echo "[mcp] Adapter $MCP_ADAPTER_VERSION is not installed." >&2
+    return 1
+  fi
+  printf '%s\n' "$cached"
+}
+
+mcp_adapter_present() {
+  [[ -e "$SCRIPT_DIR/adapters/mcp" || -e "$(mcp_adapter_cache_dir)" ]]
+}
+
+mcp_sha256() {
+  local file="$1"
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | awk '{print $1}'
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 "$file" | awk '{print $NF}'
+  else
+    echo "[mcp] No SHA-256 tool is available." >&2
+    return 1
+  fi
+}
+
+# GNU mv follows `-T`; BSD/macOS mv uses `-h`. Both variants prevent a
+# destination symlink from redirecting activation into an unrelated directory.
+mcp_move_no_follow() {
+  local source="$1" target="$2"
+  if mv -T "$source" "$target" 2>/dev/null; then
+    return 0
+  fi
+  [[ -e "$source" || -L "$source" ]] || return 0
+  mv -h -f "$source" "$target"
+}
+
+mcp_link_no_follow() {
+  local source="$1" target="$2"
+  if ln -T "$source" "$target" 2>/dev/null; then
+    return 0
+  fi
+  ln -h "$source" "$target" 2>/dev/null
+}
+
+mcp_prepare_adapter_cache() {
+  local dev="$SCRIPT_DIR/adapters/mcp" cached url tmp archive extract root member actual type
+  local members listing lock owner owner_start current_start owner_token lock_token owner_tmp waited=0
+  if [[ -e "$dev" ]]; then
+    mcp_adapter_dev_valid "$dev" || {
+      echo "[mcp] Adjacent adapter source is incomplete or has the wrong version: $dev" >&2
+      return 1
+    }
+    return 0
+  fi
+  cached="$(mcp_adapter_cache_dir)"
+  mcp_adapter_release_valid "$cached" && return 0
+  mkdir -p "$MCP_ADAPTER_CACHE_ROOT" || return 1
+  need curl
+  need tar
+  tmp="$(mktemp -d "$MCP_ADAPTER_CACHE_ROOT/.install.XXXXXX")" || return 1
+  archive="$tmp/$MCP_ADAPTER_FILENAME"
+  extract="$tmp/extract"
+  members="$tmp/members"
+  listing="$tmp/listing"
+  root="opencode-vm-mcp-adapter-$MCP_ADAPTER_VERSION"
+  mkdir -p "$extract" || { rm -rf "$tmp"; return 1; }
+  url="$(mcp_adapter_release_url)"
+  echo "[mcp] Downloading adapter $MCP_ADAPTER_VERSION..."
+  if ! curl --proto '=https' --proto-redir '=https' --fail --location --retry 2 \
+      --connect-timeout 10 --max-time 120 --output "$archive" "$url"; then
+    rm -rf "$tmp"
+    echo "[mcp] Could not download the adapter from: $url" >&2
+    return 1
+  fi
+  actual="$(mcp_sha256 "$archive")" || { rm -rf "$tmp"; return 1; }
+  if [[ "$actual" != "$MCP_ADAPTER_SHA256" ]]; then
+    rm -rf "$tmp"
+    echo "[mcp] Adapter checksum mismatch; download was not installed." >&2
+    return 1
+  fi
+  if ! tar -tf "$archive" > "$members" || ! tar -tvf "$archive" > "$listing"; then
+    rm -rf "$tmp"
+    echo "[mcp] Adapter archive could not be inspected." >&2
+    return 1
+  fi
+  while IFS= read -r member; do
+    if [[ "$member" == /* || "$member" == *"/../"* || "$member" == ../* \
+      || ( "$member" != "$root" && "$member" != "$root/"* ) ]]; then
+      rm -rf "$tmp"
+      echo "[mcp] Adapter archive contains an unsafe path." >&2
+      return 1
+    fi
+  done < "$members"
+  while IFS= read -r type; do
+    case "${type:0:1}" in
+      -|d) ;;
+      *) rm -rf "$tmp"; echo "[mcp] Adapter archive contains an unsupported entry." >&2; return 1 ;;
+    esac
+  done < "$listing"
+  if ! tar -xf "$archive" -C "$extract" || \
+     ! printf '%s\n' "$MCP_ADAPTER_SHA256" > "$extract/$root/.archive-sha256" || \
+     ! mcp_adapter_release_valid "$extract/$root"; then
+    rm -rf "$tmp"
+    echo "[mcp] Adapter archive is incomplete or incompatible." >&2
+    return 1
+  fi
+  chmod -R go-w "$extract/$root" || { rm -rf "$tmp"; return 1; }
+
+  # Downloads may run concurrently, but cache activation is serialized. A
+  # fully-written owner file is hard-linked into place atomically; PID plus
+  # process-start identity distinguishes a live installer from PID reuse.
+  lock="${cached}.install-lock"
+  owner="${BASHPID:-$$}"
+  owner_start="$(ps -p "$owner" -o lstart= 2>/dev/null | tr -d '[:space:]' || true)"
+  [[ -n "$owner_start" ]] || { rm -rf "$tmp"; return 1; }
+  owner_token="$owner-$RANDOM-$RANDOM"
+  owner_tmp="$(mktemp "$MCP_ADAPTER_CACHE_ROOT/.lock-owner.XXXXXX")" || { rm -rf "$tmp"; return 1; }
+  printf '%s %s %s\n' "$owner" "$owner_start" "$owner_token" > "$owner_tmp" || {
+    rm -rf "$tmp" "$owner_tmp"
+    return 1
+  }
+  chmod 600 "$owner_tmp" || { rm -rf "$tmp" "$owner_tmp"; return 1; }
+  while true; do
+    if mcp_link_no_follow "$owner_tmp" "$lock" && [[ -f "$lock" && ! -L "$lock" ]]; then
+      break
+    fi
+    if [[ -d "$lock" && ! -L "$lock" ]]; then
+      rm -f "$lock/${owner_tmp##*/}"
+    fi
+    if mcp_adapter_release_valid "$cached"; then
+      rm -rf "$tmp" "$owner_tmp"
+      return 0
+    fi
+    if [[ -d "$lock" && ! -L "$lock" ]]; then
+      owner="$(cat "$lock/owner" 2>/dev/null || true)"
+      if [[ "$owner" =~ ^[0-9]+$ ]] && ! kill -0 "$owner" 2>/dev/null; then
+        rm -rf "$lock"
+        continue
+      fi
+      rm -rf "$tmp" "$owner_tmp"
+      echo "[mcp] Incompatible adapter-cache lock requires inspection: $lock" >&2
+      return 1
+    elif [[ ! -f "$lock" || -L "$lock" ]]; then
+      rm -f "$lock"
+      continue
+    fi
+    owner=""
+    owner_start=""
+    lock_token=""
+    read -r owner owner_start lock_token 2>/dev/null < "$lock" || true
+    current_start=""
+    if [[ "$owner" =~ ^[0-9]+$ ]]; then
+      current_start="$(ps -p "$owner" -o lstart= 2>/dev/null | tr -d '[:space:]' || true)"
+    fi
+    if [[ -z "$owner_start" || -z "$lock_token" || "$current_start" != "$owner_start" ]]; then
+      rm -f "$lock"
+      continue
+    fi
+    (( waited < 300 )) || {
+      rm -rf "$tmp" "$owner_tmp"
+      echo "[mcp] Timed out waiting for another adapter-cache activation." >&2
+      return 1
+    }
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  rm -f "$owner_tmp"
+  lock_token=""
+  read -r _ _ lock_token 2>/dev/null < "$lock" || true
+  if [[ "$lock_token" != "$owner_token" ]]; then
+    rm -rf "$tmp"
+    return 1
+  fi
+  # Another start may have installed the same verified artifact while this one
+  # downloaded. Keep that winner instead of deleting a cache in active use.
+  if mcp_adapter_release_valid "$cached"; then
+    rm -rf "$tmp"
+    rm -f "$lock"
+    return 0
+  fi
+  [[ ! -e "$cached" && ! -L "$cached" ]] || rm -rf "$cached" || { rm -rf "$tmp"; rm -f "$lock"; return 1; }
+  if ! mcp_move_no_follow "$extract/$root" "$cached"; then
+    if mcp_adapter_release_valid "$cached"; then
+      rm -rf "$tmp"
+      rm -f "$lock"
+      return 0
+    fi
+    rm -rf "$tmp"
+    rm -f "$lock"
+    return 1
+  fi
+  rm -rf "$tmp" || true
+  rm -f "$lock" || true
+}
+
+mcp_stage_adapter() {
+  local share="$1" source parent="$1/mcp" target="$1/mcp/adapter" staging
+  validate_mcp_credential "$share" || {
+    echo "[mcp] Refusing to stage through an unsafe connector state directory." >&2
+    return 1
+  }
+  source="$(mcp_adapter_source_dir)" || return 1
+  if [[ -e "$target" || -L "$target" ]]; then
+    if [[ -L "$target" || ! -d "$target" || ! -f "$target/.ocvm-managed" ]] ||
+       ! grep -qFx 'opencode-vm-mcp-staging-v1' "$target/.ocvm-managed" 2>/dev/null; then
+      echo "[mcp] Refusing to replace an unmanaged or unsafe adapter directory: $target" >&2
+      return 1
+    fi
+  fi
+  staging="$(mktemp -d "$parent/.adapter-stage.XXXXXX")" || return 1
+  chmod 700 "$staging" || { rm -rf "$staging"; return 1; }
+  printf '%s\n' 'opencode-vm-mcp-staging-v1' > "$staging/.ocvm-managed" || { rm -rf "$staging"; return 1; }
+  if mcp_adapter_dev_valid "$source"; then
+    rsync -a --checksum --delete --exclude='node_modules/' --exclude='dist/' \
+      --exclude='.ocvm-managed' "$source/" "$staging/" || { rm -rf "$staging"; return 1; }
+  else
+    rsync -a --checksum --delete --exclude='node_modules/' --exclude='.ocvm-managed' \
+      "$source/" "$staging/" || { rm -rf "$staging"; return 1; }
+  fi
+  if [[ -e "$target" || -L "$target" ]]; then
+    if [[ -L "$target" || ! -d "$target" || ! -f "$target/.ocvm-managed" ]] ||
+       ! grep -qFx 'opencode-vm-mcp-staging-v1' "$target/.ocvm-managed" 2>/dev/null; then
+      rm -rf "$staging"
+      echo "[mcp] Adapter staging ownership changed during activation." >&2
+      return 1
+    fi
+    rm -rf "$target" || { rm -rf "$staging"; return 1; }
+  fi
+  if ! mcp_move_no_follow "$staging" "$target"; then
+    rm -rf "$staging"
+    echo "[mcp] Adapter activation target changed during the no-follow rename." >&2
+    return 1
+  fi
+  if [[ -L "$target" || ! -d "$target" || ! -f "$target/.ocvm-managed" ]] ||
+     ! grep -qFx 'opencode-vm-mcp-staging-v1' "$target/.ocvm-managed" 2>/dev/null; then
+    echo "[mcp] Adapter activation did not produce the managed target." >&2
+    return 1
+  fi
+}
+
+mcp_unstage_adapter() {
+  local share="$1"
+  [[ ! -e "$share/mcp" && ! -L "$share/mcp" ]] && return 0
+  validate_mcp_credential "$share" || {
+    echo "[mcp] Refusing to unstage through an unsafe connector state directory." >&2
+    return 1
+  }
+  rm -f "$share/mcp/runtime.json" "$share/mcp/ready.json" "$share/mcp/adapter.log"
+  if [[ -f "$share/mcp/adapter/.ocvm-managed" ]] && \
+     grep -qFx 'opencode-vm-mcp-staging-v1' "$share/mcp/adapter/.ocvm-managed" 2>/dev/null; then
+    rm -rf "$share/mcp/adapter"
   fi
 }
 
@@ -9057,10 +10314,10 @@ is_browser_unsafe_port() {
 # absolute URL: the effective base is chosen here and then handed to the VM.
 WEB_PORT_BASE=""
 
-# $1 vm name, $2 requested base port. On success WEB_PORT_BASE holds the base
-# that was actually reserved.
+# $1 vm name, $2 requested base port, $3 optional private MCP port. On success
+# WEB_PORT_BASE holds the base that was actually reserved.
 start_web_tunnels() {
-  local vm="$1" req="$2"
+  local vm="$1" req="$2" reserved="${3:-}"
   [[ -n "$vm" && -n "$req" ]] || return 1
   WEB_PORT_BASE=""
 
@@ -9103,6 +10360,10 @@ start_web_tunnels() {
   local base p ok pid err_file
   err_file="$(mktemp 2>/dev/null || echo "/tmp/ocvm-tunnel-$$.err")"
   for base in $(seq "$req" $((req + 9))); do
+    if [[ -n "$reserved" ]] && (( reserved >= base - 2 && reserved <= base + 3 )); then
+      [[ "$base" != "$req" ]] || echo "[tunnel] Base port $base overlaps reserved MCP port $reserved; moving the web block."
+      continue
+    fi
     # Never bind a block that touches the browser unsafe-port list: browsers
     # refuse those outright (ERR_UNSAFE_PORT), so the banner would advertise
     # URLs no browser can open. Reached with a port persisted in session.env
@@ -9167,6 +10428,28 @@ start_web_tunnels() {
   echo "[tunnel]   Pick another base: opencode-vm web --port 8080" >&2
   echo "[tunnel]   If a limactl process holds one, stop & restart the VM to clear it:" >&2
   echo "[tunnel]     limactl stop ${vm} && limactl start ${vm}" >&2
+  return 1
+}
+
+# Select the guest-side fallback independently from SSH tunnel availability.
+# Even when LAN forwarding fails, P-2..P+3 must not overlap the private MCP
+# listener and the public ports must remain browser-safe.
+select_web_guest_base() {
+  local req="$1" reserved="${2:-}" base p ok
+  for base in $(seq "$req" $((req + 9))); do
+    (( base >= 1026 && base <= 65532 )) || continue
+    if [[ -n "$reserved" ]] && (( reserved >= base - 2 && reserved <= base + 3 )); then
+      continue
+    fi
+    ok=1
+    for p in "$base" $((base + 1)) $((base + 2)) $((base + 3)); do
+      if is_browser_unsafe_port "$p"; then ok=0; break; fi
+    done
+    (( ok )) || continue
+    printf '%s\n' "$base"
+    return 0
+  done
+  echo "[mcp] No guest web-port block avoids the reserved MCP port $reserved." >&2
   return 1
 }
 
@@ -9941,6 +11224,352 @@ start_web_proxies() {
   return 0
 }
 
+# --- Incoming MCP connector ----------------------------------------------
+install_mcp_tunnel() {
+  local version=0.0.15 arch digest directory archive temporary
+  case "$(uname -m)" in
+    aarch64|arm64) arch=arm64; digest=c51bfd883fc22e3445494a03c0179875176564bde470661b308fd83af5d01abb ;;
+    x86_64|amd64) arch=amd64; digest=8c836dc5d68d68b663d9a5c5b28ff9fa780d9f7a3fffb1c306880b8f32fab5f1 ;;
+    *) echo "[mcp-tunnel] Unsupported guest architecture." >&2; return 1 ;;
+  esac
+  directory="$HOME/.local/share/ocvm-mcp-tunnel/$version-$arch"
+  if [ -x "$directory/tunnel-client" ] && [ -f "$directory/.archive-sha256" ] &&
+     [ "$(cat "$directory/.archive-sha256")" = "$digest" ]; then
+    OC_MCP_TUNNEL_BIN="$directory/tunnel-client"
+    return 0
+  fi
+  echo "[mcp-tunnel] Installing tunnel-client $version ($arch) in the session VM..."
+  mkdir -p "$directory" || return 1
+  archive="$(mktemp)" || return 1
+  temporary="$(mktemp "$directory/.client.XXXXXX")" || { rm -f "$archive"; return 1; }
+  if ! curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 90 \
+      "https://github.com/openai/tunnel-client/releases/download/v$version/tunnel-client-v$version-linux-$arch.zip" -o "$archive" ||
+     ! printf '%s  %s\n' "$digest" "$archive" | sha256sum -c - >/dev/null ||
+     ! unzip -p "$archive" tunnel-client > "$temporary" ||
+     ! chmod 755 "$temporary" || ! mv -f "$temporary" "$directory/tunnel-client"; then
+    rm -f "$archive" "$temporary"
+    echo "[mcp-tunnel] Download, checksum verification, or installation failed." >&2
+    return 1
+  fi
+  rm -f "$archive"
+  printf '%s\n' "$digest" > "$directory/.archive-sha256" || return 1
+  OC_MCP_TUNNEL_BIN="$directory/tunnel-client"
+}
+
+# stdin contains the host configuration. All secrets are written privately;
+# the client profile holds only file references, never literal credentials.
+prepare_mcp_tunnel() {
+  python3 -c '
+import json, os, re, stat, sys, tempfile
+share = sys.argv[1]
+directory = os.path.join(share, "mcp")
+runtime = "/tmp/ocvm-mcp-tunnel"
+os.makedirs(runtime, mode=0o700, exist_ok=True)
+for path in (directory, runtime):
+    st = os.lstat(path)
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
+        sys.exit("[mcp-tunnel] Unsafe guest state directory.")
+value = json.load(sys.stdin)
+if not re.fullmatch(r"tunnel_[0-9a-f]{32}", value.get("tunnelId", "")) or not re.fullmatch(r"[!-~]{1,4096}", value.get("apiKey", "")):
+    sys.exit("[mcp-tunnel] Invalid guest configuration.")
+with open(os.path.join(directory, "runtime.json")) as handle:
+    port = json.load(handle)["listenPort"]
+def publish(name, text):
+    fd, temporary = tempfile.mkstemp(prefix=".tunnel-", dir=directory)
+    try:
+        with os.fdopen(fd, "w") as handle: handle.write(text)
+        os.replace(temporary, os.path.join(directory, name))
+    finally:
+        if os.path.exists(temporary): os.unlink(temporary)
+publish("tunnel-key", value["apiKey"])
+header = {"X-OCVM-MCP-Token": "file:" + os.path.join(directory, "credential")}
+profile = {
+    "config_version": 1,
+    "control_plane": {"base_url": "https://api.openai.com", "tunnel_id": value["tunnelId"], "api_key": "file:" + os.path.join(directory, "tunnel-key")},
+    "mcp": {"server_urls": [{"channel": "main", "url": "http://127.0.0.1:%s/mcp" % port}], "extra_headers": header, "discovery_extra_headers": header},
+    "health": {"unix_socket": runtime + "/health.sock"},
+    "admin_ui": {"open_browser": False},
+    "log": {"level": "info", "format": "json", "file": os.path.join(directory, "tunnel.log")},
+}
+fd = os.open(os.path.join(directory, "tunnel.log"), os.O_CREAT | os.O_APPEND | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+os.fchmod(fd, 0o600)
+os.close(fd)
+publish("tunnel.yaml", json.dumps(profile) + "\n")
+' "$SESS_SHARE"
+}
+
+mcp_tunnel_unit_description() {
+  printf 'opencode-vm MCP tunnel %s\n' "$(printf '%s' "$SESS_SHARE" | sha256sum | cut -d' ' -f1)"
+}
+
+mcp_tunnel_guest_status() {
+  local properties state description tunnel="unknown" health='{}'
+  properties="$(sudo systemctl show ocvm-mcp-tunnel.service -p LoadState -p ActiveState -p Description 2>/dev/null)" || {
+    case "$properties" in *LoadState=not-found*) ;; *) return 1 ;; esac
+  }
+  case "$properties" in
+    *LoadState=not-found*) ;;
+    *)
+      description="$(printf '%s\n' "$properties" | sed -n 's/^Description=//p')"
+      if [ "$description" != "$(mcp_tunnel_unit_description)" ]; then
+        echo "[mcp-tunnel] Service ownership mismatch; refusing to use or stop this unit." >&2
+        return 1
+      fi
+      ;;
+  esac
+  state="$(printf '%s\n' "$properties" | sed -n 's/^ActiveState=//p')"
+  [ -n "$state" ] || return 1
+  if [ "$state" = active ]; then
+    health="$(curl -fsS --max-time 2 --unix-socket /tmp/ocvm-mcp-tunnel/health.sock \
+      'http://localhost/health?details=true' 2>/dev/null)" || health='{}'
+  fi
+  if [ -f "$SESS_SHARE/mcp/tunnel.yaml" ]; then
+    tunnel="$(jq -er '.control_plane.tunnel_id | select(type == "string")' "$SESS_SHARE/mcp/tunnel.yaml" 2>/dev/null)" || tunnel=unknown
+  fi
+  printf '%s' "$health" | jq --arg state "$state" --arg tunnel "$tunnel" '{process:$state, tunnelId:$tunnel, ready:(.ready == true),
+    controlPlane:(.components["control-plane"].state // "unknown"),
+    connected:((.components["control-plane"].details.last_success != null) and
+      (.components["control-plane"].details.consecutive_failures == 0)),
+    httpStatus:(.components["control-plane"].details.http_status // 0)}'
+}
+
+start_mcp_tunnel() {
+  local status
+  status="$(mcp_tunnel_guest_status)" || return 1
+  jq -e '.process == "inactive" or .process == "failed"' <<<"$status" >/dev/null || return 1
+  sudo systemctl reset-failed ocvm-mcp-tunnel.service >/dev/null 2>&1 || true
+  sudo systemd-run --quiet --collect --unit=ocvm-mcp-tunnel \
+    --description="$(mcp_tunnel_unit_description)" \
+    --property="User=$(id -un)" --property=Restart=on-failure --property=RestartSec=5 \
+    --property=TimeoutStopSec=10 --property=UMask=0077 --property=AppArmorProfile=opencode-sandbox \
+    "$OC_MCP_TUNNEL_BIN" run --config "$SESS_SHARE/mcp/tunnel.yaml" || return 1
+  echo "[mcp-tunnel] Process started. Checking local readiness and OpenAI polling..."
+}
+
+wait_for_mcp_tunnel() {
+  local attempt status
+  for (( attempt=0; attempt<45; attempt++ )); do
+    status="$(mcp_tunnel_guest_status)" || return 1
+    if jq -e '.process == "inactive" or .process == "failed"' <<<"$status" >/dev/null; then
+      echo "[mcp-tunnel] Process stopped before readiness; inspect $SESS_SHARE/mcp/tunnel.log." >&2
+      return 1
+    fi
+    if jq -e '.process == "active" and .ready and .connected' <<<"$status" >/dev/null; then
+      echo "[mcp-tunnel] Ready: OpenAI polling confirmed for this project."
+      echo "[mcp-tunnel] Logs: $SESS_SHARE/mcp/tunnel.log"
+      return 0
+    fi
+    if jq -e '.httpStatus == 401 or .httpStatus == 403' <<<"$status" >/dev/null; then
+      echo "[mcp-tunnel] OpenAI rejected the runtime key or tunnel permissions (Read + Use required)." >&2
+      break
+    fi
+    sleep 1
+  done
+  echo "[mcp-tunnel] Not ready; the service will retry temporary failures. Local web/MCP remain available." >&2
+  echo "[mcp-tunnel] Status: opencode-vm provider mcp status openai; logs: $SESS_SHARE/mcp/tunnel.log" >&2
+  return 0
+}
+
+# Caller holds /tmp/ocvm-mcp-tunnel.lock. systemd owns the complete process group,
+# so no delayed watcher or restarted child can outlive verified shutdown.
+stop_mcp_tunnel() {
+  local status
+  status="$(mcp_tunnel_guest_status)" || return 1
+  if ! jq -e '.process == "inactive" or .process == "failed"' <<<"$status" >/dev/null; then
+    sudo systemctl stop ocvm-mcp-tunnel.service || return 1
+  fi
+  status="$(mcp_tunnel_guest_status)" || return 1
+  jq -e '.process == "inactive" or .process == "failed"' <<<"$status" >/dev/null || return 1
+  rm -f "$SESS_SHARE/mcp/tunnel.yaml" "$SESS_SHARE/mcp/tunnel-key"
+}
+
+prepare_mcp_adapter() {
+  [ "${OC_MCP_ENABLED:-0}" = "1" ] || return 0
+  local adapter="$SESS_SHARE/mcp/adapter" lock_hash mode installed_mode=""
+  local runtime="$SESS_SHARE/mcp/runtime.json" tmp project version
+  [ -f "$adapter/package-lock.json" ] || { echo "[mcp] Staged adapter is missing." >&2; return 1; }
+  lock_hash="$(sha256sum "$adapter/package-lock.json" | awk '{print $1}')" || return 1
+  mode="source-$lock_hash"
+  if [ -f "$adapter/manifest.json" ]; then
+    [ -f "$adapter/.archive-sha256" ] || return 1
+    mode="release-$(cat "$adapter/.archive-sha256")"
+  fi
+  [ -f "$adapter/node_modules/.ocvm-install-mode" ] && installed_mode="$(cat "$adapter/node_modules/.ocvm-install-mode")"
+  if [ ! -f "$adapter/node_modules/.package-lock.json" ] ||
+     [ "$adapter/package-lock.json" -nt "$adapter/node_modules/.package-lock.json" ] ||
+     [ "$installed_mode" != "$mode" ]; then
+    if [ "${mode%%-*}" = "source" ]; then
+      ( cd "$adapter" && npm ci --ignore-scripts --no-audit --no-fund --loglevel=error ) || return 1
+    else
+      ( cd "$adapter" && npm ci --omit=dev --ignore-scripts --no-audit --no-fund --loglevel=error ) || return 1
+    fi
+    printf '%s\n' "$mode" > "$adapter/node_modules/.ocvm-install-mode" || return 1
+  fi
+  if [ "${mode%%-*}" = "source" ]; then
+    ( cd "$adapter" && npm run build --silent ) || return 1
+  else
+    [ -f "$adapter/dist/main.js" ] || return 1
+  fi
+  project="$(pwd -P)"
+  version="$(opencode --version 2>/dev/null || true)"
+  [ -n "$version" ] || version=unknown
+  tmp="$runtime.$$.tmp"
+  rm -f "$SESS_SHARE/mcp/ready.json" "$tmp"
+  jq -n --arg project "$project" --arg projectHash "$OC_OPENLIVE_PROJECT_HASH" \
+    --arg projectName "$(basename "$PROJ_DIR")" --arg backendUrl "http://127.0.0.1:$OC_PORT_INTERNAL" \
+    --arg generation "$OC_MCP_GENERATION" --arg opencodeVersion "$version" \
+    --arg credentialFile "$SESS_SHARE/mcp/credential" --arg managerFile "$SESS_SHARE/openlive/manager.json" \
+    --argjson listenPort "$OC_MCP_PORT" \
+    '{schema:1,project:$project,projectHash:$projectHash,projectName:$projectName,
+      backendUrl:$backendUrl,generation:$generation,opencodeVersion:$opencodeVersion,
+      listenHost:"127.0.0.1",listenPort:$listenPort,credentialFile:$credentialFile,
+      managerFile:$managerFile}' > "$tmp" || return 1
+  chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$runtime" || { rm -f "$tmp"; return 1; }
+  export OCVM_MCP_RUNTIME="$runtime"
+}
+
+stop_mcp_adapter() (
+  exec 7>/tmp/ocvm-mcp-tunnel.lock
+  flock -w 180 7 || return 1
+  stop_mcp_tunnel || return 1
+  local pid pidf marker item waited failed=0 generation runtime="$SESS_SHARE/mcp/runtime.json" port="${OC_MCP_PORT:-}"
+  generation="${OC_MCP_GENERATION:-}"
+  if [ -f "$runtime" ]; then
+    [ -n "$generation" ] || generation="$(jq -r '.generation // empty' "$runtime" 2>/dev/null || true)"
+    port="$(jq -r '.listenPort // empty' "$runtime" 2>/dev/null || true)"
+  fi
+  if [ -z "$generation" ] && { [ -f /tmp/ocvm-mcp.sup.pid ] || [ -f /tmp/ocvm-mcp.run.pid ]; }; then
+    echo "[mcp] Refusing to stop an adapter without an ownership generation." >&2
+    return 1
+  fi
+  for item in "/tmp/ocvm-mcp.sup.pid:ocvm-mcp-supervisor-$generation" "/tmp/ocvm-mcp.run.pid:ocvm-mcp-child-$generation"; do
+    pidf="${item%%:*}"
+    marker="${item#*:}"
+    [ -f "$pidf" ] || continue
+    pid="$(cat "$pidf" 2>/dev/null || true)"
+    if _pid_has_marker "$pid" "$marker"; then
+      kill "$pid" 2>/dev/null || true
+      waited=0
+      while kill -0 "$pid" 2>/dev/null && _pid_has_marker "$pid" "$marker" && [ "$waited" -lt 50 ]; do
+        sleep 0.1
+        waited=$(( waited + 1 ))
+      done
+      if kill -0 "$pid" 2>/dev/null && _pid_has_marker "$pid" "$marker"; then
+        kill -KILL "$pid" 2>/dev/null || true
+        sleep 0.2
+      fi
+    fi
+    if kill -0 "$pid" 2>/dev/null && _pid_has_marker "$pid" "$marker"; then
+      echo "[mcp] Owned adapter process $pid did not stop." >&2
+      failed=1
+    elif [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      echo "[mcp] PID file ownership mismatch; refusing to signal process $pid." >&2
+      failed=1
+    else
+      rm -f "$pidf"
+    fi
+  done
+  if [ -n "$port" ] && ss -ltn "sport = :$port" 2>/dev/null | grep -q LISTEN; then
+    echo "[mcp] Listener on port $port remains after adapter shutdown." >&2
+    failed=1
+  fi
+  [ "$failed" = "0" ] || return 1
+  rm -f "$SESS_SHARE/mcp/ready.json" "$SESS_SHARE/mcp/runtime.json"
+  return 0
+)
+
+start_mcp_adapter() {
+  [ "${OC_MCP_ENABLED:-0}" = "1" ] || return 0
+  local adapter="$SESS_SHARE/mcp/adapter" marker="ocvm-mcp-supervisor-$OC_MCP_GENERATION"
+  local child_marker="ocvm-mcp-child-$OC_MCP_GENERATION"
+  [ -f "$adapter/dist/main.js" ] && [ -f "$SESS_SHARE/mcp/runtime.json" ] || return 1
+  mkdir -p "$SESS_SHARE/mcp" || return 1
+  touch "$SESS_SHARE/mcp/adapter.log" || return 1
+  chmod 600 "$SESS_SHARE/mcp/adapter.log" || return 1
+  export OCVM_MCP_RUNTIME="$SESS_SHARE/mcp/runtime.json"
+  setsid bash -c '
+    adapter="$1"; runtime="$2"; log="$3"
+    export OCVM_MCP_RUNTIME="$runtime"
+    exec 9>&-
+    while true; do
+      aa-exec -p opencode-sandbox -- node "$adapter/dist/main.js" "$4" >>"$log" 2>&1 &
+      echo $! > /tmp/ocvm-mcp.run.pid
+      wait $! || true
+      sleep 2
+    done' "$marker" "$adapter" "$OCVM_MCP_RUNTIME" "$SESS_SHARE/mcp/adapter.log" "$child_marker" \
+    </dev/null >/dev/null 2>&1 9>&- &
+  echo $! > /tmp/ocvm-mcp.sup.pid
+  return 0
+}
+
+wait_for_mcp_adapter() {
+  local waited=0 ready="$SESS_SHARE/mcp/ready.json" response token
+  response="$(mktemp /tmp/ocvm-mcp-health.XXXXXX)" || return 1
+  chmod 600 "$response"
+  token="$(cat "$SESS_SHARE/mcp/credential" 2>/dev/null || true)"
+  [ -n "$token" ] || { rm -f "$response"; return 1; }
+  while [ "$waited" -lt 400 ]; do
+    [ "${shutdown_requested:-0}" = 0 ] || { rm -f "$response"; return 1; }
+    if [ -f "$ready" ] && jq -e --arg project "$OC_OPENLIVE_PROJECT_HASH" \
+      --arg generation "$OC_MCP_GENERATION" --argjson port "$OC_MCP_PORT" '
+        .schema == 1 and .projectHash == $project and .generation == $generation and
+        .host == "127.0.0.1" and .port == $port and (.pid | type == "number")
+      ' "$ready" >/dev/null 2>&1 &&
+      printf 'header = "X-OCVM-MCP-Token: %s"\n' "$token" |
+        curl -fsS --config - --max-time 2 -o "$response" "http://127.0.0.1:$OC_MCP_PORT/healthz" 2>/dev/null &&
+      jq -e --arg project "$OC_OPENLIVE_PROJECT_HASH" --arg generation "$OC_MCP_GENERATION" '
+        .healthy == true and .project.id == $project and .generation == $generation
+      ' "$response" >/dev/null 2>&1; then
+      rm -f "$response"
+      return 0
+    fi
+    sleep 0.3
+    waited=$(( waited + 1 ))
+  done
+  rm -f "$response"
+  return 1
+}
+
+run_mcp_tui() {
+  load_session_auth
+  stop_mcp_adapter || return 1
+  prepare_mcp_adapter || return 1
+  local log="$SESS_SHARE/mcp/backend.log" rc=0
+  ( umask 077; touch "$log" ) || return 1
+  chmod 600 "$log" || return 1
+  aa-exec -p opencode-sandbox -- opencode serve --hostname 127.0.0.1 --port "$OC_PORT_INTERNAL" </dev/null >>"$log" 2>&1 &
+  OC_WEB_PID=$!
+  start_mcp_adapter || return 1
+  if ! wait_for_mcp_adapter; then
+    echo "[mcp] Terminal backend did not become ready; inspect $log." >&2
+    return 1
+  fi
+  echo "[mcp] Attaching terminal to the shared local OpenCode runtime."
+  run_interactive TERM aa-exec -p opencode-sandbox -- opencode attach "http://127.0.0.1:$OC_PORT_INTERNAL" || rc=$?
+  stop_mcp_adapter || return 1
+  kill "$OC_WEB_PID" 2>/dev/null || true
+  wait "$OC_WEB_PID" 2>/dev/null || true
+  OC_WEB_PID=""
+  # The surrounding runtime traps own signal handling and final data capture.
+  case "$rc" in 0|130|143) return 0 ;; *) return "$rc" ;; esac
+}
+
+mcp_watch_ready() {
+  [ "${OC_MCP_ENABLED:-0}" = "1" ] || return 0
+  local controller_pid=$$
+  ( if wait_for_mcp_adapter; then
+      echo ""
+      echo "[mcp] Guest adapter ready on 127.0.0.1:$OC_MCP_PORT. Verifying host loopback..."
+    else
+      echo ""
+      echo "[mcp] ERROR: adapter did not become ready; stopping this MCP-enabled session." >&2
+      echo "[mcp]   log: $SESS_SHARE/mcp/adapter.log" >&2
+      kill -TERM "$controller_pid" 2>/dev/null || true
+    fi ) 9>&- &
+  return 0
+}
+
 # --- A2A sidecar ----------------------------------------------------------
 #
 # One OpenCode runtime, two protocol surfaces: the adapter talks to the very
@@ -10405,7 +12034,7 @@ enter_session_shell() {
     # Sync VM-local data back to session share after shell exits
     if [ -n "$SESS_SHARE" ] && [ -d "$SESS_SHARE" ]; then
       echo "[shell] Syncing session data back to host..."
-      rsync -a --exclude="bin/" --exclude="log/" --exclude="tool-output/" \
+      rsync -a --exclude="auth.json" --exclude="bin/" --exclude="log/" --exclude="tool-output/" \
         /tmp/oc-xdg-data/opencode/ "$SESS_SHARE/xdg-data/opencode/" 2>/dev/null || true
       rsync -a /tmp/oc-xdg-state/opencode/ "$SESS_SHARE/xdg-state/opencode/" 2>/dev/null || true
       echo "[shell] Sync complete"
@@ -10413,9 +12042,91 @@ enter_session_shell() {
   ' "$proj_dir" "$host_lan_ip" "$sess_share"
 }
 
+# Pre-baseline ("legacy") sessions have no recorded start state, so host and
+# session credentials cannot be three-way merged. The operator decides
+# interactively; the comparison below never prints credential values.
+_attach_legacy_choice_required() {
+  local candidate="$1" host_auth="$HOST_DATA_DIR/auth.json" rows
+  rows="$(_attach_legacy_rows "$candidate" "$host_auth")" || return 0
+  printf '%s\n' "$rows" | grep -Eq $'\t(session-only|differs)$'
+}
+
+_attach_legacy_rows() {
+  local candidate="$1" host_auth="$2"
+  [[ -f "$candidate" ]] || candidate="/dev/null"
+  [[ -f "$host_auth" ]] || host_auth="/dev/null"
+  jq -nr --arg marker "$OPENLIVE_AUTH_MARKER" --slurpfile s "$candidate" --slurpfile h "$host_auth" '
+    (($s[0] // {}) | del(.[$marker])) as $s
+    | (($h[0] // {}) | del(.[$marker])) as $h
+    | (($s | keys) + ($h | keys) | unique)[]
+    | . as $id
+    | ($s[$id] // null) as $sv
+    | ($h[$id] // null) as $hv
+    | (if $sv != null then $sv else $hv end) as $v
+    | (if $v == null then "endpoint"
+       elif $v.type == "oauth" or ($v | has("refresh")) then "oauth"
+       elif $v.type == "api" then "api" else "other" end) as $kind
+    | (if $sv == null then "host-only"
+       elif $hv == null then "session-only"
+       elif $sv == $hv then "identical" else "differs" end) as $status
+    | [$id, $kind, (if $sv == null then "no" else "yes" end), (if $hv == null then "no" else "yes" end), $status] | @tsv
+  ' 2>/dev/null
+}
+
+# Union: the host file is the base and every session entry wins per provider,
+# so host-only providers survive. The previous host state is kept beside the
+# preserved candidate for recovery.
+_attach_legacy_apply_session() {
+  local generation="$1" candidate="$2" host_auth="$HOST_DATA_DIR/auth.json" tmp out
+  tmp="$(mktemp)"
+  out="$(mktemp)"
+  if [[ -f "$host_auth" ]]; then cp -p "$host_auth" "$tmp"; else printf '{}\n' > "$tmp"; fi
+  if ! _auth_sync_lock; then rm -f "$tmp" "$out"; return 1; fi
+  if [[ -f "$host_auth" ]]; then
+    cp -p "$host_auth" "$AUTH_SYNC_DIR/runs/$generation/legacy-host-before-adopt.json" 2>/dev/null || true
+  fi
+  if ! jq -s --slurpfile s "$candidate" '.[0] + ($s[0] // {})' "$tmp" > "$out" \
+     || ! _auth_sync_atomic_json "$out" "$host_auth"; then
+    _auth_sync_unlock
+    rm -f "$tmp" "$out"
+    echo "[attach] Could not adopt the session credentials." >&2
+    return 1
+  fi
+  _auth_sync_unlock
+  rm -f "$tmp" "$out"
+  echo "[attach] Adopted the session credentials (union; session wins, host-only providers kept)." >&2
+}
+
+_attach_legacy_prompt() {
+  local generation="$1" candidate="$2" rows answer=""
+  rows="$(_attach_legacy_rows "$candidate" "$HOST_DATA_DIR/auth.json")" || rows=""
+  echo "[attach] No baseline exists for $generation; credentials were preserved, not merged." >&2
+  if [[ -n "$rows" ]]; then
+    echo "[attach] Session vs host credentials:" >&2
+    printf '%s\n' "$rows" | awk -F'\t' '{
+      printf "[attach]   %-20s %-9s session=%-3s host=%-3s %s\n", $1, $2, $3, $4, $5
+    }' >&2
+  fi
+  echo "[attach] Use which credentials for the resumed session?" >&2
+  echo "[attach]   [s] session - union: session wins, host-only providers stay" >&2
+  echo "[attach]   [h] host    - keep the current host credentials" >&2
+  echo "[attach]   [c] cancel" >&2
+  while true; do
+    read -r -p "[attach] Choice [s/h/c]: " answer
+    case "$answer" in
+      s|S|session) break ;;
+      h|H|host) return 0 ;;
+      c|C|cancel|"") echo "[attach] Cancelled." >&2; return 1 ;;
+      *) echo "[attach]   Please enter s, h or c." >&2 ;;
+    esac
+  done
+  _attach_legacy_apply_session "$generation" "$candidate"
+}
+
 _ATTACH_TUNNEL_VM=""
 _ATTACH_TUNNEL_BASE=""
 _attach_tunnel_cleanup() {
+  stop_mcp_host_watcher || true
   [[ -n "$_ATTACH_TUNNEL_VM" && -n "$_ATTACH_TUNNEL_BASE" ]] || return 0
   echo ""
   echo "[opencode-vm] Web session ended — closing LAN tunnels..."
@@ -10450,10 +12161,16 @@ attach_session() {
   # shellcheck disable=SC1090
   source "$senv"
   local old_auth_generation="${SESS_AUTH_GENERATION:-$SESS_NAME}"
+  local attach_was_stopped=0
   local attach_controller
   attach_controller="${SESS_NAME}-attach-$(date +%s)-$$"
 
   if ! is_vm_running "$SESS_NAME"; then
+    lifecycle_finalize_runtime "$SESS_NAME" "$old_auth_generation" "$(session_share_dir "$proj")" || {
+      lifecycle_lock_release
+      return 1
+    }
+    attach_was_stopped=1
     # Session was kept on a previous exit (stop-but-keep). Resume it.
     if limactl list -q 2>/dev/null | grep -qx "$SESS_NAME"; then
       echo "[attach] Session VM '$SESS_NAME' is stopped — resuming..."
@@ -10470,7 +12187,6 @@ attach_session() {
     else
       echo "Session VM '$SESS_NAME' no longer exists." >&2
       echo "Start a new session with: opencode-vm start" >&2
-      rm -f "$senv"
       exit 1
     fi
   fi
@@ -10485,8 +12201,35 @@ attach_session() {
   _att_cfg="$(session_share_dir "$proj")/config/opencode/opencode.json"
   [[ -f "$_att_cfg" ]] && apply_model_enrichment "$_att_cfg"
 
-  local sess_mode="${SESS_MODE:-tui}"
-  local sess_port="${SESS_PORT:-$DEFAULT_OC_PORT}"
+  local sess_mode
+  sess_mode="$(mcp_session_mode "${SESSION_LAUNCH_MODE:-${SESS_MODE:-tui}}" "$proj")" || { lifecycle_lock_release; return 1; }
+  local prior_session_mode="${SESS_MODE:-tui}" prior_session_port="${SESS_PORT:-$DEFAULT_OC_PORT}"
+  local sess_port="${SESSION_PORT:-${SESS_PORT:-$DEFAULT_OC_PORT}}"
+  local prior_mcp_enabled="${SESS_MCP_ENABLED:-}"
+  [[ -n "$prior_mcp_enabled" ]] || { if [[ "$sess_mode" == web ]]; then prior_mcp_enabled=1; else prior_mcp_enabled=0; fi; }
+  local prior_mcp_port="${SESS_MCP_PORT:-}"
+  local sess_mcp_enabled=0
+  if [[ ( "$sess_mode" == web || "$sess_mode" == tui-mcp ) && "${SESSION_MCP_MODE:-}" != disable ]]; then
+    sess_mcp_enabled=1
+  fi
+  local sess_mcp_port="$prior_mcp_port"
+  case "${SESSION_MCP_MODE:-}" in
+    enable)
+      sess_mcp_enabled=1
+      sess_mcp_port="${SESSION_MCP_PORT:-$sess_mcp_port}"
+      ;;
+    disable) sess_mcp_enabled=0 ;;
+  esac
+  if [[ "$sess_mcp_enabled" == "1" ]]; then
+    [[ "$sess_mode" == web || "$sess_mode" == tui-mcp ]] || {
+      echo "[mcp] The connector requires a server-backed session." >&2
+      lifecycle_lock_release
+      return 1
+    }
+    [[ -z "$sess_mcp_port" ]] || validate_mcp_port "$sess_mcp_port"
+    mcp_prepare_adapter_cache || { lifecycle_lock_release; return 1; }
+    ensure_mcp_credential "$(session_share_dir "$proj")" || { lifecycle_lock_release; return 1; }
+  fi
   # TLS is a property of the session, not of the attach invocation, so a bare
   # `opencode-vm attach` resumes HTTPS without the user repeating --tls. An
   # explicit `opencode-vm web [--tls]` wins and is written back, otherwise a
@@ -10497,7 +12240,7 @@ attach_session() {
     _tls_senv="$(session_env "$proj")"
     if [[ -f "$_tls_senv" ]]; then
       write_senv "$_tls_senv" "$SESS_NAME" "${SESS_PROJ:-$proj}" "${CFG_HASH_AT_START:-}" \
-        "${SESS_MODE:-tui}" "${SESS_PORT:-$DEFAULT_OC_PORT}" "${SESS_KEEP_HISTORY:-0}" "$sess_tls" "$old_auth_generation" "${SESS_CONTROLLER:-$old_auth_generation}"
+        "${SESS_MODE:-tui}" "${SESS_PORT:-$DEFAULT_OC_PORT}" "${SESS_KEEP_HISTORY:-0}" "$sess_tls" "$old_auth_generation" "${SESS_CONTROLLER:-$old_auth_generation}" "${SESS_MCP_ENABLED:-0}" "${SESS_MCP_PORT:-}"
       SESS_TLS="$sess_tls"
     fi
   fi
@@ -10517,11 +12260,11 @@ attach_session() {
   # Self-heal graphify venv before OpenCode tries to launch its MCP server.
   # No-op when graphify isn't installed; injects mcp extras when missing.
   graphify_ensure_mcp_in_vm "$SESS_NAME"
-  local transition_backup transition_committed=0 auth_share_backup="" auth_share_had=0 new_auth_generation=""
+  local transition_backup transition_committed=0 transition_taken_over=0 auth_share_backup="" auth_share_had=0 new_auth_generation=""
   transition_backup="$(mktemp)"
   cp -p "$senv" "$transition_backup"
   _attach_transition_fail() {
-    if (( transition_committed == 0 )); then
+    if (( transition_committed == 0 && transition_taken_over == 0 )); then
       cp -p "$transition_backup" "$senv"
       if [[ -n "$auth_share_backup" ]]; then
         if (( auth_share_had == 1 )); then
@@ -10543,16 +12286,21 @@ attach_session() {
     return 1
   }
   write_senv "$senv" "$SESS_NAME" "${SESS_PROJ:-$proj}" "${CFG_HASH_AT_START:-}" \
-    "$sess_mode" "$sess_port" "${SESS_KEEP_HISTORY:-0}" "$sess_tls" "$old_auth_generation" "$attach_controller" || {
+    "$sess_mode" "$sess_port" "${SESS_KEEP_HISTORY:-0}" "$sess_tls" "$old_auth_generation" "$attach_controller" "$prior_mcp_enabled" "$prior_mcp_port" || {
       _attach_transition_fail
       return 1
     }
   SESS_CONTROLLER="$attach_controller"
-  if [[ "$sess_mode" == "web" ]]; then
-    a2a_ensure_installed_in_vm "$SESS_NAME"
+  if (( attach_was_stopped == 0 )) && ! lifecycle_finalize_runtime "$SESS_NAME" "$old_auth_generation" "$(session_share_dir "$proj")"; then
+    _attach_transition_fail
+    return 1
+  fi
+  transition_taken_over=1
+  if [[ "$sess_mode" == web || "$sess_mode" == tui-mcp || "$prior_session_mode" == web || "$prior_session_mode" == tui-mcp ]]; then
+    if [[ "$sess_mode" == web ]]; then a2a_ensure_installed_in_vm "$SESS_NAME"; fi
     local _web_share _old_base
     _web_share="$(session_share_dir "$proj")"
-    for _old_base in $(seq "$sess_port" $((sess_port + 9))); do
+    for _old_base in $(seq "$prior_session_port" $((prior_session_port + 9))); do
       stop_web_tunnels "$SESS_NAME" "$_old_base" >/dev/null 2>&1 || true
     done
     install_web_lib "$_web_share" || {
@@ -10564,6 +12312,7 @@ attach_session() {
       set -euo pipefail
       PROJ_DIR="$1"; SESS_SHARE="$2"; OC_PORT="$3"; OC_HOST_IP="$4"; OC_TLS="${5:-0}"
       . "$SESS_SHARE/lib/web.sh"
+      stop_mcp_adapter
       stop_all_proxies
       stop_openlive_gateway
       for base in $(seq "$OC_PORT" $(( OC_PORT + 9 ))); do
@@ -10575,7 +12324,27 @@ attach_session() {
       _attach_transition_fail
       return 1
     }
+    if [[ "$prior_session_mode" == web && "$sess_mode" != web ]]; then
+      stop_materialize_daemon "$SESS_NAME" "$_web_share" >/dev/null 2>&1 || true
+      openlive_unstage_adapter "$_web_share"
+      rm -f "$_web_share/config/opencode/AGENTS.web.md"
+    fi
     resolve_session_auth "$_web_share" || { _attach_transition_fail; return 1; }
+    if [[ "$sess_mcp_enabled" == "1" ]]; then
+      if { [[ -n "$sess_mcp_port" ]] && ! mcp_wait_host_port_available "$sess_mcp_port"; } ||
+         ! sess_mcp_port="$(mcp_reserve_host_port "$proj" "$sess_mcp_port")" || ! mcp_stage_adapter "$_web_share"; then
+        echo "[attach] MCP transition failed after runtime takeover; the VM and share were preserved." >&2
+        echo "[attach] Retry with: opencode-vm web --reconnect --mcp --mcp-port $sess_mcp_port" >&2
+        _attach_transition_fail
+        return 1
+      fi
+    else
+      if ! mcp_unstage_adapter "$_web_share"; then
+        echo "[attach] MCP disable failed after runtime takeover; the VM and share were preserved." >&2
+        _attach_transition_fail
+        return 1
+      fi
+    fi
   fi
 
   # The previous runtime is stopped now, so its final share can be merged
@@ -10588,27 +12357,25 @@ attach_session() {
     auth_share_had=1
   fi
   skills_sync_besprechung_for_session "$resume_share" || { _attach_transition_fail; return 1; }
-  if [[ -f "$AUTH_SYNC_DIR/runs/$old_auth_generation/baseline.json" \
-        || -f "$HOST_DATA_DIR/auth.json" \
-        || -f "$resume_share/xdg-data/opencode/auth.json" ]]; then
-    if ! auth_sync_capture_stopped_vm "$SESS_NAME" "$resume_share"; then
-      echo "[attach] The previous runtime still owns auth state; refusing replacement." >&2
-      _attach_transition_fail
-      return 1
-    fi
-  fi
   if [[ ! -f "$AUTH_SYNC_DIR/runs/$old_auth_generation/baseline.json" \
         && -f "$resume_share/xdg-data/opencode/auth.json" ]]; then
-    auth_sync_finalize "$old_auth_generation" "$resume_share/xdg-data/opencode/auth.json" || true
-    echo "[attach] Preserved legacy auth candidate for $old_auth_generation, but no baseline exists." >&2
-    echo "[attach] Refusing to choose between legacy and host credentials automatically." >&2
-    _attach_transition_fail
-    return 1
-  fi
-  if ! auth_sync_finalize_share "$old_auth_generation" "$resume_share"; then
-    echo "[attach] Auth finalization failed; the previous runtime was not replaced." >&2
-    _attach_transition_fail
-    return 1
+    # Pre-baseline session: preserve the candidate once, then let the operator
+    # decide (interactively) whether session or host credentials win.
+    auth_sync_finalize "$old_auth_generation" "$resume_share/xdg-data/opencode/auth.json" >/dev/null 2>&1 || true
+    local legacy_candidate="$AUTH_SYNC_DIR/runs/$old_auth_generation/candidate.json"
+    [[ -f "$legacy_candidate" ]] || legacy_candidate="$resume_share/xdg-data/opencode/auth.json"
+    if _attach_legacy_choice_required "$legacy_candidate"; then
+      if [[ ! -t 0 ]]; then
+        echo "[attach] No baseline exists for $old_auth_generation and the session credentials differ from the host." >&2
+        echo "[attach] Refusing to choose automatically; run attach in a terminal to pick interactively." >&2
+        _attach_transition_fail
+        return 1
+      fi
+      if ! _attach_legacy_prompt "$old_auth_generation" "$legacy_candidate"; then
+        _attach_transition_fail
+        return 1
+      fi
+    fi
   fi
   new_auth_generation="${SESS_NAME}-$(date +%s)-$$"
   mkdir -p "$resume_share/xdg-data/opencode"
@@ -10631,13 +12398,14 @@ attach_session() {
     return 1
   fi
   write_senv "$senv" "$SESS_NAME" "${SESS_PROJ:-$proj}" "${CFG_HASH_AT_START:-}" \
-    "$sess_mode" "$sess_port" "${SESS_KEEP_HISTORY:-0}" "$sess_tls" "$new_auth_generation" "$attach_controller" || {
+    "$sess_mode" "$sess_port" "${SESS_KEEP_HISTORY:-0}" "$sess_tls" "$new_auth_generation" "$attach_controller" "$sess_mcp_enabled" "$sess_mcp_port" || {
       _attach_transition_fail
       return 1
     }
   transition_committed=1
   SESS_AUTH_GENERATION="$new_auth_generation"
   auth_sync_prune_resolved_run "$old_auth_generation"
+  rm -f "$AUTH_SYNC_DIR/runs/$old_auth_generation/lifecycle-final.json"
   lifecycle_lock_release
   rm -f "$transition_backup" "$auth_share_backup"
 
@@ -10645,10 +12413,16 @@ attach_session() {
   # them down when this attach ends. Tunnel failure is non-fatal: the session
   # still runs, and opencode stays reachable via Lima's loopback auto-forward.
   # See start_web_tunnels for the block rationale.
-  local effective_base="$sess_port"
+  local effective_base
   local lan_up=1
+  local reserved_mcp=""
+  [[ "$sess_mcp_enabled" == "1" ]] && reserved_mcp="$sess_mcp_port"
+  effective_base="$(select_web_guest_base "$sess_port" "$reserved_mcp")" || return 1
+  if [[ "$effective_base" != "$sess_port" ]]; then
+    echo "[mcp] Web guest block moved from $sess_port to $effective_base to avoid private port $reserved_mcp."
+  fi
   if [[ "$sess_mode" == "web" ]]; then
-    if start_web_tunnels "$SESS_NAME" "$sess_port"; then
+    if start_web_tunnels "$SESS_NAME" "$sess_port" "$reserved_mcp"; then
       effective_base="$WEB_PORT_BASE"
       # A named function, not an interpolated trap body: the old form spliced
       # $SESS_NAME straight into the trap string, which breaks on anything the
@@ -10661,7 +12435,7 @@ attach_session() {
     else
       lan_up=0
       echo "[attach] WARNING: SSH tunnel for LAN access could not be set up." >&2
-      echo "[attach]   Session continues. Loopback-only fallback may be available via http://127.0.0.1:${sess_port}/ (Lima auto-forward)." >&2
+      echo "[attach]   Session continues. Loopback-only fallback may be available via http://127.0.0.1:${effective_base}/ (Lima auto-forward)." >&2
       echo "[attach]   To enable LAN access: stop+restart the VM, then 'opencode-vm attach'." >&2
     fi
     # (Re-)start materialize daemon on reattach; idempotent if already running.
@@ -10699,8 +12473,22 @@ attach_session() {
   # OpenCode reads skills/commands at startup. Reconcile the managed package
   # after stopping the old web runtime and before launching the resumed one.
   skills_sync_besprechung_for_session "$(session_share_dir "$proj")" || return 1
+  if [[ "$sess_mcp_enabled" == "1" ]]; then
+    trap _attach_tunnel_cleanup EXIT HUP TERM
+    mcp_watch_host_ready "$SESS_NAME" "$proj" "$(session_share_dir "$proj")" \
+      "$sess_mcp_port" "$attach_controller" "$attach_controller" || return 1
+  fi
   vm_exec "$SESS_NAME" '
     set -euo pipefail
+    exec 9>/tmp/ocvm-runtime.lock
+    flock -n 9
+    printf "%s\n" "$$" > /tmp/ocvm-runtime.pid
+    rm -f /tmp/ocvm-runtime.child
+    run_interactive() (
+      stop_signal="$1"; shift
+      printf "%s %s\n" "$BASHPID" "$stop_signal" > /tmp/ocvm-runtime.child
+      exec "$@"
+    )
     PROJ_DIR="$1"
     SESS_SHARE="$2"
     OC_MODE="$3"
@@ -10714,6 +12502,9 @@ attach_session() {
     OC_LAN_UP="${11:-1}"
     OC_OPENLIVE_PROJECT_HASH="${12:-}"
     OC_OPENLIVE_SCRIPT_VERSION="${13:-unknown}"
+    OC_MCP_ENABLED="${14:-0}"
+    OC_MCP_PORT="${15:-40960}"
+    OC_MCP_GENERATION="${16:-}"
 
     # Shared in-VM web library (materialized into the session share by
     # install_web_lib on the host, and mounted here at the same path). It owns
@@ -10744,6 +12535,10 @@ attach_session() {
       a2a_watch_ready()   { return 0; }
       reap_stale_opencode() { return 0; }
       print_web_banner()  { local h="$OC_HOST_IP"; [ "${OC_LAN_UP:-1}" = "1" ] || h="127.0.0.1"; echo "  Browser/Web UI:  http://${h}:${OC_PORT}"; return 0; }
+      prepare_mcp_adapter() { [ "${OC_MCP_ENABLED:-0}" != "1" ]; }
+      start_mcp_adapter() { [ "${OC_MCP_ENABLED:-0}" != "1" ]; }
+      stop_mcp_adapter()  { return 0; }
+      mcp_watch_ready()   { [ "${OC_MCP_ENABLED:-0}" != "1" ]; }
     fi
 
     export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/.config/composer/vendor/bin:/tmp/go/bin:/tmp/pnpm-store:$PATH"
@@ -10827,7 +12622,7 @@ attach_session() {
     mkdir -p /tmp/oc-xdg-data/opencode /tmp/oc-xdg-state/opencode
     if [ -d "$SESS_SHARE/xdg-data/opencode" ]; then
       echo "[attach] Merging session history from share..."
-      rsync -a --update --exclude="bin/" --exclude="log/" --exclude="tool-output/" \
+      rsync -a --update --exclude="auth.json" --exclude="bin/" --exclude="log/" --exclude="tool-output/" \
         "$SESS_SHARE/xdg-data/opencode/" /tmp/oc-xdg-data/opencode/ 2>/dev/null || true
       rsync -a --update "$SESS_SHARE/xdg-state/opencode/" /tmp/oc-xdg-state/opencode/ 2>/dev/null || true
     fi
@@ -10837,10 +12632,19 @@ attach_session() {
     # branch never runs because bash terminates as soon as `opencode web`
     # exits on SIGINT (rc=130) — `set -e` propagates the signal exit.
     sync_vm_to_share() {
+      local exit_rc=$?
       # After a hangup the pty is gone and every echo fails — under the
       # scripts set -e that aborted this trap before the rsync, silently
       # losing the history sync. Nothing below may die on a write error.
       set +e
+      trap "" INT TERM HUP
+      if ! stop_mcp_adapter; then
+        MCP_SHUTDOWN_FAILED=1
+      fi
+      if [ -n "${OC_WEB_PID:-}" ]; then
+        kill "$OC_WEB_PID" 2>/dev/null
+        wait "$OC_WEB_PID" 2>/dev/null
+      fi
       echo ""
       stop_all_proxies
       stop_openlive_gateway
@@ -10851,11 +12655,16 @@ attach_session() {
       # from the host — keep the tail of the opencode log in the share.
       mkdir -p "$SESS_SHARE/log" 2>/dev/null || true
       tail -n 400 /tmp/oc-xdg-data/opencode/log/opencode.log > "$SESS_SHARE/log/opencode-last.log" 2>/dev/null || true
-      rsync -a --exclude="bin/" --exclude="log/" --exclude="tool-output/" \
+      rsync -a --exclude="auth.json" --exclude="bin/" --exclude="log/" --exclude="tool-output/" \
         /tmp/oc-xdg-data/opencode/ "$SESS_SHARE/xdg-data/opencode/" 2>/dev/null || true
       rsync -a /tmp/oc-xdg-state/opencode/ "$SESS_SHARE/xdg-state/opencode/" 2>/dev/null || true
       echo "[attach] Sync complete."
-      return 0
+      if [ "${MCP_SHUTDOWN_FAILED:-0}" = "1" ]; then
+        echo "[mcp] ERROR: adapter shutdown could not be verified." >&2
+        exit_rc=1
+      fi
+      trap - EXIT
+      exit "$exit_rc"
     }
     trap sync_vm_to_share EXIT
 
@@ -10864,8 +12673,14 @@ attach_session() {
     # inherit as "ignore" to opencode web on execve and kill its ability to
     # respond to Ctrl+C; an active handler does not.
     shutdown_requested=0
+    MCP_SHUTDOWN_FAILED=0
     OC_WEB_PID=""
-    on_signal() { shutdown_requested=1; [ -n "$OC_WEB_PID" ] && kill "$OC_WEB_PID" 2>/dev/null; return 0; }
+    on_signal() {
+      shutdown_requested=1
+      stop_mcp_adapter || MCP_SHUTDOWN_FAILED=1
+      [ -n "$OC_WEB_PID" ] && kill "$OC_WEB_PID" 2>/dev/null
+      return 0
+    }
     trap on_signal INT TERM HUP
 
     # Same guard as in start_session: config-dir deps (ECC custom tools)
@@ -10882,7 +12697,10 @@ attach_session() {
       fi
     fi
 
-    if [ "$OC_MODE" = "web" ]; then
+    if [ "$OC_MODE" = "tui-mcp" ]; then
+      run_mcp_tui
+    elif [ "$OC_MODE" = "web" ]; then
+      stop_mcp_adapter
       stop_all_proxies
       stop_openlive_gateway
       reap_stale_opencode "$OC_PORT_INTERNAL"
@@ -10894,9 +12712,14 @@ attach_session() {
       ensure_web_tls
       start_openlive_gateway
       start_web_proxies
+      if ! prepare_mcp_adapter || ! start_mcp_adapter; then
+        echo "[mcp] ERROR: adapter preparation failed; refusing MCP-enabled startup." >&2
+        exit 1
+      fi
       start_a2a
       print_web_banner
       a2a_watch_ready
+      mcp_watch_ready
       if [ "$OC_WEB_TUI" = "true" ]; then
         aa-exec -p opencode-sandbox -- opencode web --hostname 127.0.0.1 --port "$OC_PORT_INTERNAL" &
         OC_WEB_PID=$!
@@ -10904,7 +12727,8 @@ attach_session() {
         echo ""
         echo "Press Enter to start TUI (web server continues running)..."
         read -r
-        aa-exec -p opencode-sandbox -- opencode attach "http://localhost:$OC_PORT_INTERNAL" || true
+        run_interactive TERM aa-exec -p opencode-sandbox -- opencode attach "http://localhost:$OC_PORT_INTERNAL" || true
+        stop_mcp_adapter
         kill "$OC_WEB_PID" 2>/dev/null || true
         wait "$OC_WEB_PID" 2>/dev/null || true
       else
@@ -10926,6 +12750,10 @@ attach_session() {
           OC_WEB_PID=$!
           wait "$OC_WEB_PID"
           rc=$?
+          if [ "$shutdown_requested" = "1" ]; then
+            trap "" INT TERM HUP
+            wait "$OC_WEB_PID" 2>/dev/null
+          fi
           set -e
           OC_WEB_PID=""
           [ "$shutdown_requested" = "1" ] && break
@@ -10945,12 +12773,20 @@ attach_session() {
         done
       fi
     else
-      aa-exec -p opencode-sandbox -- opencode || true
+      run_interactive TERM aa-exec -p opencode-sandbox -- opencode || true
     fi
 
     # Sync-back happens via the EXIT trap installed above (covers Ctrl+C as
     # well as normal exit).
-  ' "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$effective_base" "$host_lan_ip" "${OC_WEB_TUI:-false}" "$sess_tls" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up" "$(proj_hash "$proj")" "$OCVM_VERSION"
+  ' "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$effective_base" "$host_lan_ip" "${OC_WEB_TUI:-false}" "$sess_tls" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up" "$(proj_hash "$proj")" "$OCVM_VERSION" "$sess_mcp_enabled" "$sess_mcp_port" "$attach_controller" || {
+    stop_mcp_host_watcher || true
+    echo "[attach] Session command failed." >&2
+    return 1
+  }
+  if ! stop_mcp_host_watcher; then
+    echo "[mcp] Host readiness did not complete successfully; attach failed closed." >&2
+    return 1
+  fi
   lifecycle_lock_acquire "$proj" || return 1
   if [[ ! -f "$senv" ]]; then
     lifecycle_lock_release
@@ -10964,7 +12800,7 @@ attach_session() {
     echo "[attach] Session ownership changed; skipping stale auth finalization." >&2
     return 0
   fi
-  if ! auth_sync_finalize_share "$new_auth_generation" "$(session_share_dir "$proj")"; then
+  if ! lifecycle_finalize_runtime "$SESS_NAME" "$new_auth_generation" "$(session_share_dir "$proj")"; then
     lifecycle_lock_release
     echo "[attach] Auth finalization failed; the session VM and share were retained." >&2
     return 1
@@ -11042,17 +12878,242 @@ resolve_session_auth() {
   return 0
 }
 
+# Dedicated incoming-MCP credential. It is intentionally independent from web
+# Basic auth and remains mandatory when web mode uses --no-auth.
+MCP_CREDENTIAL_TOKEN=""
+load_mcp_credential() {
+  local share="$1" dir="$1/mcp" token
+  MCP_CREDENTIAL_TOKEN=""
+  command -v perl >/dev/null 2>&1 || return 1
+  # Pin the state directory with an fd, chdir through that fd, then open the
+  # credential with O_NOFOLLOW. This avoids reopening either guest-writable
+  # path after validation and closes both symlink-swap windows.
+  token="$(perl -MFcntl=:DEFAULT,:mode -e '
+    use strict;
+    use warnings;
+    my $dir = shift;
+    sysopen(my $dh, $dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW) or exit 1;
+    my @ds = stat($dh);
+    exit 1 unless @ds && S_ISDIR($ds[2]) && $ds[4] == $< && ($ds[2] & 07777) == 0700;
+    chdir($dh) or exit 1;
+    sysopen(my $fh, "credential", O_RDONLY | O_NOFOLLOW) or exit 1;
+    my @fs = stat($fh);
+    exit 1 unless @fs && S_ISREG($fs[2]) && $fs[3] == 1 && $fs[4] == $< && ($fs[2] & 07777) == 0600;
+    my $token = "";
+    my $read = sysread($fh, $token, 513);
+    exit 1 unless defined($read) && $read <= 512;
+    my $extra = "";
+    exit 1 unless sysread($fh, $extra, 1) == 0;
+    print $token;
+  ' "$dir")" || return 1
+  [[ ${#token} -ge 43 && ${#token} -le 512 && "$token" != *[$'\t\r\n ']* ]] || return 1
+  MCP_CREDENTIAL_TOKEN="$token"
+}
+
+validate_mcp_credential() {
+  load_mcp_credential "$1" || return 1
+  MCP_CREDENTIAL_TOKEN=""
+}
+
+ensure_mcp_credential() {
+  local share="$1" dir="$1/mcp" file="$1/mcp/credential" tmp token
+  need perl
+  if [[ -e "$dir" || -L "$dir" ]]; then
+    validate_mcp_credential "$share" && return 0
+    echo "[mcp] Existing credential path is unsafe or malformed: $file" >&2
+    return 1
+  fi
+  need openssl
+  ( umask 077; mkdir "$dir" ) || return 1
+  token="$(openssl rand -hex 32)" || { rmdir "$dir" 2>/dev/null || true; return 1; }
+  tmp="$dir/.credential.$(openssl rand -hex 16).tmp" || { rmdir "$dir" 2>/dev/null || true; return 1; }
+  if ! ( umask 077; set -C; printf '%s\n' "$token" > "$tmp" ) ||
+     ! mcp_move_no_follow "$tmp" "$file"; then
+    rm -f "$tmp"
+    rmdir "$dir" 2>/dev/null || true
+    return 1
+  fi
+  validate_mcp_credential "$share"
+}
+
+read_mcp_credential_path() {
+  local share="$1"
+  validate_mcp_credential "$share" || return 1
+  printf '%s\n' "$share/mcp/credential"
+}
+
+mcp_host_port_available() {
+  local port="$1"
+  load_policy 2>/dev/null || true
+  case " ${HOST_TCP_PORTS:-} " in
+    *" $port "*)
+      echo "[mcp] Port $port conflicts with HOST_TCP_PORTS." >&2
+      return 1
+      ;;
+  esac
+  if lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | grep -q .; then
+    echo "[mcp] Port $port is already in use." >&2
+    echo "[mcp] Choose another: opencode-vm web --mcp --mcp-port <free-port>" >&2
+    return 1
+  fi
+  return 0
+}
+
+mcp_wait_host_port_available() {
+  local port="$1" waited=0
+  while (( waited < 30 )); do
+    mcp_host_port_available "$port" >/dev/null 2>&1 && return 0
+    sleep 0.2
+    waited=$((waited + 1))
+  done
+  mcp_host_port_available "$port"
+}
+
+# Reserve automatic selections across concurrent host launches, before Lima has
+# opened its listener. Reconnects keep their recorded port; dead host claims can
+# be reused only when the actual listener and host policy also permit it.
+mcp_reserve_host_port() (
+  local project="$1" requested="${2:-}" port pid owner key root sessions="$SESSIONS_DIR"
+  local LIFECYCLE_LOCK_LINK="" LIFECYCLE_LOCK_CLAIM=""
+  root="$MCP_CONNECTOR_DIR/ports"
+  mkdir -p "$root" || exit 1
+  SESSIONS_DIR="$root"
+  lifecycle_lock_acquire mcp-ports || exit 1
+  SESSIONS_DIR="$sessions"
+  trap lifecycle_lock_release EXIT
+  key="$(proj_hash "$project")"
+  local first="${requested:-$DEFAULT_MCP_PORT}" last="${requested:-$((DEFAULT_MCP_PORT + 99))}"
+  for (( port=first; port<=last; port++ )); do
+    pid=""; owner=""
+    if [[ -f "$root/$port" ]]; then
+      read -r pid owner < "$root/$port" || true
+      if [[ "$owner" != "$key" && "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+        continue
+      fi
+    fi
+    mcp_host_port_available "$port" >/dev/null 2>&1 || continue
+    printf '%s %s\n' "$$" "$key" > "$root/$port" || exit 1
+    printf '%s\n' "$port"
+    exit 0
+  done
+  echo "[mcp] No available MCP port in $first..$last; use --mcp-port <free-port>." >&2
+  exit 1
+)
+
+MCP_HOST_WATCH_PID=""
+MCP_HOST_WATCH_STATUS=""
+mcp_watch_host_ready() {
+  local vm="$1" proj="$2" share="$3" port="$4" generation="$5" controller="$6"
+  local senv credential response status token
+  senv="$(session_env "$proj")"
+  credential="$share/mcp/credential"
+  load_mcp_credential "$share" || {
+    echo "[mcp] Cannot start host readiness verification with an unsafe credential." >&2
+    return 1
+  }
+  token="$MCP_CREDENTIAL_TOKEN"
+  MCP_CREDENTIAL_TOKEN=""
+  response="$(mktemp "$share/mcp/.host-health.XXXXXX")" || return 1
+  chmod 600 "$response" || { rm -f "$response"; return 1; }
+  status="$(mktemp "${TMPDIR:-/tmp}/ocvm-mcp-watch.XXXXXX")" || { rm -f "$response"; return 1; }
+  chmod 600 "$status" || { rm -f "$response" "$status"; return 1; }
+  printf '%s\n' pending > "$status" || { rm -f "$response" "$status"; return 1; }
+  MCP_HOST_WATCH_STATUS="$status"
+  (
+    local waited=0 ready="$share/mcp/ready.json" current_controller
+    trap '
+      rc=$?
+      if [[ "$rc" == "0" ]]; then printf "%s\n" ready > "$status"
+      else printf "%s\n" failed > "$status"
+      fi
+      rm -f "$response"
+    ' EXIT
+    while (( waited < 500 )); do
+      [[ "$(<"$status")" == "pending" ]] || exit 1
+      if [[ -f "$ready" ]] && jq -e --arg project "$(proj_hash "$proj")" \
+          --arg generation "$generation" --argjson port "$port" '
+            .schema == 1 and .projectHash == $project and .generation == $generation and
+            .host == "127.0.0.1" and .port == $port
+          ' "$ready" >/dev/null 2>&1 && \
+        printf 'header = "X-OCVM-MCP-Token: %s"\n' "$token" | \
+          curl -fsS --config - --max-time 2 -o "$response" "http://127.0.0.1:$port/healthz" 2>/dev/null && \
+        jq -e --arg project "$(proj_hash "$proj")" --arg generation "$generation" '
+          .healthy == true and .project.id == $project and .generation == $generation
+        ' "$response" >/dev/null 2>&1; then
+        rm -f "$response"
+        echo ""
+        echo "[mcp] Ready:      http://127.0.0.1:$port/mcp"
+        echo "[mcp] Credential: $credential"
+        echo "[mcp] Authentication remains required even when web mode uses --no-auth."
+        mcp_tunnel_start "$vm" "$proj" "$share" "$generation" ||
+          echo "[mcp-tunnel] WARNING: tunnel setup failed; local web/MCP remain available. Check: opencode-vm provider mcp status openai" >&2
+        exit 0
+      fi
+      sleep 0.3
+      waited=$((waited + 1))
+    done
+    rm -f "$response"
+    echo "[mcp] ERROR: host loopback readiness timed out for port $port." >&2
+    current_controller="$(
+      unset SESS_CONTROLLER
+      # shellcheck disable=SC1090
+      source "$senv" 2>/dev/null || exit 0
+      printf '%s' "${SESS_CONTROLLER:-}"
+    )"
+    if [[ "$current_controller" == "$controller" ]]; then
+      if ! vm_exec "$vm" '
+        set -e
+        runtime="$1"; generation="$2"
+        [ -f "$runtime" ]
+        [ "$(jq -r ".generation // empty" "$runtime" 2>/dev/null)" = "$generation" ]
+        pid="$(cat /tmp/ocvm-runtime.pid 2>/dev/null || true)"
+        [ -n "$pid" ]
+        kill -TERM "$pid"
+      ' "$share/mcp/runtime.json" "$generation" >/dev/null 2>&1; then
+        current_controller="$(
+          unset SESS_CONTROLLER
+          # shellcheck disable=SC1090
+          source "$senv" 2>/dev/null || exit 0
+          printf '%s' "${SESS_CONTROLLER:-}"
+        )"
+        if [[ "$current_controller" == "$controller" ]]; then
+          echo "[mcp] Could not stop the failed controller cleanly; stopping VM $vm." >&2
+          limactl stop "$vm" >/dev/null 2>&1 || true
+        fi
+      fi
+    fi
+    exit 1
+  ) 9>&- &
+  MCP_HOST_WATCH_PID=$!
+}
+
+stop_mcp_host_watcher() {
+  [[ -n "${MCP_HOST_WATCH_PID:-}" ]] || return 0
+  local pid="$MCP_HOST_WATCH_PID" status_file="${MCP_HOST_WATCH_STATUS:-}" status="" rc=0
+  MCP_HOST_WATCH_PID=""
+  MCP_HOST_WATCH_STATUS=""
+  if [[ -f "$status_file" ]] && [[ "$(<"$status_file")" == "pending" ]]; then
+    printf '%s\n' cancelled > "$status_file" || true
+  fi
+  wait "$pid" 2>/dev/null || rc=$?
+  [[ -f "$status_file" ]] && status="$(<"$status_file")"
+  rm -f "$status_file"
+  [[ "$rc" == "0" && "$status" == "ready" ]]
+}
+
 # Serialize session tracking state to $senv (loaded back via `source`).
 # printf '%q' safely escapes paths with spaces/special chars.
 write_senv() {
-  local senv="$1" name="$2" proj="$3" cfg_hash="$4" mode="$5" port="$6" keep_history="$7" tls="${8:-0}" auth_generation controller
+  local senv="$1" name="$2" proj="$3" cfg_hash="$4" mode="$5" port="$6" keep_history="$7" tls="${8:-0}" auth_generation controller mcp_enabled mcp_port
   local tmp
   auth_generation="${9:-$name}"
   controller="${10:-$auth_generation}"
+  mcp_enabled="${11:-0}"
+  mcp_port="${12:-}"
   mkdir -p "$(dirname "$senv")"
   tmp="$(mktemp "${senv}.tmp.XXXXXX")" || return 1
-  printf 'SESS_NAME=%q\nSESS_PROJ=%q\nCFG_HASH_AT_START=%q\nSESS_MODE=%q\nSESS_PORT=%q\nSESS_KEEP_HISTORY=%q\nSESS_TLS=%q\nSESS_AUTH_GENERATION=%q\nSESS_CONTROLLER=%q\n' \
-    "$name" "$proj" "$cfg_hash" "$mode" "$port" "$keep_history" "$tls" "$auth_generation" "$controller" > "$tmp"
+  printf 'SESS_NAME=%q\nSESS_PROJ=%q\nCFG_HASH_AT_START=%q\nSESS_MODE=%q\nSESS_PORT=%q\nSESS_KEEP_HISTORY=%q\nSESS_TLS=%q\nSESS_AUTH_GENERATION=%q\nSESS_CONTROLLER=%q\nSESS_MCP_ENABLED=%q\nSESS_MCP_PORT=%q\n' \
+    "$name" "$proj" "$cfg_hash" "$mode" "$port" "$keep_history" "$tls" "$auth_generation" "$controller" "$mcp_enabled" "$mcp_port" > "$tmp"
   chmod 600 "$tmp"
   mv -f "$tmp" "$senv"
 }
@@ -11135,7 +13196,10 @@ _update_senv_mode() {
   [[ -f "$senv" ]] || return 0
   # shellcheck disable=SC1090
   ( source "$senv"
-    write_senv "$senv" "$SESS_NAME" "$SESS_PROJ" "${CFG_HASH_AT_START:-}" "$new_mode" "$new_port" "${SESS_KEEP_HISTORY:-0}" "${SESS_TLS:-0}" "${SESS_AUTH_GENERATION:-$SESS_NAME}" "${SESS_CONTROLLER:-${SESS_AUTH_GENERATION:-$SESS_NAME}}"
+    if [[ "$new_mode" == web && "${SESS_MODE:-tui}" != web ]]; then
+      SESS_MCP_ENABLED=1
+    fi
+    write_senv "$senv" "$SESS_NAME" "$SESS_PROJ" "${CFG_HASH_AT_START:-}" "$new_mode" "$new_port" "${SESS_KEEP_HISTORY:-0}" "${SESS_TLS:-0}" "${SESS_AUTH_GENERATION:-$SESS_NAME}" "${SESS_CONTROLLER:-${SESS_AUTH_GENERATION:-$SESS_NAME}}" "${SESS_MCP_ENABLED:-0}" "${SESS_MCP_PORT:-}"
   )
 }
 
@@ -11147,6 +13211,7 @@ _destroy_prev_session() {
   senv="$(session_env "$proj")"
   [[ -f "$senv" ]] || return 0
   lifecycle_lock_acquire "$proj" || return 1
+  if [[ ! -f "$senv" ]]; then lifecycle_lock_release; return 0; fi
 
   # shellcheck disable=SC1090
   source "$senv"
@@ -11156,7 +13221,7 @@ _destroy_prev_session() {
   destroy_controller="${old_sess}-destroy-$(date +%s)-$$"
   write_senv "$senv" "$old_sess" "${SESS_PROJ:-$proj}" "${CFG_HASH_AT_START:-}" \
     "${SESS_MODE:-tui}" "${SESS_PORT:-}" "${SESS_KEEP_HISTORY:-0}" "${SESS_TLS:-0}" \
-    "$old_auth_generation" "$destroy_controller"
+    "$old_auth_generation" "$destroy_controller" "${SESS_MCP_ENABLED:-0}" "${SESS_MCP_PORT:-}" || { lifecycle_lock_release; return 1; }
   local old_sess_share
   old_sess_share="$(session_share_dir "$proj")"
   local old_proj_state
@@ -11165,14 +13230,7 @@ _destroy_prev_session() {
   echo ""
   echo "[cleanup] Syncing old session data back before destroy... $(_ts)"
 
-  # Stop the managed writer first. Its guest EXIT trap synchronizes VM-local
-  # auth into the mounted share before we take the durable candidate.
-  if is_vm_running "$old_sess" && ! limactl stop "$old_sess"; then
-    echo "[cleanup] Could not stop old session; refusing to destroy it." >&2
-    lifecycle_lock_release
-    return 1
-  fi
-  if ! auth_sync_finalize_share "$old_auth_generation" "$old_sess_share"; then
+  if ! lifecycle_finalize_runtime "$old_sess" "$old_auth_generation" "$old_sess_share"; then
     echo "[cleanup] Auth could not be preserved; refusing to destroy the old session." >&2
     lifecycle_lock_release
     return 1
@@ -11188,15 +13246,30 @@ _destroy_prev_session() {
       old_cfg="$old_cfg_dot"
     fi
     if [[ -f "$old_cfg" ]]; then
-      cp -p "$old_cfg" "$old_proj_state/config/opencode/opencode.json"
-      cp -p "$old_cfg" "$old_proj_state/config/opencode/.opencode.json"
       # Only overwrite host config if old session's version is newer —
       # the user may have run 'provider add' after the session ended.
-      local _host_cfg
+      local _host_cfg _publish_host=0
+      local _old_pmerge="$old_cfg.proj" _old_hmerge="$old_cfg.host"
       _host_cfg="$(pick_host_cfg)"
       if [[ ! -f "$_host_cfg" ]] || [[ "$old_cfg" -nt "$_host_cfg" ]]; then
-        cp -p "$old_cfg" "$_host_cfg"
+        _publish_host=1
       fi
+      # Prepare both candidates before publishing: a raw host copy would look
+      # like an explicit re-add to the removal filter on subsequent merges.
+      if ! _cfg_merge_for_publish "$old_proj_state/config/opencode/opencode.json" "$old_cfg" "$_old_pmerge" \
+         || { (( _publish_host )) && ! _cfg_merge_for_publish "$_host_cfg" "$old_cfg" "$_old_hmerge"; }; then
+        rm -f "$_old_pmerge" "$_old_hmerge"
+        lifecycle_lock_release
+        return 1
+      fi
+      if ! cp -p "$_old_pmerge" "$old_proj_state/config/opencode/opencode.json" \
+         || ! cp -p "$_old_pmerge" "$old_proj_state/config/opencode/.opencode.json" \
+         || { (( _publish_host )) && ! cp -p "$_old_hmerge" "$_host_cfg"; }; then
+        rm -f "$_old_pmerge" "$_old_hmerge"
+        lifecycle_lock_release
+        return 1
+      fi
+      rm -f "$_old_pmerge" "$_old_hmerge"
     fi
 
     # Persist orphaned session to the correct project-local destination
@@ -11228,8 +13301,13 @@ _destroy_prev_session() {
   echo "[old-session] Synced old session data back $(_ts)"
 
   echo "[cleanup] Removing old session VM: $old_sess $(_ts)"
+  if { is_vm_running "$old_sess" && ! limactl stop "$old_sess"; } \
+     || ! limactl delete -f "$old_sess" >/dev/null 2>&1; then
+    lifecycle_lock_release
+    return 1
+  fi
   auth_sync_prune_resolved_run "$old_auth_generation"
-  limactl delete -f "$old_sess" >/dev/null 2>&1 || true
+  rm -f "$AUTH_SYNC_DIR/runs/$old_auth_generation/lifecycle-final.json"
   rm -f "$senv"
   rm -rf "$old_sess_share"
   lifecycle_lock_release
@@ -11475,6 +13553,8 @@ apply_model_enrichment() {
 
 start_session() {
   proj="$(pwd)"
+  SESSION_MODE="$(mcp_session_mode "$SESSION_MODE" "$proj")" || return 1
+  if [[ "$SESSION_MODE" == tui-mcp ]]; then SESSION_PORT="${SESSION_PORT:-$DEFAULT_OC_PORT}"; fi
   local trust_rc
   if vscode_trust_preflight "$proj"; then
     :
@@ -11512,25 +13592,12 @@ start_session() {
     fi
     case "$_action" in
       reconnect)
-        if ! is_vm_running "$SESS_NAME"; then
-          _apply_vm_sizing_to_stopped "$SESS_NAME"
-          if ! run_with_spinner "[start] Resuming session VM..." limactl start "$SESS_NAME" --tty=false; then
-            echo "[start] Failed to resume VM '$SESS_NAME'. Use 'opencode-vm start --fresh' to recreate." >&2
-            exit 1
-          fi
-        else
+        if is_vm_running "$SESS_NAME"; then
           _warn_vm_sizing_mismatch "$SESS_NAME"
         fi
-        # The launch verb (`opencode-vm web`) overrides the persisted mode
-        # from the prior session — otherwise attach_session re-sources
-        # session.env and re-launches in the old mode.
-        if [[ "$SESSION_MODE" == "web" && "${SESS_MODE:-tui}" != "web" ]]; then
-          echo "[start] Switching session mode: ${SESS_MODE:-tui} -> web (port ${SESSION_PORT:-$DEFAULT_OC_PORT})."
-          _update_senv_mode "$senv" web "${SESSION_PORT:-$DEFAULT_OC_PORT}"
-        elif [[ "$SESSION_MODE" == "web" && -n "${SESSION_PORT:-}" && "$SESSION_PORT" != "${SESS_PORT:-}" ]]; then
-          echo "[start] Updating web port: ${SESS_PORT:-?} -> $SESSION_PORT."
-          _update_senv_mode "$senv" web "$SESSION_PORT"
-        fi
+        # Keep old mode/port metadata intact until takeover so switching from
+        # web to terminal also tears down the old public forwards and staging.
+        case "$SESSION_MODE" in web|tui|tui-mcp) SESSION_LAUNCH_MODE="$SESSION_MODE" ;; esac
         attach_session
         return 0
         ;;
@@ -11550,6 +13617,12 @@ start_session() {
 
   sess="oc-$(date +%Y%m%d-%H%M%S)"
   local controller_id="${sess}-controller-$$"
+  local effective_mcp_enabled=0 effective_mcp_port=""
+  if [[ ( "$SESSION_MODE" == web || "$SESSION_MODE" == tui-mcp ) && "${SESSION_MCP_MODE:-}" != disable ]]; then
+    effective_mcp_enabled=1
+    effective_mcp_port="$(mcp_reserve_host_port "$proj" "${SESSION_MCP_PORT:-}")" || return 1
+    validate_mcp_port "$effective_mcp_port"
+  fi
 
   if ! base_exists; then
     echo "Base VM '$BASE_NAME' not found. Running: opencode-vm init $(_ts)" >&2
@@ -11563,12 +13636,13 @@ start_session() {
   host_cfg="$(pick_host_cfg)"
   proj_cfg="$proj_state/config/opencode/opencode.json"
 
-  # Auto-refresh local LLM providers (LM Studio, Ollama) so newly-loaded
+  # Auto-sync local LLM providers' model lists (LM Studio, Ollama) so newly-loaded
   # models surface in this session. Cloud providers are untouched. Failures
-  # are non-fatal. Set OCVM_PROVIDER_AUTOREFRESH=0 to disable.
+  # are non-fatal. Set OCVM_PROVIDER_AUTOSYNC=0 to disable
+  # (the former name OCVM_PROVIDER_AUTOREFRESH is still accepted).
   # Runs BEFORE the host↔project sync so refreshed host_cfg propagates
   # into proj_cfg via mtime comparison, and BEFORE cfg_hash is computed.
-  if [[ "${OCVM_PROVIDER_AUTOREFRESH:-1}" == "1" ]]; then
+  if [[ "${OCVM_PROVIDER_AUTOSYNC:-${OCVM_PROVIDER_AUTOREFRESH:-1}}" == "1" ]]; then
     provider_refresh_all_quiet || true
   fi
 
@@ -11731,6 +13805,19 @@ start_session() {
     else
       openlive_unstage_adapter "$sess_share"
     fi
+    if [[ "$effective_mcp_enabled" == "1" ]]; then
+      ensure_mcp_credential "$sess_share" || return 1
+      mcp_prepare_adapter_cache || return 1
+      mcp_stage_adapter "$sess_share" || return 1
+    else
+      mcp_unstage_adapter "$sess_share"
+    fi
+  elif [[ "$effective_mcp_enabled" == 1 ]]; then
+    resolve_session_auth "$sess_share" || return 1
+    install_web_lib "$sess_share" || return 1
+    ensure_mcp_credential "$sess_share" || return 1
+    mcp_prepare_adapter_cache || return 1
+    mcp_stage_adapter "$sess_share" || return 1
   fi
 
   # Skills (independent of ECC enabled state — package guards handle dependencies)
@@ -11876,10 +13963,11 @@ start_session() {
   echo "[run] Clone complete, lock released $(_ts)"
 
   # Track session
-  write_senv "$senv" "$sess" "$proj" "$cfg_hash" "$SESSION_MODE" "${SESSION_PORT:-}" "${KEEP_HISTORY:-0}" "${SESSION_TLS:-0}" "$sess" "$controller_id"
+  write_senv "$senv" "$sess" "$proj" "$cfg_hash" "$SESSION_MODE" "${SESSION_PORT:-}" "${KEEP_HISTORY:-0}" "${SESSION_TLS:-0}" "$sess" "$controller_id" "$effective_mcp_enabled" "$effective_mcp_port"
 
   cleanup() {
     trap - EXIT HUP TERM
+    stop_mcp_host_watcher || true
     echo "[cleanup] Starting cleanup... $(_ts)"
     if ! lifecycle_lock_acquire "$proj"; then
       echo "[cleanup] Could not obtain lifecycle ownership; preserving the session." >&2
@@ -11958,17 +14046,15 @@ start_session() {
       # Merge the session config INTO the project-state baseline (session wins)
       # rather than overwriting it, so a provider that lives only in project
       # state is not dropped just because this session never referenced it.
-      local _pmerge="$persist_cfg.proj"
-      if _cfg_merge "$proj_cfg_cleanup" "$persist_cfg" "$_pmerge"; then
-        cp -p "$_pmerge" "$proj_cfg_cleanup"
-        rm -f "$_pmerge"
-      else
-        cp -p "$persist_cfg" "$proj_cfg_cleanup"
+      local _pmerge="$persist_cfg.proj" _hmerge="$persist_cfg.host"
+      if ! _cfg_merge_for_publish "$proj_cfg_cleanup" "$persist_cfg" "$_pmerge" \
+         || ! _cfg_merge_for_publish "$dst" "$persist_cfg" "$_hmerge"; then
+        rm -f "$persist_cfg" "$_pmerge" "$_hmerge"
+        lifecycle_lock_release
+        return 1
       fi
-
-      # Same merge-not-clobber rule for the host config write below.
-      local _hmerge="$persist_cfg.host"
-      _cfg_merge "$dst" "$persist_cfg" "$_hmerge" || cp -p "$persist_cfg" "$_hmerge"
+      cp -p "$_pmerge" "$proj_cfg_cleanup"
+      rm -f "$_pmerge"
 
       local current_hash
       current_hash="$(md5 -q "$dst")"
@@ -11992,15 +14078,15 @@ start_session() {
     # Auth has a separate baseline-backed merge path; history/config rsync is
     # never an authority for credentials.
     echo "[cleanup] Persisting session data... $(_ts)"
-    local _auth_sync_ok=1
     if ! _cleanup_controller_is_current; then
       echo "[cleanup] Controller was superseded before auth finalization; leaving the active session untouched." >&2
       lifecycle_lock_release
       return 0
     fi
-    if ! auth_sync_finalize_share "$sess" "$sess_share"; then
-      _auth_sync_ok=0
+    if ! lifecycle_finalize_runtime "$sess" "$sess" "$sess_share"; then
       echo "[cleanup] Auth finalization failed; the session will be retained." >&2
+      lifecycle_lock_release
+      return 1
     fi
 
     # Persist history to the mode-appropriate project-local destination.
@@ -12085,7 +14171,7 @@ start_session() {
           keep)
             echo "[cleanup] Stopping session VM (kept for resume): $sess $(_ts)"
             stop_host_port_forwards_in_vm "$sess"
-            limactl stop "$sess" 2>/dev/null || true
+            limactl stop "$sess" 2>/dev/null || { lifecycle_lock_release; return 1; }
             echo "[cleanup] Session VM stopped — disk clone and session env retained. $(_ts)"
             echo "[cleanup] Resume with 'opencode-vm start' (choose 'r') or 'opencode-vm attach'."
             _notify_kept_session_once
@@ -12096,21 +14182,15 @@ start_session() {
               lifecycle_lock_release
               return 0
             fi
-            if (( _auth_sync_ok == 0 )); then
-              echo "[cleanup] Refusing to delete the session because auth was not safely preserved." >&2
-              stop_host_port_forwards_in_vm "$sess"
-              limactl stop "$sess" 2>/dev/null || true
-              lifecycle_lock_release
-              return 0
-            fi
             echo "[cleanup] Stopping and deleting session VM: $sess $(_ts)"
             stop_host_port_forwards_in_vm "$sess"
+            limactl stop "$sess" 2>/dev/null || { lifecycle_lock_release; return 1; }
+            echo "[cleanup] Session VM stopped $(_ts)"
+            limactl delete -f "$sess" >/dev/null 2>&1 || { lifecycle_lock_release; return 1; }
             auth_sync_prune_resolved_run "$sess"
+            rm -f "$AUTH_SYNC_DIR/runs/$sess/lifecycle-final.json"
             rm -f "$senv"
             rm -rf "$sess_share"
-            limactl stop "$sess" 2>/dev/null || true
-            echo "[cleanup] Session VM stopped $(_ts)"
-            limactl delete -f "$sess" >/dev/null 2>&1 || true
             echo "[cleanup] Session VM deleted $(_ts)"
             ;;
         esac
@@ -12221,14 +14301,22 @@ start_session() {
   # Tunnel failure is non-fatal: opencode is still reachable via loopback.
   local effective_base="${SESSION_PORT:-0}"
   local lan_up=1
+  if [[ "$SESSION_MODE" == tui-mcp ]]; then
+    effective_base="$(select_web_guest_base "$effective_base" "$effective_mcp_port")" || return 1
+    lan_up=0
+  fi
   if [[ "$SESSION_MODE" == "web" ]]; then
-    if start_web_tunnels "$sess" "${SESSION_PORT:-0}"; then
+    effective_base="$(select_web_guest_base "${SESSION_PORT:-0}" "${effective_mcp_port:-}")" || return 1
+    if [[ "$effective_base" != "${SESSION_PORT:-0}" ]]; then
+      echo "[mcp] Web guest block moved from ${SESSION_PORT:-0} to $effective_base to avoid private port ${effective_mcp_port:-}."
+    fi
+    if start_web_tunnels "$sess" "${SESSION_PORT:-0}" "$effective_mcp_port"; then
       effective_base="$WEB_PORT_BASE"
       probe_web_tunnel_async "$WEB_PORT_BASE" "$host_lan_ip" "${SESSION_TLS:-0}"
     else
       lan_up=0
       echo "[run] WARNING: SSH tunnel for LAN access could not be set up." >&2
-      echo "[run]   Session continues. Loopback fallback may work via http://127.0.0.1:${SESSION_PORT}/ (Lima auto-forward)." >&2
+      echo "[run]   Session continues. Loopback fallback may work via http://127.0.0.1:${effective_base}/ (Lima auto-forward)." >&2
       echo "[run]   To enable LAN access: 'limactl stop ${sess} && limactl start ${sess}', then 'opencode-vm attach'." >&2
     fi
     # Materialize daemon: dump inline data: URI attachments from web-UI
@@ -12236,8 +14324,21 @@ start_session() {
     start_materialize_daemon "$sess" "$sess_share" || true
   fi
 
+  if [[ "$effective_mcp_enabled" == "1" ]]; then
+    mcp_watch_host_ready "$sess" "$proj" "$sess_share" "$effective_mcp_port" "$controller_id" "$controller_id" || return 1
+  fi
+
   if vm_exec "$sess" '
     set -euo pipefail
+    exec 9>/tmp/ocvm-runtime.lock
+    flock -n 9
+    printf "%s\n" "$$" > /tmp/ocvm-runtime.pid
+    rm -f /tmp/ocvm-runtime.child
+    run_interactive() (
+      stop_signal="$1"; shift
+      printf "%s %s\n" "$BASHPID" "$stop_signal" > /tmp/ocvm-runtime.child
+      exec "$@"
+    )
     PROJ_DIR="$1"
     SESS_SHARE="$2"
     OC_MODE="$3"
@@ -12251,6 +14352,9 @@ start_session() {
     OC_LAN_UP="${11:-1}"
     OC_OPENLIVE_PROJECT_HASH="${12:-}"
     OC_OPENLIVE_SCRIPT_VERSION="${13:-unknown}"
+    OC_MCP_ENABLED="${14:-0}"
+    OC_MCP_PORT="${15:-40960}"
+    OC_MCP_GENERATION="${16:-}"
 
     # Shared in-VM web library (materialized into the session share by
     # install_web_lib on the host, and mounted here at the same path). It owns
@@ -12281,6 +14385,10 @@ start_session() {
       a2a_watch_ready()   { return 0; }
       reap_stale_opencode() { return 0; }
       print_web_banner()  { local h="$OC_HOST_IP"; [ "${OC_LAN_UP:-1}" = "1" ] || h="127.0.0.1"; echo "  Browser/Web UI:  http://${h}:${OC_PORT}"; return 0; }
+      prepare_mcp_adapter() { [ "${OC_MCP_ENABLED:-0}" != "1" ]; }
+      start_mcp_adapter() { [ "${OC_MCP_ENABLED:-0}" != "1" ]; }
+      stop_mcp_adapter()  { return 0; }
+      mcp_watch_ready()   { [ "${OC_MCP_ENABLED:-0}" != "1" ]; }
     fi
 
     export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/.config/composer/vendor/bin:/tmp/go/bin:/tmp/pnpm-store:$PATH"
@@ -12404,14 +14512,22 @@ EOF
     check_sqlite_dbs "$VM_STATE/opencode"
     echo "[$(date +%T)] SQLite checks done"
 
-    # EXIT trap so Ctrl+C in web mode still syncs VM-local data (auth.json,
-    # sessions) back to the share — without this, provider logins made via
-    # the web UI are lost when the user stops the server with Ctrl+C.
+    # Sync history on exit. Auth is captured synchronously by the host after
+    # this runtime and its writers release the runtime lock.
     sync_vm_to_share() {
+      local exit_rc=$?
       # After a hangup the pty is gone and every echo fails — under the
       # scripts set -e that aborted this trap before the rsync, silently
       # losing the history sync. Nothing below may die on a write error.
       set +e
+      trap "" INT TERM HUP
+      if ! stop_mcp_adapter; then
+        MCP_SHUTDOWN_FAILED=1
+      fi
+      if [ -n "${OC_WEB_PID:-}" ]; then
+        kill "$OC_WEB_PID" 2>/dev/null
+        wait "$OC_WEB_PID" 2>/dev/null
+      fi
       stop_all_proxies
       stop_openlive_gateway
       stop_a2a
@@ -12423,11 +14539,16 @@ EOF
       tail -n 400 /tmp/oc-xdg-data/opencode/log/opencode.log > "$SESS_SHARE/log/opencode-last.log" 2>/dev/null || true
       check_sqlite_dbs "$VM_DATA/opencode" 2>/dev/null || true
       check_sqlite_dbs "$VM_STATE/opencode" 2>/dev/null || true
-      rsync -a --exclude="bin/" --exclude="log/" --exclude="tool-output/" \
+      rsync -a --exclude="auth.json" --exclude="bin/" --exclude="log/" --exclude="tool-output/" \
         "$VM_DATA/opencode/" "$SESS_SHARE/xdg-data/opencode/" 2>/dev/null || true
       rsync -a "$VM_STATE/opencode/" "$SESS_SHARE/xdg-state/opencode/" 2>/dev/null || true
       echo "[$(date +%T)] In-VM sync complete"
-      return 0
+      if [ "${MCP_SHUTDOWN_FAILED:-0}" = "1" ]; then
+        echo "[mcp] ERROR: adapter shutdown could not be verified." >&2
+        exit_rc=1
+      fi
+      trap - EXIT
+      exit "$exit_rc"
     }
     trap sync_vm_to_share EXIT
 
@@ -12485,16 +14606,31 @@ EOF
       fi
     fi
 
+    shutdown_requested=0
+    MCP_SHUTDOWN_FAILED=0
+    OC_WEB_PID=""
+    on_signal() {
+      shutdown_requested=1
+      stop_mcp_adapter || MCP_SHUTDOWN_FAILED=1
+      [ -n "$OC_WEB_PID" ] && kill "$OC_WEB_PID" 2>/dev/null
+      return 0
+    }
+    trap on_signal INT TERM HUP
+
     case "$OC_MODE" in
+      tui-mcp)
+        run_mcp_tui
+        ;;
       shell)
         echo "[shell] Interactive shell started in session VM."
         echo "[shell] Exit this shell to return to host terminal."
-        bash
+        run_interactive HUP bash
         ;;
       prepare)
         echo "[openlive] Project session prepared."
         ;;
       web)
+        stop_mcp_adapter
         stop_all_proxies
         stop_openlive_gateway
         reap_stale_opencode "$OC_PORT_INTERNAL"
@@ -12506,9 +14642,14 @@ EOF
         ensure_web_tls
         start_openlive_gateway
         start_web_proxies
+        if ! prepare_mcp_adapter || ! start_mcp_adapter; then
+          echo "[mcp] ERROR: adapter preparation failed; refusing MCP-enabled startup." >&2
+          exit 1
+        fi
         start_a2a
         print_web_banner
         a2a_watch_ready
+        mcp_watch_ready
         if [ "$OC_WEB_TUI" = "true" ]; then
           aa-exec -p opencode-sandbox -- opencode web --hostname 127.0.0.1 --port "$OC_PORT_INTERNAL" &
           OC_WEB_PID=$!
@@ -12516,7 +14657,8 @@ EOF
           echo ""
           echo "Press Enter to start TUI (web server continues running)..."
           read -r
-          aa-exec -p opencode-sandbox -- opencode attach "http://localhost:$OC_PORT_INTERNAL" || true
+          run_interactive TERM aa-exec -p opencode-sandbox -- opencode attach "http://localhost:$OC_PORT_INTERNAL" || true
+          stop_mcp_adapter
           kill "$OC_WEB_PID" 2>/dev/null || true
           wait "$OC_WEB_PID" 2>/dev/null || true
         else
@@ -12535,10 +14677,6 @@ EOF
           # browser silently talks to the unmanaged orphan). The set -e wrap
           # matters too: without set +e a crash exits the script at the
           # aa-exec line and the restart loop can never run.
-          shutdown_requested=0
-          OC_WEB_PID=""
-          on_signal() { shutdown_requested=1; [ -n "$OC_WEB_PID" ] && kill "$OC_WEB_PID" 2>/dev/null; return 0; }
-          trap on_signal INT TERM HUP
           serve_fails=0
           while [ "$shutdown_requested" = "0" ]; do
             set +e
@@ -12546,6 +14684,10 @@ EOF
             OC_WEB_PID=$!
             wait "$OC_WEB_PID"
             rc=$?
+            if [ "$shutdown_requested" = "1" ]; then
+              trap "" INT TERM HUP
+              wait "$OC_WEB_PID" 2>/dev/null
+            fi
             set -e
             OC_WEB_PID=""
             [ "$shutdown_requested" = "1" ] && break
@@ -12567,17 +14709,22 @@ EOF
         fi
         ;;
       *)
-        aa-exec -p opencode-sandbox -- opencode || true
+        run_interactive TERM aa-exec -p opencode-sandbox -- opencode || true
         ;;
     esac
 
     # Sync back happens via the EXIT trap installed above (covers both clean
     # exit and Ctrl+C-driven termination of the web server).
-  ' "$proj" "$sess_share" "$SESSION_MODE" "$effective_base" "${OC_WEB_TUI:-false}" "$host_lan_ip" "${SESSION_TLS:-0}" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up" "$(proj_hash "$proj")" "$OCVM_VERSION"; then
+  ' "$proj" "$sess_share" "$SESSION_MODE" "$effective_base" "${OC_WEB_TUI:-false}" "$host_lan_ip" "${SESSION_TLS:-0}" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up" "$(proj_hash "$proj")" "$OCVM_VERSION" "$effective_mcp_enabled" "${effective_mcp_port:-$DEFAULT_MCP_PORT}" "$controller_id"; then
+    if ! stop_mcp_host_watcher; then
+      echo "[mcp] Host readiness did not complete successfully; session failed closed." >&2
+      return 1
+    fi
     if [[ "$SESSION_MODE" != "shell" ]]; then
       OC_SHELL_OK=1
     fi
   else
+    stop_mcp_host_watcher || true
     echo "[run] Session command failed." >&2
     return 1
   fi
@@ -12698,6 +14845,10 @@ fi
 ocvm_notify_if_new_version_available "$cmd"
 
 case "$cmd" in
+  --version|-v|version)
+    printf 'opencode-vm v%s\n' "$OCVM_VERSION"
+    ;;
+
   install)
     install_cmd
     ;;
@@ -12813,8 +14964,7 @@ case "$cmd" in
     # shellcheck disable=SC1090
     source "$senv"
     if ! is_vm_running "$SESS_NAME"; then
-      echo "[shell] Existing session record found, but VM is not running. Starting a fresh session..."
-      rm -f "$senv"
+      echo "[shell] Existing stopped session retained. Choose resume or fresh start after auth recovery."
       SESSION_MODE="shell"
       start_session
       exit 0
@@ -12843,12 +14993,15 @@ case "$cmd" in
 
   prune)
     need limactl
-    cleanup_sessions
+    if cleanup_sessions; then
+      echo "[prune] Sessions cleaned. Base VM kept."
+    else
+      echo "[prune] Some preserved sessions were left intact."
+    fi
     # Stop base VM if running, but keep it
     if base_exists; then
       limactl stop "$BASE_NAME" 2>/dev/null || true
     fi
-    echo "[prune] Sessions cleaned. Base VM kept."
     ;;
 
   update)
@@ -12868,10 +15021,14 @@ case "$cmd" in
 opencode-vm v$OCVM_VERSION
 
 Usage:
+  opencode-vm --version                    # print the current version
   opencode-vm install                      # install script to ~/bin and configure PATH
-  opencode-vm start [--keep-history] [--reconnect|--fresh|--cancel-if-exists]
+  opencode-vm start [--no-mcp] [--keep-history] [--reconnect|--fresh|--cancel-if-exists]
                                            # start a session VM in current directory
                                            # ('run' is an alias for 'start')
+                                           # Configured OpenAI MCP starts automatically;
+                                           # terminal attaches to the same local server.
+                                           # --no-mcp suppresses MCP/tunnel for this run only.
                                            # If a session already exists, prompts:
                                            #   r = reconnect (resume if stopped)
                                            #   f = fresh (destroy and recreate)
@@ -12884,7 +15041,8 @@ Usage:
                                            # --reconnect/--fresh/--cancel-if-exists:
                                            #   non-interactive override of the prompt
   opencode-vm web [--port PORT] [--password PW|--no-auth] [--no-tls] [--tui]
-                  [--no-a2a|--require-a2a] [--keep-history] [--reconnect|--fresh|--cancel-if-exists]
+                   [--no-a2a|--require-a2a] [--mcp-port PORT|--no-mcp]
+                  [--keep-history] [--reconnect|--fresh|--cancel-if-exists]
                                            # start web server session (default port 4096)
                                            # provides: web UI, REST API, TUI attach, A2A agent
                                            # Reserves a block around the base port P:
@@ -12900,8 +15058,17 @@ Usage:
                                            # A2A always needs a credential (opencode-a2a
                                            #   refuses to start without one); with no
                                            #   --password it uses the printed default.
-                                           # --no-a2a: web only (also \$OCVM_A2A=0)
-                                           # --require-a2a: fail the session if A2A is not ready
+                                            # --no-a2a: web only (also \$OCVM_A2A=0)
+                                            # --require-a2a: fail the session if A2A is not ready
+                                             # MCP is on by default; new sessions select a free
+                                             #   loopback port from 40960..41059 (--mcp-port overrides).
+                                             #   Uses a separate mandatory
+                                            #   token even with --no-auth; its path is printed
+                                            #   only after authenticated host readiness passes.
+                                             # --no-mcp: suppress the connector and OpenAI tunnel
+                                             #   for this run only; the next normal start resumes them.
+                                            # This differs from 'opencode-vm mcps', which manages
+                                            #   tool servers consumed by OpenCode itself.
                                            # Session prompt/exit behavior matches 'start'.
                                            # Serves HTTPS by default (self-signed cert):
                                            #   file/image attachments need a secure origin,
@@ -12972,15 +15139,24 @@ Usage:
   opencode-vm ports lan tcp {show|add|rm|clear} IP[:PORT]
   opencode-vm ports lan udp {show|add|rm|clear} IP[:PORT]
   opencode-vm doctor [show]                # inspect local sync/auth/model/db state
-  opencode-vm provider list                # list configured providers
-  opencode-vm provider login [id]          # log in inside this project's running VM
-  opencode-vm provider logout <id>         # log out in the VM; global tombstone on finalization
-  opencode-vm provider new                 # add new openai-compatible provider (interactive)
-  opencode-vm provider add <id> --base-url <url> [--api-key <key>] [--name <n>] [--dry-run]
-                                           # add provider non-interactively
-  opencode-vm provider refresh <id>        # re-discover models from /v1/models (auto-runs at session start
-                                           #   for local providers; OCVM_PROVIDER_AUTOREFRESH=0 disables)
-  opencode-vm provider rm <id> [--dry-run] # remove provider from auth/config/model state
+  opencode-vm provider list                # list model providers and MCP connections
+  opencode-vm provider new                 # interactive: custom endpoint, subscription, or MCP
+  opencode-vm provider custom new          # interactive custom-endpoint wizard
+  opencode-vm provider custom add <id> --base-url <url> --api-key <key> [--name <n>] [--dry-run]
+                                           # add a custom endpoint non-interactively
+  opencode-vm provider custom sync <id>    # reconcile the model list from /v1/models (auto-runs at
+                                           #   session start for local endpoints; OCVM_PROVIDER_AUTOSYNC=0 disables)
+  opencode-vm provider custom rm <id>      # remove a custom endpoint (auth/config/model state)
+  opencode-vm provider subscription new    # show how to connect an OAuth subscription in the Web UI
+  opencode-vm provider subscription rm <id>
+                                            # remove a stored subscription credential (host-side)
+  opencode-vm provider mcp new openai       # configure this project; reuse stored entries or enter new ones
+                                            # [--tunnel-id ID] [--tunnel-api-key KEY|env:NAME|file:PATH | --key-id ID]
+  opencode-vm provider mcp list [openai]    # all project assignments, tunnel API keys (hidden), and tunnels
+  opencode-vm provider mcp status openai [--project ID] # project configuration and runtime status
+  opencode-vm provider mcp rm openai [--project ID]     # stop/remove project assignment; keep reusable entries
+  opencode-vm provider mcp rm openai --key-id ID        # remove an unreferenced tunnel API key
+  opencode-vm provider mcp rm openai --tunnel-id ID     # remove an unreferenced tunnel ID
   opencode-vm auth status                  # show baseline-managed auth synchronization state
   opencode-vm auth resync                  # retry auth finalization for this project's
                                            #   stopped, tracked session

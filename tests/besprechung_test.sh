@@ -207,8 +207,29 @@ pass "standalone cache refresh failures, offline reuse, incomplete payloads and 
   apply_policy_in_vm() { :; }
   setup_host_port_forwards_in_vm() { :; }
   graphify_ensure_mcp_in_vm() { :; }
+  mkdir -p "$share/xdg-data/opencode"
+  auth_sync_begin "$(pwd)" test-vm "$share/xdg-data/opencode/auth.json"
+  guest_auth="$TMP/resume-guest-auth.json"
+  cp "$share/xdg-data/opencode/auth.json" "$guest_auth"
+  launches=0
+  # Capture and seed are VM calls too, but neither launches OpenCode. Keep
+  # real host finalization and assert skill contents only at the launch boundary.
+  resume_vm_call() {
+    # Match literal guest code, not variables from this fixture.
+    # shellcheck disable=SC2016
+    case "$2" in
+      *'lock=/tmp/ocvm-runtime.lock'*) jq -e 'type == "object"' "$guest_auth" >/dev/null; cat "$guest_auth" ;;
+      *'cat > "$tmp"'*) cat > "$guest_auth"; jq -e 'type == "object"' "$guest_auth" >/dev/null ;;
+      *) fail "unexpected resume VM call" ;;
+    esac
+  }
   # Test the actual attach path up to VM launch, not merely the sync helper.
   vm_exec() {
+    if [[ "$2" != *'exec 9>/tmp/ocvm-runtime.lock'* ]]; then
+      resume_vm_call "$@"
+      return $?
+    fi
+    launches=$((launches + 1))
     assert_file "$share/config/opencode/skills/besprechung/besprechung/SKILL.md"
     cmp -s "$SCRIPT_DIR/skills/besprechung/SKILL.md" \
       "$share/config/opencode/skills/besprechung/besprechung/SKILL.md" || fail "resume launched with a stale skill"
@@ -216,6 +237,7 @@ pass "standalone cache refresh failures, offline reuse, incomplete payloads and 
       "$share/config/opencode/commands/besprechung.md" || fail "resume launched with stale commands"
   }
   attach_session >/dev/null
+  [[ "$launches" == 1 ]] || fail "resume did not reach the runtime launch"
   printf '\nUpdated package content.\n' >> "$SCRIPT_DIR/skills/besprechung/commands/besprechung.md"
   attach_session >/dev/null
   # An edited managed command must survive both updates and opt-out.
@@ -224,11 +246,17 @@ pass "standalone cache refresh failures, offline reuse, incomplete payloads and 
   [[ "$(<"$share/config/opencode/commands/besprechung-dialog.md")" == "user edit" ]] || fail "resume overwrote an edit"
   skills_pkg_off besprechung >/dev/null
   vm_exec() {
+    if [[ "$2" != *'exec 9>/tmp/ocvm-runtime.lock'* ]]; then
+      resume_vm_call "$@"
+      return $?
+    fi
+    launches=$((launches + 1))
     [[ ! -e "$share/config/opencode/skills/besprechung/besprechung/SKILL.md" ]] || fail "disabled skill survived resume"
     [[ ! -e "$share/config/opencode/commands/besprechung.md" ]] || fail "disabled command survived resume"
     [[ "$(<"$share/config/opencode/commands/besprechung-dialog.md")" == "user edit" ]] || fail "opt-out deleted an edit"
     [[ ! -s "$share/skills-manifest.txt" ]] || fail "resume left stale skill manifest entries"
   }
   attach_session >/dev/null 2>/dev/null
+  [[ "$launches" == 4 ]] || fail "not every resume reached the runtime launch"
 )
 pass "actual reconnect installs, refreshes and removes owned files while preserving edits"

@@ -1,8 +1,21 @@
 # Provider-Verwaltung: Umsetzungsplan
 
-Status: MVP in `opencode-vm` 0.5.52 implementiert; reale macOS/Lima- und Provider-Abnahme steht noch aus.
+Status: Funktionale MVP-Ergaenzungen in `opencode-vm` 0.5.53 implementiert; automatisierte Integrationstests vorhanden. Gesamt-Abnahme bleibt bis zur realen macOS/Lima- und Provider-Pruefung offen.
 
 Dieses Dokument beschreibt die Vereinheitlichung der Provider-Bedienung sowie die strukturierte Rueckfuehrung von Zugangsdaten aus wegwerfbaren Projekt-VMs. Die MVP-Implementierung folgt den verbindlichen Entscheidungen unten; offene manuelle Abnahmen bleiben als solche markiert.
+
+### Aktueller MVP-Stand
+
+Dieser Abschnitt ersetzt ueberholte Planungsannahmen unten. Logout-Schutz und Lifecycle-Ownership wurden bestaetigt. Der Folgeauftrag verlangt minimale funktionale Vervollstaendigung; Dry-run-Nachbesserungen sind ausdruecklich ausgenommen. Bestehende Dry-run-Optionen bleiben unveraendert.
+
+- Implementiert: providerweiser Auth-Merge, Abschlussreihenfolge, gesicherte Kandidaten, Logout-Schutz und Wiederanlaufmetadaten.
+- Implementiert: kontrolliertes Beenden eigener VM-Schreiber, direkte Endstanderfassung vor Zerstoerung, verifizierter Host-Snapshot fuer Keep/Resume und Erhaltung bei Erfassungsfehlern. Gestoppte Sessions ohne verifizierten Snapshot werden nicht automatisch ersetzt.
+- Implementiert: Live-Provider-Anzeige ueber den vorhandenen Server, authentifiziertes Web-Login/Logout mit dynamischer Methodenwahl und Zustandspruefung, getrennt von OpenLive.
+- Bewusste MVP-Grenzen: keine festgeschriebene OpenCode-Version (Laufzeitpruefung der Schnittstellen, Gesamtkopie-Fallback bei unbekanntem Auth-Format — siehe Nachtrag in 10.2); Web-Login fuer automatische Headless-/Device-Verfahren ohne Zusatzprompts, sonst WebUI. TUI verwendet `/connect`; CLI-Auth nur in einer Shell-VM ohne laufende OpenCode-Schreiber. Keine eigene OAuth-Implementierung oder Polling-Schleife.
+- Web-Mutationen und Reload pruefen den Idle-Zustand. Unabhaengige Clients muessen waehrenddessen ruhen; eine atomare Sperre fuer fremde WebUI-Aktionen wird nicht versprochen. Ein Callback-Timeout gilt nicht als Abbruchbestaetigung.
+- Implementiert: persistente Provider-Konfigurationsentfernung auch bei alten Session-Kopien und `--fresh`; ausdrueckliches Wiederhinzufuegen erfolgt hostseitig.
+- Automatisierte Abdeckung: `tests/provider_test.sh`, `tests/provider_lifecycle_test.sh` (einschliesslich PTY-/Signaltests) und `tests/provider_config_test.sh`, ergaenzt um bestehende Regressionstests.
+- Offen und Abnahmeblocker: echte macOS/Lima-Dateirechte, virtiofs, Stop/Resume/Delete und ausdruecklich freigegebener realer Provider-Login. Die historische Detailcheckliste unten ist keine vollstaendige Erledigt-Erklaerung.
 
 Recherchegrundlage: `opencode-vm.sh` Version `0.5.51` und die in der Untersuchung festgestellte OpenCode-Version `1.18.29`. Vor der Implementierung sind die dann eingesetzte Version und ihre Schnittstellen erneut zu pruefen. Quellcode und Dokumentation wurden untersucht; ein realer Login- oder Mehrprojekt-Dauertest wurde nicht durchgefuehrt.
 
@@ -18,7 +31,7 @@ Erfolg bedeutet nicht, dass jede Anmeldung unbegrenzt gueltig bleibt. Erfolg bed
 
 ## 2. Verbindliche Entscheidungen
 
-- Nur diese Plan-Datei wird jetzt erstellt. Produktivimplementierung erfolgt erst nach einem gesonderten Auftrag.
+- Produktivimplementierung wurde nach der Planerstellung gesondert beauftragt; der aktuelle MVP-Umfang ist oben festgehalten.
 - Keine regelmaessige Hintergrundsicherung: kein Timer, kein Dateiwaechter, kein zusaetzlicher Daemon und keine eigene Polling-Schleife.
 - Rueckspeicherung erfolgt an vorhandenen, kontrollierten Lebenszykluspunkten, insbesondere beim geordneten Beenden und vor einer durch OpenCode VM veranlassten Loeschung oder Neuerstellung.
 - Bei harten Prozess- oder VM-Abstuerzen duerfen Aenderungen seit der letzten erfolgreichen Rueckspeicherung verloren gehen. Das kann einen erneuten Login erforderlich machen und ist ausdruecklich akzeptiert.
@@ -39,7 +52,7 @@ Die folgenden Details konkretisieren das Konzept als Umsetzungsvorschlag. Sie si
 
 Empfohlener Default: Eine erfasste bewusste Abmeldung oder ein Wechsel von OAuth auf einen API-Key erhaelt Vorrang gegenueber Ruecklieferungen aelterer Sessions. Ein neuer ausdruecklicher Login kann diese Sperre aufheben. Eine alte VM darf einen bereits global erfassten Logout nicht allein durch ihren spaeteren Abschluss rueckgaengig machen.
 
-Diese Ausnahme wurde empfohlen, aber nicht als eigenstaendige Entscheidung eindeutig bestaetigt. Sie ist vor Umsetzung der Loesch- und Typwechselregeln zu bestaetigen; nicht stillschweigend auf alle Konfliktarten ausweiten.
+Der globale Logout-Schutz wurde vor Implementierung bestaetigt. Die Ausnahme ist nicht stillschweigend auf alle Konfliktarten auszuweiten.
 
 Das betrifft eine bereits erfasste Entscheidung. Ohne Beobachtung oder Rueckfuehrung kann der Host von einem WebUI-Logout nichts wissen. Die Architektur verspricht keine sofortige globale Wirkung unbeobachteter VM-Aktionen.
 
@@ -260,6 +273,8 @@ Die konkreten optionalen Argumente an das bestehende CLI-Muster anpassen. Keine 
 
 `provider add/new/refresh/rm` bleiben fuer ihre bereits ausgelieferten Aufgaben erreichbar. `refresh` bedeutet Modelllistenaktualisierung, nicht OAuth-Erneuerung. `rm` ist nicht mit Logout gleichzusetzen und darf nicht als dessen Implementierung wiederverwendet werden.
 
+Nachtrag (Umsetzung, Oberflaeche revidiert): Der CLI-OAuth-Login (headless/device im Web-Modus, CLI-Fallback in der Shell-VM) wurde bewusst zurueckgenommen. `provider` gliedert sich jetzt in zwei Klassen: **Custom Endpoints** (`provider custom new|add|sync|rm`; hostseitig, keine Session) und **Subscriptions** (`provider subscription new` gibt die WebUI-Schritte aus, `provider subscription rm <id>` entfernt das gespeicherte OAuth-Credential hostseitig und setzt einen Logout-Tombstone). `provider new` fragt zuerst die Klasse. `provider refresh` heisst jetzt `provider custom sync` (Modellliste, kein Token-Refresh; OAuth-Tokens erneuert OpenCode automatisch). Alte flache Befehle wurden ohne Aliase entfernt. `provider list` gruppiert nach Klasse; Live-Verfuegbarkeit (`RUNTIME`) nur mit erreichbarem Web-Server, sonst benigne `unknown`.
+
 `auth status` und `auth resync` nicht kommentarlos entfernen. Auf die neue Diagnose beziehungsweise kontrollierte Rueckfuehrung umstellen und geaenderte Semantik dokumentieren. `resync` darf keine laufende oder historische Kopie allein wegen eines groesseren Ablaufdatums als neuesten Abschluss ausgeben. Nicht abgeschlossene oder baseline-lose Kandidaten nur mit ausdruecklicher Auswahl uebernehmen; nicht interaktiv unbegruendet raten.
 
 ### 10.2 Laufzeitanbindung
@@ -269,6 +284,8 @@ Die konkreten optionalen Argumente an das bestehende CLI-Muster anpassen. Keine 
 - Vorhandene Server-Authentifizierung respektieren. Keine neuen anonymen Auth-Endpunkte oder Firewall-Freigaben.
 - Version und benoetigte Schnittstellen pruefen. Bei nicht unterstuetztem Protokoll gezielt abbrechen, statt gegen ein anderes Datenmodell zu schreiben.
 - Keine neue Laufzeit starten, nur weil ein Auth-Befehl keine Verbindung bekommt.
+
+Nachtrag (Umsetzung): Keine exakte OpenCode-Version festschreiben. OpenCode liefert laufend Patch-Releases (Semver; Bruchstellen sind bei Major-/Minor-Spruengen zu erwarten, z. B. Quellbaum-Umbau in 2.0). Die Kompatibilitaet wird zur Laufzeit ueber die tatsaechlich genutzten Schnittstellen (Health/Version, Projektkontext, Provider- und Auth-Methoden-Schema) geprueft; eine nicht unterstuetzte Schnittstelle bricht gezielt ab und nennt die erkannte Version. Kann die gespeicherte Auth-Datei nicht mehr drei-Wege-zusammengefuehrt werden (unbekanntes Eintragsformat nach einem OpenCode-Update), wird der neueste Laufzeitstand als Gesamtkopie veroeffentlicht und ausdruecklich gewarnt, dass Merge beziehungsweise OpenCode-Kompatibilitaet anzupassen sind.
 
 ### 10.3 Gepruefter V1-Ablauf
 
@@ -319,6 +336,8 @@ Die heutige reine Vereinigungslogik darf eine erfasste Provider-Entfernung nicht
 - Neue baseline-gefuehrte Laeufe erst nach kontrollierter Initialisierung der Verwaltungsdaten starten.
 - Fuer bereits laufende Alt-Sessions fehlt ein verlaesslicher Ausgangsstand. Nicht den aktuellen Host-Stand rueckwirkend als deren Startzustand erfinden.
 - Alte Kandidaten sicher erhalten und Unterschiede anzeigen. Uebernahme ohne Herkunft nur ausdruecklich bestaetigt; keine neue automatische `expires`-Heuristik als Migrationsersatz.
+
+Nachtrag (Umsetzung): Fuer baseline-lose Alt-Sessions fragt `attach` interaktiv (nur TTY) mit geheimnisfreiem Provider-Vergleich: Session (Union, Session gewinnt pro Provider, host-only bleibt) oder Host. Identische Staende laufen ohne Frage weiter; nicht-interaktive Aufrufe brechen ab. Nach der Wahl ist die neue Generation baseline-verwaltet. Zusaetzlich entfernt `attach` die doppelte Kandidaten-Meldung, indem der Kandidat nur einmal gesichert wird.
 - Auth kuenftig aus allgemeinen History-Seed-/rsync-Autoritaeten herausnehmen, damit eine alte Unterhaltung keine neuere Anmeldung zuruecksetzt.
 - Alte History-Dateien nicht ungefragt massenhaft umschreiben oder loeschen. Sie werden lediglich nicht mehr automatisch als aktuelle Autoritaet verwendet.
 - `OCVM_AUTH_AUTORESYNC` und dokumentierte bestehende Befehle auf konkrete Kompatibilitaetsanforderungen pruefen. Geaenderte Bedeutung klar beschreiben; keine zweite alte Konfliktlogik parallel aktiv lassen.

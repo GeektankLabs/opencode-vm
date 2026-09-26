@@ -11,6 +11,22 @@ fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 assert_file() { [[ -f "$1" ]] || fail "missing file: $1"; }
 assert_eq() { [[ "$1" == "$2" ]] || fail "expected '$2', got '$1'"; }
+count_openlive_guest_lines() {
+  awk -v needle="$1" '
+    /^    prepare_openlive_adapter\(\) \{$/ { inside=1 }
+    inside && index($0, needle) { count++ }
+    inside && /^    }$/ { inside=0 }
+    END { print count + 0 }
+  ' "$SCRIPT"
+}
+count_openlive_stage_lines() {
+  awk -v needle="$1" '
+    /^openlive_stage_adapter\(\) \{$/ { inside=1 }
+    inside && index($0, needle) { count++ }
+    inside && /^}$/ { inside=0 }
+    END { print count + 0 }
+  ' "$SCRIPT"
+}
 
 ARTIFACT="$TMP/opencode-vm-openlive-adapter-0.1.6.tar"
 "$ROOT/scripts/build-openlive-adapter.sh" "$ARTIFACT" >/dev/null
@@ -30,8 +46,8 @@ grep -qF 'Release inputs changed without incrementing OCVM_VERSION.' "$RELEASE_W
   fail "release workflow does not reject unversioned release-input changes"
 grep -qF '.draft == false and .prerelease == false' "$RELEASE_WORKFLOW" ||
   fail "release workflow does not reject draft or prerelease no-ops"
-grep -qF 'index($adapter) != null and index("SHA256SUMS") != null' "$RELEASE_WORKFLOW" ||
-  fail "release workflow does not verify existing release assets"
+grep -qF 'index($openlive) != null and index($mcp) != null and index("SHA256SUMS") != null' "$RELEASE_WORKFLOW" ||
+  fail "release workflow does not verify both existing adapter assets"
 grep -qF 'gh release download "$OPENLIVE_RELEASE_TAG"' "$RELEASE_WORKFLOW" ||
   fail "release workflow does not download existing assets for verification"
 grep -qF '! cmp "$state_dir/assets/opencode-vm.sh" opencode-vm.sh' "$RELEASE_WORKFLOW" ||
@@ -46,7 +62,7 @@ grep -qF -- '-f ref="refs/tags/$OPENLIVE_RELEASE_TAG" -f sha="$GITHUB_SHA"' "$RE
   fail "release workflow does not bind an automatic tag to the validated commit"
 grep -qF -- '--verify-tag --generate-notes' "$RELEASE_WORKFLOW" ||
   fail "release workflow does not verify the explicit tag before publication"
-assert_eq "$(grep -cF "if: steps.state.outputs.release_needed == 'true'" "$RELEASE_WORKFLOW")" "6"
+assert_eq "$(grep -cF "if: steps.state.outputs.release_needed == 'true'" "$RELEASE_WORKFLOW")" "8"
 pass "main pushes create missing version tags and releases after validation"
 
 MOCK_BIN="$TMP/bin"
@@ -111,7 +127,7 @@ assert_file "$AUTH"
 assert_eq "$(jq -r '.["acpCommand:opencode"]' "$SETTINGS")" "$SHIM acp"
 jq -e '.__opencode_vm_openlive__ == {"type":"api","key":"opencode-vm-openlive-readiness-v1"}' "$AUTH" >/dev/null ||
   fail "readiness marker missing or unexpected"
-assert_eq "$(HOME="$HOME_ONE" "$SHIM" --version)" "opencode-vm OpenLive bridge 0.5.52"
+assert_eq "$(HOME="$HOME_ONE" "$SHIM" --version)" "opencode-vm OpenLive bridge $(grep -m1 '^OCVM_VERSION=' "$SCRIPT" | cut -d'"' -f2)"
 pass "install creates the managed shim, setting, discovery link, and non-secret marker"
 
 STANDALONE_DIR="$TMP/standalone"
@@ -284,9 +300,6 @@ grep -q 'Could not install the OpenLive settings update' "$TMP/transaction-insta
 unset MOCK_MV_FAIL_PATTERN
 pass "host integration rolls back when a later installation step fails"
 
-if grep -qF "'{schema:1,project:\$project" "$SCRIPT"; then
-  fail "runtime descriptor jq filter breaks the enclosing guest-script quote"
-fi
 assert_eq "$(grep -cF 'project:\$project,backendUrl:\$url,generation:\$generation' "$SCRIPT")" "2"
 pass "runtime descriptor filters preserve jq variables inside both guest scripts"
 
@@ -298,16 +311,17 @@ pass "fresh and resumed web starts receive the OpenLive project identity"
 if grep -qF 'src/main.ts" -nt "$adapter/dist/main.js' "$SCRIPT"; then
   fail "adapter build freshness checks only main.ts"
 fi
-assert_eq "$(grep -cF '( cd "$adapter" && npm run build --silent )' "$SCRIPT")" "2"
-assert_eq "$(grep -cF '( cd "$adapter" && npm run build --silent ) || return 1' "$SCRIPT")" "2"
+assert_eq "$(count_openlive_guest_lines '( cd "$adapter" && npm run build --silent )')" "2"
+assert_eq "$(count_openlive_guest_lines '( cd "$adapter" && npm run build --silent ) || return 1')" "2"
 assert_eq "$(grep -cF 'if ! prepare_openlive_adapter; then' "$SCRIPT")" "2"
 pass "fresh and resumed web starts always rebuild staged adapter sources"
 
-assert_eq "$(grep -cF 'npm ci --omit=dev --ignore-scripts' "$SCRIPT")" "3"
+assert_eq "$(count_openlive_guest_lines 'npm ci --omit=dev --ignore-scripts')" "2"
+assert_eq "$(grep -cF '( cd "$source" && npm ci --omit=dev --ignore-scripts' "$SCRIPT")" "1"
 pass "fresh and resumed web starts use packaged adapter runtime output"
 
-assert_eq "$(grep -cF 'rsync -a --checksum --delete' "$SCRIPT")" "2"
-assert_eq "$(grep -cF 'mode="release-$(cat "$adapter/.archive-sha256")"' "$SCRIPT")" "2"
+assert_eq "$(count_openlive_stage_lines 'rsync -a --checksum --delete')" "2"
+assert_eq "$(count_openlive_guest_lines 'mode="release-$(cat "$adapter/.archive-sha256")"')" "2"
 assert_eq "$(grep -cF 'awk "{print \$1}"' "$SCRIPT")" "2"
 RSYNC_SOURCE="$TMP/rsync-source"
 RSYNC_TARGET="$TMP/rsync-target"

@@ -189,6 +189,8 @@ opencode-vm mcps off proxmox             # disable AND wipe stored credentials
 
 Session MCP injection is data-driven: only MCPs in the active list end up in the session's `opencode.json`. Default-active MCPs are seeded into `~/.opencode-vm/mcps.env` on first use.
 
+These commands configure **consumer-side MCPs** that OpenCode calls as tools. Web sessions also expose a private **incoming MCP endpoint** that external clients call; see [Incoming MCP connector](#incoming-mcp-connector).
+
 MCPs may also contribute an `agents_md_snippet` (in [`mcps/registry.json`](mcps/registry.json)) — a markdown block automatically appended to the session's `AGENTS.md` so the agent knows the MCP is available without you needing to nudge it. The composition is sidecar-style: host writes `$sess_share/config/opencode/AGENTS.mcps.md`, the VM-side AGENTS.md build cats it after the Host LAN IP block. Active-list changes propagate on the next session start; deactivated MCPs are silently dropped.
 
 ### Graphify MCP
@@ -221,8 +223,9 @@ What you get from a single command:
 - **REST API** — programmatic access with OpenAPI docs at `/doc`
 - **TUI attach** — connect a terminal TUI from the host via `opencode attach http://<ip>:4097`
 - **A2A agent** — the same OpenCode, drivable by an A2A 1.0 orchestrator
+- **Incoming MCP** — authenticated access for external MCP clients on a separate loopback port (on by default)
 
-All clients share the same sessions and state, so you can switch between browser, terminal and orchestrator seamlessly.
+All clients share the same sessions and state, so you can switch between browser, terminal, orchestrator, and MCP client seamlessly.
 
 ### Port layout
 
@@ -244,6 +247,37 @@ Browsers additionally hardcode an unsafe-port list (Chromium's `kRestrictedPorts
 The offsets are a fixed contract, because the A2A agent card has to advertise an absolute URL. If any port in the block is taken, the **whole block** moves to the next free one — the relationships never drift apart. The host port and the VM port are always the same number.
 
 The plain-HTTP twins exist for clients that cannot be taught to trust the session's self-signed certificate — OpenCode Desktop, `opencode attach`, and most A2A clients. They are exposed on the LAN on purpose; use them only on a network you trust.
+
+### Incoming MCP connector
+
+`opencode-vm web` starts a separate, host-loopback-only MCP endpoint for external clients while reusing the existing OpenCode project and sessions:
+
+```bash
+opencode-vm web
+opencode-vm web --mcp-port 40960
+opencode-vm web --no-mcp
+```
+
+New sessions select a free loopback port from `40960..41059`; the first available endpoint is `http://127.0.0.1:40960/mcp`. Explicit ports and reconnects keep their selected port. The adapter uses stateless Streamable HTTP and exposes five tools: `list_sessions`, `get_session`, `get_session_status`, `get_session_history`, and asynchronous `send_message`. It does not create sessions or answer OpenCode permission requests and questions.
+
+Every request requires the dedicated token in the `X-OCVM-MCP-Token` header. The startup banner prints the credential **path**, never the token. This authentication is independent of Web UI Basic auth and remains required with `--no-auth`.
+
+The endpoint is enabled by default for web sessions. Reconnect preserves the port/token and re-evaluates the project configuration; `--no-mcp` suppresses MCP and its OpenAI tunnel for that invocation only. A fresh MCP-enabled session rotates the token. A source checkout builds its adjacent adapter in the VM. A standalone installed script downloads its pinned, SHA-256-verified adapter release into a content-addressed cache only when MCP is enabled.
+
+The token grants access to bounded project-session history and to `send_message`, which can cause commands and project file changes. Treat it as a project-scoped write credential. The exact contract is in [`docs/MCP-INTERFACE.md`](docs/MCP-INTERFACE.md).
+
+To connect through OpenAI Secure MCP Tunnel, configure each project from its directory on the Mac:
+
+```bash
+opencode-vm provider mcp new openai     # select a stored tunnel API key/tunnel, or enter new values
+opencode-vm start                      # TUI and configured MCP tunnel share one local server
+opencode-vm web                        # alternatively: Web UI and this project's configured tunnel
+opencode-vm provider mcp list          # all project assignments and reusable entries
+opencode-vm provider mcp status openai
+opencode-vm provider mcp rm openai     # removes this project's assignment; retains reusable entries
+```
+
+Project assignments and reusable tunnel API keys/tunnel IDs are stored centrally in `~/.opencode-vm/mcp-tunnel/openai/registry.json`. The key needs Tunnels **Read + Use**. Different projects can use the same key with separate tunnels. **Reuse a tunnel ID only for projects operated one at a time:** opencode-vm warns during setup but does not block simultaneous reuse, which can route requests to the wrong project. `start --no-mcp` and `web --no-mcp` suppress the connection for one run. Tunnel failures leave the local session available. See [`docs/MCP-TUNNEL.md`](docs/MCP-TUNNEL.md) for selection menus, list/removal, migration, dated ChatGPT plan information and external acceptance status.
 
 ### A2A
 
@@ -345,8 +379,13 @@ opencode-vm web --no-auth           # drop a previously stored password
 opencode-vm web --no-tls            # serve plain HTTP instead of HTTPS
 opencode-vm web --no-a2a            # web only, no A2A sidecar
 opencode-vm web --require-a2a       # fail the session if A2A is not ready
+opencode-vm web --mcp               # explicitly enable the normally default-on MCP connector
+opencode-vm web --mcp-port 40961     # choose its loopback port
+opencode-vm web --no-mcp            # suppress MCP and tunnel for this run only
 opencode-vm web --tui               # also start TUI in terminal (experimental)
 ```
+
+MCP is enabled by default on web sessions and on `start` when the current project has an OpenAI MCP assignment. An automatic port is selected from `40960..41059`; an explicit web `--mcp-port` enables MCP and fails on collision. Reconnect preserves the selected port; `--no-mcp` is invocation-local and conflicts with `--mcp` and `--mcp-port`. MCP token authentication cannot be disabled.
 
 The `--tui` flag starts the web server in the background, then lets you press Enter to launch a terminal TUI that connects to the same server — giving you both interfaces at once.
 
@@ -411,7 +450,7 @@ opencode-vm doctor
 ```
 
 This reports, among other things:
-- providers connected via `/connect` (from `auth.json`),
+- stored provider credentials (subscriptions and API keys, from `auth.json`),
 - recent/favorite provider+model selections (from `model.json`),
 - provider usage markers found in `opencode.db` message metadata.
 
@@ -463,28 +502,59 @@ How it behaves:
 
 ## Provider Commands
 
-Provider management is a first-class top-level command — no `doctor` prefix needed:
+Provider management distinguishes two kinds of providers:
+
+- **Custom endpoints** — your own OpenAI-compatible endpoint plus an API key. Managed entirely on the host; no session or web server is needed.
+- **Subscriptions** — OAuth sign-ins such as OpenAI ChatGPT/Plus. These are connected in the OpenCode Web UI.
 
 ```bash
-opencode-vm provider list
-opencode-vm provider login [provider] [--method "method label"]
-opencode-vm provider logout <provider>
-opencode-vm provider new                 # interactive wizard
-opencode-vm provider refresh <id>        # re-discover models for an existing provider
-opencode-vm provider rm <provider-id> [--dry-run]
+opencode-vm provider                      # command help
+opencode-vm provider list                 # providers grouped by kind, with IDs
+opencode-vm provider new                  # interactive: custom endpoint, subscription, or MCP
+
+# Custom endpoints (host-side, no session needed)
+opencode-vm provider custom new           # interactive wizard
+opencode-vm provider custom add <id> --base-url <url> --api-key <key> [...]
+opencode-vm provider custom sync <id>     # reconcile the model list from /v1/models
+opencode-vm provider custom rm <id> [--dry-run]
+
+# Subscriptions (OAuth, connected in the Web UI)
+opencode-vm provider subscription new     # prints the Web UI steps
+opencode-vm provider subscription rm <id> # removes the stored credential (host-side, tombstone)
+opencode-vm provider mcp new openai        # assign a tunnel API key and tunnel ID to this project
+opencode-vm provider mcp list              # all projects and reusable entries, with origins/usage
+opencode-vm provider mcp status openai     # current project configuration + runtime status
+opencode-vm provider mcp rm openai         # stop/remove this project assignment; retain register entries
+opencode-vm provider mcp rm openai --project <project-id>
+opencode-vm provider mcp rm openai --key-id <key-id>        # unreferenced key only
+opencode-vm provider mcp rm openai --tunnel-id <tunnel-id> # unreferenced tunnel only
 ```
 
-`provider list` reports each stored provider's credential kind (`oauth`, `api`, or endpoint-only) without printing credential values. `provider add` will not silently replace an existing OAuth login with an API key; perform that login-method change explicitly inside the project session.
+`provider list` groups providers by kind (`oauth` → subscriptions, `api`/endpoint-only → custom endpoints) without printing credential values. In a running web session it also queries the actual server for runtime availability; otherwise the `RUNTIME` column stays `unknown` and the output states how to get live status. Stored credentials alone are not proof of availability or a valid subscription.
+
+**Connecting a subscription:** `provider subscription new` prints the exact steps. Start a web session (`opencode-vm web`), open the printed URL, type `/model` in the prompt, and click the "+" button ("Connect provider" / "Anbieter verbinden"); alternatively use Settings → Providers. There is no CLI OAuth flow. OpenCode refreshes OAuth tokens automatically when the provider is used — there is no manual token refresh.
+
+**Removing a subscription:** `provider subscription rm <id>` works without any running session: it deletes the stored credential from the host `auth.json` and records a logout tombstone so older or running runtimes cannot restore it at finalization. A later explicit login clears the tombstone.
+
+The provider adapter is not pinned to one OpenCode version. OpenCode ships patch releases continuously, so compatibility is decided by validating the live server interface (health/version, project context, provider list schema) instead of an exact version string; an unsupported interface fails closed with a message naming the detected version. See "Provider auth synchronization" below for the whole-copy fallback used when a newer OpenCode changes the stored auth format.
 
 Provider credentials use a separate, baseline-managed synchronization path. Every controlled runtime records the exact host auth state it starts with. At controlled shutdown, provider entries are compared independently against that baseline and the current host state. An unchanged old VM copy cannot overwrite newer host credentials, while independently changed providers are combined. Concurrent OAuth changes use controlled completion order, never token expiry or file mtime. Unresolved candidates are retained under `~/.opencode-vm/auth-sync/` outside disposable session shares.
 
-A deliberate logout creates a global tombstone when that runtime is next finalized. Older runtime generations cannot silently restore the removed credential; a later explicit login can clear the tombstone. `provider login/logout` operate inside the current project's running tracked VM, create a durable checkpoint, and never start a VM or perform a fallback host login. The checkpoint becomes global at controlled runtime finalization. Hard VM/process loss can still lose changes made since the last checkpoint; no auth watcher or background checkpoint service runs.
+A session that predates baseline tracking has no recorded start state, so `attach` cannot merge its credentials automatically. It preserves the session candidate and, when the two states differ, asks interactively which credentials to use: **session** (union — session entries win per provider, host-only providers stay) or **host** (keep the current host state). Identical states continue without a question. The prompt lists provider IDs, kinds and an identical/differs marker only — never credential values. Non-interactive runs refuse instead of guessing. After the choice the resumed runtime is baseline-managed, so the session stores back normally on exit.
 
-**Model discovery:** When no `--model` flags are given, `provider add` automatically calls the `/models` endpoint and adds all returned models. If the endpoint is unreachable or returns no models, the provider is **not** added. Pass `--model` flags explicitly to skip auto-discovery. Where available (e.g. LM Studio), the context window size is read from the API and stored automatically.
+If the stored auth format contains entries the merge does not recognize (for example after an OpenCode update), the three-way merge refuses to guess: the newest runtime auth state is published wholesale, as before baseline management, and a warning states that the merge or OpenCode compatibility needs updating. The same warning appears at session start when the host file already uses an unrecognized format.
 
-**`provider refresh` and session-start auto-refresh:** Once a provider exists, `opencode-vm provider refresh <id>` re-queries `/v1/models` and reconciles the model list — new models are added (auto-tagged for vision/reasoning where the heuristics or `/v1/models` metadata is conclusive), removed models are dropped, and existing per-model flags (`vision`, `reasoning`, `output`) are **preserved verbatim**. Flags: `--prompt-new` (interactive accept/edit/skip per new model), `--skip-new` (drop new models silently), `--no-context-update` (don't touch context windows of existing models), `--dry-run`, `--quiet`.
+A deliberate logout creates a global tombstone. Older runtime generations cannot silently restore the removed credential; a later explicit login clears the tombstone. `provider subscription rm` removes the credential host-side and records the tombstone immediately — no VM, web server or checkpoint is involved. Hard VM/process loss can still lose changes made since a runtime's last publication; no auth watcher or background checkpoint service runs.
 
-The same refresh runs **automatically on every `opencode-vm start`** for providers that target a host-local endpoint (`localhost`, `127.0.0.1`, `192.168.5.2`, or `host.lima.internal`) — so a model you just loaded into LM Studio or Ollama shows up in the next session without you doing anything. Cloud providers (OpenAI, Anthropic, etc.) are skipped to avoid per-session API noise. Set `OCVM_PROVIDER_AUTOREFRESH=0` to disable. Failures are non-fatal — a stopped LM Studio just keeps yesterday's model list.
+Controlled cleanup stops the owned runtime, waits for its writers, and captures auth directly through the VM connection before stopping/deleting the VM. A stale share seed is not accepted as a final snapshot. Keep/Resume retains the verified snapshot on the host. If capture fails, or a stopped legacy/crashed session has no verified snapshot, cleanup preserves the VM and share rather than guessing; `--fresh` is not a way to bypass this safeguard. Such sessions require explicit recovery before replacement.
+
+`provider custom rm` records removed configuration IDs so old project/session copies cannot restore them during sync or `--fresh`. Re-add a removed endpoint explicitly in the host configuration or with `provider custom add`; unrelated configuration is preserved. Removing a custom endpoint and removing a subscription credential remain separate commands.
+
+**Model discovery:** When no `--model` flags are given, `provider custom add` automatically calls the `/models` endpoint and adds all returned models. If the endpoint is unreachable or returns no models, the provider is **not** added. Pass `--model` flags explicitly to skip auto-discovery. Where available (e.g. LM Studio), the context window size is read from the API and stored automatically.
+
+**`provider custom sync` and session-start auto-sync:** Once a provider exists, `opencode-vm provider custom sync <id>` re-queries `/v1/models` and reconciles the model list — new models are added (auto-tagged for vision/reasoning where the heuristics or `/v1/models` metadata is conclusive), removed models are dropped, and existing per-model flags (`vision`, `reasoning`, `output`) are **preserved verbatim**. Flags: `--prompt-new` (interactive accept/edit/skip per new model), `--skip-new` (drop new models silently), `--no-context-update` (don't touch context windows of existing models), `--dry-run`, `--quiet`.
+
+The same sync runs **automatically on every `opencode-vm start`** for providers that target a host-local endpoint (`localhost`, `127.0.0.1`, `192.168.5.2`, or `host.lima.internal`) — so a model you just loaded into LM Studio or Ollama shows up in the next session without you doing anything. Cloud providers (OpenAI, Anthropic, etc.) are skipped to avoid per-session API noise. Set `OCVM_PROVIDER_AUTOSYNC=0` to disable (the former name `OCVM_PROVIDER_AUTOREFRESH` is still accepted). Failures are non-fatal — a stopped LM Studio just keeps yesterday's model list.
 
 **`--model` flag** (repeatable) — `id[:name[:context_tokens]]`:
 - `--model gpt-4o` — ID and display name both `gpt-4o`, no context limit stored
@@ -501,28 +571,28 @@ The same refresh runs **automatically on every `opencode-vm start`** for provide
 
 ```bash
 # 1) Fully interactive wizard (prompts for ID, URL, key, name, then auto-discovers models)
-opencode-vm provider new
+opencode-vm provider custom new
 
 # 2) Local LM Studio — auto-discovers models from http://localhost:1234/v1/models
-opencode-vm provider add lmstudio-local \
+opencode-vm provider custom add lmstudio-local \
     --base-url http://localhost:1234/v1 \
     --api-key local \
     --name "LM Studio (host local)"
 
 # 3) Local Ollama — auto-discovers models from http://localhost:11434/v1/models
-opencode-vm provider add ollama-local \
+opencode-vm provider custom add ollama-local \
     --base-url http://localhost:11434/v1 \
     --api-key local \
     --name "Ollama (host local)"
 
 # 4) OpenRouter — auto-discovers all available models
-opencode-vm provider add openrouter-custom \
+opencode-vm provider custom add openrouter-custom \
     --base-url https://openrouter.ai/api/v1 \
     --api-key sk-or-v1-xxxx \
     --name "OpenRouter"
 
 # 5) Self-hosted gateway with explicit model list + context limits + vision
-opencode-vm provider add ai-gateway \
+opencode-vm provider custom add ai-gateway \
     --base-url https://ai.example.com/v1 \
     --api-key your-token \
     --name "Company AI Gateway" \
@@ -531,14 +601,14 @@ opencode-vm provider add ai-gateway \
     --vision
 
 # 6) Safe preview first (auto-discovers but writes nothing)
-opencode-vm provider add myprovider \
+opencode-vm provider custom add myprovider \
     --base-url https://api.example.com/v1 \
     --api-key test-key \
     --dry-run
 
 # 7) Remove a provider (cleans auth, config, model state, db metadata)
-opencode-vm provider rm lmstudio-local --dry-run
-opencode-vm provider rm lmstudio-local
+opencode-vm provider custom rm lmstudio-local --dry-run
+opencode-vm provider custom rm lmstudio-local
 ```
 
 After adding/updating a provider, restart the session so OpenCode reloads config/auth:
@@ -772,10 +842,16 @@ opencode-vm ram default  # drop the RAM override (8 GiB); 'cpu default' likewise
 opencode-vm ports show   # show host/LAN policy and localhost-forwarding status
 opencode-vm doctor       # inspect synced local auth/model/db state
 opencode-vm provider list
-opencode-vm provider login openai
-opencode-vm provider logout openai
-opencode-vm provider add <id> --base-url <url> --api-key <key> [--name "Display Name"] [--dry-run]
-opencode-vm provider rm <id> [--dry-run]
+opencode-vm provider new                 # interactive: custom endpoint, subscription, or MCP
+opencode-vm provider custom add <id> --base-url <url> --api-key <key> [--name "Display Name"] [--dry-run]
+opencode-vm provider custom sync <id>    # reconcile the model list from /v1/models
+opencode-vm provider custom rm <id> [--dry-run]
+opencode-vm provider subscription new    # show the Web UI steps for an OAuth subscription
+opencode-vm provider subscription rm <id>  # remove a stored subscription credential (host-side)
+opencode-vm provider mcp new openai       # configure this project's OpenAI MCP connection
+opencode-vm provider mcp list             # all project assignments and reusable keys/tunnels
+opencode-vm provider mcp status openai    # inspect this project's configuration and runtime
+opencode-vm provider mcp rm openai        # stop/remove this project's assignment
 opencode-vm auth status  # show baseline-managed auth synchronization state
 opencode-vm auth resync  # retry finalization for this project's stopped tracked session
 opencode-vm screenshot   # setup guide for browser screenshot capture
@@ -790,7 +866,7 @@ All optional; the defaults are the documented behavior.
 | Variable | Default | Effect |
 |---|---|---|
 | `OCVM_ON_EXIT` | `ask` (`keep` for non-TTY) | Session-end action: `keep`, `delete`, or `ask` |
-| `OCVM_PROVIDER_AUTOREFRESH` | `1` | Auto-refresh local LM Studio/Ollama providers at session start (`0` disables) |
+| `OCVM_PROVIDER_AUTOSYNC` | `1` | Auto-sync local LM Studio/Ollama model lists at session start (`0` disables; the former name `OCVM_PROVIDER_AUTOREFRESH` is still accepted) |
 | `OCVM_MODEL_ENRICH` | `1` | Backfill context/output/vision/reasoning metadata for known frontier models (`0` disables) |
 | `OCVM_MODEL_ENRICH_PROVIDERS` | auto | Comma-separated provider ids to enrich (default: openai-compatible + ai-gateway) |
 | `OCVM_REASONING_EFFORT` | `medium` | `reasoningEffort` injected for openai-compatible reasoning models |

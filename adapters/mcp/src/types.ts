@@ -1,0 +1,300 @@
+import { lstat, readFile, realpath } from "node:fs/promises";
+import { dirname, isAbsolute } from "node:path";
+
+export const ADAPTER_VERSION = "0.1.0";
+export const MCP_TRANSPORT = "streamable-http-stateless";
+export const MAX_HISTORY_TEXT = 32_000;
+
+export type RuntimeDescriptor = {
+  schema: 1;
+  project: string;
+  projectHash: string;
+  projectName: string;
+  backendUrl: string;
+  generation: string;
+  opencodeVersion: string;
+  listenHost: "127.0.0.1";
+  listenPort: number;
+  credentialFile: string;
+  managerFile?: string;
+};
+
+export type ReadyDescriptor = {
+  schema: 1;
+  projectHash: string;
+  generation: string;
+  adapterVersion: string;
+  pid: number;
+  host: "127.0.0.1";
+  port: number;
+  transport: string;
+  preferredProtocolVersion: string;
+  supportedProtocolVersions: string[];
+  negotiatedProtocolVersion: null;
+};
+
+export type ProjectIdentity = {
+  id: string;
+  name: string;
+};
+
+export type PendingInput = {
+  permissions: number;
+  questions: number;
+};
+
+export type SessionActivity = "idle" | "busy" | "retry";
+
+export type SessionSummary = {
+  id: string;
+  title: string;
+  created: number;
+  updated: number;
+  activity: SessionActivity;
+};
+
+export type ListSessionsResult = {
+  project: ProjectIdentity;
+  sessions: SessionSummary[];
+  next_cursor?: string;
+  truncated: boolean;
+};
+
+export type SessionDetailsResult = SessionSummary & {
+  agent?: string;
+  provider_id?: string;
+  model_id?: string;
+  variant?: string;
+  pending_input: PendingInput;
+};
+
+export type CorrelatedState =
+  | "unknown"
+  | "submitted"
+  | "running"
+  | "input_required"
+  | "completed"
+  | "failed"
+  | "aborted";
+
+export type SessionStatusResult = {
+  session_id: string;
+  message_id?: string;
+  backend_activity: SessionActivity;
+  state: CorrelatedState;
+  pending_input: PendingInput;
+  assistant_message_ids: string[];
+};
+
+export type HistoryMessage = {
+  id: string;
+  role: "user" | "assistant";
+  parent_id?: string;
+  text: string;
+  created: number;
+  completed?: number;
+  finish?: string;
+  error?: "aborted" | "failed";
+  text_truncated: boolean;
+};
+
+export type SessionHistoryResult = {
+  session_id: string;
+  messages: HistoryMessage[];
+  next_before?: string;
+  truncated: boolean;
+};
+
+export type SendMessageResult = {
+  session_id: string;
+  message_id: string;
+  state: "submitted";
+};
+
+export const ADAPTER_ERROR_CODES = [
+  "INVALID_ARGUMENT",
+  "SESSION_NOT_FOUND",
+  "SESSION_BUSY",
+  "INPUT_REQUIRED",
+  "BACKEND_UNAVAILABLE",
+  "BACKEND_INCOMPATIBLE",
+  "SUBMISSION_UNCERTAIN",
+  "INTERNAL_ERROR",
+] as const;
+
+export type AdapterErrorCode = (typeof ADAPTER_ERROR_CODES)[number];
+
+export class AdapterError extends Error {
+  constructor(
+    readonly code: AdapterErrorCode,
+    message: string,
+    readonly correlationId?: string,
+  ) {
+    super(message);
+    this.name = "AdapterError";
+  }
+}
+
+export async function loadRuntimeDescriptor(
+  path: string,
+): Promise<RuntimeDescriptor> {
+  await requirePrivateRegularFile(path, 0o600, "runtime descriptor");
+  let value: unknown;
+  try {
+    value = JSON.parse(await readFile(path, "utf8"));
+  } catch {
+    throw new Error("The MCP runtime descriptor is not valid JSON.");
+  }
+  if (!isRecord(value) || value.schema !== 1) {
+    throw new Error("The MCP runtime descriptor has an unsupported schema.");
+  }
+
+  const project = requiredString(value, "project", 4096);
+  const projectHash = requiredString(value, "projectHash", 256);
+  const projectName = requiredString(value, "projectName", 256);
+  const backendUrl = requiredString(value, "backendUrl", 2048);
+  const generation = requiredString(value, "generation", 256);
+  const opencodeVersion = requiredString(value, "opencodeVersion", 128);
+  const credentialFile = requiredString(value, "credentialFile", 4096);
+  const managerFile = optionalString(value, "managerFile", 4096);
+
+  if (!isAbsolute(project)) throw new Error("MCP project must be absolute.");
+  if ((await realpath(project).catch(() => undefined)) !== project) {
+    throw new Error("MCP project must be an existing canonical directory.");
+  }
+  if (!isSafeLabel(projectHash) || !isSafeLabel(projectName)) {
+    throw new Error("MCP project identity is invalid.");
+  }
+  validateBackendUrl(backendUrl);
+  if (!isSafeLabel(generation) || /[\r\n]/u.test(opencodeVersion)) {
+    throw new Error("MCP runtime identity is invalid.");
+  }
+  if (value.listenHost !== "127.0.0.1") {
+    throw new Error("MCP listenHost must be 127.0.0.1.");
+  }
+  const listenPort = value.listenPort;
+  if (
+    typeof listenPort !== "number" ||
+    !Number.isInteger(listenPort) ||
+    listenPort < 1 ||
+    listenPort > 65_535
+  ) {
+    throw new Error("MCP listenPort is invalid.");
+  }
+  if (
+    !isAbsolute(credentialFile) ||
+    (managerFile && !isAbsolute(managerFile))
+  ) {
+    throw new Error("MCP credential and manager paths must be absolute.");
+  }
+  await requirePrivateRegularFile(credentialFile, 0o600, "credential");
+
+  return {
+    schema: 1,
+    project,
+    projectHash,
+    projectName,
+    backendUrl,
+    generation,
+    opencodeVersion,
+    listenHost: "127.0.0.1",
+    listenPort,
+    credentialFile,
+    ...(managerFile ? { managerFile } : {}),
+  };
+}
+
+export async function loadCredential(path: string): Promise<string> {
+  await requirePrivateRegularFile(path, 0o600, "credential");
+  const raw = await readFile(path, "utf8");
+  const token = raw.endsWith("\n") ? raw.slice(0, -1) : raw;
+  if (
+    token.length < 43 ||
+    token.length > 512 ||
+    token.trim() !== token ||
+    /[\s\x00-\x1f\x7f]/u.test(token)
+  ) {
+    throw new Error("The MCP credential is malformed.");
+  }
+  return token;
+}
+
+export function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+async function requirePrivateRegularFile(
+  path: string,
+  expectedMode: number,
+  label: string,
+): Promise<void> {
+  if (!isAbsolute(path))
+    throw new Error(`The MCP ${label} path must be absolute.`);
+  const stat = await lstat(path).catch(() => undefined);
+  if (!stat?.isFile() || stat.isSymbolicLink()) {
+    throw new Error(`The MCP ${label} must be a regular file.`);
+  }
+  if (stat.uid !== process.getuid?.()) {
+    throw new Error(`The MCP ${label} has an unsafe owner.`);
+  }
+  if ((stat.mode & 0o777) !== expectedMode) {
+    throw new Error(
+      `The MCP ${label} must have mode ${expectedMode.toString(8)}.`,
+    );
+  }
+  const parent = await lstat(dirname(path)).catch(() => undefined);
+  if (
+    !parent?.isDirectory() ||
+    parent.isSymbolicLink() ||
+    parent.uid !== process.getuid?.() ||
+    (parent.mode & 0o777) !== 0o700
+  ) {
+    throw new Error(`The MCP ${label} directory must be owner-only mode 700.`);
+  }
+}
+
+function requiredString(
+  value: Record<string, unknown>,
+  key: string,
+  maximum: number,
+): string {
+  const item = value[key];
+  if (typeof item !== "string" || item.length === 0 || item.length > maximum) {
+    throw new Error(`MCP runtime field ${key} is invalid.`);
+  }
+  return item;
+}
+
+function optionalString(
+  value: Record<string, unknown>,
+  key: string,
+  maximum: number,
+): string | undefined {
+  if (value[key] === undefined) return undefined;
+  return requiredString(value, key, maximum);
+}
+
+function isSafeLabel(value: string): boolean {
+  return value.length > 0 && !/[\x00-\x1f\x7f/\\]/u.test(value);
+}
+
+function validateBackendUrl(value: string): void {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("MCP backendUrl is invalid.");
+  }
+  if (
+    url.protocol !== "http:" ||
+    url.hostname !== "127.0.0.1" ||
+    !url.port ||
+    url.username ||
+    url.password ||
+    (url.pathname !== "/" && url.pathname !== "") ||
+    url.search ||
+    url.hash
+  ) {
+    throw new Error("MCP backendUrl must be a loopback HTTP origin.");
+  }
+}

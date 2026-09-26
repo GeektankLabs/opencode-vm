@@ -15,12 +15,14 @@ REPO = "fixture/project"
 TAG = "v0.5.51"
 SHA = "a" * 40
 ASSET = "opencode-vm-openlive-adapter-0.1.6.tar"
+MCP_ASSET = "opencode-vm-mcp-adapter-0.1.0.tar"
 REF = ["api", f"repos/{REPO}/git/ref/tags/{TAG}"]
 COMMIT = ["api", f"repos/{REPO}/commits/{TAG}", "--jq", ".sha"]
 RELEASE = ["api", f"repos/{REPO}/releases/tags/{TAG}"]
 CREATE_REF = ["api", "--method", "POST", f"repos/{REPO}/git/refs",
               "-f", f"ref=refs/tags/{TAG}", "-f", f"sha={SHA}"]
 PUBLISH = ["release", "create", TAG, "opencode-vm.sh", f"release-a/{ASSET}",
+           f"release-a/{MCP_ASSET}",
            "release-a/SHA256SUMS", "--verify-tag", "--generate-notes",
            "--title", f"opencode-vm {TAG}"]
 
@@ -70,8 +72,9 @@ class ReleaseStateTest(unittest.TestCase):
                 cwd=root,
                 env={**os.environ, "PATH": f"{root}:{os.environ['PATH']}",
                      "GH_FIXTURE": str(fixture), "GITHUB_REPOSITORY": REPO,
-                     "GITHUB_SHA": SHA, "OPENLIVE_RELEASE_TAG": TAG,
-                     "OPENLIVE_ASSET": ASSET, "GITHUB_OUTPUT": str(output),
+                      "GITHUB_SHA": SHA, "OPENLIVE_RELEASE_TAG": TAG,
+                      "OPENLIVE_ASSET": ASSET, "MCP_ASSET": MCP_ASSET,
+                      "GITHUB_OUTPUT": str(output),
                      "TMPDIR": str(root)},
                 capture_output=True, text=True,
             )

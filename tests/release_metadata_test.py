@@ -28,6 +28,8 @@ class ReleaseMetadataTest(unittest.TestCase):
                 "opencode-vm.sh",
                 "adapters/openlive-acp/package.json",
                 "adapters/openlive-acp/src/acp/transport.ts",
+                "adapters/mcp/package.json",
+                "adapters/mcp/src/types.ts",
             ]
             for path in paths:
                 content = (ROOT / path).read_text()
@@ -73,6 +75,25 @@ class ReleaseMetadataTest(unittest.TestCase):
         result, output = self.run_metadata(ref_type="tag", ref_name="v0.0.0")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("::error::Pushed tag must match OCVM_VERSION", result.stderr)
+        self.assertEqual(output, "")
+
+    def test_stale_mcp_tag_and_package_metadata_are_rejected(self):
+        result, output = self.run_metadata({
+            "opencode-vm.sh": [(f'MCP_ADAPTER_TAG="v{VERSION}"',
+                                 'MCP_ADAPTER_TAG="v0.0.0"')],
+        })
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("::error::MCP_ADAPTER_TAG must match OCVM_VERSION", result.stderr)
+        self.assertEqual(output, "")
+
+        result, output = self.run_metadata({
+            "adapters/mcp/src/types.ts": [
+                ('export const ADAPTER_VERSION = "0.1.0";',
+                 'export const ADAPTER_VERSION = "0.0.0";')
+            ],
+        })
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("types.ts ADAPTER_VERSION", result.stderr)
         self.assertEqual(output, "")
 
 
