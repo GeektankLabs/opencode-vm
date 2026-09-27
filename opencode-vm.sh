@@ -34,7 +34,7 @@ OPENLIVE_PREVIOUS_COMMAND="$OPENLIVE_DIR/previous-command"
 OPENLIVE_AUTH_MARKER="__opencode_vm_openlive__"
 OPENLIVE_LOCK_PATH=""
 OPENLIVE_ADAPTER_VERSION="0.1.6"
-OPENLIVE_ADAPTER_TAG="v0.5.68"
+OPENLIVE_ADAPTER_TAG="v0.5.73"
 OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.6.tar"
 OPENLIVE_ADAPTER_SHA256="06f461873b8b299de98220aa577824eb9807672b26cb069541acebcdd2d973b9"
 OPENLIVE_ACP_SDK_VERSION="1.2.1"
@@ -44,10 +44,10 @@ OPENLIVE_MANAGER_DESCRIPTION="Read-only OpenLive voice session manager"
 OPENLIVE_MANAGER_PROMPT="You manage an OpenLive voice call. The voice_sessions tool is available and you must call it before listing, inspecting, summarizing, checking, attaching to, or creating project sessions. Never claim session details without a successful tool result. Ask for clarification if a requested session is ambiguous. Create a new work session only when the user explicitly asks for one. Apart from that explicit create action, you are read-only: do not edit files, run shell commands, create tasks, or mutate sessions. Keep responses brief and conversational: one or two plain sentences without Markdown, paths, URLs, code, or stray symbols. When attachment or creation succeeds, tell the user the next voice prompt will continue in that session."
 MCP_CONNECTOR_DIR="$SHARE_ROOT/mcp-connector"
 MCP_ADAPTER_CACHE_ROOT="$MCP_CONNECTOR_DIR/adapters"
-MCP_ADAPTER_VERSION="0.1.4"
-MCP_ADAPTER_TAG="v0.5.68"
-MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.4.tar"
-MCP_ADAPTER_SHA256="5e32e3609112ff893c8a2055054f3795d8a9391c546932635daec8f878153f3f"
+MCP_ADAPTER_VERSION="0.1.7"
+MCP_ADAPTER_TAG="v0.5.73"
+MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.7.tar"
+MCP_ADAPTER_SHA256="2bc7f7a569b3c07794e548ff881f702c7a8ab851c1370f54507f087209f6c49e"
 MCP_SDK_VERSION="1.30.1"
 MCP_OPENCODE_SDK_VERSION="1.18.21"
 MCP_TESTED_PROTOCOL_VERSION="2025-11-25"
@@ -159,7 +159,7 @@ DEFAULT_MCP_PORT=40960                # private incoming MCP connector
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.5.68"
+OCVM_VERSION="0.5.73"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -175,6 +175,7 @@ OC_WEB_TUI=false
 KEEP_HISTORY=0
 SESSION_MCP_MODE=""
 SESSION_MCP_PORT=""
+SESSION_EDITOR_MODE=""                # empty = default on for web; retain explicit opt-out on reconnect
 SESSION_LAUNCH_MODE=""                 # explicit start/web intent; bare attach uses the saved UI mode
 
 need() {
@@ -247,6 +248,7 @@ run_with_spinner() {
 #
 #   P      web  HTTPS      P+2    a2a HTTPS
 #   P+1    web  HTTP       P+3    a2a HTTP
+#   P+4    editor HTTPS (optional)
 #
 # and inside the VM, never tunnelled to the LAN:
 #
@@ -257,16 +259,23 @@ run_with_spinner() {
 # absolute URL, so they can never be allowed to drift apart. That is why the
 # whole block moves together on a collision, and why the host port and the VM
 # port are now the same number.
+web_editor_enabled() {
+  if [[ "$1" == web && "${2:-0}" != 1 ]]; then printf '1\n'; else printf '0\n'; fi
+}
+
 validate_web_port() {
   local p="$1"
-  if ! is_valid_port "$p" || (( p < 1026 || p > 65532 )); then
+  local last=3
+  [[ "${SESSION_EDITOR_MODE:-}" == disable ]] || last=4
+  if ! is_valid_port "$p" || (( p < 1026 || p > 65535 - last )); then
     echo "Invalid --port value: $p" >&2
     echo "opencode-vm web reserves a block around the base port:" >&2
     echo "  P-2  opencode-a2a      (VM-internal)" >&2
     echo "  P-1  opencode backend  (VM-internal)" >&2
     echo "  P    web HTTPS         P+1  web HTTP" >&2
     echo "  P+2  a2a HTTPS         P+3  a2a HTTP" >&2
-    echo "so the base port must be between 1026 and 65532." >&2
+    echo "  P+4  editor HTTPS      (unless --no-editor)" >&2
+    echo "so the base port must be between 1026 and $((65535 - last))." >&2
     exit 2
   fi
   # Refuse, don't warn: web mode exists for browsers, and browsers refuse
@@ -274,10 +283,10 @@ validate_web_port() {
   # mid-scroll warning gets missed while the closing banner still advertises
   # the dead URLs — so an explicit --port must fail loudly instead.
   local u
-  for u in "$p" $((p + 1)) $((p + 2)) $((p + 3)); do
+  for u in $(seq "$p" $((p + last))); do
     if is_browser_unsafe_port "$u"; then
       echo "Browser-blocked --port value: $p" >&2
-      echo "Port $u of the public block $p..$((p + 3)) is on the browsers' hardcoded" >&2
+      echo "Port $u of the public block $p..$((p + last)) is on the browsers' hardcoded" >&2
       echo "unsafe-port list — Chrome/Firefox/Safari refuse to connect (ERR_UNSAFE_PORT)," >&2
       echo "so the web UI and the A2A agent card would be unreachable from any browser." >&2
       echo "Browser-safe alternatives: 4096 (default), 5555, 7777, 8080, 8888, 9000+" >&2
@@ -342,6 +351,7 @@ parse_web_flags() {
   SESSION_A2A="${OCVM_A2A:-1}"
   SESSION_MCP_MODE=""
   SESSION_MCP_PORT=""
+  SESSION_EDITOR_MODE=""
   local _saw_password="" _saw_no_auth="" _saw_mcp="" _saw_no_mcp="" _saw_mcp_port=""
   OC_WEB_TUI=false
   # HTTPS by default: opencode hashes attachments via crypto.subtle, which
@@ -363,6 +373,15 @@ parse_web_flags() {
       --mcp-port) shift; SESSION_MCP_PORT="${1:?Missing MCP port value}"; _saw_mcp_port=1 ;;
       --mcp-port=*) SESSION_MCP_PORT="${1#*=}"; _saw_mcp_port=1 ;;
       --no-mcp) SESSION_MCP_MODE="disable"; _saw_no_mcp=1 ;;
+      --editor|--no-editor)
+        local editor_mode=enable
+        [[ "$1" != --no-editor ]] || editor_mode=disable
+        if [[ -n "$SESSION_EDITOR_MODE" && "$SESSION_EDITOR_MODE" != "$editor_mode" ]]; then
+          echo "--editor and --no-editor are mutually exclusive." >&2
+          exit 2
+        fi
+        SESSION_EDITOR_MODE="$editor_mode"
+        ;;
       --tui) OC_WEB_TUI=true ;;
       --tls) SESSION_TLS=1 ;;
       --no-tls) SESSION_TLS=0 ;;
@@ -7177,12 +7196,19 @@ lifecycle_finalize_runtime() {
       fi
       exec 8>"$lock"
       flock -w 30 8
+      # The editor is a systemd service and can survive a crashed controller.
+      # Stop its terminals/writers before preferences or auth are captured.
+      if [ -f "$1/lib/web.sh" ]; then
+        SESS_SHARE="$1"; OC_PORT=0
+        . "$SESS_SHARE/lib/web.sh"
+        if declare -F stop_editor >/dev/null; then stop_editor; fi
+      fi
       if pgrep -x opencode >/dev/null 2>&1; then
         echo "[auth] An unmanaged OpenCode writer remains; preserving the VM." >&2
         exit 1
       fi
       jq -e "select(type == \"object\")" /tmp/oc-xdg-data/opencode/auth.json
-    ' > "$tmp" || ! _auth_sync_atomic_json "$tmp" "$snapshot"; then
+    ' "$share" > "$tmp" || ! _auth_sync_atomic_json "$tmp" "$snapshot"; then
       rm -f "$tmp"
       echo "[auth] Final live capture failed; VM and share must be retained." >&2
       return 1
@@ -7194,6 +7220,9 @@ lifecycle_finalize_runtime() {
     return 1
   fi
   auth_sync_finalize "$generation" "$snapshot" || return 1
+  if [[ -d "$share/editor/user-data/User" ]]; then
+    editor_sync_preferences "$share" "$PROJECT_STATE_DIR/${share##*/}" || return 1
+  fi
   _auth_sync_atomic_json "$snapshot" "$share/xdg-data/opencode/auth.json"
 }
 
@@ -7240,7 +7269,7 @@ cleanup_sessions() {
         continue
       fi
       if [[ ! -f "$senv" ]]; then lifecycle_lock_release; continue; fi
-      unset SESS_MCP_ENABLED SESS_MCP_PORT
+      unset SESS_MCP_ENABLED SESS_MCP_PORT SESS_EDITOR_ENABLED SESS_EDITOR_DISABLED
       # shellcheck disable=SC1090
       source "$senv"
       if [[ "${SESS_PROJ:-}" != "$_cleanup_proj" ]]; then
@@ -7254,7 +7283,7 @@ cleanup_sessions() {
       _cleanup_controller="${SESS_NAME}-cleanup-$(date +%s)-$$"
       write_senv "$senv" "$SESS_NAME" "${SESS_PROJ:-unknown}" "${CFG_HASH_AT_START:-}" \
         "${SESS_MODE:-tui}" "${SESS_PORT:-}" "${SESS_KEEP_HISTORY:-0}" "${SESS_TLS:-0}" \
-        "$_cleanup_generation" "$_cleanup_controller" "${SESS_MCP_ENABLED:-0}" "${SESS_MCP_PORT:-}" || {
+        "$_cleanup_generation" "$_cleanup_controller" "${SESS_MCP_ENABLED:-0}" "${SESS_MCP_PORT:-}" "${SESS_EDITOR_ENABLED:-0}" "${SESS_EDITOR_DISABLED:-0}" || {
         cleanup_failed=1
         lifecycle_lock_release
         continue
@@ -7972,7 +8001,7 @@ mcp_adapter_dev_valid() {
   [[ -f "$dir/package.json" && -f "$dir/package-lock.json" && -f "$dir/tsconfig.json" \
     && -f "$dir/src/main.ts" && -f "$dir/src/types.ts" && -f "$dir/src/http.ts" \
     && -f "$dir/src/opencode.ts" && -f "$dir/src/tools.ts" && -f "$dir/src/activity.ts" \
-    && -f "$dir/src/content.ts" ]] || return 1
+    && -f "$dir/src/content.ts" && -f "$dir/src/diagnostics.ts" ]] || return 1
   [[ "$(jq -r '.version // empty' "$dir/package.json" 2>/dev/null)" == "$MCP_ADAPTER_VERSION" ]]
 }
 
@@ -7981,7 +8010,7 @@ mcp_adapter_release_valid() {
   [[ -f "$dir/manifest.json" && -f "$dir/package.json" && -f "$dir/package-lock.json" \
     && -f "$dir/dist/main.js" && -f "$dir/dist/types.js" && -f "$dir/dist/http.js" \
     && -f "$dir/dist/opencode.js" && -f "$dir/dist/tools.js" && -f "$dir/dist/activity.js" \
-    && -f "$dir/dist/content.js" && -f "$dir/.archive-sha256" ]] || return 1
+    && -f "$dir/dist/content.js" && -f "$dir/dist/diagnostics.js" && -f "$dir/.archive-sha256" ]] || return 1
   [[ "$(<"$dir/.archive-sha256")" == "$MCP_ADAPTER_SHA256" ]] || return 1
   jq -e --arg version "$MCP_ADAPTER_VERSION" --arg mcp "$MCP_SDK_VERSION" \
     --arg opencode "$MCP_OPENCODE_SDK_VERSION" --arg protocol "$MCP_TESTED_PROTOCOL_VERSION" '
@@ -10417,13 +10446,13 @@ is_browser_unsafe_port() {
   return 1
 }
 
-# Web-mode forwarding: one SSH process carrying all four public forwards of the
-# port block, host(0.0.0.0:X) -> VM(127.0.0.1:X).
+# Web-mode forwarding: one SSH process carrying four public forwards, plus the
+# optional editor at P+4, host(0.0.0.0:X) -> VM(127.0.0.1:X).
 #
-# One ssh, not four:
+# One SSH process for the complete public block:
 #   - ExitOnForwardFailure=yes makes the whole block bind atomically. Either all
-#     four ports are reserved or none are, so there is no window in which the
-#     P/P+1/P+2/P+3 relationship is half-established, and no TOCTOU gap between
+#     public ports are reserved or none are, so there is no window in which the
+#     port relationship is half-established, and no TOCTOU gap between
 #     probing a port and binding it.
 #   - One PID, one pidfile, one teardown. Nothing here ever needs to drop a
 #     single forward: the offsets are a public contract, so if P+2 is taken the
@@ -10441,10 +10470,25 @@ is_browser_unsafe_port() {
 # absolute URL: the effective base is chosen here and then handed to the VM.
 WEB_PORT_BASE=""
 
-# $1 vm name, $2 requested base port, $3 optional private MCP port. On success
+# A running guest service can occupy P+4 even if no LAN forward exists yet.
+editor_guest_port_available() {
+  vm_exec "$1" 'python3 -c '\''import socket, sys
+s = socket.socket()
+try:
+    s.bind(("127.0.0.1", int(sys.argv[1])))
+except OSError:
+    sys.exit(1)
+finally:
+    s.close()'\'' "$1"' "$2" >/dev/null 2>&1
+}
+
+# $1 vm name, $2 requested base port, $3 optional private MCP port, $4 editor on.
+# On success
 # WEB_PORT_BASE holds the base that was actually reserved.
 start_web_tunnels() {
   local vm="$1" req="$2" reserved="${3:-}"
+  local last=3
+  [[ "${4:-0}" != 1 ]] || last=4
   [[ -n "$vm" && -n "$req" ]] || return 1
   WEB_PORT_BASE=""
 
@@ -10487,7 +10531,8 @@ start_web_tunnels() {
   local base p ok pid err_file
   err_file="$(mktemp 2>/dev/null || echo "/tmp/ocvm-tunnel-$$.err")"
   for base in $(seq "$req" $((req + 9))); do
-    if [[ -n "$reserved" ]] && (( reserved >= base - 2 && reserved <= base + 3 )); then
+    (( base >= 1026 && base <= 65535 - last )) || continue
+    if [[ -n "$reserved" ]] && (( reserved >= base - 2 && reserved <= base + last )); then
       [[ "$base" != "$req" ]] || echo "[tunnel] Base port $base overlaps reserved MCP port $reserved; moving the web block."
       continue
     fi
@@ -10497,10 +10542,10 @@ start_web_tunnels() {
     # before validate_web_port checked this, or when the shift below would
     # otherwise walk into the range.
     ok=1
-    for p in "$base" $((base + 1)) $((base + 2)) $((base + 3)); do
+    for p in $(seq "$base" $((base + last))); do
       if is_browser_unsafe_port "$p"; then
         if [[ "$base" == "$req" ]]; then
-          echo "[tunnel] Base port ${req}: port ${p} of block ${req}..$((req + 3)) is browser-blocked (ERR_UNSAFE_PORT) — moving to a browser-safe block."
+          echo "[tunnel] Base port ${req}: port ${p} of block ${req}..$((req + last)) is browser-blocked (ERR_UNSAFE_PORT) — moving to a browser-safe block."
         fi
         ok=0; break
       fi
@@ -10509,11 +10554,18 @@ start_web_tunnels() {
     # Sweep any tunnel of ours left on this base before probing it.
     stop_web_tunnels "$vm" "$base" >/dev/null 2>&1 || true
     ok=1
-    for p in "$base" $((base + 1)) $((base + 2)) $((base + 3)); do
+    for p in $(seq "$base" $((base + last))); do
       if ! _port_free_for_bind "$p"; then ok=0; break; fi
     done
     (( ok )) || continue
 
+    if [[ "$last" == 4 ]] && ! editor_guest_port_available "$vm" "$((base + 4))"; then
+      continue
+    fi
+    local forwards=()
+    for p in $(seq "$base" $((base + last))); do
+      forwards+=( -L "0.0.0.0:${p}:127.0.0.1:${p}" )
+    done
     if ssh -f -N -F /dev/null \
         -o IdentityFile="$HOME/.lima/_config/user" \
         -o StrictHostKeyChecking=no \
@@ -10525,10 +10577,7 @@ start_web_tunnels() {
         -o BatchMode=yes \
         -o ConnectTimeout=10 \
         -o ControlMaster=no \
-        -L "0.0.0.0:${base}:127.0.0.1:${base}" \
-        -L "0.0.0.0:$((base + 1)):127.0.0.1:$((base + 1))" \
-        -L "0.0.0.0:$((base + 2)):127.0.0.1:$((base + 2))" \
-        -L "0.0.0.0:$((base + 3)):127.0.0.1:$((base + 3))" \
+        "${forwards[@]}" \
         -p "$ssh_port" "${guest_user}@127.0.0.1" 2>"$err_file"; then
       pid="$(pgrep -f "ssh -f -N .*-L 0\.0\.0\.0:${base}:127\.0\.0\.1:${base} .*-p ${ssh_port} " | head -1)"
       # The Lima SSH port goes in as line 2: after `limactl delete` the instance
@@ -10540,6 +10589,7 @@ start_web_tunnels() {
         echo "[tunnel] Requested base port ${req} was unavailable — the block moved to ${base}."
       fi
       echo "[tunnel] LAN tunnels up (pid ${pid:-?}): ${base} web/https, $((base + 1)) web/http, $((base + 2)) a2a/https, $((base + 3)) a2a/http"
+      [[ "$last" != 4 ]] || echo "[tunnel] Editor HTTPS: $((base + 4))"
       rm -f "$err_file"
       return 0
     fi
@@ -10549,9 +10599,9 @@ start_web_tunnels() {
     echo "[tunnel] ERROR: last ssh attempt said: $(tail -1 "$err_file")" >&2
   fi
   rm -f "$err_file"
-  echo "[tunnel] ERROR: no free browser-safe block of four consecutive host ports in ${req}..$((req + 12))." >&2
-  echo "[tunnel]   web mode needs P (web https), P+1 (web http), P+2 (a2a https), P+3 (a2a http)." >&2
-  echo "[tunnel]   Diagnose: lsof -nP -iTCP:${req}-$((req + 12)) -sTCP:LISTEN" >&2
+  echo "[tunnel] ERROR: no free browser-safe block of $((last + 1)) consecutive host ports in ${req}..$((req + 9 + last))." >&2
+  echo "[tunnel]   web mode needs P (web https), P+1 (web http), P+2 (a2a https), P+3 (a2a http), and P+4 unless --no-editor." >&2
+  echo "[tunnel]   Diagnose: lsof -nP -iTCP:${req}-$((req + 9 + last)) -sTCP:LISTEN" >&2
   echo "[tunnel]   Pick another base: opencode-vm web --port 8080" >&2
   echo "[tunnel]   If a limactl process holds one, stop & restart the VM to clear it:" >&2
   echo "[tunnel]     limactl stop ${vm} && limactl start ${vm}" >&2
@@ -10563,25 +10613,27 @@ start_web_tunnels() {
 # listener and the public ports must remain browser-safe.
 select_web_guest_base() {
   local req="$1" reserved="${2:-}" base p ok
+  local last=3
+  [[ "${3:-0}" != 1 ]] || last=4
   for base in $(seq "$req" $((req + 9))); do
-    (( base >= 1026 && base <= 65532 )) || continue
-    if [[ -n "$reserved" ]] && (( reserved >= base - 2 && reserved <= base + 3 )); then
+    (( base >= 1026 && base <= 65535 - last )) || continue
+    if [[ -n "$reserved" ]] && (( reserved >= base - 2 && reserved <= base + last )); then
       continue
     fi
     ok=1
-    for p in "$base" $((base + 1)) $((base + 2)) $((base + 3)); do
+    for p in $(seq "$base" $((base + last))); do
       if is_browser_unsafe_port "$p"; then ok=0; break; fi
     done
     (( ok )) || continue
     printf '%s\n' "$base"
     return 0
   done
-  echo "[mcp] No guest web-port block avoids the reserved MCP port $reserved." >&2
+  echo "[web] No valid browser-safe guest port block (reserved MCP port: ${reserved:-none})." >&2
   return 1
 }
 
 # Idempotent, and safe for a base that was never bound. One call tears down all
-# four forwards, because they share a single ssh process.
+# public forwards, because they share a single ssh process.
 stop_web_tunnels() {
   local vm="$1" base="$2" pidfile pid ssh_port
   [[ -n "$vm" && -n "$base" ]] || return 0
@@ -10601,6 +10653,222 @@ stop_web_tunnels() {
   fi
   return 0
 }
+
+# The editor payload is embedded so standalone installs have the same profile
+# and extension as source checkouts. The only download is a pinned upstream build.
+read -r -d '' OCVM_EDITOR_INSTALL_SH <<'EDITOR_INSTALL' || true
+install_editor() {
+  local version=4.139.1 arch digest root stage archive
+  case "$(uname -m)" in
+    aarch64|arm64) arch=arm64; digest=0edb4b60d9c4744b2dd14b0911e3c2e6dd8c6f3c13bd58bda23ae744e59e7df1 ;;
+    x86_64|amd64) arch=amd64; digest=53029be6c5781b7bca49b815fcc9a2a3fc111813ad8c9965b2c0f0d2985a0674 ;;
+    *) echo "[editor] Unsupported guest architecture." >&2; return 1 ;;
+  esac
+  root="$HOME/.local/share/ocvm-editor"
+  OC_EDITOR_BIN="$root/code-server-$version-$arch/bin/code-server"
+  [ ! -L "$root" ] && [ ! -L "$root/code-server-$version-$arch" ] || return 1
+  if [ -x "$OC_EDITOR_BIN" ] && [ -f "$root/code-server-$version-$arch/.sha256" ] &&
+     [ "$(cat "$root/code-server-$version-$arch/.sha256")" = "$digest" ]; then
+    return 0
+  fi
+  [ "${1:-}" != check ] || return 1
+  mkdir -p "$root" || return 1
+  stage="$(mktemp -d "$root/.install.XXXXXX")" || return 1
+  archive="$stage/release.tar.gz"
+  echo "[editor] Installing code-server $version ($arch)..."
+  if ! curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 300 \
+      "https://github.com/coder/code-server/releases/download/v$version/code-server-$version-linux-$arch.tar.gz" -o "$archive" ||
+     ! printf '%s  %s\n' "$digest" "$archive" | sha256sum -c - ||
+     ! mkdir "$stage/build" ||
+     ! tar -xzf "$archive" --strip-components=1 --no-same-owner -C "$stage/build" ||
+     [ ! -x "$stage/build/bin/code-server" ]; then
+    rm -rf "$stage"
+    echo "[editor] Installation failed; no editor was started." >&2
+    return 1
+  fi
+  printf '%s\n' "$digest" > "$stage/build/.sha256" || return 1
+  rm -rf "$root/code-server-$version-$arch"
+  mv "$stage/build" "$root/code-server-$version-$arch" || return 1
+  rm -rf "$stage"
+}
+EDITOR_INSTALL
+
+editor_ensure_installed_in_base() {
+  if ! is_vm_running "$BASE_NAME"; then
+    limactl start "$BASE_NAME" --tty=false >/dev/null || return 1
+  fi
+  vm_exec "$BASE_NAME" "$OCVM_EDITOR_INSTALL_SH"$'\ninstall_editor'
+}
+
+# Only the editor's User directory is persistent. Runtime credentials, downloaded
+# binaries, logs and the managed extension never enter project preferences.
+editor_sync_preferences() {
+  local source="$1/editor/user-data/User" destination="$2/editor/user-data/User"
+  local path
+  for path in "$1/editor" "$1/editor/user-data" "$source" "$2/editor" "$2/editor/user-data" "$destination"; do
+    [[ ! -L "$path" ]] || return 1
+  done
+  [[ -d "$source" ]] || return 0
+  mkdir -p "$destination" || return 1
+  rsync -a --delete --safe-links "$source/" "$destination/"
+}
+
+read -r -d '' OCVM_EDITOR_EXTENSION_JS <<'EDITOR_JS' || true
+"use strict";
+const vscode = require("vscode");
+const fs = require("node:fs/promises");
+const path = require("node:path");
+const os = require("node:os");
+const net = require("node:net");
+const { execFile } = require("node:child_process");
+const { promisify } = require("node:util");
+const run = promisify(execFile);
+
+// Read bounded snapshots through an open descriptor: rotation cannot mix files.
+async function tailFile(file, limit = 128 * 1024) {
+  const handle = await fs.open(file, "r");
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) throw new Error("Not a regular file");
+    const start = Math.max(0, stat.size - limit);
+    const data = Buffer.alloc(Math.min(stat.size, limit));
+    const { bytesRead } = await handle.read(data, 0, data.length, start);
+    let text = data.subarray(0, bytesRead).toString("utf8");
+    if (start) text = "[Earlier log entries omitted]\n" + text.slice(text.indexOf("\n") + 1);
+    return text;
+  } finally { await handle.close(); }
+}
+
+async function readJson(file, limit = 32 * 1024 * 1024) {
+  const stat = await fs.stat(file);
+  if (!stat.isFile() || stat.size > limit) throw new Error("Invalid or oversized state");
+  return JSON.parse(await fs.readFile(file, "utf8"));
+}
+
+function reachable(port) {
+  return new Promise(resolve => {
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return resolve(false);
+    const socket = net.connect({ host: "127.0.0.1", port });
+    const finish = value => { socket.destroy(); resolve(value); };
+    socket.setTimeout(1500, () => finish(false));
+    socket.once("connect", () => finish(true));
+    socket.once("error", () => finish(false));
+  });
+}
+
+async function activate(context) {
+  const runtimeFile = process.env.OCVM_EDITOR_RUNTIME;
+  if (!runtimeFile) return;
+  let runtime;
+  try { runtime = await readJson(runtimeFile, 16384); } catch { return; }
+  if (runtime.schema !== 1 || typeof runtime.share !== "string" || typeof runtime.projectHash !== "string") return;
+  const sources = [
+    ["mcp", "MCP: Communication", path.join(runtime.share, "mcp/adapter.log")],
+    ["tunnel", "MCP: Tunnel", path.join(runtime.share, "mcp/tunnel.log")],
+    ["editor", "opencode-vm: Editor", path.join(runtime.share, "editor/server.log")],
+    ["activity", "OpenCode: Activity", null],
+  ];
+  const status = vscode.window.createOutputChannel("opencode-vm: Status");
+  context.subscriptions.push(status);
+  const logs = sources.map(([id, name, file]) => {
+    const channel = vscode.window.createOutputChannel(name);
+    context.subscriptions.push(channel);
+    return { id, file, channel, previous: null };
+  });
+  let disposed = false;
+  let refreshing = false;
+  async function activity() {
+    if (!runtime.mcpEnabled) return "Incoming MCP is disabled. Activity collection is unavailable.\n";
+    const journal = await readJson(path.join(runtime.share, "mcp/activity.json"));
+    if (journal.schema !== 1 || journal.project !== runtime.projectHash || !Array.isArray(journal.events)) {
+      throw new Error("Activity journal does not belong to this project");
+    }
+    const events = journal.events.slice(-200).map(event => {
+      // Render only the journal's known metadata; never prompts/tool bodies.
+      const values = [event.timestamp, event.type, event.session_id, event.message_id, event.source];
+      return values.filter(value => typeof value === "string").map(value => value.replace(/[\r\n\x00-\x1f]/g, " ").slice(0, 200)).join(" · ");
+    });
+    return "Recent stored activity (all project frontends, not only MCP).\n" +
+      "Collection is bounded; downtime may leave gaps. Stored events are not current status.\n" +
+      `Journal epoch: ${journal.epoch}\n\n` + (events.join("\n") || "No recorded events.") + "\n";
+  }
+  async function refresh() {
+    if (refreshing || disposed) return;
+    refreshing = true;
+    try {
+      for (const log of logs) {
+        let text;
+        try {
+          text = log.id === "activity" ? await activity() : await tailFile(log.file);
+          if (log.id === "mcp") text = "Incoming MCP tool calls. A completed call is not necessarily a completed agent task.\n\n" + text;
+        } catch (error) {
+          text = error.code === "ENOENT" ? "No log available for this session yet.\n" : "Log unavailable; retrying.\n";
+        }
+        if (!disposed && text !== log.previous) {
+          log.previous = text;
+          log.channel.replace(text || "No log entries yet.\n");
+        }
+      }
+    } finally { refreshing = false; }
+  }
+  async function refreshStatus() {
+    const [backend, editor, mcp] = await Promise.all([
+      reachable(runtime.backendPort), reachable(runtime.editorPort),
+      runtime.mcpEnabled ? reachable(runtime.mcpPort) : false,
+    ]);
+    let tunnel = "inactive";
+    try {
+      const result = await run("systemctl", ["is-active", "ocvm-mcp-tunnel.service"], { timeout: 2000 });
+      tunnel = result.stdout.trim();
+    } catch (error) {
+      tunnel = error.stdout?.trim() || "unknown";
+    }
+    let disk = "unknown";
+    try {
+      const stat = await fs.statfs(runtime.project);
+      disk = `${(stat.bavail * stat.bsize / 1024 ** 3).toFixed(1)} GiB free`;
+    } catch { /* status must still be useful when the mount is unavailable */ }
+    const tcp = value => value ? "TCP reachable" : "unreachable";
+    if (disposed) return;
+    status.replace([
+      `Checked: ${new Date().toISOString()}`,
+      `Project: ${runtime.project}`,
+      `VM uptime: ${Math.floor(os.uptime() / 60)} minutes`,
+      `Memory: ${((os.totalmem() - os.freemem()) / 1024 ** 3).toFixed(1)} / ${(os.totalmem() / 1024 ** 3).toFixed(1)} GiB`,
+      `Project disk: ${disk}`,
+      `OpenCode: ${tcp(backend)}`,
+      `Editor: ${tcp(editor)}`,
+      `Incoming MCP: ${runtime.mcpEnabled ? tcp(mcp) : "disabled"}`,
+      `MCP tunnel service: ${tunnel}`,
+      "",
+      "TCP reachability is not an end-to-end authentication or client connectivity check.",
+      "Run 'opencode-vm: Show Status' to refresh this snapshot.",
+    ].join("\n") + "\n");
+  }
+  for (const log of logs) {
+    context.subscriptions.push(vscode.commands.registerCommand(`ocvm.logs.${log.id}`, async () => {
+      await refresh(); log.channel.show(true);
+    }));
+  }
+  context.subscriptions.push(vscode.commands.registerCommand("ocvm.status", async () => {
+    await refreshStatus(); status.show(true);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand("ocvm.terminal", () => {
+    vscode.window.createTerminal({ name: "Project VM", cwd: runtime.project }).show();
+  }));
+  const button = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 0);
+  button.text = "$(server-environment) VM";
+  button.tooltip = "Project VM status and Output logs";
+  button.command = "ocvm.status";
+  button.show();
+  context.subscriptions.push(button);
+  await refresh();
+  await refreshStatus();
+  const timer = setInterval(() => { void refresh(); }, 2000);
+  context.subscriptions.push({ dispose() { disposed = true; clearInterval(timer); } });
+}
+exports.activate = activate;
+EDITOR_JS
 
 # ---------------------------------------------------------------------------
 # In-VM web redirector
@@ -11161,6 +11429,133 @@ load_session_auth() {
     unset OPENCODE_SERVER_PASSWORD 2>/dev/null || true
   fi
   return 0
+}
+
+stop_editor() {
+  local description
+  OC_EDITOR_READY=0
+  [ "$(systemctl show ocvm-editor.service -p LoadState --value 2>/dev/null)" != not-found ] || return 0
+  description="$(systemctl show ocvm-editor.service -p Description --value 2>/dev/null)" || return 1
+  [ -n "$description" ] || return 0
+  [ "$description" = "opencode-vm editor $SESS_SHARE" ] || {
+    echo "[editor] Existing service belongs to another runtime; refusing to stop it." >&2
+    return 1
+  }
+  sudo -n systemctl stop ocvm-editor.service || return 1
+  rm -f "$SESS_SHARE/editor/runtime.json"
+}
+
+start_editor() {
+  OC_EDITOR_READY=0
+  [ "${OC_EDITOR_ENABLED:-0}" = "1" ] || return 0
+  stop_editor || return 1
+  local dir="$SESS_SHARE/editor" waited=0
+  local OC_TLS=1 OC_SCHEME=http OC_TLS_CERT="" OC_TLS_KEY=""
+  ensure_web_tls
+  [ "$OC_SCHEME" = https ] || {
+    echo "[editor] HTTPS certificate unavailable; editor was not started." >&2
+    return 1
+  }
+  . "$SESS_SHARE/lib/editor-install.sh"
+  # Downloads run before the MCP/backend readiness deadline starts.
+  install_editor check || return 1
+  load_session_auth
+  mkdir -p "$dir/user-data/User" || return 1
+  chmod 700 "$dir" || return 1
+  # JSON is also YAML. Pass the password in the child environment, never argv.
+  OC_EDITOR_PASSWORD="$OC_PASSWORD" python3 - "$dir" "$PROJ_DIR" "$SESS_SHARE" \
+      "$((OC_PORT + 4))" "$OC_TLS_CERT" "$OC_TLS_KEY" "$OC_PORT_INTERNAL" \
+      "${OC_MCP_ENABLED:-0}" "${OC_MCP_PORT:-0}" "${OC_OPENLIVE_PROJECT_HASH:-}" <<'EDITOR_CONFIG'
+import json, os, pathlib, sys
+directory, project, share, port, cert, key, backend, mcp, mcp_port, project_hash = sys.argv[1:]
+os.umask(0o077)
+root = pathlib.Path(directory)
+password = os.environ.get("OC_EDITOR_PASSWORD", "")
+config = {"bind-addr": "127.0.0.1:" + port, "auth": "password" if password else "none",
+          "cert": cert, "cert-key": key, "user-data-dir": str(root / "user-data"),
+          "extensions-dir": str(root / "extensions")}
+if password:
+    config["password"] = password
+runtime = {"schema": 1, "project": project, "share": share, "projectHash": project_hash,
+           "editorPort": int(port), "backendPort": int(backend),
+           "mcpEnabled": mcp == "1", "mcpPort": int(mcp_port or "0")}
+for name, data in (("config.yaml", config), ("runtime.json", runtime)):
+    temporary = root / (name + ".tmp")
+    with temporary.open("w") as file:
+        json.dump(data, file)
+    temporary.chmod(0o600)
+    temporary.replace(root / name)
+settings = root / "user-data/User/settings.json"
+if not settings.exists():
+    with settings.open("x") as file:
+        json.dump({
+            "chat.disableAIFeatures": True,
+            "workbench.colorTheme": "Dark Modern",
+            "workbench.startupEditor": "none",
+            "workbench.tips.enabled": False,
+            "workbench.secondarySideBar.defaultVisibility": "hidden",
+            "extensions.ignoreRecommendations": True,
+            "extensions.autoCheckUpdates": False,
+            "extensions.autoUpdate": False,
+            "telemetry.telemetryLevel": "off",
+            "update.mode": "none",
+            "files.autoSave": "off",
+            "git.autofetch": False,
+            "git.enableStatusBarSync": False,
+            "git.showPushSuccessNotification": False,
+            "git.showActionButton": {"commit": True, "publish": False, "sync": False},
+            "remote.autoForwardPorts": False,
+            "terminal.integrated.cwd": project,
+            "editor.minimap.enabled": False,
+        }, file, indent=2)
+else:
+    # Older generated profiles had no theme default. Preserve any chosen theme.
+    try:
+        preferences = json.loads(settings.read_text())
+    except (OSError, ValueError):
+        preferences = None
+    if isinstance(preferences, dict) and "workbench.colorTheme" not in preferences:
+        preferences["workbench.colorTheme"] = "Dark Modern"
+        temporary = settings.with_name("settings.json.tmp")
+        with temporary.open("w") as file:
+            json.dump(preferences, file, indent=2)
+        temporary.chmod(0o600)
+        temporary.replace(settings)
+EDITOR_CONFIG
+  [ "$?" = 0 ] || return 1
+  touch "$dir/server.log" || return 1
+  chmod 600 "$dir/server.log" || return 1
+  if ss -ltn "sport = :$((OC_PORT + 4))" | grep -q LISTEN; then
+    echo "[editor] Port $((OC_PORT + 4)) is already occupied inside the VM." >&2
+    return 1
+  fi
+  sudo -n systemd-run --quiet --collect --unit=ocvm-editor --service-type=exec \
+    --description="opencode-vm editor $SESS_SHARE" \
+    --property="User=$(id -un)" --property="Group=$(id -gn)" \
+    --property="WorkingDirectory=$PROJ_DIR" --property=UMask=0077 \
+    --property=KillMode=control-group --property=TimeoutStopSec=10 \
+    --property=Restart=on-failure --property=RestartSec=2 \
+    --property=AppArmorProfile=opencode-sandbox \
+    --property="StandardOutput=append:$dir/server.log" --property="StandardError=append:$dir/server.log" \
+    --setenv="PATH=$PATH" --setenv="HOME=$HOME" --setenv="OCVM_EDITOR_RUNTIME=$dir/runtime.json" \
+    --setenv="XDG_CONFIG_HOME=$SESS_SHARE/config" --setenv=XDG_DATA_HOME=/tmp/oc-xdg-data \
+    --setenv=XDG_STATE_HOME=/tmp/oc-xdg-state --setenv="OCVM_HOST_LAN_IP=$OC_HOST_IP" \
+    -- "$OC_EDITOR_BIN" --config "$dir/config.yaml" --disable-telemetry --disable-update-check \
+    --disable-getting-started-override --disable-proxy --disable-workspace-trust \
+    --app-name "opencode-vm Editor" "$PROJ_DIR" || return 1
+  while [ "$waited" -lt 100 ]; do
+    if systemctl is-active --quiet ocvm-editor.service &&
+       curl -fsk --max-time 1 "https://127.0.0.1:$((OC_PORT + 4))/healthz" >/dev/null 2>&1; then
+      OC_EDITOR_READY=1
+      echo "[editor] Ready on HTTPS port $((OC_PORT + 4))."
+      return 0
+    fi
+    sleep 0.2
+    waited=$((waited + 1))
+  done
+  stop_editor || return 1
+  echo "[editor] Startup failed; inspect $dir/server.log." >&2
+  return 1
 }
 
 stop_openlive_gateway() {
@@ -11905,6 +12300,21 @@ print_web_banner() {
     echo "  Plain HTTP:    ${plain}:$(( OC_PORT + 1 ))    (no certificate to trust)"
   fi
   echo ""
+  if [ "${OC_EDITOR_ENABLED:-0}" = "1" ]; then
+    echo "Project editor (files, upload/download, local Git, terminal and logs)"
+    if [ "${OC_EDITOR_READY:-0}" = "1" ]; then
+      echo "  Browser:       https://${host}:$(( OC_PORT + 4 ))"
+      echo "  Certificate:   $SESS_SHARE/tls/cert.pem (trust for Markdown/webviews)"
+      if [ -n "${OC_PASSWORD:-}" ]; then
+        echo "  Login:         same password as the Web UI (password only)"
+      else
+        echo "  Login:         none (--no-auth)"
+      fi
+    else
+      echo "  unavailable — inspect $SESS_SHARE/editor/server.log"
+    fi
+    echo ""
+  fi
   if [ "${OC_A2A:-1}" = "1" ]; then
     echo "A2A  (protocol 1.0)"
     # Empty when the sidecar bailed out before naming itself (not installed, or
@@ -11958,7 +12368,7 @@ print_web_banner() {
     fi
   else
     echo ""
-    echo "  Plain HTTP everywhere (--no-tls): file/image attachments stay broken"
+    echo "  OpenCode/A2A use plain HTTP (--no-tls): file/image attachments stay broken"
     echo "       from other devices — browsers withhold crypto.subtle from"
     echo "       insecure origins. Use the 127.0.0.1 URL, or drop --no-tls."
   fi
@@ -11978,6 +12388,31 @@ install_web_lib() {
   mkdir -p "$dir" || return 1
   printf '%s\n' "$OCVM_WEB_LIB_SH"      > "$dir/web.sh"   || return 1
   printf '%s\n' "$OCVM_WEB_REDIRECT_PY" > "$dir/proxy.py" || return 1
+  printf '%s\n' "$OCVM_EDITOR_INSTALL_SH" > "$dir/editor-install.sh" || return 1
+  local extension="$share/editor/extensions/ocvm.project-tools-0.1.0" path
+  for path in "$share/editor" "$share/editor/extensions" "$extension" "$extension/extension.js" "$extension/package.json"; do
+    [[ ! -L "$path" ]] || { echo "[editor] Refusing a symlinked managed extension path: $path" >&2; return 1; }
+  done
+  mkdir -p "$extension" || return 1
+  chmod 700 "$share/editor" || return 1
+  printf '%s\n' "$OCVM_EDITOR_EXTENSION_JS" > "$extension/extension.js" || return 1
+  cat > "$extension/package.json" <<'EDITOR_MANIFEST'
+{
+  "name": "project-tools", "publisher": "ocvm", "version": "0.1.0",
+  "displayName": "opencode-vm Project Tools",
+  "description": "Project VM status, terminal and bounded diagnostic logs",
+  "engines": {"vscode": "^1.96.0"}, "main": "./extension.js",
+  "extensionKind": ["workspace"], "activationEvents": ["onStartupFinished"],
+  "contributes": {"commands": [
+    {"command": "ocvm.status", "title": "opencode-vm: Show Status"},
+    {"command": "ocvm.terminal", "title": "opencode-vm: Open Project Terminal"},
+    {"command": "ocvm.logs.mcp", "title": "opencode-vm: Show MCP Communication"},
+    {"command": "ocvm.logs.tunnel", "title": "opencode-vm: Show MCP Tunnel Log"},
+    {"command": "ocvm.logs.activity", "title": "opencode-vm: Show OpenCode Activity"},
+    {"command": "ocvm.logs.editor", "title": "opencode-vm: Show Editor Log"}
+  ]}
+ }
+EDITOR_MANIFEST
   return 0
 }
 
@@ -12332,6 +12767,14 @@ attach_session() {
   sess_mode="$(mcp_session_mode "${SESSION_LAUNCH_MODE:-${SESS_MODE:-tui}}" "$proj")" || { lifecycle_lock_release; return 1; }
   local prior_session_mode="${SESS_MODE:-tui}" prior_session_port="${SESS_PORT:-$DEFAULT_OC_PORT}"
   local sess_port="${SESSION_PORT:-${SESS_PORT:-$DEFAULT_OC_PORT}}"
+  # Old session records used 0 for the default-off editor. Only the new
+  # explicit opt-out marker suppresses the default when resuming web mode.
+  local sess_editor_disabled="${SESS_EDITOR_DISABLED:-0}" sess_editor_enabled
+  case "${SESSION_EDITOR_MODE:-}" in
+    enable) sess_editor_disabled=0 ;;
+    disable) sess_editor_disabled=1 ;;
+  esac
+  sess_editor_enabled="$(web_editor_enabled "$sess_mode" "$sess_editor_disabled")"
   local prior_mcp_enabled="${SESS_MCP_ENABLED:-}"
   [[ -n "$prior_mcp_enabled" ]] || { if [[ "$sess_mode" == web ]]; then prior_mcp_enabled=1; else prior_mcp_enabled=0; fi; }
   local prior_mcp_port="${SESS_MCP_PORT:-}"
@@ -12367,7 +12810,7 @@ attach_session() {
     _tls_senv="$(session_env "$proj")"
     if [[ -f "$_tls_senv" ]]; then
       write_senv "$_tls_senv" "$SESS_NAME" "${SESS_PROJ:-$proj}" "${CFG_HASH_AT_START:-}" \
-        "${SESS_MODE:-tui}" "${SESS_PORT:-$DEFAULT_OC_PORT}" "${SESS_KEEP_HISTORY:-0}" "$sess_tls" "$old_auth_generation" "${SESS_CONTROLLER:-$old_auth_generation}" "${SESS_MCP_ENABLED:-0}" "${SESS_MCP_PORT:-}"
+        "${SESS_MODE:-tui}" "${SESS_PORT:-$DEFAULT_OC_PORT}" "${SESS_KEEP_HISTORY:-0}" "$sess_tls" "$old_auth_generation" "${SESS_CONTROLLER:-$old_auth_generation}" "${SESS_MCP_ENABLED:-0}" "${SESS_MCP_PORT:-}" "${SESS_EDITOR_ENABLED:-0}" "${SESS_EDITOR_DISABLED:-0}"
       SESS_TLS="$sess_tls"
     fi
   fi
@@ -12413,7 +12856,7 @@ attach_session() {
     return 1
   }
   write_senv "$senv" "$SESS_NAME" "${SESS_PROJ:-$proj}" "${CFG_HASH_AT_START:-}" \
-    "$sess_mode" "$sess_port" "${SESS_KEEP_HISTORY:-0}" "$sess_tls" "$old_auth_generation" "$attach_controller" "$prior_mcp_enabled" "$prior_mcp_port" || {
+    "$sess_mode" "$sess_port" "${SESS_KEEP_HISTORY:-0}" "$sess_tls" "$old_auth_generation" "$attach_controller" "$prior_mcp_enabled" "$prior_mcp_port" "${SESS_EDITOR_ENABLED:-0}" "${SESS_EDITOR_DISABLED:-0}" || {
       _attach_transition_fail
       return 1
     }
@@ -12439,6 +12882,7 @@ attach_session() {
       set -euo pipefail
       PROJ_DIR="$1"; SESS_SHARE="$2"; OC_PORT="$3"; OC_HOST_IP="$4"; OC_TLS="${5:-0}"
       . "$SESS_SHARE/lib/web.sh"
+      stop_editor
       stop_mcp_adapter
       stop_all_proxies
       stop_openlive_gateway
@@ -12478,6 +12922,9 @@ attach_session() {
   # before the accepted host state is seeded into the resumed runtime.
   local resume_share
   resume_share="$(session_share_dir "$proj")"
+  if [[ "$sess_editor_enabled" == 1 && ! -d "$resume_share/editor/user-data/User" ]]; then
+    editor_sync_preferences "$(project_state_dir "$proj")" "$resume_share" || { _attach_transition_fail; return 1; }
+  fi
   auth_share_backup="$(mktemp)"
   if [[ -f "$resume_share/xdg-data/opencode/auth.json" ]]; then
     cp -p "$resume_share/xdg-data/opencode/auth.json" "$auth_share_backup"
@@ -12525,7 +12972,7 @@ attach_session() {
     return 1
   fi
   write_senv "$senv" "$SESS_NAME" "${SESS_PROJ:-$proj}" "${CFG_HASH_AT_START:-}" \
-    "$sess_mode" "$sess_port" "${SESS_KEEP_HISTORY:-0}" "$sess_tls" "$new_auth_generation" "$attach_controller" "$sess_mcp_enabled" "$sess_mcp_port" || {
+    "$sess_mode" "$sess_port" "${SESS_KEEP_HISTORY:-0}" "$sess_tls" "$new_auth_generation" "$attach_controller" "$sess_mcp_enabled" "$sess_mcp_port" "$sess_editor_enabled" "$sess_editor_disabled" || {
       _attach_transition_fail
       return 1
     }
@@ -12544,12 +12991,12 @@ attach_session() {
   local lan_up=1
   local reserved_mcp=""
   [[ "$sess_mcp_enabled" == "1" ]] && reserved_mcp="$sess_mcp_port"
-  effective_base="$(select_web_guest_base "$sess_port" "$reserved_mcp")" || return 1
+  effective_base="$(select_web_guest_base "$sess_port" "$reserved_mcp" "$sess_editor_enabled")" || return 1
   if [[ "$effective_base" != "$sess_port" ]]; then
     echo "[mcp] Web guest block moved from $sess_port to $effective_base to avoid private port $reserved_mcp."
   fi
   if [[ "$sess_mode" == "web" ]]; then
-    if start_web_tunnels "$SESS_NAME" "$sess_port" "$reserved_mcp"; then
+    if start_web_tunnels "$SESS_NAME" "$sess_port" "$reserved_mcp" "$sess_editor_enabled"; then
       effective_base="$WEB_PORT_BASE"
       # A named function, not an interpolated trap body: the old form spliced
       # $SESS_NAME straight into the trap string, which breaks on anything the
@@ -12600,6 +13047,10 @@ attach_session() {
   # OpenCode reads skills/commands at startup. Reconcile the managed package
   # after stopping the old web runtime and before launching the resumed one.
   skills_sync_besprechung_for_session "$(session_share_dir "$proj")" || return 1
+  if [[ "$sess_editor_enabled" == 1 ]]; then
+    vm_exec "$SESS_NAME" "$OCVM_EDITOR_INSTALL_SH"$'\ninstall_editor' ||
+      echo "[editor] Installation unavailable; OpenCode will continue without the editor." >&2
+  fi
   if [[ "$sess_mcp_enabled" == "1" ]]; then
     trap _attach_tunnel_cleanup EXIT HUP TERM
     mcp_watch_host_ready "$SESS_NAME" "$proj" "$(session_share_dir "$proj")" \
@@ -12632,6 +13083,7 @@ attach_session() {
     OC_MCP_ENABLED="${14:-0}"
     OC_MCP_PORT="${15:-40960}"
     OC_MCP_GENERATION="${16:-}"
+    OC_EDITOR_ENABLED="${17:-0}"
 
     # Shared in-VM web library (materialized into the session share by
     # install_web_lib on the host, and mounted here at the same path). It owns
@@ -12666,6 +13118,8 @@ attach_session() {
       start_mcp_adapter() { [ "${OC_MCP_ENABLED:-0}" != "1" ]; }
       stop_mcp_adapter()  { return 0; }
       mcp_watch_ready()   { [ "${OC_MCP_ENABLED:-0}" != "1" ]; }
+      stop_editor()      { return 0; }
+      start_editor()     { [ "${OC_EDITOR_ENABLED:-0}" != "1" ]; }
     fi
 
     export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/.config/composer/vendor/bin:/tmp/go/bin:/tmp/pnpm-store:$PATH"
@@ -12765,6 +13219,7 @@ attach_session() {
       # losing the history sync. Nothing below may die on a write error.
       set +e
       trap "" INT TERM HUP
+      stop_editor || echo "[editor] Could not stop editor cleanly." >&2
       if ! stop_mcp_adapter; then
         MCP_SHUTDOWN_FAILED=1
       fi
@@ -12844,6 +13299,7 @@ attach_session() {
         exit 1
       fi
       start_a2a
+      start_editor || echo "[editor] Unavailable; OpenCode continues. See $SESS_SHARE/editor/server.log." >&2
       print_web_banner
       a2a_watch_ready
       mcp_watch_ready
@@ -12905,7 +13361,7 @@ attach_session() {
 
     # Sync-back happens via the EXIT trap installed above (covers Ctrl+C as
     # well as normal exit).
-  ' "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$effective_base" "$host_lan_ip" "${OC_WEB_TUI:-false}" "$sess_tls" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up" "$(proj_hash "$proj")" "$OCVM_VERSION" "$sess_mcp_enabled" "$sess_mcp_port" "$attach_controller" || {
+  ' "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$effective_base" "$host_lan_ip" "${OC_WEB_TUI:-false}" "$sess_tls" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up" "$(proj_hash "$proj")" "$OCVM_VERSION" "$sess_mcp_enabled" "$sess_mcp_port" "$attach_controller" "$sess_editor_enabled" || {
     stop_mcp_host_watcher || true
     echo "[attach] Session command failed." >&2
     return 1
@@ -13242,8 +13698,8 @@ write_senv() {
   mcp_port="${12:-}"
   mkdir -p "$(dirname "$senv")"
   tmp="$(mktemp "${senv}.tmp.XXXXXX")" || return 1
-  printf 'SESS_NAME=%q\nSESS_PROJ=%q\nCFG_HASH_AT_START=%q\nSESS_MODE=%q\nSESS_PORT=%q\nSESS_KEEP_HISTORY=%q\nSESS_TLS=%q\nSESS_AUTH_GENERATION=%q\nSESS_CONTROLLER=%q\nSESS_MCP_ENABLED=%q\nSESS_MCP_PORT=%q\n' \
-    "$name" "$proj" "$cfg_hash" "$mode" "$port" "$keep_history" "$tls" "$auth_generation" "$controller" "$mcp_enabled" "$mcp_port" > "$tmp"
+  printf 'SESS_NAME=%q\nSESS_PROJ=%q\nCFG_HASH_AT_START=%q\nSESS_MODE=%q\nSESS_PORT=%q\nSESS_KEEP_HISTORY=%q\nSESS_TLS=%q\nSESS_AUTH_GENERATION=%q\nSESS_CONTROLLER=%q\nSESS_MCP_ENABLED=%q\nSESS_MCP_PORT=%q\nSESS_EDITOR_ENABLED=%q\nSESS_EDITOR_DISABLED=%q\n' \
+    "$name" "$proj" "$cfg_hash" "$mode" "$port" "$keep_history" "$tls" "$auth_generation" "$controller" "$mcp_enabled" "$mcp_port" "${13:-0}" "${14:-0}" > "$tmp"
   chmod 600 "$tmp"
   mv -f "$tmp" "$senv"
 }
@@ -13329,7 +13785,7 @@ _update_senv_mode() {
     if [[ "$new_mode" == web && "${SESS_MODE:-tui}" != web ]]; then
       SESS_MCP_ENABLED=1
     fi
-    write_senv "$senv" "$SESS_NAME" "$SESS_PROJ" "${CFG_HASH_AT_START:-}" "$new_mode" "$new_port" "${SESS_KEEP_HISTORY:-0}" "${SESS_TLS:-0}" "${SESS_AUTH_GENERATION:-$SESS_NAME}" "${SESS_CONTROLLER:-${SESS_AUTH_GENERATION:-$SESS_NAME}}" "${SESS_MCP_ENABLED:-0}" "${SESS_MCP_PORT:-}"
+    write_senv "$senv" "$SESS_NAME" "$SESS_PROJ" "${CFG_HASH_AT_START:-}" "$new_mode" "$new_port" "${SESS_KEEP_HISTORY:-0}" "${SESS_TLS:-0}" "${SESS_AUTH_GENERATION:-$SESS_NAME}" "${SESS_CONTROLLER:-${SESS_AUTH_GENERATION:-$SESS_NAME}}" "${SESS_MCP_ENABLED:-0}" "${SESS_MCP_PORT:-}" "${SESS_EDITOR_ENABLED:-0}" "${SESS_EDITOR_DISABLED:-0}"
   )
 }
 
@@ -13351,7 +13807,7 @@ _destroy_prev_session() {
   destroy_controller="${old_sess}-destroy-$(date +%s)-$$"
   write_senv "$senv" "$old_sess" "${SESS_PROJ:-$proj}" "${CFG_HASH_AT_START:-}" \
     "${SESS_MODE:-tui}" "${SESS_PORT:-}" "${SESS_KEEP_HISTORY:-0}" "${SESS_TLS:-0}" \
-    "$old_auth_generation" "$destroy_controller" "${SESS_MCP_ENABLED:-0}" "${SESS_MCP_PORT:-}" || { lifecycle_lock_release; return 1; }
+    "$old_auth_generation" "$destroy_controller" "${SESS_MCP_ENABLED:-0}" "${SESS_MCP_PORT:-}" "${SESS_EDITOR_ENABLED:-0}" "${SESS_EDITOR_DISABLED:-0}" || { lifecycle_lock_release; return 1; }
   local old_sess_share
   old_sess_share="$(session_share_dir "$proj")"
   local old_proj_state
@@ -13748,6 +14204,9 @@ start_session() {
   sess="oc-$(date +%Y%m%d-%H%M%S)"
   local controller_id="${sess}-controller-$$"
   local effective_mcp_enabled=0 effective_mcp_port=""
+  local effective_editor_disabled=0 effective_editor_enabled
+  [[ "${SESSION_EDITOR_MODE:-}" != disable ]] || effective_editor_disabled=1
+  effective_editor_enabled="$(web_editor_enabled "$SESSION_MODE" "$effective_editor_disabled")"
   if [[ ( "$SESSION_MODE" == web || "$SESSION_MODE" == tui-mcp ) && "${SESSION_MCP_MODE:-}" != disable ]]; then
     effective_mcp_enabled=1
     effective_mcp_port="$(mcp_reserve_host_port "$proj" "${SESSION_MCP_PORT:-}")" || return 1
@@ -13814,6 +14273,9 @@ start_session() {
   sess_share="$(session_share_dir "$proj")"
   rm -rf "$sess_share"
   mkdir -p "$sess_share"
+  if [[ "$effective_editor_enabled" == 1 ]]; then
+    editor_sync_preferences "$proj_state" "$sess_share" || return 1
+  fi
 
   # Copy project state into session share (XDG directory structure)
   mkdir -p "$sess_share/config/opencode" "$sess_share/xdg-data/opencode" "$sess_share/xdg-state/opencode"
@@ -14019,6 +14481,9 @@ start_session() {
   # (idempotent, web mode only). Same BEFORE-stop-for-clone placement as above.
   if [[ "$SESSION_MODE" == "web" ]]; then
     a2a_ensure_installed_in_base || echo "[run] A2A install skipped; session will start without A2A." >&2
+    if [[ "$effective_editor_enabled" == 1 ]]; then
+      editor_ensure_installed_in_base || echo "[editor] Base installation failed; will retry inside the session." >&2
+    fi
   fi
 
   # Ensure base VM is stopped for clone — always attempt stop defensively
@@ -14093,7 +14558,7 @@ start_session() {
   echo "[run] Clone complete, lock released $(_ts)"
 
   # Track session
-  write_senv "$senv" "$sess" "$proj" "$cfg_hash" "$SESSION_MODE" "${SESSION_PORT:-}" "${KEEP_HISTORY:-0}" "${SESSION_TLS:-0}" "$sess" "$controller_id" "$effective_mcp_enabled" "$effective_mcp_port"
+  write_senv "$senv" "$sess" "$proj" "$cfg_hash" "$SESSION_MODE" "${SESSION_PORT:-}" "${KEEP_HISTORY:-0}" "${SESSION_TLS:-0}" "$sess" "$controller_id" "$effective_mcp_enabled" "$effective_mcp_port" "$effective_editor_enabled" "$effective_editor_disabled"
 
   cleanup() {
     trap - EXIT HUP TERM
@@ -14436,11 +14901,11 @@ start_session() {
     lan_up=0
   fi
   if [[ "$SESSION_MODE" == "web" ]]; then
-    effective_base="$(select_web_guest_base "${SESSION_PORT:-0}" "${effective_mcp_port:-}")" || return 1
+    effective_base="$(select_web_guest_base "${SESSION_PORT:-0}" "${effective_mcp_port:-}" "$effective_editor_enabled")" || return 1
     if [[ "$effective_base" != "${SESSION_PORT:-0}" ]]; then
       echo "[mcp] Web guest block moved from ${SESSION_PORT:-0} to $effective_base to avoid private port ${effective_mcp_port:-}."
     fi
-    if start_web_tunnels "$sess" "${SESSION_PORT:-0}" "$effective_mcp_port"; then
+    if start_web_tunnels "$sess" "${SESSION_PORT:-0}" "$effective_mcp_port" "$effective_editor_enabled"; then
       effective_base="$WEB_PORT_BASE"
       probe_web_tunnel_async "$WEB_PORT_BASE" "$host_lan_ip" "${SESSION_TLS:-0}"
     else
@@ -14454,6 +14919,10 @@ start_session() {
     start_materialize_daemon "$sess" "$sess_share" || true
   fi
 
+  if [[ "$effective_editor_enabled" == 1 ]]; then
+    vm_exec "$sess" "$OCVM_EDITOR_INSTALL_SH"$'\ninstall_editor' ||
+      echo "[editor] Installation unavailable; OpenCode will continue without the editor." >&2
+  fi
   if [[ "$effective_mcp_enabled" == "1" ]]; then
     mcp_watch_host_ready "$sess" "$proj" "$sess_share" "$effective_mcp_port" "$controller_id" "$controller_id" || return 1
   fi
@@ -14485,6 +14954,7 @@ start_session() {
     OC_MCP_ENABLED="${14:-0}"
     OC_MCP_PORT="${15:-40960}"
     OC_MCP_GENERATION="${16:-}"
+    OC_EDITOR_ENABLED="${17:-0}"
 
     # Shared in-VM web library (materialized into the session share by
     # install_web_lib on the host, and mounted here at the same path). It owns
@@ -14519,6 +14989,8 @@ start_session() {
       start_mcp_adapter() { [ "${OC_MCP_ENABLED:-0}" != "1" ]; }
       stop_mcp_adapter()  { return 0; }
       mcp_watch_ready()   { [ "${OC_MCP_ENABLED:-0}" != "1" ]; }
+      stop_editor()      { return 0; }
+      start_editor()     { [ "${OC_EDITOR_ENABLED:-0}" != "1" ]; }
     fi
 
     export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/.config/composer/vendor/bin:/tmp/go/bin:/tmp/pnpm-store:$PATH"
@@ -14651,6 +15123,7 @@ EOF
       # losing the history sync. Nothing below may die on a write error.
       set +e
       trap "" INT TERM HUP
+      stop_editor || echo "[editor] Could not stop editor cleanly." >&2
       if ! stop_mcp_adapter; then
         MCP_SHUTDOWN_FAILED=1
       fi
@@ -14777,6 +15250,7 @@ EOF
           exit 1
         fi
         start_a2a
+        start_editor || echo "[editor] Unavailable; OpenCode continues. See $SESS_SHARE/editor/server.log." >&2
         print_web_banner
         a2a_watch_ready
         mcp_watch_ready
@@ -14845,7 +15319,7 @@ EOF
 
     # Sync back happens via the EXIT trap installed above (covers both clean
     # exit and Ctrl+C-driven termination of the web server).
-  ' "$proj" "$sess_share" "$SESSION_MODE" "$effective_base" "${OC_WEB_TUI:-false}" "$host_lan_ip" "${SESSION_TLS:-0}" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up" "$(proj_hash "$proj")" "$OCVM_VERSION" "$effective_mcp_enabled" "${effective_mcp_port:-$DEFAULT_MCP_PORT}" "$controller_id"; then
+  ' "$proj" "$sess_share" "$SESSION_MODE" "$effective_base" "${OC_WEB_TUI:-false}" "$host_lan_ip" "${SESSION_TLS:-0}" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up" "$(proj_hash "$proj")" "$OCVM_VERSION" "$effective_mcp_enabled" "${effective_mcp_port:-$DEFAULT_MCP_PORT}" "$controller_id" "$effective_editor_enabled"; then
     if ! stop_mcp_host_watcher; then
       echo "[mcp] Host readiness did not complete successfully; session failed closed." >&2
       return 1
@@ -15172,6 +15646,7 @@ Usage:
                                            #   non-interactive override of the prompt
   opencode-vm web [--port PORT] [--password PW|--no-auth] [--no-tls] [--tui]
                    [--no-a2a|--require-a2a] [--mcp-port PORT|--no-mcp]
+                   [--no-editor|--editor]
                   [--keep-history] [--reconnect|--fresh|--cancel-if-exists]
                                            # start web server session (default port 4096)
                                            # provides: web UI, REST API, TUI attach, A2A agent
@@ -15180,7 +15655,16 @@ Usage:
                                            #   P-1  opencode backend (VM-internal)
                                            #   P    web HTTPS        P+1  web HTTP
                                            #   P+2  a2a HTTPS        P+3  a2a HTTP
-                                           #   valid range for P: 1026-65532
+                                           #   P+4  editor HTTPS (default on)
+                                           #   valid range for P: 1026-65532 (65531 with editor)
+                                           # Editor: files, upload/download, local Git,
+                                           #   terminal and diagnostic logs via code-server.
+                                           #   --no-editor disables it for this session;
+                                           #   attach/reconnect retain that choice. --editor
+                                           #   re-enables it; fresh web starts default on.
+                                           #   Always HTTPS, including with --no-tls.
+                                           #   Editor login uses the same password (no username);
+                                           #   --no-auth also disables editor authentication.
                                            # --password PW: HTTP Basic on all four
                                            #   public endpoints (also \$OCVM_WEB_PASSWORD).
                                            #   Persisted per session, so 'attach' keeps it.

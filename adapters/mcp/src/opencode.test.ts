@@ -80,6 +80,8 @@ type FakeState = {
   };
   createCalls: Array<Record<string, unknown>>;
   runtimeCalls: Array<Record<string, unknown>>;
+  archiveCalls: Array<Record<string, unknown>>;
+  archive?: (parameters: Record<string, unknown>) => Promise<unknown>;
   create?: (
     parameters: Record<string, unknown>,
     options: { signal: AbortSignal },
@@ -196,7 +198,24 @@ function fakeClient(state: FakeState) {
       },
     },
     session: {
-      async message(parameters: { sessionID: string; messageID: string }) {
+      async update(parameters: Record<string, unknown>) {
+        state.archiveCalls.push(parameters);
+        if (state.archive) return state.archive(parameters);
+        const found = state.sessions.find(
+          (item) => item.id === parameters.sessionID,
+        );
+        if (!found)
+          throw Object.assign(new Error("not found"), { status: 404 });
+        found.time = {
+          ...found.time,
+          archived: (parameters.time as { archived: number }).archived,
+        };
+        return { data: found };
+      },
+      async message(
+        parameters: { sessionID: string; messageID: string },
+        _options?: { signal?: AbortSignal },
+      ) {
         const item = state.messages.find(
           (message) =>
             message.info.id === parameters.messageID &&
@@ -288,6 +307,7 @@ function baseState(sessions = [session("ses_work")]): FakeState {
     },
     createCalls: [],
     runtimeCalls: [],
+    archiveCalls: [],
   };
 }
 
@@ -727,7 +747,7 @@ test("Delivery A: result cursors reject changed boundaries and query switches; e
   });
 });
 
-test("Delivery A: completed deep result reconciles the MCP admission guard without resending", async () => {
+test("idle admission automatically reconciles an old completed receipt beyond the status window", async () => {
   const state = baseState();
   state.promptAsync = async (parameters) => {
     state.messages.push(stored(parameters.messageID as string, "task"));
@@ -741,22 +761,343 @@ test("Delivery A: completed deep result reconciles the MCP admission guard witho
     ),
     stored("final", "done", receipt.message_id),
   );
-  await assert.rejects(gateway.sendMessage("ses_work", "next"), {
-    code: "SESSION_BUSY",
-  });
-  let cursor: string | undefined;
-  do {
-    const page = await gateway.getTaskResult(
-      "ses_work",
-      receipt.message_id,
-      cursor,
-    );
-    cursor = page.next_cursor;
-  } while (cursor);
+  assert.equal((await gateway.getSessionDetails("ses_work")).activity, "idle");
+  assert.equal(
+    (await gateway.getSessionStatus("ses_work", receipt.message_id)).state,
+    "unknown",
+  );
   assert.equal(state.promptCalls.length, 1);
   await gateway.sendMessage("ses_work", "next");
   assert.equal(state.promptCalls.length, 2);
 });
+
+test("idle without terminal evidence stays guarded; unrelated busy is not proof of this task running", async () => {
+  const state = baseState();
+  state.promptAsync = async (parameters) => {
+    state.messages.push(
+      stored(parameters.messageID as string, "old inventory"),
+    );
+  };
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  const receipt = await gateway.sendMessage("ses_work", "inventory");
+  state.messages.push(
+    ...Array.from({ length: 5 }, (_, i) =>
+      stored(`iteration${i}`, "", receipt.message_id, "tool-calls"),
+    ),
+  );
+  const before = await gateway.getSessionDetails("ses_work");
+  assert.equal(before.activity, "idle");
+  assert.equal(before.admission?.guarded_message_id, receipt.message_id);
+  const result = await gateway.getTaskResult("ses_work", receipt.message_id);
+  assert.equal(result.search_complete, true);
+  assert.equal(result.messages.length, 5);
+  assert.equal(result.state, "unknown");
+  await assert.rejects(gateway.sendMessage("ses_work", "new implementation"), {
+    code: "SUBMISSION_UNRESOLVED",
+    reason: "receipt_not_terminal",
+    correlationId: receipt.message_id,
+  });
+  state.statuses.ses_work = { type: "busy" };
+  const busy = await gateway.getSessionStatus("ses_work", receipt.message_id);
+  assert.equal(busy.backend_activity, "busy");
+  assert.equal(busy.state, "unknown");
+  assert.equal(busy.task_status_reason, "non_terminal_evidence");
+  assert.deepEqual(busy.active_assistant_message_ids, []);
+  await assert.rejects(gateway.sendMessage("ses_work", "new implementation"), {
+    code: "SESSION_BUSY",
+    reason: "backend_active",
+  });
+  // Text generation can be active without any currently running tool.
+  const generating = stored("generating", "", receipt.message_id, "unknown");
+  generating.info.time = { created: 3 };
+  state.messages.push(generating);
+  const active = await gateway.getSessionStatus("ses_work", receipt.message_id);
+  assert.equal(active.state, "running");
+  assert.deepEqual(active.active_assistant_message_ids, ["generating"]);
+  assert.equal(
+    (await gateway.getSessionProgress("ses_work")).in_flight_tools.length,
+    0,
+  );
+  assert.equal(state.promptCalls.length, 1);
+  assert.equal(
+    (await gateway.getSessionDetails("ses_work")).admission?.guarded_message_id,
+    receipt.message_id,
+  );
+});
+
+test("a visible user receipt alone does not become running or input_required from session-wide signals", async () => {
+  const state = baseState();
+  state.messages = [stored("user", "task")];
+  state.statuses.ses_work = { type: "busy" };
+  state.questions = [
+    { sessionID: "ses_work", tool: { messageID: "another_turn" } },
+  ];
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  const result = await gateway.getSessionStatus("ses_work", "user");
+  assert.equal(result.state, "submitted");
+  assert.equal(result.pending_input_scope, "session");
+  assert.equal(result.pending_input.questions, 1);
+  assert.deepEqual(result.active_assistant_message_ids, []);
+});
+
+test("deep admission search is bounded and resumes without replaying a prompt", async () => {
+  const state = baseState();
+  state.promptAsync = async (parameters) => {
+    state.messages.push(stored(parameters.messageID as string, "task"));
+  };
+  const client = fakeClient(state);
+  const gateway = new OpenCodeGateway(runtime(), client as never);
+  const receipt = await gateway.sendMessage("ses_work", "old task");
+  state.messages.push(
+    ...Array.from({ length: 620 }, (_, i) =>
+      stored(`step${i}`, "", receipt.message_id, "tool-calls"),
+    ),
+    stored("done", "finished", receipt.message_id),
+  );
+  const scanned: Array<string | undefined> = [];
+  const messages = client.session.messages.bind(client.session);
+  client.session.messages = async (parameters) => {
+    if (parameters.limit === 20) scanned.push(parameters.before);
+    return messages(parameters);
+  };
+  await assert.rejects(gateway.sendMessage("ses_work", "next"), {
+    code: "SUBMISSION_UNRESOLVED",
+    reason: "search_incomplete",
+  });
+  assert.equal(state.promptCalls.length, 1);
+  const firstCount = scanned.length;
+  assert.ok(firstCount > 0 && firstCount < 32);
+  const next = await gateway.sendMessage("ses_work", "next");
+  assert.ok(
+    scanned[firstCount],
+    "next admission resumes the saved backward cursor",
+  );
+  assert.equal(
+    new Set(scanned).size,
+    scanned.length,
+    "already searched pages were not fetched again",
+  );
+  assert.equal(state.promptCalls.length, 2);
+  assert.equal(
+    (await gateway.getSessionDetails("ses_work")).admission?.guarded_message_id,
+    next.message_id,
+  );
+});
+
+test("changed search boundaries and backend failures retain the receipt guard", async () => {
+  const state = baseState();
+  state.promptAsync = async (parameters) => {
+    state.messages.push(stored(parameters.messageID as string, "task"));
+  };
+  const client = fakeClient(state);
+  const gateway = new OpenCodeGateway(runtime(), client as never);
+  const receipt = await gateway.sendMessage("ses_work", "old");
+  state.messages.push(
+    ...Array.from({ length: 510 }, (_, i) =>
+      stored(`step${i}`, "", receipt.message_id, "tool-calls"),
+    ),
+    stored("done", "report", receipt.message_id),
+  );
+  await assert.rejects(gateway.sendMessage("ses_work", "next"), {
+    reason: "search_incomplete",
+  });
+  state.messages.at(-1)!.parts[0]!.text = "changed report";
+  await assert.rejects(gateway.sendMessage("ses_work", "next"), {
+    code: "SUBMISSION_UNRESOLVED",
+    reason: "search_changed",
+  });
+  const direct = client.session.message;
+  client.session.message = async () => {
+    throw new Error("PRIVATE BACKEND ERROR");
+  };
+  await assert.rejects(gateway.sendMessage("ses_work", "next"), {
+    code: "SUBMISSION_UNRESOLVED",
+    reason: "backend_unavailable",
+  });
+  assert.equal(state.promptCalls.length, 1);
+  assert.equal(
+    (await gateway.getSessionDetails("ses_work")).admission?.guarded_message_id,
+    receipt.message_id,
+  );
+  client.session.message = direct;
+});
+
+test("deep reconciliation shares the write lock and rechecks backend activity before admission", async () => {
+  const state = baseState();
+  state.promptAsync = async (parameters) => {
+    state.messages.push(stored(parameters.messageID as string, "task"));
+  };
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  const receipt = await gateway.sendMessage("ses_work", "old");
+  state.messages.push(
+    ...Array.from({ length: 110 }, (_, i) =>
+      stored(`step${i}`, "", receipt.message_id, "tool-calls"),
+    ),
+    stored("done", "report", receipt.message_id),
+  );
+  const search = gateway.getTaskResult.bind(gateway);
+  let entered!: () => void;
+  const entering = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  gateway.getTaskResult = async (...args) => {
+    entered();
+    await gate;
+    const result = await search(...args);
+    if (result.search_complete) state.statuses.ses_work = { type: "busy" };
+    return result;
+  };
+  const first = gateway.sendMessage("ses_work", "next");
+  await entering;
+  const pending = await gateway.getSessionDetails("ses_work");
+  assert.equal(pending.activity, "idle");
+  assert.equal(pending.admission?.write_in_progress, true);
+  await assert.rejects(gateway.sendMessage("ses_work", "concurrent"), {
+    code: "SESSION_BUSY",
+    reason: "write_in_progress",
+  });
+  release();
+  await assert.rejects(first, {
+    code: "SESSION_BUSY",
+    reason: "backend_active",
+  });
+  assert.equal(state.promptCalls.length, 1);
+  assert.equal(
+    (await gateway.getSessionDetails("ses_work")).admission?.write_in_progress,
+    false,
+  );
+});
+
+test("a late status read for an old task cannot retire a newer receipt", async () => {
+  const state = baseState();
+  state.promptAsync = async (parameters) => {
+    state.messages.push(stored(parameters.messageID as string, "task"));
+  };
+  const client = fakeClient(state);
+  const gateway = new OpenCodeGateway(runtime(), client as never);
+  const first = await gateway.sendMessage("ses_work", "first");
+  state.messages.push(stored("done", "report", first.message_id));
+  const messages = client.session.messages.bind(client.session);
+  let entered!: () => void, release!: () => void;
+  const entering = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let held = false;
+  client.session.messages = async (parameters) => {
+    const result = await messages(parameters);
+    if (!held && parameters.limit === 100) {
+      held = true;
+      entered();
+      await gate;
+    }
+    return result;
+  };
+  const oldRead = gateway.getSessionStatus("ses_work", first.message_id);
+  await entering;
+  const second = await gateway.sendMessage("ses_work", "second");
+  release();
+  assert.equal((await oldRead).state, "completed");
+  assert.equal(
+    (await gateway.getSessionDetails("ses_work")).admission?.guarded_message_id,
+    second.message_id,
+  );
+  await assert.rejects(gateway.sendMessage("ses_work", "third"), {
+    code: "SUBMISSION_UNRESOLVED",
+    correlationId: second.message_id,
+  });
+  assert.equal(state.promptCalls.length, 2);
+});
+
+test("runtime changes reconcile old terminal receipts without sending work", async () => {
+  for (const finish of ["stop", "abort", "error"]) {
+    const state = baseState();
+    state.promptAsync = async (parameters) => {
+      state.messages.push(stored(parameters.messageID as string, "task"));
+    };
+    const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+    const receipt = await gateway.sendMessage("ses_work", "old");
+    state.messages.push(
+      ...Array.from({ length: 110 }, (_, i) =>
+        stored(`step${i}`, "", receipt.message_id, "tool-calls"),
+      ),
+      stored("end", "", receipt.message_id, finish),
+    );
+    assert.equal(
+      (await gateway.updateSessionRuntime("ses_work", { agent: "plan" })).state,
+      "updated",
+    );
+    assert.equal(state.promptCalls.length, 1);
+    assert.equal(
+      (await gateway.getSessionDetails("ses_work")).admission
+        ?.guarded_message_id,
+      undefined,
+    );
+  }
+});
+
+test(
+  "deep reconciliation deadline aborts backend reads without clearing the guard",
+  { timeout: 2000 },
+  async () => {
+    const state = baseState();
+    state.promptAsync = async (parameters) => {
+      state.messages.push(stored(parameters.messageID as string, "task"));
+    };
+    const client = fakeClient(state);
+    const gateway = new OpenCodeGateway(
+      runtime(),
+      client as never,
+      5000,
+      1000,
+      20,
+    );
+    const receipt = await gateway.sendMessage("ses_work", "old");
+    state.messages.push(
+      ...Array.from({ length: 110 }, (_, i) =>
+        stored(`step${i}`, "", receipt.message_id, "tool-calls"),
+      ),
+      stored("done", "report", receipt.message_id),
+    );
+    const direct = client.session.message.bind(client.session);
+    let observed: AbortSignal | undefined;
+    client.session.message = async (parameters, options) => {
+      observed = options?.signal;
+      assert.ok(observed);
+      const signal = observed;
+      await new Promise<void>((_resolve, reject) => {
+        if (signal.aborted) reject(new Error("aborted"));
+        else
+          signal.addEventListener("abort", () => reject(new Error("aborted")), {
+            once: true,
+          });
+      });
+      return direct(parameters, options);
+    };
+    const keepAlive = setTimeout(() => {}, 3000);
+    try {
+      await assert.rejects(gateway.sendMessage("ses_work", "next"), {
+        code: "SUBMISSION_UNRESOLVED",
+        reason: "search_incomplete",
+      });
+      assert.equal(observed?.aborted, true);
+      assert.equal(state.promptCalls.length, 1);
+      assert.equal(
+        (await gateway.getSessionDetails("ses_work")).admission
+          ?.guarded_message_id,
+        receipt.message_id,
+      );
+    } finally {
+      clearTimeout(keepAlive);
+    }
+  },
+);
 
 test("Delivery A: full serialized MCP responses stay bounded, including escaped text and Unicode", async () => {
   const state = baseState();
@@ -929,6 +1270,150 @@ test("creation binds runtime defaults and a root project session without sending
     providerID: "provider",
     modelID: "model",
   });
+});
+
+test("archiving keeps history opt-in readable by ID but excludes normal reads and all writes", async () => {
+  const state = baseState();
+  state.messages = [
+    stored("user", "question"),
+    stored("answer", "archived answer", "user"),
+  ];
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  const oldRef = (await gateway.getMessage("ses_work", "answer")).message
+    .content!.content_ref;
+  const archived = await gateway.archiveSession("ses_work");
+  assert.equal(archived.state, "archived");
+  assert.equal(state.archiveCalls.length, 1);
+  assert.deepEqual(state.archiveCalls[0], {
+    sessionID: "ses_work",
+    directory: project,
+    time: { archived: archived.archived_at },
+  });
+  assert.equal((await gateway.listSessions()).sessions.length, 0);
+  for (const read of [
+    () => gateway.getSessionDetails("ses_work"),
+    () => gateway.getSessionHistory("ses_work"),
+    () => gateway.getMessage("ses_work", "answer"),
+    () => gateway.readMessageContent(oldRef),
+    () => gateway.getTaskResult("ses_work", "user"),
+    () => gateway.sendMessage("ses_work", "new work"),
+    () => gateway.archiveSession("ses_work"),
+  ])
+    await assert.rejects(read(), { code: "SESSION_NOT_FOUND" });
+  assert.equal(
+    (await gateway.getSessionDetails("ses_work", true)).archived_at,
+    archived.archived_at,
+  );
+  const page = await gateway.getSessionHistory("ses_work", 2, undefined, true);
+  assert.equal(page.messages.length, 2);
+  const message = (await gateway.getMessage("ses_work", "answer", true))
+    .message;
+  assert.equal(
+    (await gateway.readMessageContent(message.content!.content_ref)).text,
+    "archived answer",
+  );
+  const result = await gateway.getTaskResult(
+    "ses_work",
+    "user",
+    undefined,
+    20,
+    undefined,
+    true,
+  );
+  assert.equal(result.state, "completed");
+  assert.equal(
+    (await gateway.readMessageContent(result.messages[0]!.content!.content_ref))
+      .text,
+    "archived answer",
+  );
+  const partial = await gateway.getTaskResult(
+    "ses_work",
+    "user",
+    undefined,
+    1,
+    undefined,
+    true,
+  );
+  assert.ok(partial.next_cursor);
+  await assert.rejects(
+    gateway.getTaskResult("ses_work", "user", partial.next_cursor),
+    { code: "SESSION_NOT_FOUND" },
+  );
+  const resumed = await gateway.getTaskResult(
+    "ses_work",
+    "user",
+    partial.next_cursor,
+    1,
+    undefined,
+    true,
+  );
+  assert.equal(resumed.state, "completed");
+  assert.equal(state.promptCalls.length, 0);
+  state.sessions[0]!.location.directory = "/other";
+  await assert.rejects(
+    gateway.readMessageContent(message.content!.content_ref),
+    { code: "SESSION_NOT_FOUND" },
+  );
+  await assert.rejects(
+    gateway.getTaskResult("ses_work", "user", undefined, 20, undefined, true),
+    { code: "SESSION_NOT_FOUND" },
+  );
+});
+
+test("archive refuses busy, pending, unresolved, foreign and child sessions before writing", async () => {
+  for (const mode of [
+    "busy",
+    "pending",
+    "unresolved",
+    "foreign",
+    "child",
+  ] as const) {
+    const state = baseState();
+    if (mode === "busy") state.statuses.ses_work = { type: "busy" };
+    if (mode === "pending") state.questions = [{ sessionID: "ses_work" }];
+    if (mode === "foreign") state.sessions[0]!.location.directory = "/other";
+    if (mode === "child") state.sessions[0]!.parentID = "ses_parent";
+    const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+    if (mode === "unresolved")
+      await gateway.sendMessage("ses_work", "unfinished");
+    await assert.rejects(gateway.archiveSession("ses_work"), {
+      code:
+        mode === "unresolved"
+          ? "SUBMISSION_UNRESOLVED"
+          : mode === "busy"
+            ? "SESSION_BUSY"
+            : mode === "pending"
+              ? "INPUT_REQUIRED"
+              : "SESSION_NOT_FOUND",
+    });
+    assert.equal(state.archiveCalls.length, 0, mode);
+    if (mode === "foreign" || mode === "child")
+      await assert.rejects(gateway.getSessionDetails("ses_work", true), {
+        code: "SESSION_NOT_FOUND",
+      });
+  }
+});
+
+test("unconfirmed archive is not retried or falsely reported as success", async () => {
+  for (const mode of ["lost-response", "not-persisted"]) {
+    const state = baseState();
+    state.archive = async () => {
+      if (mode === "lost-response") {
+        state.sessions[0]!.time.archived = 3;
+        throw new Error("lost response");
+      }
+      return { data: state.sessions[0] };
+    };
+    const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+    await assert.rejects(gateway.archiveSession("ses_work"), {
+      code: "ARCHIVE_UNCERTAIN",
+    });
+    assert.equal(state.archiveCalls.length, 1);
+    assert.equal(
+      (await gateway.getSessionDetails("ses_work", true)).archived_at,
+      mode === "lost-response" ? 3 : undefined,
+    );
+  }
 });
 
 test("creation resolves agent model/variant, nested model IDs, and provider defaults", async () => {
@@ -1296,7 +1781,12 @@ test("E-I: activity correlates parallel receipts, pending input and restart with
     event_types: ["session.input_required", "session.permission_required"],
   });
   assert.equal(blocked.events.length, 2);
-  assert.equal(blocked.events[0]?.message_id, c.message_id);
+  assert.equal(blocked.events[0]?.session_id, c.session_id);
+  assert.equal(
+    blocked.events[0]?.message_id,
+    undefined,
+    "unattributed session input must not claim a task binding",
+  );
   assert.deepEqual(blocked.events[0]?.pending_input, {
     permissions: 1,
     questions: 0,
@@ -1578,6 +2068,9 @@ test("correlated status requires terminal assistant evidence", async () => {
     state: "completed",
     pending_input: { permissions: 0, questions: 0 },
     assistant_message_ids: ["msg_assistant"],
+    active_assistant_message_ids: [],
+    admission: { write_in_progress: false },
+    pending_input_scope: "session",
     observed_at: observed.observed_at,
     source: "backend",
   });
@@ -1706,7 +2199,10 @@ test("submission timeout is uncertain, is never retried, and blocks concurrency"
   assert.equal(state.promptCalls.length, 1);
   await assert.rejects(
     gateway.sendMessage("ses_work", "third"),
-    (error) => error instanceof AdapterError && error.code === "SESSION_BUSY",
+    (error) =>
+      error instanceof AdapterError &&
+      error.code === "SUBMISSION_UNRESOLVED" &&
+      error.reason === "receipt_unavailable",
   );
   assert.equal(state.promptCalls.length, 1);
 });

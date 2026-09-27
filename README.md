@@ -239,14 +239,30 @@ A web session owns a small contiguous block around the base port `P` you pass to
 | `P+1` | Web UI / REST, **HTTP** | yes |
 | `P+2` | A2A, **HTTPS** | yes |
 | `P+3` | A2A, **HTTP** | yes |
+| `P+4` | Project editor, **HTTPS** (unless `--no-editor`) | yes |
 
-With the default `--port 4096` that is `4094`–`4099`. Valid base ports are `1026`–`65532`.
+With the default `--port 4096` that is `4094`–`4099`, plus editor port `4100`. Valid base ports are `1026`–`65531` by default (`65532` with `--no-editor`).
 
-Browsers additionally hardcode an unsafe-port list (Chromium's `kRestrictedPorts` — e.g. `6000`, `6665`–`6669`, `6697`, `10080`) and refuse such ports with `ERR_UNSAFE_PORT` no matter what listens there. A `--port` whose public block `P`–`P+3` touches that list is therefore rejected, and if a stored session port would land the block on one, the whole block shifts to the next browser-safe base instead.
+Browsers additionally hardcode an unsafe-port list (Chromium's `kRestrictedPorts` — e.g. `6000`, `6665`–`6669`, `6697`, `10080`) and refuse such ports with `ERR_UNSAFE_PORT` no matter what listens there. A `--port` whose public block `P`–`P+3` (through `P+4` with the editor) touches that list is therefore rejected, and if a stored session port would land the block on one, the whole block shifts to the next browser-safe base instead.
 
 The offsets are a fixed contract, because the A2A agent card has to advertise an absolute URL. If any port in the block is taken, the **whole block** moves to the next free one — the relationships never drift apart. The host port and the VM port are always the same number.
 
 The plain-HTTP twins exist for clients that cannot be taught to trust the session's self-signed certificate — OpenCode Desktop, `opencode attach`, and most A2A clients. They are exposed on the LAN on purpose; use them only on a network you trust.
+
+### Project editor (enabled by default in web mode)
+
+```bash
+opencode-vm web                          # Web UI and editor
+opencode-vm attach                       # resume web session and editor
+opencode-vm web --no-editor              # deliberately omit the editor
+opencode-vm web --reconnect --editor     # re-enable after --no-editor
+```
+
+The browser editor uses code-server inside the project VM: files, search, diffs, local Git commits/branches, Markdown preview, a VM terminal, and status/log channels. File upload (Explorer menu or drag-and-drop) and download are enabled immediately. The profile starts with manual saving, AI features off, no extension recommendations, and automatic Git fetch disabled. The only added extension supplies the VM status and Output channels.
+
+Its **HTTPS address is printed in the service banner**, using the effective base plus four; port collisions move the whole service block. The editor reuses the self-signed certificate and the web password (password-only editor login). Explicit `--no-auth` applies to both; editor HTTPS remains enabled even with web `--no-tls`. Browser webviews such as Markdown preview require trusting the certificate, not merely bypassing its warning.
+
+The explicit `--no-editor` choice is retained on reconnect/attach; a fresh web session starts with the editor again. Older web sessions without a recorded opt-out also gain the editor on reconnect. Editor preferences survive session recreation in project state. Files and local Git operations affect the same mounted working tree as the host. See [Web editor setup, logs and certificate trust](docs/WEB-EDITOR.md).
 
 ### Incoming MCP connector
 
@@ -258,11 +274,13 @@ opencode-vm web --mcp-port 40960
 opencode-vm web --no-mcp
 ```
 
-New sessions select a free loopback port from `40960..41059`; the first available endpoint is `http://127.0.0.1:40960/mcp`. Explicit ports and reconnects keep their selected port. The adapter uses stateless Streamable HTTP and exposes fourteen tools: `list_sessions`, `create_session`, `get_session`, `get_session_status`, `get_session_progress`, `get_session_history`, `get_task_result`, `get_message`, `read_message_content`, asynchronous `send_message`, `get_session_runtime_options`, `update_session_runtime`, `get_project_activity`, and `wait_for_project_activity`. `create_session` accepts an optional title and creates an empty work session using the project's default work agent/model; send its first prompt with `send_message`. OpenCode permission requests and questions are handled in Web UI/TUI.
+New sessions select a free loopback port from `40960..41059`; the first available endpoint is `http://127.0.0.1:40960/mcp`. Explicit ports and reconnects keep their selected port. The adapter uses stateless Streamable HTTP and exposes fifteen tools: `list_sessions`, `create_session`, `archive_session`, `get_session`, `get_session_status`, `get_session_progress`, `get_session_history`, `get_task_result`, `get_message`, `read_message_content`, asynchronous `send_message`, `get_session_runtime_options`, `update_session_runtime`, `get_project_activity`, and `wait_for_project_activity`. `create_session` accepts an optional title and creates an empty work session using the project's default work agent/model; send its first prompt with `send_message`. `archive_session` requires an explicit request, preserves history and verifies the archived timestamp; archived content can be read by known ID using `include_archived:true` on the stored-content tools. OpenCode permission requests and questions are handled in Web UI/TUI.
 
 Since 0.5.67, `get_task_result` finds original reports by their submitted user-message ID with bounded, resumable searches beyond the fast status window. `get_message` directly addresses a known message; `read_message_content` reads its full visible original in revision-bound UTF-8 pages with a SHA-256 checksum. History is a small preview with content references and explicit omissions. No model regeneration is needed. Changed content or expired references are reported explicitly; reading does not mark a result discussed. See [`PLAN_MCP_READING.md`](PLAN_MCP_READING.md) for scope, measured compatibility and outstanding real ChatGPT acceptance.
 
 Since 0.5.68, `get_session_progress` shows recorded tool names, pending/running states, the last finished step, timestamps and task IDs in a bounded recent-message window. Arguments, titles, outputs and reasoning remain private; tool completion does not imply task success. `get_project_activity` accepts `tail:true` for a recent filtered overview, followed by ordinary cursor reads/waits. Save each returned cursor separately under its `filter_key`; tail is not an acknowledgement of older history. See [`PLAN_MCP_PROGRESS.md`](PLAN_MCP_PROGRESS.md) for limits, tests and target-host acceptance.
+
+Since 0.5.70, admission distinguishes real backend/concurrent-write `SESSION_BUSY` from `SUBMISSION_UNRESOLVED` when an idle session still has an unverified old receipt. Before a new write, bounded resumable result checks can recover terminal evidence outside the 100-message status window. Idle alone never unlocks a task. Session/status reads expose admission tracking, and task `running` now requires correlated unfinished-assistant/tool evidence as well as backend activity. See [`PLAN_MCP_ADMISSION.md`](PLAN_MCP_ADMISSION.md) for recovery semantics and error/log interpretation.
 
 Since 0.5.66, clients can query live agent/provider/model/variant options, update idle sessions, and follow all project sessions through a private persistent activity journal. Retain `next_cursor` to retrieve later completion/error/input-required events without polling every session. Receipts preserve `message_id` and add an activity cursor; status remains authoritative and response text stays in history. The journal retains 5,000 events across adapter restarts, reports expired cursors explicitly, and supports waits up to 15 seconds. Collection and cross-client concurrency limits are documented in [`PLAN_MCP_ACTIVITY.md`](PLAN_MCP_ACTIVITY.md).
 
@@ -272,7 +290,9 @@ The endpoint is enabled by default for web sessions. Reconnect preserves the por
 
 The token grants access to bounded project-session history and to `send_message`, which can cause commands and project file changes. Treat it as a project-scoped write credential. The exact contract is in [`docs/MCP-INTERFACE.md`](docs/MCP-INTERFACE.md).
 
-To connect through OpenAI Secure MCP Tunnel, configure each project from its directory on the Mac:
+#### Connect ChatGPT through OpenAI MCP
+
+ChatGPT can coordinate the project's OpenCode sessions through Secure MCP Tunnel. Configure each project from its directory in the **Mac host terminal**:
 
 ```bash
 opencode-vm provider mcp               # interactive action menu: list/add/status/rm
@@ -287,6 +307,24 @@ opencode-vm provider mcp rm            # choose project connection, tunnel API k
 Project assignments and reusable tunnel API keys/tunnel IDs are stored centrally in `~/.opencode-vm/mcp-tunnel/openai/registry.json`. The key needs Tunnels **Read + Use**. Different projects can use the same key with separate tunnels. **Reuse a tunnel ID only for projects operated one at a time:** opencode-vm warns during setup but does not block simultaneous reuse, which can route requests to the wrong project. `start --no-mcp` and `web --no-mcp` suppress the connection for one run. Tunnel failures leave the local session available. See [`docs/MCP-TUNNEL.md`](docs/MCP-TUNNEL.md) for selection menus, list/removal, migration, dated ChatGPT plan information and external acceptance status.
 
 Interactive menus accept `q` to cancel. Explicit `--project`, `--key-id`, or `--tunnel-id` selectors run directly. Bare `provider mcp`/`provider mcp rm` require a terminal; the existing noninteractive `provider mcp rm openai` keeps its current-project default. To remove the current project directly in either mode, use `provider mcp rm openai --project "$PWD"`.
+
+Once authenticated MCP readiness and OpenAI polling are confirmed, add a developer-mode connection at [ChatGPT Plugins](https://chatgpt.com/plugins), choose **Tunnel**, and select the tunnel associated with the intended workspace/project. Keep the project running. Refresh the connection's tool catalog after adapter updates and test in a new chat. The connection name is yours to choose; `provider mcp new openai` configures this incoming connection, not the coding model or an audio engine.
+
+#### Install the optional ChatGPT orchestration skill
+
+<img src="integrations/chatgpt/opencode-session-orchestrator/assets/icon.svg" alt="OpenCode VM orchestration skill" width="80" height="80">
+
+**[Download OpenCode Session Orchestrator — installable ZIP](https://github.com/GeektankLabs/opencode-vm/raw/refs/heads/main/integrations/chatgpt/opencode-session-orchestrator.zip)** · [SHA-256](integrations/chatgpt/opencode-session-orchestrator.zip.sha256) · [Review source / inventory](integrations/chatgpt/README.md)
+
+This generic instruction-only skill helps ChatGPT select the right session, handle approvals and uncertain submissions, observe Delivery B tool progress, keep journal cursors separate per filter, and read complete original reports. It contains no credentials, tunnel IDs or fixed connection aliases.
+
+In ChatGPT, open **Plugins → Skills → Create → Upload from your computer** (or the Skills page in the available desktop UI), select the ZIP, complete the host's scan/review/install flow, and use it with the configured MCP connection. Import through the **Skills UI**, not as a normal chat attachment. Skill uploading and MCP access have separate account/workspace requirements. Updates to this repository do not automatically update an installed skill.
+
+**[Step-by-step setup, installation and read-only smoke test](docs/CHATGPT.md)**
+
+#### ChatGPT voice and spoken coordination
+
+The tunnel supplies MCP tools, while the selected ChatGPT surface supplies speech input/output. Dictation into a supported text chat and live Voice mode are different. As of the 2026-09-27 documentation check, OpenAI's apps FAQ says Voice mode does not support apps; Voice in Work/Codex has separate desktop tool/permission availability. A successful text connection or skill import does not prove that MCP tools are available in every voice surface. Verify the exact surface before relying on spoken task delegation; see [the voice guidance](docs/CHATGPT.md#5-spoken-use-distinguish-the-product-surfaces).
 
 ### A2A
 

@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="ocvm-title ocvm-description">
+  <title id="ocvm-title">OpenCode VM</title>
+  <desc id="ocvm-description">A terminal inside an open virtual-machine enclosure, with a mint-green arrow pointing into it.</desc>
+  <defs>
+    <linearGradient id="ocvm-background" x1="24" y1="8" x2="232" y2="248" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#233238"/>
+      <stop offset="1" stop-color="#0B1216"/>
+    </linearGradient>
+    <linearGradient id="ocvm-front" x1="44" y1="110" x2="164" y2="212" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F5FAF8"/>
+      <stop offset="1" stop-color="#CBD7D3"/>
+    </linearGradient>
+    <linearGradient id="ocvm-side" x1="177" y1="112" x2="218" y2="188" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#92A6A6"/>
+      <stop offset="1" stop-color="#465C63"/>
+    </linearGradient>
+    <linearGradient id="ocvm-accent" x1="108" y1="32" x2="146" y2="96" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#82F2CA"/>
+      <stop offset="1" stop-color="#2EC9B0"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="52" fill="url(#ocvm-background)"/>
+  <rect x="8.75" y="8.75" width="238.5" height="238.5" rx="51.25" fill="none" stroke="#FFFFFF" stroke-opacity=".1" stroke-width="1.5"/>
+  <path d="M38 202 48 220H177L218 188V180H38Z" fill="#071013"/>
+  <path d="M177 110 218 80V180L177 212Z" fill="url(#ocvm-side)"/>
+  <path d="M38 110 79 80H218L177 110Z" fill="#E8F1EE"/>
+  <path d="M62 103 84 87H195L173 103Z" fill="#0D1C20"/>
+  <path d="M62 103H173L195 87" fill="none" stroke="#2EC9B0" stroke-width="2"/>
+  <path d="M38 110H177V212H48L38 202Z" fill="url(#ocvm-front)"/>
+  <path d="M51 124H164V198H56L51 193Z" fill="#101C21"/>
+  <path d="M70 143 88 161 70 179" fill="none" stroke="#F5FAF8" stroke-width="9" stroke-linecap="square" stroke-linejoin="miter"/>
+  <path d="M108 179H137" fill="none" stroke="#53DEC0" stroke-width="9" stroke-linecap="square"/>
+  <path d="M117 32H139V61H157L128 94 99 61H117Z" fill="url(#ocvm-accent)"/>
+</svg>

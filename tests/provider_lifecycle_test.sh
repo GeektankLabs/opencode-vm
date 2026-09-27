@@ -176,7 +176,7 @@ wait_for_mcp_adapter() { kill -0 "$OC_WEB_PID"; }
     if mode.startswith("fresh") and not mode.endswith("web") and source.index("shutdown_requested=0") > source.index('case "$OC_MODE" in'):
         handler = ""
     code = prelude + '''
-stop_all_proxies() { :; }; stop_openlive_gateway() { :; }; stop_a2a() { :; }
+stop_all_proxies() { :; }; stop_openlive_gateway() { :; }; stop_a2a() { :; }; stop_editor() { :; }
 check_sqlite_dbs() { :; }; rsync() { :; }
 OC_PORT_INTERNAL=4095
 VM_DATA="$TEST_GUEST/oc-xdg-data"; VM_STATE="$TEST_GUEST/state"
@@ -216,7 +216,7 @@ vm_exec() {
   local code="$2"
   code="${code//\\/tmp\\//$TEST_GUEST/}"
   code="${code/flock -w 30 8/flock -w 2 8}"
-  bash -c "$code"
+  bash -c "$code" _ "${@:3}"
 }
 auth_sync_begin /project pty-run
 lifecycle_finalize_runtime test-vm pty-run "$TEST_GUEST/share"

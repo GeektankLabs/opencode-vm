@@ -7,6 +7,7 @@ import type {
 import { CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod/v4";
 import type { SessionGateway } from "./opencode.js";
+import { traceToolCall } from "./diagnostics.js";
 import {
   ACTIVITY_TYPES,
   ADAPTER_VERSION,
@@ -41,7 +42,11 @@ const readReference = z
   .max(16384)
   .regex(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/u);
 const getMessageInput = z
-  .object({ session_id: sessionId, message_id: sessionId })
+  .object({
+    session_id: sessionId,
+    message_id: sessionId,
+    include_archived: z.boolean().optional(),
+  })
   .strict();
 const readContentInput = z
   .object({
@@ -61,6 +66,7 @@ const taskResultInput = z
     submitted_message_id: sessionId,
     cursor: readReference.optional(),
     limit: z.number().int().min(1).max(20).default(20),
+    include_archived: z.boolean().optional(),
   })
   .strict();
 
@@ -69,6 +75,12 @@ const pendingSchema = z
   .object({
     permissions: z.number().int().nonnegative(),
     questions: z.number().int().nonnegative(),
+  })
+  .strict();
+const admissionSchema = z
+  .object({
+    write_in_progress: z.boolean(),
+    guarded_message_id: z.string().optional(),
   })
   .strict();
 const activitySchema = z.enum(["idle", "busy", "retry"]);
@@ -127,7 +139,15 @@ export const listSessionsInputSchema = z
   .strict();
 
 export const getSessionInputSchema = z
-  .object({ session_id: sessionId })
+  .object({ session_id: sessionId, include_archived: z.boolean().optional() })
+  .strict();
+const archiveSessionInputSchema = z.object({ session_id: sessionId }).strict();
+const archiveSessionOutputSchema = z
+  .object({
+    session_id: z.string(),
+    state: z.literal("archived"),
+    archived_at: z.number().int().positive(),
+  })
   .strict();
 
 export const getSessionStatusInputSchema = z
@@ -139,6 +159,7 @@ export const getSessionHistoryInputSchema = z
     session_id: sessionId,
     before: opaqueCursor.optional(),
     limit: z.number().int().min(1).max(20).default(10),
+    include_archived: z.boolean().optional(),
   })
   .strict();
 
@@ -291,11 +312,13 @@ const listSessionsOutputSchema = z
 
 const sessionDetailsOutputSchema = summarySchema
   .extend({
+    archived_at: z.number().int().positive().optional(),
     agent: z.string().optional(),
     provider_id: z.string().optional(),
     model_id: z.string().optional(),
     variant: z.string().optional(),
     pending_input: pendingSchema,
+    admission: admissionSchema.optional(),
   })
   .strict();
 
@@ -315,6 +338,9 @@ const sessionStatusOutputSchema = z
     ]),
     pending_input: pendingSchema,
     assistant_message_ids: z.array(z.string()),
+    active_assistant_message_ids: z.array(z.string()).optional(),
+    pending_input_scope: z.literal("session").optional(),
+    admission: admissionSchema.optional(),
     observed_at: z.string().optional(),
     source: z.literal("backend").optional(),
     task_status_reason: z
@@ -506,6 +532,7 @@ export function createMcpServer(gateway: SessionGateway): McpServer {
       const result = await gateway.getMessage(
         input.session_id,
         input.message_id,
+        input.include_archived,
       );
       return readSuccess(
         result,
@@ -535,6 +562,8 @@ export function createMcpServer(gateway: SessionGateway): McpServer {
         input.submitted_message_id,
         input.cursor,
         input.limit,
+        undefined,
+        input.include_archived,
       );
       return readSuccess(
         result,
@@ -549,7 +578,7 @@ export function createMcpServer(gateway: SessionGateway): McpServer {
     {
       title: "Get Stored Message",
       description:
-        "Read one known visible user/assistant message directly: identity, parent, finish, preview, omissions and content_ref. Never starts model work. Read references expire on adapter restart; reacquire with IDs. CONTENT_CHANGED requires restarting the new revision.",
+        "Read one known visible user/assistant message directly: identity, parent, finish, preview, omissions and content_ref. Set include_archived=true to read an archived project session by ID. Never starts model work. Read references expire on adapter restart; reacquire with IDs. CONTENT_CHANGED requires restarting the new revision.",
       inputSchema: getMessageInput,
       outputSchema: getMessageOutput,
       annotations: readOnlyAnnotations,
@@ -573,7 +602,7 @@ export function createMcpServer(gateway: SessionGateway): McpServer {
     {
       title: "Find Task Result",
       description:
-        "Find results by the original submitted user message ID, including older tasks beyond 100 messages. Bounded backward search: follow next_cursor until search_complete, retaining returned references (newest first). Intermediate tool-call steps are not reports. SEARCH_CHANGED means restart the search. Read terminal originals with read_message_content; finish=length/content-filter is not a regular generation finish. No new model call or native MCP task.",
+        "Find results by the original submitted user message ID, including older tasks beyond 100 messages. Set include_archived=true for archived project sessions by ID, including on cursor continuation. Bounded backward search: follow next_cursor until search_complete, retaining returned references (newest first). Intermediate tool-call steps are not reports. SEARCH_CHANGED means restart the search. Read terminal originals with read_message_content; finish=length/content-filter is not a regular generation finish. No new model call or native MCP task.",
       inputSchema: taskResultInput,
       outputSchema: taskResultOutput,
       annotations: readOnlyAnnotations,
@@ -594,8 +623,14 @@ export function createMcpServer(gateway: SessionGateway): McpServer {
     },
   );
   const getSessionHandler = safeHandler(
-    async ({ session_id }: z.output<typeof getSessionInputSchema>) => {
-      const result = await gateway.getSessionDetails(session_id);
+    async ({
+      session_id,
+      include_archived,
+    }: z.output<typeof getSessionInputSchema>) => {
+      const result = await gateway.getSessionDetails(
+        session_id,
+        include_archived,
+      );
       return success(result, `Session ${result.id} is ${result.activity}.`);
     },
   );
@@ -618,8 +653,14 @@ export function createMcpServer(gateway: SessionGateway): McpServer {
       session_id,
       limit,
       before,
+      include_archived,
     }: z.output<typeof getSessionHistoryInputSchema>) => {
-      const result = await gateway.getSessionHistory(session_id, limit, before);
+      const result = await gateway.getSessionHistory(
+        session_id,
+        limit,
+        before,
+        include_archived,
+      );
       return readSuccess(
         result,
         `Returned ${result.messages.length} text message${result.messages.length === 1 ? "" : "s"} from session ${session_id}.`,
@@ -647,6 +688,13 @@ export function createMcpServer(gateway: SessionGateway): McpServer {
         `Created session ${result.session_id} (${result.title}) for ${result.project.name} using ${result.agent} and ${result.provider_id}/${result.model_id}. Use send_message with this session_id to start work.`,
       );
     },
+  );
+  const archiveSessionHandler = safeHandler(
+    async ({ session_id }: z.output<typeof archiveSessionInputSchema>) =>
+      success(
+        await gateway.archiveSession(session_id),
+        `Session ${session_id} archived. Use include_archived=true on ID-based stored-content reads.`,
+      ),
   );
 
   const optionsHandler = safeHandler(
@@ -751,6 +799,18 @@ export function createMcpServer(gateway: SessionGateway): McpServer {
     },
     createSessionHandler,
   );
+  server.registerTool(
+    "archive_session",
+    {
+      title: "Archive OpenCode Session",
+      description:
+        "Archive an idle project work session without deleting history. Requires an explicit request. Refuses busy/pending/unresolved sessions; do not retry an uncertain archive blindly. Archived sessions are omitted from normal views; use include_archived=true on ID-based reads.",
+      inputSchema: archiveSessionInputSchema,
+      outputSchema: archiveSessionOutputSchema,
+      annotations: { ...writeAnnotations, openWorldHint: false },
+    },
+    archiveSessionHandler,
+  );
 
   server.registerTool(
     "list_sessions",
@@ -770,7 +830,7 @@ export function createMcpServer(gateway: SessionGateway): McpServer {
     {
       title: "Get OpenCode Session",
       description:
-        "Inspect one exposed root work session: current agent/model/variant, activity and pending-input counts. Use this compact view to check runtime settings; request the full runtime options catalog only when choosing settings.",
+        "Inspect one root work session: current runtime, backend activity, session-wide pending input and MCP admission tracking. Set include_archived=true for an archived project session by ID (archived_at is returned). Backend idle does not prove an old receipt is terminal. Use this compact view for settings; request the full catalog only when choosing settings.",
       inputSchema: getSessionInputSchema,
       outputSchema: sessionDetailsOutputSchema,
       annotations: readOnlyAnnotations,
@@ -783,7 +843,7 @@ export function createMcpServer(gateway: SessionGateway): McpServer {
     {
       title: "Get OpenCode Session Status",
       description:
-        "Inspect backend activity and the correlated state of an optional submitted message (newest 100 messages). Without message_id no particular task was requested. For older tasks or complete result references use get_task_result. Session busy alone is not proof that a requested task started.",
+        "Inspect backend activity and a correlated task (newest 100 messages), including active assistant evidence and MCP admission tracking. Session busy alone never proves this task is running; pending counts are session-wide. Without message_id no task was requested. Use get_task_result for older tasks/terminal evidence. Unknown is not completed or failed.",
       inputSchema: getSessionStatusInputSchema,
       outputSchema: sessionStatusOutputSchema,
       annotations: readOnlyAnnotations,
@@ -796,7 +856,7 @@ export function createMcpServer(gateway: SessionGateway): McpServer {
     {
       title: "Get OpenCode Session History",
       description:
-        "Read bounded user/assistant text previews. history_has_more concerns older messages; text_truncated concerns a preview. Follow content_ref with read_message_content for the complete visible original. Omissions are explicit; tool output and reasoning are not exposed. For a known task prefer get_task_result.",
+        "Read bounded user/assistant text previews. Set include_archived=true for archived project sessions by ID, including on pagination. history_has_more concerns older messages; text_truncated concerns a preview. Follow content_ref with read_message_content for the complete visible original. Omissions are explicit; tool output and reasoning are not exposed. For a known task prefer get_task_result.",
       inputSchema: getSessionHistoryInputSchema,
       outputSchema: historyOutputSchema,
       annotations: readOnlyAnnotations,
@@ -809,7 +869,7 @@ export function createMcpServer(gateway: SessionGateway): McpServer {
     {
       title: "Send OpenCode Message",
       description:
-        "Submit one asynchronous prompt to an existing session. This can run commands and change project files inside the VM. It is non-idempotent and must not be retried automatically.",
+        "Submit one asynchronous prompt; this can run commands and change project files. Non-idempotent: do not blindly retry. SESSION_BUSY means active backend work or a concurrent MCP write. SUBMISSION_UNRESOLVED means an idle session's earlier receipt lacks verified terminal evidence; this new prompt was not sent. Inspect the original message ID, not a new session or invented unlock. SUBMISSION_UNCERTAIN means delivery may already have occurred.",
       inputSchema: sendMessageInputSchema,
       outputSchema: sendMessageOutputSchema,
       annotations: writeAnnotations,
@@ -821,120 +881,129 @@ export function createMcpServer(gateway: SessionGateway): McpServer {
     CallToolRequestSchema,
     async (request, extra) => {
       const input = request.params.arguments ?? {};
-      switch (request.params.name) {
-        case "get_session_progress":
-          return validatedToolCall(
-            getSessionStatusInputSchema,
-            sessionProgressOutput,
-            input,
-            progressHandler,
-            extra.requestId,
-            request.params.name,
-          );
-        case "get_message":
-          return validatedToolCall(
-            getMessageInput,
-            getMessageOutput,
-            input,
-            getMessageHandler,
-            extra.requestId,
-            request.params.name,
-          );
-        case "read_message_content":
-          return validatedToolCall(
-            readContentInput,
-            readContentOutput,
-            input,
-            readContentHandler,
-            extra.requestId,
-            request.params.name,
-          );
-        case "get_task_result":
-          return validatedToolCall(
-            taskResultInput,
-            taskResultOutput,
-            input,
-            taskResultHandler,
-            extra.requestId,
-            request.params.name,
-          );
-        case "get_session_runtime_options":
-          return validatedToolCall(
-            runtimeOptionsInput,
-            runtimeOptionsOutput,
-            input,
-            optionsHandler,
-          );
-        case "update_session_runtime":
-          return validatedToolCall(
-            runtimeUpdateInput,
-            runtimeUpdateOutput,
-            input,
-            updateHandler,
-          );
-        case "get_project_activity":
-          return validatedToolCall(
-            activityInput,
-            activityOutput,
-            input,
-            activityHandler,
-          );
-        case "wait_for_project_activity":
-          return validatedToolCall(
-            waitActivityInput,
-            waitActivityOutput,
-            input,
-            waitHandler,
-          );
-        case "create_session":
-          return validatedToolCall(
-            createSessionInputSchema,
-            createSessionOutputSchema,
-            input,
-            createSessionHandler,
-          );
-        case "list_sessions":
-          return validatedToolCall(
-            listSessionsInputSchema,
-            listSessionsOutputSchema,
-            input,
-            listSessionsHandler,
-          );
-        case "get_session":
-          return validatedToolCall(
-            getSessionInputSchema,
-            sessionDetailsOutputSchema,
-            input,
-            getSessionHandler,
-          );
-        case "get_session_status":
-          return validatedToolCall(
-            getSessionStatusInputSchema,
-            sessionStatusOutputSchema,
-            input,
-            getSessionStatusHandler,
-          );
-        case "get_session_history":
-          return validatedToolCall(
-            getSessionHistoryInputSchema,
-            historyOutputSchema,
-            input,
-            getSessionHistoryHandler,
-            extra.requestId,
-            request.params.name,
-          );
-        case "send_message":
-          return validatedToolCall(
-            sendMessageInputSchema,
-            sendMessageOutputSchema,
-            input,
-            sendMessageHandler,
-          );
-        default:
-          return errorResult(
-            new AdapterError("INVALID_ARGUMENT", "Tool name is invalid."),
-          );
-      }
+      return traceToolCall(request.params.name, input, async () => {
+        switch (request.params.name) {
+          case "get_session_progress":
+            return validatedToolCall(
+              getSessionStatusInputSchema,
+              sessionProgressOutput,
+              input,
+              progressHandler,
+              extra.requestId,
+              request.params.name,
+            );
+          case "get_message":
+            return validatedToolCall(
+              getMessageInput,
+              getMessageOutput,
+              input,
+              getMessageHandler,
+              extra.requestId,
+              request.params.name,
+            );
+          case "read_message_content":
+            return validatedToolCall(
+              readContentInput,
+              readContentOutput,
+              input,
+              readContentHandler,
+              extra.requestId,
+              request.params.name,
+            );
+          case "get_task_result":
+            return validatedToolCall(
+              taskResultInput,
+              taskResultOutput,
+              input,
+              taskResultHandler,
+              extra.requestId,
+              request.params.name,
+            );
+          case "get_session_runtime_options":
+            return validatedToolCall(
+              runtimeOptionsInput,
+              runtimeOptionsOutput,
+              input,
+              optionsHandler,
+            );
+          case "update_session_runtime":
+            return validatedToolCall(
+              runtimeUpdateInput,
+              runtimeUpdateOutput,
+              input,
+              updateHandler,
+            );
+          case "get_project_activity":
+            return validatedToolCall(
+              activityInput,
+              activityOutput,
+              input,
+              activityHandler,
+            );
+          case "wait_for_project_activity":
+            return validatedToolCall(
+              waitActivityInput,
+              waitActivityOutput,
+              input,
+              waitHandler,
+            );
+          case "create_session":
+            return validatedToolCall(
+              createSessionInputSchema,
+              createSessionOutputSchema,
+              input,
+              createSessionHandler,
+            );
+          case "archive_session":
+            return validatedToolCall(
+              archiveSessionInputSchema,
+              archiveSessionOutputSchema,
+              input,
+              archiveSessionHandler,
+            );
+          case "list_sessions":
+            return validatedToolCall(
+              listSessionsInputSchema,
+              listSessionsOutputSchema,
+              input,
+              listSessionsHandler,
+            );
+          case "get_session":
+            return validatedToolCall(
+              getSessionInputSchema,
+              sessionDetailsOutputSchema,
+              input,
+              getSessionHandler,
+            );
+          case "get_session_status":
+            return validatedToolCall(
+              getSessionStatusInputSchema,
+              sessionStatusOutputSchema,
+              input,
+              getSessionStatusHandler,
+            );
+          case "get_session_history":
+            return validatedToolCall(
+              getSessionHistoryInputSchema,
+              historyOutputSchema,
+              input,
+              getSessionHistoryHandler,
+              extra.requestId,
+              request.params.name,
+            );
+          case "send_message":
+            return validatedToolCall(
+              sendMessageInputSchema,
+              sendMessageOutputSchema,
+              input,
+              sendMessageHandler,
+            );
+          default:
+            return errorResult(
+              new AdapterError("INVALID_ARGUMENT", "Tool name is invalid."),
+            );
+        }
+      });
     },
   );
 
@@ -1038,7 +1107,9 @@ function errorResult(
   error: AdapterError,
   requestId = randomUUID(),
 ): CallToolResult {
-  process.stderr.write(`[mcp] request=${requestId} error=${error.code}\n`);
+  process.stderr.write(
+    `[mcp] request=${requestId} error=${error.code}${error.reason ? ` reason=${error.reason}` : ""}\n`,
+  );
   return {
     isError: true,
     _meta: {
@@ -1046,6 +1117,7 @@ function errorResult(
         code: error.code,
         message: error.message,
         ...(error.correlationId ? { message_id: error.correlationId } : {}),
+        ...(error.reason ? { reason: error.reason } : {}),
       },
     },
     content: [

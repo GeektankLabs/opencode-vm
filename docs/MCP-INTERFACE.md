@@ -2,7 +2,7 @@
 
 This document defines the incoming MCP interface exposed by `opencode-vm web` sessions (enabled by default since 0.5.61) and by terminal `start` sessions with a project-specific OpenAI MCP assignment (since 0.5.62). It describes the server side that external MCP clients use. It is separate from `opencode-vm mcps`, which configures MCP servers that OpenCode consumes as tools.
 
-The implemented adapter is version **0.1.4**, uses `@modelcontextprotocol/sdk` **1.30.1** and `@opencode-ai/sdk` **1.18.21**, and was tested with MCP protocol revision **2025-11-25**. It uses stateless Streamable HTTP with JSON responses. The SDK also advertises `2025-06-18`, `2025-03-26`, `2024-11-05`, and `2024-10-07`, but those revisions are not the release-tested contract. Delivery A adds three ordinary reading tools; Delivery B adds `get_session_progress` and a journal tail option, bringing the surface to fourteen tools. Neither delivery migrates the transport, SDK or native task protocol. The observed combinations and outstanding ChatGPT acceptance are recorded in [PLAN_MCP_READING.md](../PLAN_MCP_READING.md) and [PLAN_MCP_PROGRESS.md](../PLAN_MCP_PROGRESS.md).
+The implemented adapter is version **0.1.7**, uses `@modelcontextprotocol/sdk` **1.30.1** and `@opencode-ai/sdk` **1.18.21**, and was tested with MCP protocol revision **2025-11-25**. It uses stateless Streamable HTTP with JSON responses. The SDK also advertises `2025-06-18`, `2025-03-26`, `2024-11-05`, and `2024-10-07`, but those revisions are not the release-tested contract. Delivery A adds three ordinary reading tools; Delivery B adds `get_session_progress` and a journal tail option, bringing the surface to fourteen tools. Adapter 0.1.7 adds `archive_session` as the fifteenth tool, plus explicit by-ID archived-content reads. The transport, SDK and native task protocol remain unchanged. The observed combinations and outstanding ChatGPT acceptance are recorded in [PLAN_MCP_READING.md](../PLAN_MCP_READING.md) and [PLAN_MCP_PROGRESS.md](../PLAN_MCP_PROGRESS.md). Adapter 0.1.6 distinguished unresolved old receipts from actual busy work and automatically checks older terminal evidence before a new write; see [admission diagnostics](../PLAN_MCP_ADMISSION.md).
 
 ## 1. Runtime model
 
@@ -72,11 +72,11 @@ Only sessions meeting all of these conditions are exposed:
 - The OpenCode project ID matches the configured project.
 - The session directory exactly matches the configured canonical directory.
 - The session is a root session with no `parentID`.
-- The session is not archived.
+- The session is not archived (unless an ID-based stored-content read explicitly supplies `include_archived:true`).
 - The session agent is not `openlive-manager`.
 - The session is not the manager session named by OpenLive's manager descriptor.
 
-Absent, foreign-project, foreign-directory, child, archived, and manager sessions all return the same `SESSION_NOT_FOUND` tool error. This prevents direct-ID calls from revealing whether an excluded session exists.
+Absent, foreign-project, foreign-directory, child, manager and default-read archived sessions all return the same `SESSION_NOT_FOUND` tool error. Explicitly opted-in archived reads still enforce project, directory, root and manager checks. Normal lists, runtime changes, submissions, progress/status and activity exclude archived sessions.
 
 The public project identity is:
 
@@ -165,6 +165,16 @@ The adapter calls the scoped create endpoint once, then verifies the returned se
 
 The 0.1.2 review additionally validates the default variant and native model disabling. OpenCode bridges custom providers lazily into its v2 catalog: connected legacy catalog entries remain usable before that bridge exists, while an existing native entry's enabled flag and variants take precedence.
 
+### `archive_session`
+
+Added in adapter 0.1.7. Write-capable and non-idempotent from the MCP client's perspective; use only on the user's explicit request. Generic to eligible project root work sessions, not specific to `[KLÄRUNG]` titles.
+
+```json
+{"session_id":"ses_..."}
+```
+
+After the same session exposure, per-session MCP write lock, idle, pending-input and unresolved-receipt checks as `send_message`, the adapter updates OpenCode's archive timestamp without deleting history. A successful result contains `{"session_id":"ses_...","state":"archived","archived_at":1790520000000}` only after an exact by-ID backend readback verifies the timestamp. An archive request that might have applied but cannot be verified returns `ARCHIVE_UNCERTAIN`: inspect with an opted-in archived `get_session` before another deliberate attempt, never blindly retry. Already archived sessions are not accepted by this tool. Other OpenCode clients are not locked by the MCP per-session lock; there is no cross-client archive transaction. The archived session leaves normal MCP lists and default reads, but retains history for explicit by-ID reads below.
+
 ### `get_session`
 
 Read-only, idempotent, closed-world tool.
@@ -193,6 +203,10 @@ Output:
 ```
 
 Agent, provider, model, and variant are omitted when unavailable. Pending input is counted but its private payload is not returned.
+
+Since 0.1.7, `get_session` accepts optional `include_archived:true` for a known, archived project-root session ID. Its result adds `archived_at` (Unix milliseconds) when archived. No other read tool silently enables archived access, and archived IDs are absent from `list_sessions`.
+
+Since 0.1.6, `get_session` and `get_session_status` also return `admission:{write_in_progress,guarded_message_id?}`. `write_in_progress` is an MCP-local submission/runtime-write lock, distinct from backend activity. `guarded_message_id` identifies an earlier MCP receipt awaiting terminal reconciliation; it is not a receipt for a rejected new request and does not itself prove execution is running. Thus `activity:idle` alongside admission tracking can be legitimate.
 
 ### `get_session_status`
 
@@ -227,8 +241,8 @@ Output:
 |---|---|
 | `unknown` | The receipt is not visible in the bounded history, or available evidence is not terminal. |
 | `submitted` | The user message is visible and no correlated assistant message is visible yet. |
-| `running` | Correlated work is non-terminal and the backend is busy or retrying. |
-| `input_required` | The session has a pending permission or question; continue in Web UI or TUI. |
+| `running` | The backend is busy/retrying and a correlated assistant lacks completion or records pending/running tools. Session busy alone is insufficient. |
+| `input_required` | For a requested task, a permission/question is explicitly linked to a correlated assistant; without a message ID this remains a session-wide status. Continue in Web UI/TUI. |
 | `completed` | Correlated assistant messages are complete and at least one ends with `stop`, `length`, or `content-filter`. |
 | `failed` | A correlated assistant message carries a non-abort error. |
 | `aborted` | A correlated assistant message was aborted. |
@@ -236,6 +250,8 @@ Output:
 Correlation uses the submitted user `message_id` and assistant `parentID`. `tool-calls`, `unknown`, and unrecognized future finish values are non-terminal; `error` is failed. An earlier tool-call iteration does not prevent a later terminal assistant message from completing the turn. Status reads at most 100 backend messages. If the user message or required terminal evidence is outside that bound, the state is `unknown`, not guessed.
 
 Use `get_task_result` to search beyond that bound. A question/permission explicitly linked to this turn remains actionable, but session-wide or later-turn pending input no longer overrides this turn's terminal evidence. `completed` describes execution evidence, not how much text the caller has read. `length` and `content-filter` are terminal generation reasons, not proof of a regularly finished report.
+
+Adapter 0.1.6 additionally returns `active_assistant_message_ids` when correlation is available: stored correlated assistants without completion timestamps or with pending/running tool parts. This is observation evidence, not independent process-liveness verification. An older turn consisting only of completed `tool-calls` iterations stays `unknown/non_terminal_evidence` even if another operation makes the session busy. A receipt with no correlated assistant remains `submitted`, including while the backend is busy. Conversely, text generation may have an unfinished assistant and no active tool, so an empty progress tool list does not prove inactivity. `pending_input_scope:"session"` explicitly qualifies the counts; unrelated/unattributed input does not become that older task's `input_required` state. The observations are not a cross-endpoint transactional snapshot.
 
 ### `get_session_progress`
 
@@ -318,6 +334,8 @@ Output:
 ```
 
 Only user and assistant messages are returned. The adapter includes non-synthetic, non-ignored text parts and excludes attachments, reasoning, system messages, and raw tool inputs or outputs. `completed`, `finish`, `error`, `parent_id`, and `next_before` are omitted when not applicable.
+
+Since 0.1.7, `get_session_history`, `get_message` and `get_task_result` accept optional `include_archived:true` for a known archived session ID. Keep the same value on history or result-search continuations; result cursors reject a mode switch. A `content_ref` issued by an opted-in read binds that read mode and can be followed through `read_message_content` without a new argument. Every page/reference rechecks exact project/root/manager visibility and the original content revision. Existing references issued without opt-in do not become archive-readable after archival. The backend may still change archived content out of band; the ordinary revision/search-change safeguards apply. No archived-session browse/restore, write, progress or activity API is added.
 
 **Delivery A migration (0.1.3):** text is now a preview of at most 1024 UTF-8 bytes per message, possibly smaller to preserve metadata within the response budget. The old shared 32,000-JavaScript-code-unit clipping is replaced by the complete reading path below. Existing fields remain: `truncated` still means more history **or** any shortened preview. New clients should instead use:
 
@@ -470,7 +488,7 @@ Omitted fields keep their effective current values. Every resulting combination 
 }
 ```
 
-Busy/retrying sessions and unresolved MCP admissions are refused with `SESSION_BUSY`. Pending questions/permissions return `INPUT_REQUIRED`. Runtime updates and MCP submissions share the same per-session write lock. The adapter checks idle immediately before changes and between the backend's separate agent/model switches, then verifies the stored settings; subsequent `get_session` and `send_message` use those values.
+Busy/retrying sessions and concurrent writes are refused with `SESSION_BUSY`. Idle sessions with unverified old receipts use `SUBMISSION_UNRESOLVED` after bounded reconciliation. Pending questions/permissions return `INPUT_REQUIRED`. Runtime updates and MCP submissions share the same per-session write lock and admission preflight. The adapter checks idle immediately before changes and between the backend's separate agent/model switches, then verifies the stored settings; subsequent `get_session` and `send_message` use those values.
 
 OpenCode does not expose an atomic multi-field switch or cross-client compare-and-swap here. Web UI/TUI/other-client writes can race; a failed/uncertain write may leave a partial update and reports `RUNTIME_UPDATE_FAILED`, without rollback or retry. Inspect `get_session` before continuing. Older empty sessions without any reusable agent/model metadata report `UNSUPPORTED_CONFIGURATION`; initialize them in first-party UI or use `create_session`.
 
@@ -552,9 +570,18 @@ Same filters/output as ordinary `get_project_activity`, with required `after_cur
 
 Before admission, `send_message` requires an exposed, idle session with no pending permission or question. It calls OpenCode's asynchronous prompt endpoint once with a generated message ID and a 15-second admission deadline.
 
-The adapter serializes MCP submissions per session and keeps an in-memory unresolved-receipt guard until status reconciliation reaches `completed`, `failed`, or `aborted`. A second MCP submission is rejected with `SESSION_BUSY`; it is not queued.
+The adapter serializes MCP submissions per session and keeps an in-memory unresolved-receipt guard until correlated reconciliation reaches `completed`, `failed`, or `aborted`. It does not queue a second prompt. Since 0.1.6, admission distinguishes:
+
+- `SESSION_BUSY` / `write_in_progress`: a concurrent MCP write holds the lock. Backend activity can still be idle while that write is being prepared/checked.
+- `SESSION_BUSY` / `backend_active`: the backend is busy or retrying. This does not attribute that activity to the old receipt by itself.
+- `INPUT_REQUIRED` / `pending_input`: session-wide questions/permissions need first-party input.
+- `SUBMISSION_UNRESOLVED`: idle was observed, but an older receipt has no verified terminal state. This new prompt was **not** submitted; the error's message ID refers to the older receipt.
+
+For an old receipt outside the fast status window, the write-side preflight reuses the authenticated backward result search under the existing per-session write lock. Each deep-search attempt is bounded to 25 result pages of up to 20 messages, with a shared 10-second deep-read deadline in addition to normal preflight deadlines. Completed pages retain only a process-local search cursor; a later deliberate write attempt can resume it. Source changes invalidate the checkpoint explicitly. A full nonterminal search, missing source, read failure or exhausted budget never causes an idle/time-based unlock. Following confirmed terminal evidence, backend activity and pending input are checked again before admission; runtime changes use the same preflight. Correlation-ID comparisons prevent a late old read from retiring a newer receipt.
 
 This guard does not lock Web UI, TUI, A2A, OpenLive, or other OpenCode clients. It also does not provide durable exactly-once admission across adapter restarts. The durable correlation source is OpenCode history, not an adapter-side task database.
+
+A restart is not a recovery verdict: process-local guards/checkpoints do not survive it, and an uncertain old submission still requires inspection by its original IDs. No automatic prompt replay, abort, unlock endpoint or persistent request-id registry is added by this fix. Existing terminal status/result reads can still reconcile internal receipt bookkeeping.
 
 If admission times out or disconnects, the adapter returns `SUBMISSION_UNCERTAIN` with the generated message ID. The request may already have been admitted. Do not retry automatically. Poll status and inspect history using that ID. Adapter restart never replays a prompt; a known receipt can still be inspected after restart.
 
@@ -570,18 +597,20 @@ Collection is bounded: each discovery sweep processes up to 200 exposed sessions
 
 ## 6. Tool errors
 
-Tool failures return `isError: true` and sanitized text. Machine-readable error details are also returned in `_meta["opencode-vm/error"]` (`code`, `message`, optional `message_id`). Error objects are not placed in `structuredContent`, because MCP SDK clients validate that field against the successful tool output schema even on errors. Existing text codes remain compatible. Backend stack traces, prompts, responses, credentials and raw headers are not returned.
+Tool failures return `isError: true` and sanitized text. Machine-readable error details are also returned in `_meta["opencode-vm/error"]` (`code`, `message`, optional `message_id` and admission `reason`). Error objects are not placed in `structuredContent`, because MCP SDK clients validate that field against the successful tool output schema even on errors. Existing text prefixes remain compatible; 0.1.6 adds the more precise `SUBMISSION_UNRESOLVED` code for previously overloaded idle/receipt-busy cases. Backend stack traces, prompts, responses, credentials and raw headers are not returned.
 
 | Code | Meaning |
 |---|---|
 | `INVALID_ARGUMENT` | A limit, cursor, message, or other argument is invalid. |
 | `SESSION_NOT_FOUND` | The session is absent or excluded by the endpoint's confinement rules. |
-| `SESSION_BUSY` | The session is active, receiving another MCP submission, or has an unresolved MCP receipt. |
+| `SESSION_BUSY` | Backend work is active/retrying or an MCP write is in progress; inspect `reason`. |
+| `SUBMISSION_UNRESOLVED` | An old receipt cannot be confirmed terminal despite observed idle. The requested operation was not admitted. Inspect the original correlation ID and `reason`. |
 | `INPUT_REQUIRED` | A permission or question must be handled in Web UI or TUI. |
 | `BACKEND_UNAVAILABLE` | OpenCode did not answer a bounded backend request. |
 | `BACKEND_INCOMPATIBLE` | The live OpenCode API or session metadata does not satisfy the required contract. |
 | `SUBMISSION_UNCERTAIN` | Admission was not confirmed; automatic retry could duplicate work. |
 | `CREATION_UNCERTAIN` | Session creation was not confirmed; inspect sessions before retrying, since a session may already exist. |
+| `ARCHIVE_UNCERTAIN` | Archive update may have applied but could not be verified; inspect with opted-in `get_session` before another deliberate attempt. |
 | `INVALID_AGENT` | Agent is not an available visible primary/all-mode work agent. |
 | `INVALID_PROVIDER` | Provider is not connected/available. |
 | `INVALID_MODEL` | Model is unavailable for the chosen provider. |
@@ -600,7 +629,15 @@ Tool failures return `isError: true` and sanitized text. Machine-readable error 
 
 HTTP authentication and request-boundary failures use HTTP status codes rather than these tool codes.
 
+Admission reasons are `write_in_progress`, `backend_active`, `pending_input`, `receipt_not_terminal`, `receipt_unavailable`, `receipt_changed`, `search_incomplete`, `search_changed`, `backend_unavailable`, and `backend_incompatible`. Never reinterpret `unknown/non_terminal_evidence` or a complete search without a terminal record as successful completion or safe non-delivery. A known pre-admission rejection is distinct from `SUBMISSION_UNCERTAIN`, where the backend may already have accepted the new prompt. Read/reconcile the original evidence before deciding on any further send.
+
+The adapter does not emit a separate outer `error_code:"INVALID_ARGUMENT"` for these conflicts. Raw MCP tool errors can be HTTP 200 responses with `result.isError:true`; transport forwarding logs therefore do not prove tool success. Clients should inspect the canonical `_meta` code and visible text prefix. A hosted wrapper's different outer classification requires comparison with the actual wire response; do not automatically treat a busy/unresolved refusal as malformed arguments.
+
 Reading diagnostics use the existing stderr log: an internal request identifier, tool, session/message IDs where applicable, visible-content revision/length, delivered text length, complete serialized response size/budget and known preview/search/error cause. No prompt, answer, reasoning, cursor/token, tool arguments or raw tool results are logged. There is no separate telemetry/export product.
+
+Adapter 0.1.5 additionally records metadata-only tool-call start/end, timestamp, duration and error code in that same log. Internal request IDs correlate the two records; known session/message IDs are included where available. Completion here means the MCP call returned, not that an asynchronously submitted agent task completed. These records support the optional [web editor's Output channels](WEB-EDITOR.md); the original fourteen-tool submission semantics are unchanged.
+
+Adapter 0.1.6 adds a bounded admission `reason` and `blocking_message_id` to rejection diagnostics when available. These identify the older receipt, not a new successful submission. Raw prompts and backend payloads remain excluded.
 
 ## 7. Authentication and lifecycle
 
@@ -638,4 +675,4 @@ The endpoint is bound only to guest `127.0.0.1` and is verified through host `12
 
 This interface can create empty root work sessions, change idle-session runtime settings, continue exposed sessions and read project activity. It does not delete, fork, or interrupt sessions; upload attachments; answer permissions/questions; expose a shell directly; or discover other projects.
 
-Automated package, fake-backend, disposable real-OpenCode and local tunnel-control-plane tests cover fourteen tools, metadata-only progress, tail-to-forward continuation, complete original-text reconstruction, deep result searches, revision/reference handling, creation without a model call, runtime changes and validation, independent session completions, bounded waits, journal restart recovery, pending input and no automatic resend on uncertainty. Real macOS/Lima and actual ChatGPT text/Voice operation still require target-host acceptance. After upgrading, reconnect the project runtime and refresh the external client's tool catalog; ChatGPT custom apps may require a tool refresh or republishing to expose new tools. See the exact tested combinations and external acceptance procedures in [PLAN_MCP_READING.md](../PLAN_MCP_READING.md) and [PLAN_MCP_PROGRESS.md](../PLAN_MCP_PROGRESS.md).
+Automated package, fake-backend, disposable real-OpenCode and local tunnel-control-plane tests cover fifteen tools, including scoped archive and opted-in archived reading, metadata-only progress, tail-to-forward continuation, complete original-text reconstruction, deep result searches, revision/reference handling, creation without a model call, runtime changes and validation, independent session completions, bounded waits, journal restart recovery, pending input and no automatic resend on uncertainty. Real macOS/Lima and actual ChatGPT text/Voice operation still require target-host acceptance. After upgrading, reconnect the project runtime and refresh the external client's tool catalog; ChatGPT custom apps may require a tool refresh or republishing to expose new tools. See the exact tested combinations and external acceptance procedures in [PLAN_MCP_READING.md](../PLAN_MCP_READING.md) and [PLAN_MCP_PROGRESS.md](../PLAN_MCP_PROGRESS.md).

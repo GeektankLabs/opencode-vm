@@ -1,7 +1,7 @@
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { dirname, isAbsolute } from "node:path";
 
-export const ADAPTER_VERSION = "0.1.4";
+export const ADAPTER_VERSION = "0.1.7";
 export const MCP_TRANSPORT = "streamable-http-stateless";
 
 export type RuntimeDescriptor = {
@@ -60,11 +60,18 @@ export type ListSessionsResult = {
 };
 
 export type SessionDetailsResult = SessionSummary & {
+  archived_at?: number;
   agent?: string;
   provider_id?: string;
   model_id?: string;
   variant?: string;
   pending_input: PendingInput;
+  admission?: AdmissionState;
+};
+
+export type AdmissionState = {
+  write_in_progress: boolean;
+  guarded_message_id?: string;
 };
 
 export type CorrelatedState =
@@ -83,6 +90,9 @@ export type SessionStatusResult = {
   state: CorrelatedState;
   pending_input: PendingInput;
   assistant_message_ids: string[];
+  active_assistant_message_ids?: string[];
+  pending_input_scope?: "session";
+  admission?: AdmissionState;
   observed_at?: string;
   source?: "backend";
   task_status_reason?:
@@ -295,6 +305,12 @@ export type CreateSessionResult = {
   state: "created";
 };
 
+export type ArchiveSessionResult = {
+  session_id: string;
+  state: "archived";
+  archived_at: number;
+};
+
 export const ADAPTER_ERROR_CODES = [
   "INVALID_ARGUMENT",
   "SESSION_NOT_FOUND",
@@ -303,7 +319,9 @@ export const ADAPTER_ERROR_CODES = [
   "BACKEND_UNAVAILABLE",
   "BACKEND_INCOMPATIBLE",
   "SUBMISSION_UNCERTAIN",
+  "SUBMISSION_UNRESOLVED",
   "CREATION_UNCERTAIN",
+  "ARCHIVE_UNCERTAIN",
   "INVALID_AGENT",
   "INVALID_PROVIDER",
   "INVALID_MODEL",
@@ -323,11 +341,26 @@ export const ADAPTER_ERROR_CODES = [
 
 export type AdapterErrorCode = (typeof ADAPTER_ERROR_CODES)[number];
 
+export const ADMISSION_ERROR_REASONS = [
+  "write_in_progress",
+  "backend_active",
+  "pending_input",
+  "receipt_not_terminal",
+  "receipt_unavailable",
+  "receipt_changed",
+  "search_incomplete",
+  "search_changed",
+  "backend_unavailable",
+  "backend_incompatible",
+] as const;
+export type AdmissionErrorReason = (typeof ADMISSION_ERROR_REASONS)[number];
+
 export class AdapterError extends Error {
   constructor(
     readonly code: AdapterErrorCode,
     message: string,
     readonly correlationId?: string,
+    readonly reason?: AdmissionErrorReason,
   ) {
     super(message);
     this.name = "AdapterError";

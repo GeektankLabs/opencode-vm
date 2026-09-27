@@ -1,0 +1,8 @@
+interface:
+  display_name: "OpenCode Session Orchestrator"
+  short_description: "Coordinate sessions, tool progress, approvals, and results."
+  icon_small: "./assets/icon.svg"
+  icon_large: "./assets/icon.svg"
+  brand_color: "#2EC9B0"
+policy:
+  allow_implicit_invocation: true

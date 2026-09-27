@@ -1,0 +1,32 @@
+name: ChatGPT skill package
+
+on:
+  push:
+    paths:
+      - integrations/chatgpt/**
+      - scripts/build-chatgpt-skill.py
+      - tests/chatgpt_skill_test.py
+      - LICENSE
+      - .github/workflows/chatgpt-skill.yml
+  pull_request:
+    paths:
+      - integrations/chatgpt/**
+      - scripts/build-chatgpt-skill.py
+      - tests/chatgpt_skill_test.py
+      - LICENSE
+      - .github/workflows/chatgpt-skill.yml
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Check inventory, artifact and checksum
+        run: python3 scripts/build-chatgpt-skill.py --check
+      - name: Check packaging regressions
+        run: python3 -B tests/chatgpt_skill_test.py

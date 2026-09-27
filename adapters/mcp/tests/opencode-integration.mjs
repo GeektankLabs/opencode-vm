@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { createOpencodeClient } from "@opencode-ai/sdk/v2";
+import { OpenCodeGateway } from "../dist/opencode.js";
 
 const OPEN_CODE_VERSION = "1.18.21";
 const here = dirname(fileURLToPath(import.meta.url));
@@ -803,6 +804,90 @@ try {
     "[integration] Delivery B: real tool name, running/completed states, start/end and parent correlation verified\n",
   );
 
+  // Isolate admission tracking from the background collector, so a completed
+  // receipt deliberately remains guarded until its next write-side check.
+  const admissionGateway = new OpenCodeGateway(
+    {
+      schema: 1,
+      project,
+      projectHash: "integration-hash",
+      projectName: "integration-project",
+      backendUrl,
+      generation: "admission-fixture",
+      opencodeVersion: backendVersion,
+      listenHost: "127.0.0.1",
+      listenPort: 0,
+      credentialFile,
+    },
+    backend,
+  );
+  try {
+    const admissionSession = (
+      await admissionGateway.createSession("Admission recovery")
+    ).session_id;
+    const oldReceipt = await admissionGateway.sendMessage(
+      admissionSession,
+      "admission-first",
+    );
+    const waitStored = async (id) => {
+      for (let i = 0; i < 150; i++) {
+        const messages = (
+          await backend.session.messages({
+            sessionID: admissionSession,
+            limit: 10,
+          })
+        ).data;
+        if (
+          messages.some(
+            (message) =>
+              message.info.parentID === id &&
+              message.info.finish === "stop" &&
+              typeof message.info.time.completed === "number",
+          )
+        )
+          return;
+        await delay(100);
+      }
+      throw new Error("Synthetic admission task did not complete");
+    };
+    await waitStored(oldReceipt.message_id);
+    for (let i = 0; i < 105; i++)
+      await backend.session.prompt({
+        sessionID: admissionSession,
+        noReply: true,
+        parts: [{ type: "text", text: `later-note-${i}` }],
+      });
+    const idle = await admissionGateway.getSessionDetails(admissionSession);
+    assert.equal(idle.activity, "idle");
+    assert.equal(idle.admission.guarded_message_id, oldReceipt.message_id);
+    assert.equal(
+      (
+        await admissionGateway.getSessionStatus(
+          admissionSession,
+          oldReceipt.message_id,
+        )
+      ).state,
+      "unknown",
+    );
+    const count = providerRequests.length;
+    const nextReceipt = await admissionGateway.sendMessage(
+      admissionSession,
+      "admission-next",
+    );
+    assert.notEqual(nextReceipt.message_id, oldReceipt.message_id);
+    await waitStored(nextReceipt.message_id);
+    assert.equal(
+      providerRequests.length,
+      count + 1,
+      "reconciliation must not replay the old prompt",
+    );
+    process.stderr.write(
+      "[integration] old idle receipt beyond 100 messages reconciled before exactly one new submission\n",
+    );
+  } finally {
+    await admissionGateway.close();
+  }
+
   const secondSession = structured(
     await mcpClient.callTool({
       name: "create_session",
@@ -943,6 +1028,26 @@ try {
     ).data?.filter((message) => message.info.id === receipt.message_id).length,
     1,
   );
+  const archiveResult = structured(await mcpClient.callTool({
+    name: "archive_session",
+    arguments: { session_id: reportSession },
+  }));
+  assert.equal(archiveResult.state, "archived");
+  assert.equal((await backend.v2.session.get({ sessionID: reportSession })).data?.data?.time.archived, archiveResult.archived_at);
+  const hidden = await mcpClient.callTool({ name: "get_message", arguments: { session_id: reportSession, message_id: reportId } });
+  assert.equal(hidden._meta["opencode-vm/error"].code, "SESSION_NOT_FOUND");
+  const archivedMessage = structured(await mcpClient.callTool({
+    name: "get_message",
+    arguments: { session_id: reportSession, message_id: reportId, include_archived: true },
+  }));
+  assert.equal(archivedMessage.message.content.sha256, reportMessage.content.sha256);
+  const archivedPage = structured(await mcpClient.callTool({
+    name: "read_message_content",
+    arguments: { content_ref: archivedMessage.message.content.content_ref, max_bytes: 256 },
+  }));
+  assert.equal(archivedPage.range.start, 0);
+  assert.equal(structured(await mcpClient.callTool({ name: "get_session", arguments: { session_id: reportSession, include_archived: true } })).archived_at, archiveResult.archived_at);
+  assert.ok(!structured(await mcpClient.callTool({ name: "list_sessions", arguments: {} })).sessions.some((item) => item.id === reportSession));
   process.stdout.write("MCP real OpenCode integration passed.\n");
 } finally {
   await writeFile(toolGate, "release").catch(() => {});

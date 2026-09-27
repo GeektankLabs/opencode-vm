@@ -11,6 +11,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { McpHttpServer } from "../adapters/mcp/dist/http.js";
 import { OpenCodeGateway } from "../adapters/mcp/dist/opencode.js";
+import { AdapterError } from "../adapters/mcp/dist/types.js";
 
 const binary = process.env.OCVM_TUNNEL_CLIENT;
 if (!binary) throw new Error("Set OCVM_TUNNEL_CLIENT to tunnel-client v0.0.15.");
@@ -59,11 +60,16 @@ const gateway = {
   getProjectActivity: (...args) => readGateway.getProjectActivity(...args),
   waitForProjectActivity: (...args) => readGateway.waitForProjectActivity(...args),
   async createSession(title) { creations++; return { project: { id: "fixture", name: "fixture" }, session_id: summary.id, title: title ?? "MCP Work Session", agent: "build", provider_id: "fixture", model_id: "model", state: "created" }; },
+  async archiveSession(sessionId) { return { session_id: sessionId, state: "archived", archived_at: 3 }; },
   async listSessions() { return { project: { id: "fixture", name: "fixture" }, sessions: [summary], truncated: false }; },
   async getSessionDetails() { return { ...summary, pending_input: pending }; },
   async getSessionStatus() { return { session_id: summary.id, message_id: "msg_fixture", backend_activity: "idle", state: "completed", pending_input: pending, assistant_message_ids: ["msg_reply"] }; },
   async getSessionHistory() { return { session_id: summary.id, messages: [{ id: "msg_reply", role: "assistant", text: "Tunnel fixture reply", created: 2, text_truncated: false }], truncated: false }; },
-  async sendMessage() { submissions++; return { session_id: summary.id, message_id: "msg_fixture", state: "submitted" }; },
+  async sendMessage(_sessionId, message) {
+    if (message === "fixture-busy") throw new AdapterError("SESSION_BUSY", "Backend active; no new prompt submitted.", "msg_previous", "backend_active");
+    if (message === "fixture-unresolved") throw new AdapterError("SUBMISSION_UNRESOLVED", "Previous receipt is not terminal; no new prompt submitted.", "msg_previous", "receipt_not_terminal");
+    submissions++; return { session_id: summary.id, message_id: "msg_fixture", state: "submitted" };
+  },
 };
 const server = new McpHttpServer({ schema: 1, project: temp, projectHash: "fixture", projectName: "fixture", generation: "fixture", listenHost: "127.0.0.1", listenPort: 0 }, token, gateway);
 let proxy, client, controlPlane, serviceShare;
@@ -139,7 +145,7 @@ try {
     },
   }));
   const tools = await client.listTools();
-  assert.equal(tools.tools.length, 14);
+  assert.equal(tools.tools.length, 15);
   const task = await client.callTool({ name: "get_task_result", arguments: { session_id: summary.id, submitted_message_id: "msg_fixture" } });
   assert.equal(task.structuredContent?.state, "completed");
   const message = await client.callTool({ name: "get_message", arguments: { session_id: summary.id, message_id: "msg_reply" } });
@@ -209,10 +215,21 @@ try {
   }
   assert.equal(submissions, 1);
   assert.equal(creations, 1);
+  const archived = await client.callTool({ name: "archive_session", arguments: { session_id: summary.id } });
+  assert.equal(archived.structuredContent?.state, "archived");
+  for (const [message, code, reason] of [["fixture-busy", "SESSION_BUSY", "backend_active"], ["fixture-unresolved", "SUBMISSION_UNRESOLVED", "receipt_not_terminal"]]) {
+    const result = await client.callTool({ name: "send_message", arguments: { session_id: summary.id, message } });
+    assert.equal(result.isError, true);
+    assert.equal(result._meta["opencode-vm/error"].code, code);
+    assert.equal(result._meta["opencode-vm/error"].reason, reason);
+    assert.equal(result._meta["opencode-vm/error"].message_id, "msg_previous");
+  }
+  assert.equal(submissions, 1);
+  console.log("PASS: busy/unresolved admission codes and blocking receipt survive the local tunnel without INVALID_ARGUMENT remapping.");
   const direct = await fetch(`http://127.0.0.1:${port}/healthz`);
   assert.equal(direct.status, 401, "the local endpoint still requires its token");
   assert.ok(!diagnostics.includes(key) && !diagnostics.includes(token), "credentials leaked into tunnel diagnostics");
-  console.log("PASS: tunnel-client v0.0.15 discovers and invokes all fourteen tools through its local tunnel control plane using the generated profile.");
+  console.log("PASS: tunnel-client v0.0.15 discovers and invokes all fifteen tools through its local tunnel control plane using the generated profile.");
 
   // Optional Linux/systemd check: real checksum installer and managed service,
   // with outbound traffic confined to a disposable local control-plane fixture.

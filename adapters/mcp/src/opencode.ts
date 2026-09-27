@@ -47,6 +47,9 @@ import type {
   TaskResult,
   SessionProgressResult,
   ToolObservation,
+  AdmissionState,
+  AdmissionErrorReason,
+  ArchiveSessionResult,
 } from "./types.js";
 
 const BACKEND_DEADLINE_MS = 8_000;
@@ -54,6 +57,8 @@ const ADMISSION_DEADLINE_MS = 15_000;
 const BACKEND_PAGE_SIZE = 20;
 const MAX_SESSION_PAGES = 10;
 const STATUS_HISTORY_LIMIT = 100;
+const ADMISSION_SEARCH_PAGES = 25;
+const ADMISSION_SEARCH_MS = 10_000;
 const OPENLIVE_MANAGER_AGENT = "openlive-manager";
 
 type OpenCodeClient = ReturnType<typeof createOpencodeClient>;
@@ -71,6 +76,7 @@ type ResultCursor = {
   failed: boolean;
   aborted: boolean;
   latestFinish?: string;
+  archived?: boolean;
 };
 
 type PendingDetails = PendingInput & {
@@ -89,7 +95,11 @@ export interface SessionGateway {
     sessionId: string,
     messageId?: string,
   ): Promise<SessionProgressResult>;
-  getMessage(sessionId: string, messageId: string): Promise<MessageResult>;
+  getMessage(
+    sessionId: string,
+    messageId: string,
+    includeArchived?: boolean,
+  ): Promise<MessageResult>;
   readMessageContent(
     reference: string,
     cursor?: string,
@@ -100,7 +110,10 @@ export interface SessionGateway {
     messageId: string,
     cursor?: string,
     limit?: number,
+    signal?: AbortSignal,
+    includeArchived?: boolean,
   ): Promise<TaskResult>;
+  archiveSession(sessionId: string): Promise<ArchiveSessionResult>;
   getSessionRuntimeOptions(sessionId?: string): Promise<RuntimeOptions>;
   updateSessionRuntime(
     sessionId: string,
@@ -112,7 +125,10 @@ export interface SessionGateway {
   ): Promise<ActivityResult & { timeout: boolean }>;
   createSession(title?: string): Promise<CreateSessionResult>;
   listSessions(limit?: number, cursor?: string): Promise<ListSessionsResult>;
-  getSessionDetails(sessionId: string): Promise<SessionDetailsResult>;
+  getSessionDetails(
+    sessionId: string,
+    includeArchived?: boolean,
+  ): Promise<SessionDetailsResult>;
   getSessionStatus(
     sessionId: string,
     messageId?: string,
@@ -121,6 +137,7 @@ export interface SessionGateway {
     sessionId: string,
     limit?: number,
     before?: string,
+    includeArchived?: boolean,
   ): Promise<SessionHistoryResult>;
   sendMessage(sessionId: string, message: string): Promise<SendMessageResult>;
 }
@@ -131,6 +148,10 @@ export class OpenCodeGateway implements SessionGateway {
   private compatibilityPromise: Promise<void> | undefined;
   private readonly submissionLocks = new Set<string>();
   private readonly unresolved = new Map<string, string>();
+  private readonly admissionSearch = new Map<
+    string,
+    { messageId: string; cursor: string }
+  >();
   private readonly readReferences = new ReadReferences();
   private journal?: ActivityJournal;
   private readonly collectorStop = new AbortController();
@@ -147,6 +168,7 @@ export class OpenCodeGateway implements SessionGateway {
     client?: OpenCodeClient,
     private readonly backendDeadlineMs = BACKEND_DEADLINE_MS,
     private readonly admissionDeadlineMs = ADMISSION_DEADLINE_MS,
+    private readonly admissionSearchMs = ADMISSION_SEARCH_MS,
   ) {
     const password = process.env.OPENCODE_SERVER_PASSWORD;
     const username = process.env.OPENCODE_SERVER_USERNAME || "opencode";
@@ -226,6 +248,8 @@ export class OpenCodeGateway implements SessionGateway {
       throw new AdapterError(
         "SESSION_BUSY",
         "The session has an MCP write in progress.",
+        undefined,
+        "write_in_progress",
       );
     this.submissionLocks.add(sessionId);
     this.collecting.delete(sessionId);
@@ -411,6 +435,50 @@ export class OpenCodeGateway implements SessionGateway {
     }
   }
 
+  async archiveSession(sessionId: string): Promise<ArchiveSessionResult> {
+    if (this.submissionLocks.has(sessionId))
+      throw new AdapterError(
+        "SESSION_BUSY",
+        "The session has an MCP write in progress.",
+        undefined,
+        "write_in_progress",
+      );
+    this.submissionLocks.add(sessionId);
+    this.collecting.delete(sessionId);
+    try {
+      await this.requireExposedSession(sessionId);
+      await this.requireIdle(sessionId);
+      // The legacy update endpoint records the archive timestamp; do not use
+      // delete, which removes the conversation. A failed readback is uncertain.
+      const time = Date.now();
+      try {
+        await this.client.session.update(
+          {
+            sessionID: sessionId,
+            directory: this.runtime.project,
+            time: { archived: time },
+          },
+          { signal: this.deadline() },
+        );
+        const verified = await this.requireExposedSession(
+          sessionId,
+          undefined,
+          true,
+        );
+        if (verified.time.archived !== time)
+          throw new Error("Archive timestamp not persisted.");
+        return { session_id: sessionId, state: "archived", archived_at: time };
+      } catch {
+        throw new AdapterError(
+          "ARCHIVE_UNCERTAIN",
+          "Archive could not be confirmed. Inspect the session before another attempt; do not retry automatically.",
+        );
+      }
+    } finally {
+      this.submissionLocks.delete(sessionId);
+    }
+  }
+
   async listSessions(limit = 10, cursor?: string): Promise<ListSessionsResult> {
     await this.compatibilityCheck();
     const boundedLimit = integerInRange(limit, 1, 20, "limit");
@@ -508,14 +576,22 @@ export class OpenCodeGateway implements SessionGateway {
     };
   }
 
-  async getSessionDetails(sessionId: string): Promise<SessionDetailsResult> {
-    const session = await this.requireExposedSession(sessionId);
+  async getSessionDetails(
+    sessionId: string,
+    includeArchived = false,
+  ): Promise<SessionDetailsResult> {
+    const session = await this.requireExposedSession(
+      sessionId,
+      undefined,
+      includeArchived,
+    );
     const [activity, pending] = await Promise.all([
       this.activity(sessionId),
       this.pending(sessionId),
     ]);
     return {
       ...toSummary(session, activity),
+      ...(session.time.archived ? { archived_at: session.time.archived } : {}),
       ...(session.agent ? { agent: session.agent } : {}),
       ...(session.model
         ? {
@@ -527,6 +603,7 @@ export class OpenCodeGateway implements SessionGateway {
           }
         : {}),
       pending_input: pendingCounts(pending),
+      admission: this.admissionState(sessionId),
     };
   }
 
@@ -673,6 +750,9 @@ export class OpenCodeGateway implements SessionGateway {
     if (!messageId) {
       return {
         ...base,
+        admission: this.admissionState(sessionId),
+        pending_input_scope: "session",
+        active_assistant_message_ids: [],
         observed_at: new Date().toISOString(),
         source: "backend",
         task_status_reason: "not_requested",
@@ -698,6 +778,8 @@ export class OpenCodeGateway implements SessionGateway {
     );
     return {
       ...result,
+      admission: this.admissionState(sessionId),
+      pending_input_scope: "session",
       observed_at: new Date().toISOString(),
       source: "backend",
       ...(result.state === "unknown"
@@ -738,6 +820,19 @@ export class OpenCodeGateway implements SessionGateway {
         message.info.parentID === messageId,
     );
     const assistantIds = assistants.map((message) => message.info.id);
+    const activeAssistantIds = assistants
+      .filter(
+        (message) =>
+          message.info.role === "assistant" &&
+          (typeof message.info.time.completed !== "number" ||
+            message.parts.some(
+              (part) =>
+                part.type === "tool" &&
+                isRecord(part.state) &&
+                ["pending", "running"].includes(part.state.status),
+            )),
+      )
+      .map((message) => message.info.id);
     const latestAssistant = assistants.at(-1);
     const pendingForTurn =
       pending.permissionsList.some(
@@ -770,25 +865,23 @@ export class OpenCodeGateway implements SessionGateway {
       isCompletedFinish(latestAssistant.info.finish)
     ) {
       state = "completed";
-    } else if (pendingForTurn || pending.permissions + pending.questions > 0) {
-      state = "input_required";
-    } else if (activity !== "idle") {
-      state = "running";
     } else if (assistants.length === 0) {
       state = "submitted";
+    } else if (activity !== "idle" && activeAssistantIds.length > 0) {
+      state = "running";
     } else {
       state = "unknown";
     }
 
     if (state === "completed" || state === "failed" || state === "aborted") {
-      if (this.unresolved.get(sessionId) === messageId)
-        this.unresolved.delete(sessionId);
+      this.retireReceipt(sessionId, messageId);
     }
     return {
       ...base,
       message_id: messageId,
       state,
       assistant_message_ids: assistantIds,
+      active_assistant_message_ids: activeAssistantIds,
     };
   }
 
@@ -796,8 +889,9 @@ export class OpenCodeGateway implements SessionGateway {
     sessionId: string,
     limit = 10,
     before?: string,
+    includeArchived = false,
   ): Promise<SessionHistoryResult> {
-    await this.requireExposedSession(sessionId);
+    await this.requireExposedSession(sessionId, undefined, includeArchived);
     const boundedLimit = integerInRange(limit, 1, 20, "limit");
     if (before && !isOpaqueCursor(before)) {
       throw new AdapterError("INVALID_ARGUMENT", "before cursor is invalid.");
@@ -808,7 +902,7 @@ export class OpenCodeGateway implements SessionGateway {
         message.info.role === "user" || message.info.role === "assistant",
     );
     const messages = visible.map((message) =>
-      describeMessage(message, this.readReferences),
+      describeMessage(message, this.readReferences, undefined, includeArchived),
     );
     const result = {
       session_id: sessionId,
@@ -831,6 +925,7 @@ export class OpenCodeGateway implements SessionGateway {
           sessionId,
           Math.floor(boundedLimit / 2),
           before,
+          includeArchived,
         );
       throw error;
     }
@@ -841,11 +936,14 @@ export class OpenCodeGateway implements SessionGateway {
   async getMessage(
     sessionId: string,
     messageId: string,
+    includeArchived = false,
   ): Promise<MessageResult> {
-    await this.requireExposedSession(sessionId);
+    await this.requireExposedSession(sessionId, undefined, includeArchived);
     const message = describeMessage(
       await this.message(sessionId, messageId),
       this.readReferences,
+      undefined,
+      includeArchived,
     );
     return fitPreviews({ session_id: sessionId, message }, [message]);
   }
@@ -860,7 +958,11 @@ export class OpenCodeGateway implements SessionGateway {
       reference,
       "content",
     );
-    await this.requireExposedSession(ref.session);
+    await this.requireExposedSession(
+      ref.session,
+      undefined,
+      ref.archived === true,
+    );
     let start = 0;
     if (cursor) {
       const position = this.readReferences.decode<
@@ -870,6 +972,7 @@ export class OpenCodeGateway implements SessionGateway {
         position.session !== ref.session ||
         position.message !== ref.message ||
         position.revision !== ref.revision ||
+        position.archived !== ref.archived ||
         !Number.isSafeInteger(position.offset) ||
         position.offset < 0
       ) {
@@ -940,16 +1043,22 @@ export class OpenCodeGateway implements SessionGateway {
     messageId: string,
     cursor?: string,
     limit = 20,
+    signal?: AbortSignal,
+    includeArchived = false,
   ): Promise<TaskResult> {
     const boundedLimit = integerInRange(limit, 1, 20, "limit");
-    const session = await this.requireExposedSession(sessionId);
-    const user = await this.message(sessionId, messageId);
+    const session = await this.requireExposedSession(
+      sessionId,
+      signal,
+      includeArchived,
+    );
+    const user = await this.message(sessionId, messageId, signal);
     if (user.info.role !== "user")
       throw new AdapterError(
         "INVALID_ARGUMENT",
         "submitted_message_id must identify a user message.",
       );
-    const newest = await this.messages(sessionId, 1);
+    const newest = await this.messages(sessionId, 1, undefined, signal);
     const boundary = this.resultBoundary(
       session.time.updated,
       user,
@@ -967,8 +1076,13 @@ export class OpenCodeGateway implements SessionGateway {
           allCompleted: true,
           failed: false,
           aborted: false,
+          ...(includeArchived ? { archived: true } : {}),
         };
-    if (scan.session !== sessionId || scan.user !== messageId)
+    if (
+      scan.session !== sessionId ||
+      scan.user !== messageId ||
+      Boolean(scan.archived) !== includeArchived
+    )
       throw new AdapterError(
         "INVALID_ARGUMENT",
         "Result cursor belongs to another query.",
@@ -982,6 +1096,7 @@ export class OpenCodeGateway implements SessionGateway {
       sessionId,
       boundedLimit,
       scan.before || undefined,
+      signal,
     );
     const messages: TaskResult["messages"] = [];
     let foundUser = false;
@@ -999,7 +1114,12 @@ export class OpenCodeGateway implements SessionGateway {
         (hasError(info) && !isAborted(info)) || info.finish === "error";
       scan.aborted ||= isAborted(info);
       messages.push({
-        ...describeMessage(stored, this.readReferences),
+        ...describeMessage(
+          stored,
+          this.readReferences,
+          undefined,
+          includeArchived,
+        ),
         result_kind:
           isCompletedFinish(info.finish) ||
           hasError(info) ||
@@ -1011,9 +1131,13 @@ export class OpenCodeGateway implements SessionGateway {
     }
     // No historical snapshots: reject an observable change rather than silently
     // mixing search boundaries. Cursors are query-bound and contain only metadata.
-    const verifiedSession = await this.requireExposedSession(sessionId);
-    const verifiedHead = await this.messages(sessionId, 1);
-    const verifiedUser = await this.message(sessionId, messageId);
+    const verifiedSession = await this.requireExposedSession(
+      sessionId,
+      signal,
+      includeArchived,
+    );
+    const verifiedHead = await this.messages(sessionId, 1, undefined, signal);
+    const verifiedUser = await this.message(sessionId, messageId, signal);
     if (
       this.resultBoundary(
         verifiedSession.time.updated,
@@ -1073,11 +1197,8 @@ export class OpenCodeGateway implements SessionGateway {
     };
     try {
       fitPreviews(result, messages);
-      if (
-        ["completed", "failed", "aborted"].includes(state) &&
-        this.unresolved.get(sessionId) === messageId
-      )
-        this.unresolved.delete(sessionId);
+      if (["completed", "failed", "aborted"].includes(state))
+        this.retireReceipt(sessionId, messageId);
       return result;
     } catch (error) {
       if (
@@ -1090,6 +1211,8 @@ export class OpenCodeGateway implements SessionGateway {
           messageId,
           cursor,
           Math.floor(boundedLimit / 2),
+          signal,
+          includeArchived,
         );
       throw error;
     }
@@ -1126,6 +1249,7 @@ export class OpenCodeGateway implements SessionGateway {
   private async message(
     sessionId: string,
     messageId: string,
+    signal?: AbortSignal,
   ): Promise<MessageWithParts> {
     let stored: MessageWithParts | undefined;
     try {
@@ -1135,7 +1259,7 @@ export class OpenCodeGateway implements SessionGateway {
           messageID: messageId,
           directory: this.runtime.project,
         },
-        { signal: this.deadline(), throwOnError: false },
+        { signal: this.deadline(signal), throwOnError: false },
       );
       if (response.response?.status === 404)
         throw new AdapterError(
@@ -1183,45 +1307,19 @@ export class OpenCodeGateway implements SessionGateway {
       throw new AdapterError(
         "SESSION_BUSY",
         "The session is already receiving a message.",
+        undefined,
+        "write_in_progress",
       );
     }
     this.submissionLocks.add(sessionId);
     this.collecting.delete(sessionId);
     try {
-      const unresolvedId = this.unresolved.get(sessionId);
-      if (unresolvedId) {
-        const status = await this.getSessionStatus(sessionId, unresolvedId);
-        if (
-          status.state !== "completed" &&
-          status.state !== "failed" &&
-          status.state !== "aborted"
-        ) {
-          throw new AdapterError(
-            "SESSION_BUSY",
-            "The previous MCP submission has not reached a terminal state.",
-            unresolvedId,
-          );
-        }
-      }
-
       const session = await this.requireExposedSession(sessionId);
-      const [activity, pending] = await Promise.all([
-        this.activity(sessionId),
-        this.pending(sessionId),
-      ]);
-      if (pending.permissions + pending.questions > 0) {
-        throw new AdapterError(
-          "INPUT_REQUIRED",
-          "The session is waiting for input in OpenCode Web UI or TUI.",
-        );
-      }
-      if (activity !== "idle") {
-        throw new AdapterError(
-          "SESSION_BUSY",
-          "The OpenCode session is not idle.",
-        );
-      }
+      await this.requireIdle(sessionId);
       const settings = await this.promptSettings(session);
+      // Runtime lookup can race another frontend. Recheck before admission;
+      // this is still not a cross-client backend transaction.
+      await this.requireIdle(sessionId);
       const messageId = `msg_${randomUUID().replaceAll("-", "")}`;
       const activityCursor = await this.journal?.track(sessionId, messageId);
       const submittedAt = new Date().toISOString();
@@ -1313,13 +1411,15 @@ export class OpenCodeGateway implements SessionGateway {
 
   private async requireExposedSession(
     sessionId: string,
+    signal?: AbortSignal,
+    includeArchived = false,
   ): Promise<SessionV2Info> {
     await this.compatibilityCheck();
     let session: SessionV2Info | undefined;
     try {
       const response = await this.client.v2.session.get(
         { sessionID: sessionId },
-        { signal: this.deadline(), throwOnError: false },
+        { signal: this.deadline(signal), throwOnError: false },
       );
       if (response.response?.status === 404) throw sessionNotFound();
       if (response.response && !response.response.ok)
@@ -1333,7 +1433,7 @@ export class OpenCodeGateway implements SessionGateway {
     if (
       !session ||
       session.id !== sessionId ||
-      !(await this.isExposedSession(session))
+      !(await this.isExposedSession(session, undefined, includeArchived))
     )
       throw sessionNotFound();
     return session;
@@ -1342,13 +1442,14 @@ export class OpenCodeGateway implements SessionGateway {
   private async isExposedSession(
     session: SessionV2Info,
     knownManagerId?: string,
+    includeArchived = false,
   ): Promise<boolean> {
     const managerId = knownManagerId ?? (await this.managerSessionId());
     return (
       session.projectID === this.requiredProjectId() &&
       session.location.directory === this.runtime.project &&
       !session.parentID &&
-      !session.time.archived &&
+      (includeArchived || !session.time.archived) &&
       session.agent !== OPENLIVE_MANAGER_AGENT &&
       session.id !== managerId
     );
@@ -1443,6 +1544,7 @@ export class OpenCodeGateway implements SessionGateway {
     sessionId: string,
     limit: number,
     before?: string,
+    signal?: AbortSignal,
   ): Promise<MessagePage> {
     let response: Awaited<ReturnType<OpenCodeClient["session"]["messages"]>>;
     try {
@@ -1453,9 +1555,14 @@ export class OpenCodeGateway implements SessionGateway {
           limit,
           ...(before ? { before } : {}),
         },
-        { signal: this.deadline() },
+        { signal: this.deadline(signal), throwOnError: false },
       );
+      if (before && response.response?.status === 400)
+        throw new AdapterError("INVALID_ARGUMENT", "before cursor is invalid.");
+      if ((response.response?.status ?? 0) >= 400)
+        throw unavailable("Could not read OpenCode session history.");
     } catch (error) {
+      if (error instanceof AdapterError) throw error;
       if (before && httpStatus(error) === 400) {
         throw new AdapterError("INVALID_ARGUMENT", "before cursor is invalid.");
       }
@@ -1760,23 +1867,167 @@ export class OpenCodeGateway implements SessionGateway {
   }
 
   private async requireIdle(id: string): Promise<void> {
-    const receipt = this.unresolved.get(id);
-    if (receipt) {
-      const status = await this.getSessionStatus(id, receipt);
-      if (!["completed", "failed", "aborted"].includes(status.state))
-        throw new AdapterError(
-          "SESSION_BUSY",
-          "The previous MCP submission is unresolved.",
-        );
+    const check = async () => {
+      const [activity, pending] = await Promise.all([
+        this.activity(id),
+        this.pending(id),
+      ]);
+      this.assertIdle(activity, pending, this.unresolved.get(id));
+    };
+    await check();
+    if (!this.unresolved.has(id)) {
+      this.admissionSearch.delete(id);
+      return;
     }
-    if ((await this.activity(id)) !== "idle")
-      throw new AdapterError("SESSION_BUSY", "The session is not idle.");
-    const pending = await this.pending(id);
+    await this.reconcileAdmission(id);
+    // A terminal old receipt never establishes that the whole session is idle.
+    await check();
+  }
+
+  private admissionState(id: string): AdmissionState {
+    const receipt = this.unresolved.get(id);
+    return {
+      write_in_progress: this.submissionLocks.has(id),
+      ...(receipt ? { guarded_message_id: receipt } : {}),
+    };
+  }
+
+  private retireReceipt(id: string, receipt: string): void {
+    if (this.unresolved.get(id) !== receipt) return;
+    this.unresolved.delete(id);
+    if (this.admissionSearch.get(id)?.messageId === receipt)
+      this.admissionSearch.delete(id);
+  }
+
+  private assertIdle(
+    activity: SessionActivity,
+    pending: PendingInput,
+    receipt?: string,
+  ): void {
     if (pending.permissions + pending.questions > 0)
       throw new AdapterError(
         "INPUT_REQUIRED",
-        "Resolve pending input in Web UI/TUI before changing runtime settings.",
+        "The session has pending input. Resolve it in OpenCode Web UI/TUI; the requested operation was not admitted.",
+        receipt,
+        "pending_input",
       );
+    if (activity !== "idle")
+      throw new AdapterError(
+        "SESSION_BUSY",
+        "The backend session is busy or retrying. The requested operation was not admitted.",
+        receipt,
+        "backend_active",
+      );
+  }
+
+  private unresolvedAdmission(
+    receipt: string,
+    reason: AdmissionErrorReason,
+  ): AdapterError {
+    return new AdapterError(
+      "SUBMISSION_UNRESOLVED",
+      `The requested operation was not admitted. The session was observed idle, but the previous receipt could not be confirmed terminal (${reason}). Inspect this original task with get_task_result; idle alone does not authorize clearing it.`,
+      receipt,
+      reason,
+    );
+  }
+
+  private async reconcileAdmission(id: string): Promise<void> {
+    const receipt = this.unresolved.get(id);
+    if (!receipt) return;
+    const unchanged = () => {
+      const current = this.unresolved.get(id);
+      if (current && current !== receipt)
+        throw this.unresolvedAdmission(current, "receipt_changed");
+      return current === receipt;
+    };
+    let status: SessionStatusResult;
+    try {
+      status = await this.getSessionStatus(id, receipt);
+    } catch (error) {
+      if (error instanceof AdapterError && error.code === "BACKEND_UNAVAILABLE")
+        throw this.unresolvedAdmission(receipt, "backend_unavailable");
+      throw error;
+    }
+    this.assertIdle(status.backend_activity, status.pending_input, receipt);
+    if (!unchanged()) return; // Another correlated read retired exactly this receipt.
+    if (["completed", "failed", "aborted"].includes(status.state)) {
+      this.retireReceipt(id, receipt);
+      return;
+    }
+    if (
+      status.state !== "unknown" ||
+      status.task_status_reason !== "outside_history_or_not_observed"
+    )
+      throw this.unresolvedAdmission(receipt, "receipt_not_terminal");
+
+    // Reuse the authenticated result-search contract. Bound each attempt and
+    // retain only its cursor, not message contents; subsequent attempts resume.
+    const saved = this.admissionSearch.get(id);
+    let cursor = saved?.messageId === receipt ? saved.cursor : undefined;
+    const signal = AbortSignal.timeout(this.admissionSearchMs);
+    const end = Date.now() + this.admissionSearchMs;
+    for (
+      let page = 0;
+      page < ADMISSION_SEARCH_PAGES && Date.now() < end && !signal.aborted;
+      page++
+    ) {
+      let result: TaskResult;
+      try {
+        result = await this.getTaskResult(
+          id,
+          receipt,
+          cursor,
+          BACKEND_PAGE_SIZE,
+          signal,
+        );
+      } catch (error) {
+        if (!unchanged()) return;
+        if (
+          !(error instanceof AdapterError) ||
+          error.code === "SESSION_NOT_FOUND"
+        )
+          throw error;
+        if (signal.aborted)
+          throw this.unresolvedAdmission(receipt, "search_incomplete");
+        if (
+          error.code === "SEARCH_CHANGED" ||
+          error.code === "READ_REFERENCE_EXPIRED"
+        ) {
+          this.admissionSearch.delete(id);
+          throw this.unresolvedAdmission(receipt, "search_changed");
+        }
+        if (
+          error.code === "MESSAGE_NOT_FOUND" ||
+          error.code === "CONTENT_UNAVAILABLE"
+        )
+          throw this.unresolvedAdmission(receipt, "receipt_unavailable");
+        if (error.code === "BACKEND_UNAVAILABLE")
+          throw this.unresolvedAdmission(receipt, "backend_unavailable");
+        if (
+          error.code === "BACKEND_INCOMPATIBLE" ||
+          error.code === "INVALID_ARGUMENT"
+        ) {
+          this.admissionSearch.delete(id);
+          throw this.unresolvedAdmission(receipt, "backend_incompatible");
+        }
+        throw error;
+      }
+      if (!unchanged()) return;
+      if (result.search_complete) {
+        this.admissionSearch.delete(id);
+        if (["completed", "failed", "aborted"].includes(result.state)) {
+          this.retireReceipt(id, receipt);
+          return;
+        }
+        throw this.unresolvedAdmission(receipt, "receipt_not_terminal");
+      }
+      if (!result.next_cursor)
+        throw this.unresolvedAdmission(receipt, "backend_incompatible");
+      cursor = result.next_cursor;
+      this.admissionSearch.set(id, { messageId: receipt, cursor });
+    }
+    throw this.unresolvedAdmission(receipt, "search_incomplete");
   }
 
   private requireJournal(): ActivityJournal {
@@ -1832,9 +2083,9 @@ export class OpenCodeGateway implements SessionGateway {
       if (this.collecting.get(id) === marker && !this.submissionLocks.has(id))
         await this.journal.observe(snapshot, source);
     } catch (error) {
-      if (
-        !(error instanceof AdapterError && error.code === "SESSION_NOT_FOUND")
-      )
+      if (!(
+        error instanceof AdapterError && error.code === "SESSION_NOT_FOUND"
+      ))
         throw error;
     } finally {
       if (this.collecting.get(id) === marker) this.collecting.delete(id);
@@ -1892,12 +2143,10 @@ export class OpenCodeGateway implements SessionGateway {
               await this.journal!.signal(id, session.title, "question");
             await this.captureActivity(id, "observed");
           } catch (error) {
-            if (
-              !(
-                error instanceof AdapterError &&
-                error.code === "SESSION_NOT_FOUND"
-              )
-            )
+            if (!(
+              error instanceof AdapterError &&
+              error.code === "SESSION_NOT_FOUND"
+            ))
               this.tracking.partial = true;
           }
         }
@@ -1963,10 +2212,11 @@ export class OpenCodeGateway implements SessionGateway {
     return { id: this.runtime.projectHash, name: this.runtime.projectName };
   }
 
-  private deadline(): AbortSignal {
+  private deadline(extra?: AbortSignal): AbortSignal {
     return AbortSignal.any([
       AbortSignal.timeout(this.backendDeadlineMs),
       this.collectorStop.signal,
+      ...(extra ? [extra] : []),
     ]);
   }
 

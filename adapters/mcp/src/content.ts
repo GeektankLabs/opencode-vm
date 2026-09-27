@@ -22,6 +22,7 @@ export type ContentReference = {
   session: string;
   message: string;
   revision: string;
+  archived?: boolean;
 };
 
 /** Authenticated, adapter-lifetime references, never file paths or authority.
@@ -135,6 +136,7 @@ export function describeMessage(
   message: StoredMessage,
   references: ReadReferences,
   previewBytes = PREVIEW_BYTES,
+  includeArchived = false,
 ): HistoryMessage {
   const { info } = message;
   const visible = visibleContent(message);
@@ -171,6 +173,7 @@ export function describeMessage(
         session: info.sessionID,
         message: info.id,
         revision,
+        ...(includeArchived ? { archived: true } : {}),
       }),
       revision,
       unit: "utf8_bytes",

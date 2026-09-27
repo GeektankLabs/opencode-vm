@@ -5,6 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { McpHttpServer, MAX_REQUEST_BODY_BYTES } from "./http.js";
 import type { SessionGateway } from "./opencode.js";
+import { AdapterError } from "./types.js";
 import type {
   ActivityQuery,
   ActivityResult,
@@ -13,6 +14,7 @@ import type {
   RuntimeUpdateResult,
   ListSessionsResult,
   CreateSessionResult,
+  ArchiveSessionResult,
   RuntimeDescriptor,
   SendMessageResult,
   SessionDetailsResult,
@@ -120,6 +122,12 @@ class FakeGateway implements SessionGateway {
   listEntered: (() => void) | undefined;
   listBarrier: Promise<void> | undefined;
   createCalls: Array<string | undefined> = [];
+  archiveCalls: string[] = [];
+
+  async archiveSession(sessionId: string): Promise<ArchiveSessionResult> {
+    this.archiveCalls.push(sessionId);
+    return { session_id: sessionId, state: "archived", archived_at: 3 };
+  }
 
   async createSession(title?: string): Promise<CreateSessionResult> {
     this.createCalls.push(title);
@@ -177,7 +185,7 @@ class FakeGateway implements SessionGateway {
   }
 }
 
-test("official MCP client discovers fourteen stateless HTTP tools and invokes the original surface", async () => {
+test("official MCP client discovers fifteen stateless HTTP tools and invokes archive by ID", async () => {
   const gateway = new FakeGateway();
   const server = new McpHttpServer(runtime(), token, gateway);
   const port = await server.start();
@@ -190,6 +198,7 @@ test("official MCP client discovers fourteen stateless HTTP tools and invokes th
     await client.connect(transport);
     const listed = await client.listTools();
     assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), [
+      "archive_session",
       "create_session",
       "get_message",
       "get_project_activity",
@@ -216,6 +225,10 @@ test("official MCP client discovers fourteen stateless HTTP tools and invokes th
     assert.equal(createTool?.annotations?.readOnlyHint, false);
     assert.equal(createTool?.annotations?.idempotentHint, false);
     assert.equal(createTool?.annotations?.destructiveHint, false);
+    const archiveTool = listed.tools.find(
+      (tool) => tool.name === "archive_session",
+    );
+    assert.equal(archiveTool?.annotations?.destructiveHint, true);
     const created = await client.callTool({
       name: "create_session",
       arguments: { title: "  New work  " },
@@ -225,6 +238,15 @@ test("official MCP client discovers fourteen stateless HTTP tools and invokes th
       "ses_new",
     );
     assert.deepEqual(gateway.createCalls, ["New work"]);
+    const archived = await client.callTool({
+      name: "archive_session",
+      arguments: { session_id: "ses" },
+    });
+    assert.equal(
+      (archived.structuredContent as Record<string, unknown>)?.state,
+      "archived",
+    );
+    assert.deepEqual(gateway.archiveCalls, ["ses"]);
     for (const request of [
       { name: "get_session_runtime_options", arguments: {} },
       { name: "get_session_progress", arguments: { session_id: "ses" } },
@@ -341,6 +363,19 @@ test("official MCP client discovers fourteen stateless HTTP tools and invokes th
       { name: "create_session", arguments: { title: " " } },
       { name: "create_session", arguments: { title: "x".repeat(161) } },
       { name: "create_session", arguments: { title: "bad\nname" } },
+      {
+        name: "archive_session",
+        arguments: { session_id: "ses", delete: true },
+      },
+      { name: "archive_session", arguments: { session_id: "bad id" } },
+      {
+        name: "get_message",
+        arguments: {
+          session_id: "ses",
+          message_id: "msg",
+          include_archived: "true",
+        },
+      },
       { name: "list_sessions", arguments: { limit: 0 } },
       {
         name: "get_session_history",
@@ -377,6 +412,78 @@ test("official MCP client discovers fourteen stateless HTTP tools and invokes th
     assert.match(JSON.stringify(failed), /INTERNAL_ERROR/u);
   } finally {
     await client.close().catch(() => undefined);
+    await server.close();
+  }
+});
+
+test("raw MCP responses preserve busy/unresolved error codes and receipt reasons, including JSON-RPC id zero", async () => {
+  const gateway = new FakeGateway();
+  const server = new McpHttpServer(runtime(), token, gateway);
+  const port = await server.start();
+  try {
+    for (const error of [
+      new AdapterError(
+        "SESSION_BUSY",
+        "Backend is busy; no new submission.",
+        "msg_previous",
+        "backend_active",
+      ),
+      new AdapterError(
+        "SUBMISSION_UNRESOLVED",
+        "Idle with an unresolved earlier receipt; no new submission.",
+        "msg_previous",
+        "receipt_not_terminal",
+      ),
+    ]) {
+      gateway.sendMessage = async () => {
+        throw error;
+      };
+      const response = await fetch(`http://127.0.0.1:${port}/mcp`, {
+        method: "POST",
+        headers: {
+          "X-OCVM-MCP-Token": token,
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          "MCP-Protocol-Version": "2025-11-25",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 0,
+          method: "tools/call",
+          params: {
+            name: "send_message",
+            arguments: { session_id: "ses_123", message: "authorized fixture" },
+          },
+        }),
+      });
+      assert.equal(response.status, 200);
+      const wire = (await response.json()) as {
+        id: number;
+        error?: unknown;
+        result: {
+          isError: boolean;
+          error_code?: unknown;
+          _meta: Record<string, unknown>;
+          content: Array<{ text: string }>;
+        };
+      };
+      assert.equal(wire.id, 0);
+      assert.equal(wire.error, undefined);
+      assert.equal(wire.result.isError, true);
+      assert.equal(
+        wire.result.error_code,
+        undefined,
+        "adapter does not invent a generic outer INVALID_ARGUMENT code",
+      );
+      assert.deepEqual(wire.result._meta["opencode-vm/error"], {
+        code: error.code,
+        message: error.message,
+        message_id: "msg_previous",
+        reason: error.reason,
+      });
+      assert.match(wire.result.content[0]!.text, new RegExp(`^${error.code}:`));
+    }
+  } finally {
     await server.close();
   }
 });
