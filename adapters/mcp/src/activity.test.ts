@@ -204,3 +204,165 @@ test("slow visibility checks paginate instead of validating an entire backlog in
     await journal.close();
   }
 });
+
+test("Delivery B: tail selects newest matching events and preserves concurrent future events", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "ocvm-tail-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "activity.json");
+  let journal = await ActivityJournal.open(path, "project");
+  const start = journal.cursor;
+  for (const activity of ["idle", "busy", "idle"] as const) {
+    await journal.observe(snapshot("a", activity), "observed");
+    await journal.observe(snapshot("b", activity), "observed");
+  }
+  const head = journal.cursor;
+  let appended = false;
+  const tail = await journal.read(
+    { tail: true, limit: 2, session_ids: ["a"] },
+    async () => {
+      if (!appended) {
+        appended = true;
+        await journal.observe(snapshot("a", "busy"), "observed");
+      }
+      return true;
+    },
+  );
+  assert.deepEqual(
+    tail.events.map((event) => event.type),
+    ["session.busy", "session.idle"],
+  );
+  assert.ok(tail.events[0]!.cursor < tail.events[1]!.cursor);
+  assert.equal(tail.next_cursor, head);
+  assert.equal(tail.has_more, false);
+  assert.deepEqual(tail.tail, {
+    selection_complete: true,
+    earlier_events_not_examined: true,
+  });
+  const next = await journal.read(
+    { after_cursor: tail.next_cursor, session_ids: ["a"] },
+    async () => true,
+  );
+  assert.equal(next.events.length, 1);
+  assert.equal(next.events[0]?.type, "session.busy");
+  assert.equal(next.filter_key, tail.filter_key);
+  // Separate filter progress: A's high-water cursor must not replace B's cursor.
+  const b = await journal.read(
+    { after_cursor: start, session_ids: ["b"] },
+    async () => true,
+  );
+  assert.equal(b.events.length, 3);
+  assert.notEqual(b.filter_key, next.filter_key);
+  const filterProgress = new Map([
+    [next.filter_key, next.next_cursor],
+    [b.filter_key, b.next_cursor],
+  ]);
+  await journal.close();
+  journal = await ActivityJournal.open(path, "project");
+  await journal.observe(snapshot("b", "busy"), "observed");
+  const nextB = await journal.read(
+    { after_cursor: filterProgress.get(b.filter_key), session_ids: ["b"] },
+    async () => true,
+  );
+  assert.equal(nextB.events.length, 1);
+  assert.equal(nextB.filter_key, b.filter_key);
+  await journal.close();
+});
+
+test("Delivery B: tail budgets, empty windows, visibility and filter identity are explicit", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "ocvm-tail-budget-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const journal = await ActivityJournal.open(
+    join(directory, "activity.json"),
+    "project",
+  );
+  const empty = await journal.read({ tail: true }, async () => true);
+  assert.deepEqual(empty.events, []);
+  assert.deepEqual(empty.tail, {
+    selection_complete: true,
+    earlier_events_not_examined: false,
+  });
+  for (const id of ["a", "b", "private"])
+    await journal.observe(snapshot(id, "idle"), "observed");
+  const visible = await journal.read(
+    { tail: true, limit: 1 },
+    async (id) => id !== "private",
+  );
+  assert.equal(visible.events[0]?.session_id, "b");
+  assert.doesNotMatch(JSON.stringify(visible), /private/);
+  const noMatches = await journal.read(
+    { tail: true, session_ids: ["absent"] },
+    async () => true,
+  );
+  assert.equal(noMatches.events.length, 0);
+  assert.equal(noMatches.next_cursor, journal.cursor);
+  assert.equal(noMatches.tail?.selection_complete, true);
+  const first = await journal.read(
+    {
+      session_ids: ["a", "b", "a"],
+      event_types: ["session.busy", "session.idle"],
+      limit: 1,
+    },
+    async () => true,
+  );
+  const reordered = await journal.read(
+    {
+      tail: true,
+      session_ids: ["b", "a"],
+      event_types: ["session.idle", "session.busy"],
+    },
+    async () => true,
+  );
+  assert.equal(first.filter_key, reordered.filter_key);
+  await assert.rejects(
+    journal.read(
+      { tail: true, after_cursor: journal.cursor },
+      async () => true,
+    ),
+    { code: "INVALID_ARGUMENT" },
+  );
+  const now = Date.now;
+  let clock = now();
+  try {
+    Date.now = () => clock;
+    const limited = await journal.read({ tail: true, limit: 3 }, async () => {
+      clock += 2000;
+      return true;
+    });
+    assert.equal(limited.events.length, 1);
+    assert.deepEqual(limited.tail, {
+      selection_complete: false,
+      earlier_events_not_examined: true,
+    });
+    assert.equal(limited.next_cursor, journal.cursor);
+    assert.equal(limited.has_more, false); // head cursor is for future reads, not older tail records
+  } finally {
+    Date.now = now;
+    await journal.close();
+  }
+});
+
+test("Delivery B: tail cursors retain explicit rotation/epoch expiry", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "ocvm-tail-expiry-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "activity.json");
+  let journal = await ActivityJournal.open(path, "project", 2);
+  await journal.signal("a", "A", "idle");
+  const tail = await journal.read({ tail: true }, async () => true);
+  for (const id of ["b", "c", "d"]) await journal.signal(id, id, "idle");
+  await assert.rejects(
+    journal.read({ after_cursor: tail.next_cursor }, async () => true),
+    { code: "CURSOR_EXPIRED" },
+  );
+  await journal.close();
+  await rm(path);
+  journal = await ActivityJournal.open(path, "project", 2);
+  await assert.rejects(
+    journal.read({ after_cursor: tail.next_cursor }, async () => true),
+    { code: "CURSOR_EXPIRED" },
+  );
+  assert.equal(
+    (await journal.read({ tail: true }, async () => true)).events.length,
+    0,
+  );
+  await journal.close();
+});

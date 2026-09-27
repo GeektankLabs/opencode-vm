@@ -309,6 +309,143 @@ function stored(
   };
 }
 
+function progressPart(
+  call: string,
+  status: string,
+  start?: number,
+  end?: number,
+): Record<string, unknown> {
+  return {
+    type: "tool",
+    callID: call,
+    tool: "proxmox_create_vm",
+    state: {
+      status,
+      ...(start !== undefined || end !== undefined
+        ? { time: { start, end } }
+        : {}),
+      title: "B_PRIVATE_TITLE",
+      input: { token: "B_PRIVATE_ARGUMENT" },
+      output: "B_PRIVATE_OUTPUT",
+      error: "B_PRIVATE_ERROR",
+      metadata: { password: "B_PRIVATE_METADATA", exit: 1 },
+    },
+  };
+}
+
+test("Delivery B: progress exposes only observed tool metadata and exact task correlation", async () => {
+  const state = baseState();
+  const stepA = stored("stepA", "B_PRIVATE_TEXT", "userA", "tool-calls");
+  stepA.parts = [
+    progressPart("waiting", "pending"),
+    progressPart("running", "running", 30),
+    progressPart("done", "completed", 10, 20),
+    progressPart("error", "error", 22, 25),
+    { type: "reasoning", text: "B_PRIVATE_REASONING" },
+  ];
+  const stepB = stored("stepB", "", "userB", "tool-calls");
+  stepB.parts = [progressPart("other-task", "running", 50)];
+  state.messages = [
+    stored("userA", "B_PRIVATE_PROMPT"),
+    stepA,
+    stored("userB", "next"),
+    stepB,
+  ];
+  state.statuses.ses_work = { type: "busy" };
+  state.questions = [{ sessionID: "ses_work", tool: { messageID: "stepB" } }];
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  const progress = await gateway.getSessionProgress("ses_work", "userA");
+  assert.equal(progress.source, "backend_snapshot");
+  assert.ok(progress.observed_at);
+  assert.deepEqual(
+    progress.in_flight_tools.map((tool) => tool.call_id),
+    ["running", "waiting"],
+  );
+  assert.ok(
+    progress.in_flight_tools.every((tool) => tool.task_message_id === "userA"),
+  );
+  assert.equal(progress.in_flight_tools[0]?.started_at, 30);
+  assert.equal(progress.in_flight_tools[1]?.started_at, undefined);
+  assert.equal(progress.last_finished_tool?.call_id, "error");
+  assert.equal(progress.last_finished_tool?.status, "error");
+  assert.equal(progress.last_finished_tool?.finished_at, 25);
+  assert.equal(progress.last_activity_at, 30);
+  assert.equal(progress.pending_input.questions, 1);
+  assert.equal(progress.pending_input_scope, "session");
+  assert.equal(progress.idle_with_in_flight_tools, false);
+  assert.equal(progress.coverage.metadata_incomplete, false);
+  assert.doesNotMatch(
+    JSON.stringify(progress),
+    /B_PRIVATE|password|exit|percent|success/u,
+  );
+  const all = await gateway.getSessionProgress("ses_work");
+  assert.equal(all.in_flight_tools.length, 3);
+  assert.equal(all.last_activity_at, 50);
+  state.statuses.ses_work = { type: "idle" };
+  assert.equal(
+    (await gateway.getSessionProgress("ses_work")).idle_with_in_flight_tools,
+    true,
+  );
+  stepA.parts = [progressPart("done", "completed", 10, 20)];
+  const completed = await gateway.getSessionProgress("ses_work", "userA");
+  assert.equal(completed.last_finished_tool?.status, "completed"); // metadata.exit=1 is not promoted into a guessed success/failure
+  assert.equal(completed.in_flight_tools.length, 0);
+  assert.equal(state.promptCalls.length, 0);
+});
+
+test("Delivery B: parallel-tool caps, history bounds and missing metadata stay explicit", async () => {
+  const state = baseState();
+  const step = stored("step", "", "user", "tool-calls");
+  step.parts = Array.from({ length: 12 }, (_, i) =>
+    progressPart(`call${i}`, "running", 100 + i),
+  );
+  state.messages = [stored("user", "task"), step];
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  const capped = await gateway.getSessionProgress("ses_work", "user");
+  assert.equal(capped.coverage.in_flight_total, 12);
+  assert.equal(capped.coverage.in_flight_truncated, true);
+  assert.equal(capped.in_flight_tools.length, 10);
+  assert.equal(capped.in_flight_tools[0]?.started_at, 111);
+  assert.ok(Buffer.byteLength(JSON.stringify(capped)) < READ_PAYLOAD_BYTES);
+  step.info.parentID = "";
+  step.parts = [
+    progressPart("unattributed", "pending"),
+    progressPart("badtime", "running", NaN),
+    progressPart("future", "new-backend-state"),
+  ];
+  const incomplete = await gateway.getSessionProgress("ses_work");
+  assert.equal(incomplete.coverage.unattributed_tools, 3);
+  assert.equal(incomplete.coverage.metadata_incomplete, true);
+  assert.ok(
+    incomplete.in_flight_tools.every(
+      (tool) => tool.task_message_id === undefined,
+    ),
+  );
+  assert.equal(
+    (await gateway.getSessionProgress("ses_work", "user")).in_flight_tools
+      .length,
+    0,
+  );
+  state.messages.push(
+    ...Array.from({ length: 105 }, (_, i) => stored(`new${i}`, "newer task")),
+  );
+  const bounded = await gateway.getSessionProgress("ses_work", "user");
+  assert.equal(bounded.coverage.history_has_more, true);
+  assert.equal(bounded.coverage.messages_scanned, 100);
+  assert.equal(bounded.last_activity_at, undefined);
+  assert.equal(bounded.in_flight_tools.length, 0);
+  await assert.rejects(gateway.getSessionProgress("ses_work", "step"), {
+    code: "INVALID_ARGUMENT",
+  });
+  await assert.rejects(gateway.getSessionProgress("ses_work", "absent"), {
+    code: "MESSAGE_NOT_FOUND",
+  });
+  state.sessions[0]!.time.archived = 3;
+  await assert.rejects(gateway.getSessionProgress("ses_work"), {
+    code: "SESSION_NOT_FOUND",
+  });
+});
+
 test("Delivery A: original UTF-8 content is fully reconstructible independent of history size", async () => {
   const state = baseState();
   const text =

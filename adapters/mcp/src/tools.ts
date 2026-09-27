@@ -72,6 +72,43 @@ const pendingSchema = z
   })
   .strict();
 const activitySchema = z.enum(["idle", "busy", "retry"]);
+const toolObservationSchema = z
+  .object({
+    message_id: z.string(),
+    call_id: z.string(),
+    tool: z.string(),
+    task_message_id: z.string().optional(),
+    status: z.enum(["pending", "running", "completed", "error"]),
+    started_at: z.number().nonnegative().optional(),
+    finished_at: z.number().nonnegative().optional(),
+  })
+  .strict();
+const sessionProgressOutput = z
+  .object({
+    session_id: z.string(),
+    message_id: z.string().optional(),
+    observed_at: z.string(),
+    source: z.literal("backend_snapshot"),
+    backend_activity: activitySchema,
+    pending_input: pendingSchema,
+    pending_input_scope: z.literal("session"),
+    in_flight_tools: z.array(toolObservationSchema).max(10),
+    last_finished_tool: toolObservationSchema.optional(),
+    last_activity_at: z.number().nonnegative().optional(),
+    idle_with_in_flight_tools: z.boolean(),
+    coverage: z
+      .object({
+        message_limit: z.number().int().positive(),
+        messages_scanned: z.number().int().nonnegative(),
+        history_has_more: z.boolean(),
+        in_flight_total: z.number().int().nonnegative(),
+        in_flight_truncated: z.boolean(),
+        metadata_incomplete: z.boolean(),
+        unattributed_tools: z.number().int().nonnegative(),
+      })
+      .strict(),
+  })
+  .strict();
 const summarySchema = z
   .object({
     id: z.string(),
@@ -188,7 +225,10 @@ const activityFields = {
     .max(ACTIVITY_TYPES.length)
     .optional(),
 };
-const activityInput = z.object(activityFields).strict();
+const activityInput = z
+  .object({ ...activityFields, tail: z.boolean().optional() })
+  .strict()
+  .refine((value) => !value.tail || value.after_cursor === undefined);
 const waitActivityInput = z
   .object({
     ...activityFields,
@@ -219,6 +259,14 @@ const activityOutput = z
     ),
     next_cursor: z.string(),
     has_more: z.boolean(),
+    filter_key: z.string().optional(),
+    tail: z
+      .object({
+        selection_complete: z.boolean(),
+        earlier_events_not_examined: z.boolean(),
+      })
+      .strict()
+      .optional(),
     tracking: z
       .object({
         connected: z.boolean(),
@@ -426,6 +474,33 @@ export function createMcpServer(gateway: SessionGateway): McpServer {
     version: ADAPTER_VERSION,
   });
 
+  const progressHandler = safeHandler(
+    async (input: z.output<typeof getSessionStatusInputSchema>) => {
+      const result = await gateway.getSessionProgress(
+        input.session_id,
+        input.message_id,
+      );
+      return readSuccess(
+        result,
+        result.idle_with_in_flight_tools
+          ? "Session is idle alongside stored pending/running tools: do not infer tool-process liveness. Check coverage and observation times."
+          : "Stored tool snapshot, not a percentage or task success report. Pending input counts are session-wide; check coverage and observation times.",
+      );
+    },
+  );
+  server.registerTool(
+    "get_session_progress",
+    {
+      title: "Get Session Tool Progress",
+      description:
+        "Inspect stored tool metadata in the newest 100 messages: up to ten pending/running tools, last tool finished, timestamps and parent-based task IDs. Optional message_id filters to that submitted user message. Completed tools do not prove command/task success. No arguments, titles, outputs or reasoning are exposed. Empty/bounded observations do not prove inactivity; pending input remains session-wide. A normal read, not a new event subscription.",
+      inputSchema: getSessionStatusInputSchema,
+      outputSchema: sessionProgressOutput,
+      annotations: readOnlyAnnotations,
+    },
+    progressHandler,
+  );
+
   const getMessageHandler = safeHandler(
     async (input: z.output<typeof getMessageInput>) => {
       const result = await gateway.getMessage(
@@ -593,7 +668,9 @@ export function createMcpServer(gateway: SessionGateway): McpServer {
       const result = await gateway.getProjectActivity(query);
       return success(
         result,
-        `Returned ${result.events.length} project activity events. Save next_cursor for the next read.`,
+        result.tail
+          ? `Returned ${result.events.length} recent events; tail selection ${result.tail.selection_complete ? "complete" : "incomplete due to scan budget"}. Older history is not acknowledged. Save next_cursor under filter_key; continue without tail.`
+          : `Returned ${result.events.length} project activity events. Save next_cursor separately for this filter_key.`,
       );
     },
   );
@@ -603,8 +680,8 @@ export function createMcpServer(gateway: SessionGateway): McpServer {
       return success(
         result,
         result.timeout
-          ? "Activity wait timed out; save next_cursor."
-          : `Returned ${result.events.length} activity events.`,
+          ? "Activity wait timed out; save next_cursor separately for this filter_key."
+          : `Returned ${result.events.length} activity events; save next_cursor separately for this filter_key.`,
       );
     },
   );
@@ -637,7 +714,7 @@ export function createMcpServer(gateway: SessionGateway): McpServer {
     {
       title: "Get Project Activity",
       description:
-        "Read the bounded persistent activity journal across project sessions since after_cursor. Completion events reference message IDs; fetch history separately. Save next_cursor; CURSOR_EXPIRED requires a fresh read. Check tracking for collector outages/limits.",
+        "Read the bounded persistent project journal. Set tail=true WITHOUT after_cursor for the latest matching retained events, then continue after next_cursor without tail. Tail is a recent window, not complete historical consumption; check tail.selection_complete and tracking. Save a separate cursor per filter_key; changing filters must not reuse another filter's progress. CURSOR_EXPIRED requires an explicit fresh start. Completion IDs can be read with get_task_result/get_message.",
       inputSchema: activityInput,
       outputSchema: activityOutput,
       annotations: readOnlyAnnotations,
@@ -649,7 +726,7 @@ export function createMcpServer(gateway: SessionGateway): McpServer {
     {
       title: "Wait For Project Activity",
       description:
-        "Wait up to 15 seconds for matching project activity after a cursor; returns timeout=true when no matching event arrives. This is short polling, not external push.",
+        "Wait up to 15 seconds for matching project activity after a cursor; returns timeout=true when no matching event arrives. Use a cursor saved for this exact filter_key (including after a tail read); keep filter progress separate. This is short polling, not external push.",
       inputSchema: waitActivityInput,
       outputSchema: waitActivityOutput,
       annotations: readOnlyAnnotations,
@@ -745,6 +822,15 @@ export function createMcpServer(gateway: SessionGateway): McpServer {
     async (request, extra) => {
       const input = request.params.arguments ?? {};
       switch (request.params.name) {
+        case "get_session_progress":
+          return validatedToolCall(
+            getSessionStatusInputSchema,
+            sessionProgressOutput,
+            input,
+            progressHandler,
+            extra.requestId,
+            request.params.name,
+          );
         case "get_message":
           return validatedToolCall(
             getMessageInput,

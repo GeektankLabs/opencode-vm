@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, open, rename, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
@@ -8,6 +8,7 @@ import type {
   ActivityQuery,
   ActivitySnapshot,
   ActivityType,
+  ActivityResult,
   SessionStatusResult,
 } from "./types.js";
 
@@ -341,15 +342,72 @@ export class ActivityJournal {
     events: ActivityEvent[];
     next_cursor: string;
     has_more: boolean;
+    filter_key: string;
+    tail?: ActivityResult["tail"];
   }> {
     await this.tail;
     this.check();
     const snapshot = this.store;
+    if (query.tail && query.after_cursor !== undefined)
+      throw new AdapterError(
+        "INVALID_ARGUMENT",
+        "tail cannot be combined with after_cursor.",
+      );
+    const filterKey = `activity-filter-v1:${createHash("sha256")
+      .update(
+        JSON.stringify({
+          project: snapshot.project,
+          sessions: query.session_ids
+            ? [...new Set(query.session_ids)].sort()
+            : null,
+          types: query.event_types
+            ? [...new Set(query.event_types)].sort()
+            : null,
+        }),
+      )
+      .digest("hex")}`;
     const after = this.sequence(query.after_cursor, snapshot);
     const limit = query.limit ?? 50;
     const matches: ActivityEvent[] = [];
     const permissions = new Map<string, boolean>();
     const deadline = Date.now() + 1000;
+    if (query.tail) {
+      // Capture the head before asynchronous visibility checks. New events must
+      // remain reachable through next_cursor, never silently join this snapshot.
+      let index = snapshot.events.length - 1;
+      let limited = false;
+      for (; index >= 0; index--) {
+        if (Date.now() >= deadline) {
+          limited = true;
+          break;
+        }
+        const event = snapshot.events[index]!;
+        if (
+          (query.session_ids &&
+            !query.session_ids.includes(event.session_id)) ||
+          (query.event_types && !query.event_types.includes(event.type))
+        )
+          continue;
+        if (!permissions.has(event.session_id))
+          permissions.set(event.session_id, await visible(event.session_id));
+        if (!permissions.get(event.session_id)) continue;
+        matches.push(event);
+        if (matches.length === limit) {
+          index--;
+          break;
+        }
+      }
+      return {
+        events: structuredClone(matches.reverse()),
+        next_cursor: this.cursorFor(snapshot.next - 1),
+        has_more: false,
+        filter_key: filterKey,
+        tail: {
+          selection_complete: !limited,
+          earlier_events_not_examined: index >= 0,
+        },
+      };
+    }
     let scanned = after;
     let budgetReached = false;
     for (const event of snapshot.events) {
@@ -387,6 +445,7 @@ export class ActivityJournal {
         ? this.cursorFor(scanned)
         : this.cursorFor(snapshot.next - 1),
       has_more: hasMore,
+      filter_key: filterKey,
     };
   }
 

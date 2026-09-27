@@ -1,7 +1,7 @@
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { dirname, isAbsolute } from "node:path";
 
-export const ADAPTER_VERSION = "0.1.3";
+export const ADAPTER_VERSION = "0.1.4";
 export const MCP_TRANSPORT = "streamable-http-stateless";
 
 export type RuntimeDescriptor = {
@@ -89,6 +89,39 @@ export type SessionStatusResult = {
     | "not_requested"
     | "outside_history_or_not_observed"
     | "non_terminal_evidence";
+};
+
+export type ToolObservation = {
+  message_id: string;
+  call_id: string;
+  tool: string;
+  task_message_id?: string;
+  status: "pending" | "running" | "completed" | "error";
+  started_at?: number;
+  finished_at?: number;
+};
+
+export type SessionProgressResult = {
+  session_id: string;
+  message_id?: string;
+  observed_at: string;
+  source: "backend_snapshot";
+  backend_activity: SessionActivity;
+  pending_input: PendingInput;
+  pending_input_scope: "session";
+  in_flight_tools: ToolObservation[];
+  last_finished_tool?: ToolObservation;
+  last_activity_at?: number;
+  idle_with_in_flight_tools: boolean;
+  coverage: {
+    message_limit: number;
+    messages_scanned: number;
+    history_has_more: boolean;
+    in_flight_total: number;
+    in_flight_truncated: boolean;
+    metadata_incomplete: boolean;
+    unattributed_tools: number;
+  };
 };
 
 export type ContentDescriptor = {
@@ -221,6 +254,7 @@ export type ActivityEvent = {
   source: "mcp" | "observed" | "reconciled";
 };
 export type ActivityQuery = {
+  tail?: boolean;
   after_cursor?: string;
   limit?: number;
   session_ids?: string[];
@@ -230,6 +264,11 @@ export type ActivityResult = {
   events: ActivityEvent[];
   next_cursor: string;
   has_more: boolean;
+  filter_key?: string;
+  tail?: {
+    selection_complete: boolean;
+    earlier_events_not_examined: boolean;
+  };
   tracking: {
     connected: boolean;
     partial: boolean;

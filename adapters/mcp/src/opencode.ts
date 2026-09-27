@@ -45,6 +45,8 @@ import type {
   MessageResult,
   MessageContentResult,
   TaskResult,
+  SessionProgressResult,
+  ToolObservation,
 } from "./types.js";
 
 const BACKEND_DEADLINE_MS = 8_000;
@@ -83,6 +85,10 @@ type SessionCursor = {
 };
 
 export interface SessionGateway {
+  getSessionProgress(
+    sessionId: string,
+    messageId?: string,
+  ): Promise<SessionProgressResult>;
   getMessage(sessionId: string, messageId: string): Promise<MessageResult>;
   readMessageContent(
     reference: string,
@@ -303,6 +309,8 @@ export class OpenCodeGateway implements SessionGateway {
   }
 
   async getProjectActivity(query: ActivityQuery = {}): Promise<ActivityResult> {
+    if (query.tail !== undefined && typeof query.tail !== "boolean")
+      throw new AdapterError("INVALID_ARGUMENT", "tail must be a boolean.");
     const journal = this.requireJournal();
     const limit = integerInRange(query.limit ?? 50, 1, 100, "limit");
     const result = await journal.read({ ...query, limit }, async (id) => {
@@ -321,6 +329,11 @@ export class OpenCodeGateway implements SessionGateway {
   async waitForProjectActivity(
     query: ActivityQuery & { after_cursor: string; timeout_ms?: number },
   ): Promise<ActivityResult & { timeout: boolean }> {
+    if (query.tail !== undefined)
+      throw new AdapterError(
+        "INVALID_ARGUMENT",
+        "Activity waits require a continuation cursor, not tail.",
+      );
     const end =
       Date.now() +
       integerInRange(query.timeout_ms ?? 10000, 1, 15000, "timeout_ms");
@@ -514,6 +527,131 @@ export class OpenCodeGateway implements SessionGateway {
           }
         : {}),
       pending_input: pendingCounts(pending),
+    };
+  }
+
+  async getSessionProgress(
+    sessionId: string,
+    messageId?: string,
+  ): Promise<SessionProgressResult> {
+    await this.requireExposedSession(sessionId);
+    if (
+      messageId &&
+      (await this.message(sessionId, messageId)).info.role !== "user"
+    )
+      throw new AdapterError(
+        "INVALID_ARGUMENT",
+        "message_id must identify a submitted user message.",
+      );
+    const [activity, pending, history] = await Promise.all([
+      this.activity(sessionId),
+      this.pending(sessionId),
+      this.messages(sessionId, STATUS_HISTORY_LIMIT),
+    ]);
+    const inFlight: ToolObservation[] = [];
+    let lastFinished: ToolObservation | undefined;
+    let lastActivity: number | undefined;
+    let incomplete = false;
+    let unattributed = 0;
+    const identifier = (value: unknown): value is string =>
+      typeof value === "string" &&
+      value.length > 0 &&
+      value.length <= 256 &&
+      !/[\s\x00-\x1f\x7f]/u.test(value);
+    const timestamp = (value: unknown): number | undefined =>
+      typeof value === "number" && Number.isFinite(value) && value >= 0
+        ? value
+        : undefined;
+    const observeTime = (value: unknown) => {
+      const time = timestamp(value);
+      if (time !== undefined)
+        lastActivity = Math.max(lastActivity ?? time, time);
+    };
+    for (const { info, parts } of history.items) {
+      if (info.sessionID !== sessionId)
+        throw incompatible("OpenCode returned progress for another session.");
+      const parent =
+        info.role === "assistant" && identifier(info.parentID)
+          ? info.parentID
+          : undefined;
+      const matches =
+        !messageId || info.id === messageId || parent === messageId;
+      if (matches) {
+        observeTime(info.time.created);
+        if (info.role === "assistant") observeTime(info.time.completed);
+      }
+      if (info.role !== "assistant") continue;
+      for (const part of parts) {
+        if (part.type !== "tool") continue;
+        if (!parent) unattributed++;
+        if (!matches) continue;
+        // Deliberate allowlist: no title, arguments, output, metadata, file paths,
+        // reasoning or raw error strings leave this projection.
+        if (
+          !identifier(info.id) ||
+          !identifier(part.callID) ||
+          !identifier(part.tool) ||
+          !isRecord(part.state) ||
+          !["pending", "running", "completed", "error"].includes(
+            part.state.status,
+          )
+        ) {
+          incomplete = true;
+          continue;
+        }
+        const state = part.state;
+        const started =
+          state.status === "pending" ? undefined : timestamp(state.time?.start);
+        const finished =
+          state.status === "completed" || state.status === "error"
+            ? timestamp(state.time?.end)
+            : undefined;
+        if (state.status !== "pending" && started === undefined)
+          incomplete = true;
+        const tool: ToolObservation = {
+          message_id: info.id,
+          call_id: part.callID,
+          tool: part.tool,
+          status: state.status,
+          ...(parent ? { task_message_id: parent } : {}),
+          ...(started !== undefined ? { started_at: started } : {}),
+          ...(finished !== undefined ? { finished_at: finished } : {}),
+        };
+        observeTime(started);
+        observeTime(finished);
+        if (state.status === "pending" || state.status === "running")
+          inFlight.push(tool);
+        else if (finished === undefined) incomplete = true;
+        else if (!lastFinished || finished >= lastFinished.finished_at!)
+          lastFinished = tool;
+      }
+    }
+    inFlight.sort(
+      (a, b) =>
+        (b.started_at ?? -1) - (a.started_at ?? -1) ||
+        a.call_id.localeCompare(b.call_id),
+    );
+    return {
+      session_id: sessionId,
+      ...(messageId ? { message_id: messageId } : {}),
+      observed_at: new Date().toISOString(),
+      source: "backend_snapshot",
+      backend_activity: activity,
+      pending_input: pendingCounts(pending),
+      pending_input_scope: "session",
+      in_flight_tools: inFlight.slice(0, 10),
+      ...(lastFinished ? { last_finished_tool: lastFinished } : {}),
+      ...(lastActivity !== undefined ? { last_activity_at: lastActivity } : {}),
+      idle_with_in_flight_tools: activity === "idle" && inFlight.length > 0,
+      coverage: {
+        message_limit: STATUS_HISTORY_LIMIT,
+        messages_scanned: history.items.length,
+        history_has_more: Boolean(history.next),
+        in_flight_total: inFlight.length,
+        in_flight_truncated: inFlight.length > 10,
+        metadata_incomplete: incomplete,
+        unattributed_tools: unattributed,
+      },
     };
   }
 

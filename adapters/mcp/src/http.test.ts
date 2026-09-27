@@ -21,6 +21,7 @@ import type {
   MessageResult,
   MessageContentResult,
   TaskResult,
+  SessionProgressResult,
 } from "./types.js";
 
 const token = "test-token-" + "x".repeat(43);
@@ -41,6 +42,27 @@ function runtime(): RuntimeDescriptor {
 }
 
 class FakeGateway implements SessionGateway {
+  async getSessionProgress(sessionId: string): Promise<SessionProgressResult> {
+    return {
+      session_id: sessionId,
+      observed_at: new Date().toISOString(),
+      source: "backend_snapshot",
+      backend_activity: "idle",
+      pending_input: { permissions: 0, questions: 0 },
+      pending_input_scope: "session",
+      in_flight_tools: [],
+      idle_with_in_flight_tools: false,
+      coverage: {
+        message_limit: 100,
+        messages_scanned: 0,
+        history_has_more: false,
+        in_flight_total: 0,
+        in_flight_truncated: false,
+        metadata_incomplete: false,
+        unattributed_tools: 0,
+      },
+    };
+  }
   async getMessage(): Promise<MessageResult> {
     throw new Error("fixture unused");
   }
@@ -155,7 +177,7 @@ class FakeGateway implements SessionGateway {
   }
 }
 
-test("official MCP client discovers thirteen stateless HTTP tools and invokes the original surface", async () => {
+test("official MCP client discovers fourteen stateless HTTP tools and invokes the original surface", async () => {
   const gateway = new FakeGateway();
   const server = new McpHttpServer(runtime(), token, gateway);
   const port = await server.start();
@@ -173,6 +195,7 @@ test("official MCP client discovers thirteen stateless HTTP tools and invokes th
       "get_project_activity",
       "get_session",
       "get_session_history",
+      "get_session_progress",
       "get_session_runtime_options",
       "get_session_status",
       "get_task_result",
@@ -204,6 +227,7 @@ test("official MCP client discovers thirteen stateless HTTP tools and invokes th
     assert.deepEqual(gateway.createCalls, ["New work"]);
     for (const request of [
       { name: "get_session_runtime_options", arguments: {} },
+      { name: "get_session_progress", arguments: { session_id: "ses" } },
       {
         name: "update_session_runtime",
         arguments: { session_id: "ses", agent: "build" },
@@ -284,6 +308,23 @@ test("official MCP client discovers thirteen stateless HTTP tools and invokes th
       },
       { name: "update_session_runtime", arguments: { session_id: "ses" } },
       { name: "get_project_activity", arguments: { limit: 101 } },
+      {
+        name: "get_project_activity",
+        arguments: { tail: true, after_cursor: "cursor" },
+      },
+      { name: "get_project_activity", arguments: { tail: "true" } },
+      {
+        name: "wait_for_project_activity",
+        arguments: { tail: true, after_cursor: "cursor" },
+      },
+      {
+        name: "get_session_progress",
+        arguments: { session_id: "ses", include_output: true },
+      },
+      {
+        name: "get_session_progress",
+        arguments: { session_id: "ses", message_id: "bad id" },
+      },
       {
         name: "wait_for_project_activity",
         arguments: { after_cursor: "cursor", timeout_ms: 15001 },

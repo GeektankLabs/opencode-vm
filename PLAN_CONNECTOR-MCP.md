@@ -6,6 +6,10 @@ Date: 2026-09-25
 
 Last updated: 2026-09-27
 
+## Phase 7: Delivery B — Tool Progress and Journal Tail (0.5.68 / Adapter 0.1.4)
+
+One additive read-only tool, `get_session_progress`, exposes bounded observed tool metadata with parent-based task IDs, times and explicit coverage. `get_project_activity(tail:true)` supplies the newest matching retained events and a captured-head cursor for subsequent reads/waits. `filter_key` supports independent client-side progress for each filter without changing existing global cursor semantics or adding consumer state. No raw tool output, additional event subscription or protocol migration is introduced. Contract and acceptance details are maintained in `PLAN_MCP_PROGRESS.md` and `docs/MCP-INTERFACE.md`.
+
 ## Phase 6: Delivery A — Complete Original Reading (0.5.67 / Adapter 0.1.3)
 
 Three additive tools (`get_task_result`, `get_message`, `read_message_content`) provide bounded deep result searches and complete revision-bound original-text reads. History's shared text clipping is replaced by UTF-8 previews with references, explicit omissions and serialized response budgets. The existing transport/SDK/revision baseline is preserved. No snapshots, durable result index, automatic write retries, raw tool output or discussion state are added. Decisions, test evidence and required hosted ChatGPT acceptance are maintained in `PLAN_MCP_READING.md` and `docs/MCP-INTERFACE.md`; historical text-budget/no-content-reading statements below are superseded by this phase.

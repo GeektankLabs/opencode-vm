@@ -44,6 +44,7 @@ const longReport =
 assert.ok(Buffer.byteLength(longReport) >= 200 * 1024);
 const protocolObservations = new Set();
 const readResponseSizes = [];
+const toolGate = join(temporary, "release-tool");
 
 try {
   await mkdir(configDirectory, { recursive: true });
@@ -104,6 +105,50 @@ try {
       "content-type": "text/event-stream",
       "cache-control": "no-cache",
     });
+    if (lastText === "delivery-b-tool") {
+      response.write(
+        sseChunk({
+          id: "chatcmpl-progress",
+          object: "chat.completion.chunk",
+          created: 1,
+          model: "test-model",
+          choices: [
+            {
+              index: 0,
+              delta: {
+                role: "assistant",
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "call_delivery_b",
+                    type: "function",
+                    function: {
+                      name: "bash",
+                      arguments: JSON.stringify({
+                        command: `for i in $(seq 1 300); do [ -f "${toolGate}" ] && break; sleep 0.1; done; printf B_PRIVATE_TOOL_OUTPUT`,
+                        description: "B_PRIVATE_TOOL_TITLE",
+                      }),
+                    },
+                  },
+                ],
+              },
+              finish_reason: null,
+            },
+          ],
+        }),
+      );
+      response.write(
+        sseChunk({
+          id: "chatcmpl-progress",
+          object: "chat.completion.chunk",
+          created: 1,
+          model: "test-model",
+          choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+        }),
+      );
+      response.end("data: [DONE]\n\n");
+      return;
+    }
     response.write(
       sseChunk({
         id: "chatcmpl-mcp",
@@ -143,6 +188,7 @@ try {
     join(configDirectory, "opencode.json"),
     `${JSON.stringify({
       autoupdate: false,
+      permission: { bash: "allow" },
       model: "integration/test-model",
       small_model: "integration/test-model",
       provider: {
@@ -662,6 +708,101 @@ try {
     `[integration] Delivery A: ${Buffer.byteLength(longReport)} UTF-8 bytes reconstructed; old result recovered in ${searchPages} pages; protocol ${[...protocolObservations].join(", ")}; max read response ${Math.max(...readResponseSizes)} bytes\n`,
   );
 
+  const progressSession = structured(
+    await mcpClient.callTool({
+      name: "create_session",
+      arguments: { title: "Delivery B progress" },
+    }),
+  ).session_id;
+  const progressReceipt = structured(
+    await mcpClient.callTool({
+      name: "send_message",
+      arguments: { session_id: progressSession, message: "delivery-b-tool" },
+    }),
+  );
+  let runningTool, toolMessage;
+  for (let i = 0; i < 100; i++) {
+    const messages = (
+      await backend.session.messages({ sessionID: progressSession, limit: 100 })
+    ).data;
+    toolMessage = messages.find((item) =>
+      item.parts.some(
+        (part) => part.type === "tool" && part.state.status === "running",
+      ),
+    );
+    runningTool = toolMessage?.parts.find(
+      (part) => part.type === "tool" && part.state.status === "running",
+    );
+    if (runningTool) break;
+    await delay(100);
+  }
+  assert.ok(runningTool, "backend must expose a running tool");
+  assert.equal(runningTool.tool, "bash");
+  assert.equal(typeof runningTool.state.time.start, "number");
+  assert.equal(toolMessage.info.parentID, progressReceipt.message_id);
+  const callsBeforeProgress = providerRequests.length;
+  const liveProgress = structured(
+    await mcpClient.callTool({
+      name: "get_session_progress",
+      arguments: {
+        session_id: progressSession,
+        message_id: progressReceipt.message_id,
+      },
+    }),
+  );
+  assert.equal(liveProgress.source, "backend_snapshot");
+  assert.equal(liveProgress.in_flight_tools[0]?.tool, "bash");
+  assert.equal(liveProgress.in_flight_tools[0]?.status, "running");
+  assert.equal(
+    liveProgress.in_flight_tools[0]?.task_message_id,
+    progressReceipt.message_id,
+  );
+  assert.equal(liveProgress.in_flight_tools[0]?.call_id, runningTool.callID);
+  assert.equal(
+    liveProgress.in_flight_tools[0]?.started_at,
+    runningTool.state.time.start,
+  );
+  assert.equal(providerRequests.length, callsBeforeProgress);
+  assert.doesNotMatch(
+    JSON.stringify(liveProgress),
+    /B_PRIVATE|release-tool|command|description/,
+  );
+  await writeFile(toolGate, "release");
+  await waitForTask(progressSession, progressReceipt.message_id);
+  const finishedMessage = (
+    await backend.session.message({
+      sessionID: progressSession,
+      messageID: toolMessage.info.id,
+    })
+  ).data;
+  const finishedTool = finishedMessage.parts.find(
+    (part) => part.type === "tool" && part.callID === runningTool.callID,
+  );
+  assert.equal(finishedTool.state.status, "completed");
+  assert.equal(typeof finishedTool.state.time.end, "number");
+  const finalProgress = structured(
+    await mcpClient.callTool({
+      name: "get_session_progress",
+      arguments: {
+        session_id: progressSession,
+        message_id: progressReceipt.message_id,
+      },
+    }),
+  );
+  assert.equal(finalProgress.in_flight_tools.length, 0);
+  assert.equal(finalProgress.last_finished_tool.status, "completed");
+  assert.equal(
+    finalProgress.last_finished_tool.finished_at,
+    finishedTool.state.time.end,
+  );
+  assert.doesNotMatch(
+    JSON.stringify(finalProgress),
+    /B_PRIVATE|release-tool|command|description/,
+  );
+  process.stderr.write(
+    "[integration] Delivery B: real tool name, running/completed states, start/end and parent correlation verified\n",
+  );
+
   const secondSession = structured(
     await mcpClient.callTool({
       name: "create_session",
@@ -712,10 +853,25 @@ try {
     firstCompletion.events.map((event) => event.message_id),
     [parallelA.message_id],
   );
+  const recent = structured(
+    await mcpClient.callTool({
+      name: "get_project_activity",
+      arguments: {
+        tail: true,
+        limit: 1,
+        session_ids: [sessionId, secondSession],
+        event_types: ["message.completed"],
+      },
+    }),
+  );
+  assert.equal(recent.events[0]?.message_id, parallelA.message_id);
+  assert.equal(recent.tail.selection_complete, true);
+  assert.equal(recent.has_more, false);
+  assert.equal(recent.filter_key, firstCompletion.filter_key);
   const wait = mcpClient.callTool({
     name: "wait_for_project_activity",
     arguments: {
-      after_cursor: firstCompletion.next_cursor,
+      after_cursor: recent.next_cursor,
       session_ids: [sessionId, secondSession],
       event_types: ["message.completed"],
       timeout_ms: 15000,
@@ -723,6 +879,7 @@ try {
   });
   heldPrompts.get("parallel-B")();
   const secondCompletion = structured(await wait);
+  assert.equal(secondCompletion.filter_key, recent.filter_key);
   assert.equal(secondCompletion.timeout, false);
   assert.deepEqual(
     secondCompletion.events.map((event) => event.message_id),
@@ -772,6 +929,7 @@ try {
     [parallelA.message_id, parallelB.message_id],
   );
   assert.ok(persisted.next_cursor >= secondCompletion.next_cursor);
+  assert.equal(persisted.filter_key, recent.filter_key);
   const recovered = structured(
     await mcpClient.callTool({
       name: "get_session_status",
@@ -787,6 +945,7 @@ try {
   );
   process.stdout.write("MCP real OpenCode integration passed.\n");
 } finally {
+  await writeFile(toolGate, "release").catch(() => {});
   for (const release of heldPrompts.values()) release();
   await mcpClient?.close().catch(() => undefined);
   await stopChild(mcp);
@@ -854,6 +1013,7 @@ async function connectMcp(port, token) {
               "read_message_content",
               "get_task_result",
               "get_session_history",
+              "get_session_progress",
             ].includes(request?.params?.name)
           )
             readResponseSizes.push(Buffer.byteLength(body));

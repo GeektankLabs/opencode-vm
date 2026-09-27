@@ -2,7 +2,7 @@
 
 This document defines the incoming MCP interface exposed by `opencode-vm web` sessions (enabled by default since 0.5.61) and by terminal `start` sessions with a project-specific OpenAI MCP assignment (since 0.5.62). It describes the server side that external MCP clients use. It is separate from `opencode-vm mcps`, which configures MCP servers that OpenCode consumes as tools.
 
-The implemented adapter is version **0.1.3**, uses `@modelcontextprotocol/sdk` **1.30.1** and `@opencode-ai/sdk` **1.18.21**, and was tested with MCP protocol revision **2025-11-25**. It uses stateless Streamable HTTP with JSON responses. The SDK also advertises `2025-06-18`, `2025-03-26`, `2024-11-05`, and `2024-10-07`, but those revisions are not the release-tested contract. Delivery A adds three ordinary reading tools; it does not migrate the transport, SDK or native task protocol. The observed combinations and outstanding ChatGPT acceptance are recorded in [PLAN_MCP_READING.md](../PLAN_MCP_READING.md).
+The implemented adapter is version **0.1.4**, uses `@modelcontextprotocol/sdk` **1.30.1** and `@opencode-ai/sdk` **1.18.21**, and was tested with MCP protocol revision **2025-11-25**. It uses stateless Streamable HTTP with JSON responses. The SDK also advertises `2025-06-18`, `2025-03-26`, `2024-11-05`, and `2024-10-07`, but those revisions are not the release-tested contract. Delivery A adds three ordinary reading tools; Delivery B adds `get_session_progress` and a journal tail option, bringing the surface to fourteen tools. Neither delivery migrates the transport, SDK or native task protocol. The observed combinations and outstanding ChatGPT acceptance are recorded in [PLAN_MCP_READING.md](../PLAN_MCP_READING.md) and [PLAN_MCP_PROGRESS.md](../PLAN_MCP_PROGRESS.md).
 
 ## 1. Runtime model
 
@@ -237,6 +237,52 @@ Correlation uses the submitted user `message_id` and assistant `parentID`. `tool
 
 Use `get_task_result` to search beyond that bound. A question/permission explicitly linked to this turn remains actionable, but session-wide or later-turn pending input no longer overrides this turn's terminal evidence. `completed` describes execution evidence, not how much text the caller has read. `length` and `content-filter` are terminal generation reasons, not proof of a regularly finished report.
 
+### `get_session_progress`
+
+Added in adapter 0.1.4 / opencode-vm 0.5.68. Read-only, idempotent, closed-world. A compact observation of stored tool metadata, with no model execution or new event subscription:
+
+```json
+{"session_id":"ses_...","message_id":"msg_user_optional"}
+```
+
+Omit `message_id` to inspect the session's recent tools. If supplied, it must identify a visible stored **user** message in this session; only assistant tools whose backend `parentID` matches that ID are selected. No latest-user/time-proximity guess is made.
+
+```json
+{
+  "session_id":"ses_...",
+  "message_id":"msg_user",
+  "observed_at":"2026-09-27T12:00:00.000Z",
+  "source":"backend_snapshot",
+  "backend_activity":"busy",
+  "pending_input":{"permissions":0,"questions":0},
+  "pending_input_scope":"session",
+  "in_flight_tools":[{
+    "message_id":"msg_assistant",
+    "call_id":"call_...",
+    "tool":"bash",
+    "task_message_id":"msg_user",
+    "status":"running",
+    "started_at":1790510399000
+  }],
+  "last_activity_at":1790510399000,
+  "idle_with_in_flight_tools":false,
+  "coverage":{
+    "message_limit":100,"messages_scanned":12,"history_has_more":false,
+    "in_flight_total":1,"in_flight_truncated":false,
+    "metadata_incomplete":false,"unattributed_tools":0
+  }
+}
+```
+
+- The observation examines at most the newest **100 messages**, not the whole historical task. An old requested user can be directly verified even when its tool steps are outside this window. An empty result does not prove that no tool exists or that the task is idle; inspect `coverage.history_has_more`.
+- `in_flight_tools` contains up to **ten** tools recorded as `pending` or `running`, ordered by descending known start time, then call ID; entries without a start time follow timed entries. Parallel tools are represented individually. `in_flight_total` counts matching valid entries in the inspected window, and `in_flight_truncated` marks the ten-entry cap.
+- Optional `last_finished_tool` has the same shape with status `completed` or `error` and, where available, `started_at`/`finished_at`. It selects the greatest recorded finish timestamp within the selected window, using the later encountered part for ties. It is not necessarily the last tool in the entire session.
+- Tool times and `last_activity_at` are Unix **milliseconds**. The latter is the greatest known selected message create/complete or tool start/end time in this read, not a heartbeat or a claim that progress just occurred. It is omitted when the selected window has no known activity time. `observed_at` is the read completion time.
+- `completed` means the backend finished that tool invocation. It is **not** a shell exit-code check or proof of task success. `error` is the backend's tool error state; its raw error string remains private. Use task status/results for execution completion and the original report for substantive conclusions.
+- Only message/call/tool/parent identifiers, enum states and timestamps are selected. No titles, descriptions, arguments, output, raw metadata, paths from arguments/results, artifact bodies or reasoning are returned. Missing/unsupported identifiers, states or expected times set `metadata_incomplete`; invalid entries/times are not fabricated. `unattributed_tools` counts tool parts in the inspected session window with no usable parent ID. Session-wide reads can show their metadata without `task_message_id`; task-filtered reads exclude them.
+- These are non-transactional backend snapshots, not process-liveness checks. `idle_with_in_flight_tools` explicitly notes session idle alongside stored pending/running entries; do not silently turn that combination into a running task. Pending-input counts are always **session-wide**, even on task-filtered reads, and do not establish that the requested task is blocked. Resolve input through first-party UI as before.
+- The same project/session checks and 64-KiB serialized result budget as Delivery A apply. Backend failures return errors rather than a cached success. No percentages or automatically generated semantic checkpoints are inferred.
+
 ### `get_session_history`
 
 Read-only, idempotent, closed-world tool.
@@ -440,6 +486,7 @@ Read-only access to a persistent **project-wide observation journal**, not a sta
 - `limit`: 1–100, default 50.
 - `session_ids`: optional 1–50 session IDs.
 - `event_types`: optional nonempty array of supported types.
+- `tail`: optional boolean, default false. `tail:true` is an initial recent-window read and cannot be combined with `after_cursor`.
 
 ```json
 {
@@ -474,9 +521,32 @@ Session-only events may omit `message_id`; message events preserve the existing 
 
 Events are ordered by a persistent monotonic sequence within a journal epoch. Reads are exclusive of `after_cursor` and do not consume events for other clients. Keep `next_cursor`; when `has_more` is true, continue pagination, including an empty page. A one-second scan budget (plus the in-flight bounded backend check) prevents long backlogs of visibility checks from monopolizing one call. Filtering advances past skipped records; changing filters later does not replay records already skipped by that cursor. Omit the cursor to read from the earliest retained event. Current project/root/manager/archive checks are repeated before returning stored events, so excluded sessions cannot be retrieved from old journal entries.
 
+**Delivery B — recent entry and independent filter progress:**
+
+```json
+{"tail":true,"limit":10,"session_ids":["ses_A"],"event_types":["message.completed"]}
+```
+
+Tail scans backward from a captured journal head to find the newest matching currently exposed events, then returns them in the usual **oldest-to-newest order**. `next_cursor` is that captured **global journal head**, not the last matching event. Events appended during the read remain reachable with a subsequent ordinary `after_cursor` read or wait. Continue **without `tail`** and with the same filters.
+
+Tail responses add:
+
+```json
+{
+  "filter_key":"activity-filter-v1:<sha256>",
+  "tail":{"selection_complete":true,"earlier_events_not_examined":true},
+  "has_more":false,
+  "next_cursor":"<captured global head>"
+}
+```
+
+`selection_complete:true` means the requested number of visible matches was found, or the retained snapshot was exhausted. If the scan budget is reached first, it is false and only the newest matches found so far are returned. `earlier_events_not_examined` says older retained entries remain unchecked; neither false nor a complete tail selection proves that evicted/downtime history was recovered. Tail's `has_more:false` refers to forward continuation through the captured head, **not complete past consumption**. To recover older retained events, start an ordinary read without a cursor/tail; to request a smaller current window after a budget-limited selection, repeat tail with a smaller limit. No historical read/discussion acknowledgement is made.
+
+All activity reads and waits now return `filter_key`, a stable opaque key for the project plus sorted/deduplicated `session_ids` and `event_types`. Limit, tail and cursor are not part of this identity. Clients must store **one `next_cursor` per `filter_key`**. Switching to a previously used filter restores that filter's own cursor; a new filter starts its own history or tail read. The existing global cursors are unchanged and are not filter-bound authorization tokens: the server cannot detect a client incorrectly reusing another filter's cursor. No server-side consumer registry is introduced. Existing `CURSOR_EXPIRED`, tracking/coverage limits and visibility rechecks still apply.
+
 ### `wait_for_project_activity`
 
-Same filters/output as `get_project_activity`, with required `after_cursor`, optional `timeout_ms` (1–15000, default 10000), and an additional `timeout` boolean. Returns immediately if matching events are already present; otherwise waits briefly for journal changes. Normal backend visibility validation adds its usual request deadline to the waiting budget. On timeout, the empty response still has `next_cursor`. This is a bounded active wait, not delivery/push to an inactive ChatGPT conversation.
+Same filters/output as ordinary `get_project_activity`, with required `after_cursor`, optional `timeout_ms` (1–15000, default 10000), and an additional `timeout` boolean. `tail` is not accepted on waits. Returns immediately if matching events are already present; otherwise waits briefly for journal changes. Normal backend visibility validation adds its usual request deadline to the waiting budget. On timeout, the empty response still has `next_cursor` and `filter_key`; retain it only for that filter. This is a bounded active wait, not delivery/push to an inactive ChatGPT conversation.
 
 ## 5. Submission and recovery semantics
 
@@ -568,4 +638,4 @@ The endpoint is bound only to guest `127.0.0.1` and is verified through host `12
 
 This interface can create empty root work sessions, change idle-session runtime settings, continue exposed sessions and read project activity. It does not delete, fork, or interrupt sessions; upload attachments; answer permissions/questions; expose a shell directly; or discover other projects.
 
-Automated package, fake-backend, disposable real-OpenCode and local tunnel-control-plane tests cover thirteen tools, complete original-text reconstruction, deep result searches, revision/reference handling, creation without a model call, runtime changes and validation, independent session completions, bounded waits, journal restart recovery, pending input and no automatic resend on uncertainty. Real macOS/Lima and actual ChatGPT text/Voice operation still require target-host acceptance. After upgrading, reconnect the project runtime and refresh the external client's tool catalog; ChatGPT custom apps may require a tool refresh or republishing to expose new tools. See the exact tested combinations and external acceptance procedure in [PLAN_MCP_READING.md](../PLAN_MCP_READING.md).
+Automated package, fake-backend, disposable real-OpenCode and local tunnel-control-plane tests cover fourteen tools, metadata-only progress, tail-to-forward continuation, complete original-text reconstruction, deep result searches, revision/reference handling, creation without a model call, runtime changes and validation, independent session completions, bounded waits, journal restart recovery, pending input and no automatic resend on uncertainty. Real macOS/Lima and actual ChatGPT text/Voice operation still require target-host acceptance. After upgrading, reconnect the project runtime and refresh the external client's tool catalog; ChatGPT custom apps may require a tool refresh or republishing to expose new tools. See the exact tested combinations and external acceptance procedures in [PLAN_MCP_READING.md](../PLAN_MCP_READING.md) and [PLAN_MCP_PROGRESS.md](../PLAN_MCP_PROGRESS.md).

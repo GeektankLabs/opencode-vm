@@ -8,6 +8,8 @@ Implementation and local automated acceptance are complete. Hosted ChatGPT/Voice
 
 Delivery A implements package 1, the functional core of package 2, and only necessary status fields, descriptions and metadata diagnostics from package 3. Delivery B is a small journal tail/continuation improvement plus observable tool metadata. Incremental history, general tool outputs, export and personal discussion state are deferred. Idempotency is a separate prerequisite before any automatic write retry. MCP 2026-07-28 migration is a separate decision, not a requirement of Delivery A.
 
+Delivery B is implemented in 0.5.68 / adapter 0.1.4; see [PLAN_MCP_PROGRESS.md](PLAN_MCP_PROGRESS.md). The Delivery A evidence below records its original acceptance baseline.
+
 ## Findings and implementation decisions
 
 - The previous adapter shared 32,000 JavaScript UTF-16 code units among all history messages and conflated more history with clipped text. This explains blank following messages and history-limit-dependent report visibility. It does not establish loss in OpenCode storage or additional client-side clipping.

@@ -32,27 +32,32 @@ const stored = [
   { info: { id: "msg_fixture", sessionID: summary.id, role: "user", time: { created: 1 } }, parts: [{ type: "text", text: "synthetic task" }] },
   { info: { id: "msg_reply", sessionID: summary.id, role: "assistant", parentID: "msg_fixture", time: { created: 2, completed: 3 }, finish: "stop" }, parts: [{ type: "text", text: original }] },
 ];
+let progressBusy = false;
 const readGateway = new OpenCodeGateway(readRuntime, {
   global: { async health() { return { data: { healthy: true } }; } },
   project: { async current() { return { data: { id: "fixture" } }; } },
   v2: { session: {
+    permission: { async list() { return { data: { data: [] } }; } },
+    question: { async list() { return { data: { data: [] } }; } },
     async list() { return { data: { data: [], cursor: {} } }; },
-    async get() { return { data: { data: { id: summary.id, projectID: "fixture", location: { directory: temp }, time: { created: 1, updated: 3 } } } }; },
+    async get() { return { data: { data: { id: summary.id, title: summary.title, projectID: "fixture", location: { directory: temp }, time: { created: 1, updated: 3 } } } }; },
   } },
   session: {
+    async status() { return { data: progressBusy ? { [summary.id]: { type: "busy" } } : {} }; },
     async message({ messageID }) { return { data: stored.find((item) => item.info.id === messageID) }; },
     async messages({ limit }) { return { data: stored.slice(-limit), response: { headers: new Headers(limit < 2 ? { "x-next-cursor": "older" } : {}) } }; },
   },
 });
 let submissions = 0, creations = 0;
 const gateway = {
+  getSessionProgress: (...args) => readGateway.getSessionProgress(...args),
   getMessage: (...args) => readGateway.getMessage(...args),
   readMessageContent: (...args) => readGateway.readMessageContent(...args),
   getTaskResult: (...args) => readGateway.getTaskResult(...args),
   async getSessionRuntimeOptions() { return { agents: ["build", "plan"], providers: [{ provider_id: "fixture", name: "Fixture" }], models: [{ provider_id: "fixture", model_id: "model", name: "Model", variants: ["default"] }], truncated: false }; },
   async updateSessionRuntime(sessionId, patch) { return { session_id: sessionId, previous: fixtureRuntime, current: { ...fixtureRuntime, ...patch }, state: "updated" }; },
-  async getProjectActivity() { return { events: [], next_cursor: "fixture-cursor", has_more: false, tracking: { connected: true, partial: false } }; },
-  async waitForProjectActivity() { return { ...await this.getProjectActivity(), timeout: true }; },
+  getProjectActivity: (...args) => readGateway.getProjectActivity(...args),
+  waitForProjectActivity: (...args) => readGateway.waitForProjectActivity(...args),
   async createSession(title) { creations++; return { project: { id: "fixture", name: "fixture" }, session_id: summary.id, title: title ?? "MCP Work Session", agent: "build", provider_id: "fixture", model_id: "model", state: "created" }; },
   async listSessions() { return { project: { id: "fixture", name: "fixture" }, sessions: [summary], truncated: false }; },
   async getSessionDetails() { return { ...summary, pending_input: pending }; },
@@ -90,6 +95,8 @@ try {
   const version = spawnSync(binary, ["--version"], { encoding: "utf8" });
   assert.equal(version.status, 0);
   assert.match(version.stdout, /^0\.0\.15[+\s]/);
+  await readGateway.enableActivity(join(temp, "activity.json"));
+  await readGateway.captureActivity(summary.id);
   const port = await server.start();
   const share = join(temp, "share");
   await mkdir(join(share, "mcp"), { recursive: true, mode: 0o700 });
@@ -126,13 +133,13 @@ try {
       if (response.headers.get("content-type")?.includes("application/json")) {
         const body = await response.clone().text();
         if (request?.method === "initialize") revisions.add(`negotiated:${JSON.parse(body).result.protocolVersion}`);
-        if (["get_message", "get_task_result", "read_message_content"].includes(request?.params?.name)) sizes.push(Buffer.byteLength(body));
+        if (["get_message", "get_task_result", "read_message_content", "get_session_progress"].includes(request?.params?.name)) sizes.push(Buffer.byteLength(body));
       }
       return response;
     },
   }));
   const tools = await client.listTools();
-  assert.equal(tools.tools.length, 13);
+  assert.equal(tools.tools.length, 14);
   const task = await client.callTool({ name: "get_task_result", arguments: { session_id: summary.id, submitted_message_id: "msg_fixture" } });
   assert.equal(task.structuredContent?.state, "completed");
   const message = await client.callTool({ name: "get_message", arguments: { session_id: summary.id, message_id: "msg_reply" } });
@@ -150,11 +157,41 @@ try {
   assert.ok(sizes.every((size) => size <= 64 * 1024));
   assert.ok(revisions.has("negotiated:2025-11-25"));
   console.log(`PASS: local tunnel control plane reconstructed ${Buffer.byteLength(original)} UTF-8 bytes; client-side ${[...revisions].join(", ")}; max read response ${Math.max(...sizes)} bytes.`);
+  const recent = await client.callTool({ name: "get_project_activity", arguments: { tail: true, limit: 1, event_types: ["message.completed"] } });
+  assert.ok(!recent.isError, JSON.stringify(recent));
+  assert.equal(recent.structuredContent.events[0]?.message_id, "msg_fixture");
+  assert.equal(recent.structuredContent.tail.selection_complete, true);
+  const progressPart = { type: "tool", tool: "bash", callID: "call_progress", state: { status: "running", time: { start: 4 }, input: { token: "B_PRIVATE_ARGUMENT" }, title: "B_PRIVATE_TITLE" } };
+  stored.push(
+    { info: { id: "msg_progress", sessionID: summary.id, role: "user", time: { created: 4 } }, parts: [] },
+    { info: { id: "msg_step", sessionID: summary.id, role: "assistant", parentID: "msg_progress", time: { created: 4 }, finish: "tool-calls" }, parts: [progressPart] },
+  );
+  progressBusy = true;
+  await readGateway.captureActivity(summary.id);
+  const progress = await client.callTool({ name: "get_session_progress", arguments: { session_id: summary.id, message_id: "msg_progress" } });
+  assert.ok(!progress.isError, JSON.stringify(progress));
+  assert.equal(progress.structuredContent.in_flight_tools[0]?.tool, "bash");
+  assert.equal(progress.structuredContent.in_flight_tools[0]?.task_message_id, "msg_progress");
+  assert.doesNotMatch(JSON.stringify(progress), /B_PRIVATE/);
+  progressPart.state = { status: "completed", time: { start: 4, end: 5 }, output: "B_PRIVATE_OUTPUT" };
+  stored.at(-1).info.time.completed = 5;
+  stored.at(-1).info.finish = "stop";
+  progressBusy = false;
+  await readGateway.captureActivity(summary.id);
+  const nextActivity = await client.callTool({ name: "get_project_activity", arguments: { after_cursor: recent.structuredContent.next_cursor, event_types: ["message.completed"] } });
+  assert.deepEqual(nextActivity.structuredContent.events.map((event) => event.message_id), ["msg_progress"]);
+  assert.equal(nextActivity.structuredContent.filter_key, recent.structuredContent.filter_key);
+  const finished = await client.callTool({ name: "get_session_progress", arguments: { session_id: summary.id } });
+  assert.equal(finished.structuredContent.last_finished_tool.status, "completed");
+  assert.doesNotMatch(JSON.stringify(finished), /B_PRIVATE/);
+  assert.ok(sizes.every((size) => size <= 64 * 1024));
+  console.log("PASS: tool progress and journal tail-to-forward continuation over the local tunnel, with no raw tool data.");
+  const latestCursor = (await readGateway.getProjectActivity()).next_cursor;
   for (const [name, args] of [
     ["get_session_runtime_options", {}],
     ["update_session_runtime", { session_id: summary.id, agent: "plan" }],
     ["get_project_activity", {}],
-    ["wait_for_project_activity", { after_cursor: "fixture-cursor", timeout_ms: 1 }],
+    ["wait_for_project_activity", { after_cursor: latestCursor, timeout_ms: 1 }],
   ]) {
     const result = await client.callTool({ name, arguments: args });
     assert.ok(!result.isError, JSON.stringify(result));
@@ -175,7 +212,7 @@ try {
   const direct = await fetch(`http://127.0.0.1:${port}/healthz`);
   assert.equal(direct.status, 401, "the local endpoint still requires its token");
   assert.ok(!diagnostics.includes(key) && !diagnostics.includes(token), "credentials leaked into tunnel diagnostics");
-  console.log("PASS: tunnel-client v0.0.15 discovers and invokes all thirteen tools through its local tunnel control plane using the generated profile.");
+  console.log("PASS: tunnel-client v0.0.15 discovers and invokes all fourteen tools through its local tunnel control plane using the generated profile.");
 
   // Optional Linux/systemd check: real checksum installer and managed service,
   // with outbound traffic confined to a disposable local control-plane fixture.
@@ -234,6 +271,7 @@ try {
   if (serviceShare) await runGuest('exec 7>"/tmp/$TEST_TUNNEL_NAMESPACE.lock"; flock -w 10 7; stop_mcp_tunnel').catch(() => {});
   if (controlPlane) await new Promise(resolve => controlPlane.close(resolve));
   await server.close();
+  await readGateway.close();
   await rm(temp, { recursive: true, force: true });
   await rm(`/tmp/${namespace}`, { recursive: true, force: true });
   await rm(`/tmp/${namespace}.lock`, { force: true });
