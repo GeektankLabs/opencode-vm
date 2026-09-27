@@ -90,7 +90,7 @@ pass "connector credentials are private, stable, and reject unsafe paths"
 
 # Stage through a private connector directory and reject any guest-created
 # destination symlink before rsync --delete can touch it.
-MCP_ADAPTER_VERSION=0.1.2
+MCP_ADAPTER_VERSION=0.1.3
 MCP_ADAPTER_SHA256="test"
 MCP_ADAPTER_CACHE_ROOT="$TMP/cache"
 SCRIPT_DIR="$ROOT"
@@ -134,16 +134,16 @@ fi
 pass "guest web ports avoid MCP overlap without depending on LAN tunnels"
 
 # Build/package contract and the pinned digest used by standalone scripts.
-artifact="$TMP/opencode-vm-mcp-adapter-0.1.2.tar"
+artifact="$TMP/opencode-vm-mcp-adapter-0.1.3.tar"
 "$ROOT/scripts/build-mcp-adapter.sh" "$artifact" >/dev/null
 expected_sha="$(awk -F'"' '/^MCP_ADAPTER_SHA256=/ {print $2; exit}' "$SCRIPT")"
 assert_eq "$(sha256sum "$artifact" | awk '{print $1}')" "$expected_sha"
 mkdir "$TMP/artifact"
 tar -xf "$artifact" -C "$TMP/artifact"
-package_root="$TMP/artifact/opencode-vm-mcp-adapter-0.1.2"
-[[ -f "$package_root/dist/main.js" && -f "$package_root/manifest.json" ]] || fail "release package is incomplete"
+package_root="$TMP/artifact/opencode-vm-mcp-adapter-0.1.3"
+[[ -f "$package_root/dist/main.js" && -f "$package_root/dist/content.js" && -f "$package_root/manifest.json" ]] || fail "release package is incomplete"
 [[ ! -e "$package_root/src" && ! -e "$package_root/tests" && ! -e "$package_root/node_modules" ]] || fail "release package contains development state"
-jq -e '.schema == 1 and .adapterVersion == "0.1.2" and
+jq -e '.schema == 1 and .adapterVersion == "0.1.3" and
   .mcpSdkVersion == "1.30.1" and .opencodeSdkVersion == "1.18.21" and
   .transport == "streamable-http-stateless"' "$package_root/manifest.json" >/dev/null ||
   fail "release manifest is invalid"
@@ -152,7 +152,7 @@ pass "MCP adapter artifact is deterministic, pinned, and production-only"
 # Standalone cache installation is serialized: two starts may download in
 # parallel, but neither may remove the other start's verified winner.
 MCP_ADAPTER_SHA256="$expected_sha"
-MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.2.tar"
+MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.3.tar"
 MCP_ADAPTER_TAG="v0.5.60"
 MCP_SDK_VERSION="1.30.1"
 MCP_OPENCODE_SDK_VERSION="1.18.21"

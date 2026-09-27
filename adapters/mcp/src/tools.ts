@@ -7,7 +7,18 @@ import type {
 import { CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod/v4";
 import type { SessionGateway } from "./opencode.js";
-import { ACTIVITY_TYPES, ADAPTER_VERSION, AdapterError } from "./types.js";
+import {
+  ACTIVITY_TYPES,
+  ADAPTER_VERSION,
+  AdapterError,
+  isRecord,
+} from "./types.js";
+import {
+  DEFAULT_CONTENT_BYTES,
+  MAX_CONTENT_BYTES,
+  READ_RESPONSE_BYTES,
+  jsonBytes,
+} from "./content.js";
 
 const sessionId = z
   .string()
@@ -24,6 +35,34 @@ const opaqueCursor = z
   .min(1)
   .max(2048)
   .regex(/^[^\s\x00-\x1f\x7f]+$/u);
+const readReference = z
+  .string()
+  .min(1)
+  .max(16384)
+  .regex(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/u);
+const getMessageInput = z
+  .object({ session_id: sessionId, message_id: sessionId })
+  .strict();
+const readContentInput = z
+  .object({
+    content_ref: readReference,
+    cursor: readReference.optional(),
+    max_bytes: z
+      .number()
+      .int()
+      .min(4)
+      .max(MAX_CONTENT_BYTES)
+      .default(DEFAULT_CONTENT_BYTES),
+  })
+  .strict();
+const taskResultInput = z
+  .object({
+    session_id: sessionId,
+    submitted_message_id: sessionId,
+    cursor: readReference.optional(),
+    limit: z.number().int().min(1).max(20).default(20),
+  })
+  .strict();
 
 const projectSchema = z.object({ id: z.string(), name: z.string() }).strict();
 const pendingSchema = z
@@ -228,29 +267,119 @@ const sessionStatusOutputSchema = z
     ]),
     pending_input: pendingSchema,
     assistant_message_ids: z.array(z.string()),
+    observed_at: z.string().optional(),
+    source: z.literal("backend").optional(),
+    task_status_reason: z
+      .enum([
+        "not_requested",
+        "outside_history_or_not_observed",
+        "non_terminal_evidence",
+      ])
+      .optional(),
   })
   .strict();
 
-const historyOutputSchema = z
+const contentDescriptorSchema = z
   .object({
-    session_id: z.string(),
-    messages: z.array(
+    content_ref: z.string(),
+    revision: z.string(),
+    unit: z.literal("utf8_bytes"),
+    total_bytes: z.number().int().nonnegative(),
+    sha256: z.string(),
+    availability: z.enum(["available", "empty", "not_exposed"]),
+    omitted_parts: z.array(
       z
         .object({
-          id: z.string(),
-          role: z.enum(["user", "assistant"]),
-          parent_id: z.string().optional(),
-          text: z.string(),
-          created: z.number(),
-          completed: z.number().optional(),
-          finish: z.string().optional(),
-          error: z.enum(["aborted", "failed"]).optional(),
-          text_truncated: z.boolean(),
+          type: z.string(),
+          count: z.number().int().positive(),
+          reason: z.literal("part_not_exposed"),
         })
         .strict(),
     ),
+  })
+  .strict();
+const messageSchema = z
+  .object({
+    id: z.string(),
+    role: z.enum(["user", "assistant"]),
+    parent_id: z.string().optional(),
+    text: z.string(),
+    created: z.number(),
+    completed: z.number().optional(),
+    finish: z.string().optional(),
+    error: z.enum(["aborted", "failed"]).optional(),
+    text_truncated: z.boolean(),
+    content_complete: z.boolean().optional(),
+    truncation_reason: z.enum(["preview_limit", "response_budget"]).optional(),
+    content: contentDescriptorSchema.optional(),
+  })
+  .strict();
+const readableMessageSchema = messageSchema
+  .extend({ content: contentDescriptorSchema, content_complete: z.boolean() })
+  .strict();
+const historyOutputSchema = z
+  .object({
+    session_id: z.string(),
+    messages: z.array(messageSchema),
     next_before: z.string().optional(),
     truncated: z.boolean(),
+    history_has_more: z.boolean().optional(),
+  })
+  .strict();
+
+const getMessageOutput = z
+  .object({ session_id: z.string(), message: readableMessageSchema })
+  .strict();
+const readContentOutput = z
+  .object({
+    session_id: z.string(),
+    message_id: z.string(),
+    revision: z.string(),
+    unit: z.literal("utf8_bytes"),
+    total_bytes: z.number().int().nonnegative(),
+    sha256: z.string(),
+    range: z
+      .object({
+        start: z.number().int().nonnegative(),
+        end: z.number().int().nonnegative(),
+      })
+      .strict(),
+    text: z.string(),
+    has_more: z.boolean(),
+    next_cursor: z.string().optional(),
+    content_complete: z.boolean(),
+  })
+  .strict();
+const taskResultOutput = z
+  .object({
+    session_id: z.string(),
+    submitted_message_id: z.string(),
+    state: z.enum([
+      "unknown",
+      "submitted",
+      "running",
+      "input_required",
+      "completed",
+      "failed",
+      "aborted",
+    ]),
+    state_reason: z
+      .enum([
+        "search_incomplete",
+        "non_terminal_evidence",
+        "no_terminal_evidence",
+      ])
+      .optional(),
+    observed_at: z.string(),
+    source: z.literal("backend"),
+    search_complete: z.boolean(),
+    next_cursor: z.string().optional(),
+    order: z.literal("newest_first"),
+    messages: z.array(
+      readableMessageSchema
+        .extend({ result_kind: z.enum(["terminal", "intermediate"]) })
+        .strict(),
+    ),
   })
   .strict();
 
@@ -297,6 +426,86 @@ export function createMcpServer(gateway: SessionGateway): McpServer {
     version: ADAPTER_VERSION,
   });
 
+  const getMessageHandler = safeHandler(
+    async (input: z.output<typeof getMessageInput>) => {
+      const result = await gateway.getMessage(
+        input.session_id,
+        input.message_id,
+      );
+      return readSuccess(
+        result,
+        "Message preview and revision-bound content_ref. Use read_message_content to retrieve the original text.",
+      );
+    },
+  );
+  const readContentHandler = safeHandler(
+    async (input: z.output<typeof readContentInput>) => {
+      const result = await gateway.readMessageContent(
+        input.content_ref,
+        input.cursor,
+        input.max_bytes,
+      );
+      return readSuccess(
+        result,
+        result.has_more
+          ? "Content page. Continue with the same content_ref and next_cursor."
+          : "End of this revision. Verify concatenated UTF-8 text against sha256; this does not imply a regular model finish.",
+      );
+    },
+  );
+  const taskResultHandler = safeHandler(
+    async (input: z.output<typeof taskResultInput>) => {
+      const result = await gateway.getTaskResult(
+        input.session_id,
+        input.submitted_message_id,
+        input.cursor,
+        input.limit,
+      );
+      return readSuccess(
+        result,
+        result.search_complete
+          ? "Result search complete for this observed session boundary. Read terminal message content_refs; pages are newest first."
+          : "Result search incomplete. Save message references and continue with next_cursor, even for an empty page; unknown does not mean absent.",
+      );
+    },
+  );
+  server.registerTool(
+    "get_message",
+    {
+      title: "Get Stored Message",
+      description:
+        "Read one known visible user/assistant message directly: identity, parent, finish, preview, omissions and content_ref. Never starts model work. Read references expire on adapter restart; reacquire with IDs. CONTENT_CHANGED requires restarting the new revision.",
+      inputSchema: getMessageInput,
+      outputSchema: getMessageOutput,
+      annotations: readOnlyAnnotations,
+    },
+    getMessageHandler,
+  );
+  server.registerTool(
+    "read_message_content",
+    {
+      title: "Read Message Content",
+      description:
+        "Read original visible text in bounded UTF-8 pages using content_ref from get_message, history or get_task_result. Keep the same reference and follow next_cursor until has_more=false. max_bytes bounds text bytes, not the JSON response. Verify concatenation with sha256. Changed text reports CONTENT_CHANGED, never mixed revisions. Does not acknowledge/read-mark results.",
+      inputSchema: readContentInput,
+      outputSchema: readContentOutput,
+      annotations: readOnlyAnnotations,
+    },
+    readContentHandler,
+  );
+  server.registerTool(
+    "get_task_result",
+    {
+      title: "Find Task Result",
+      description:
+        "Find results by the original submitted user message ID, including older tasks beyond 100 messages. Bounded backward search: follow next_cursor until search_complete, retaining returned references (newest first). Intermediate tool-call steps are not reports. SEARCH_CHANGED means restart the search. Read terminal originals with read_message_content; finish=length/content-filter is not a regular generation finish. No new model call or native MCP task.",
+      inputSchema: taskResultInput,
+      outputSchema: taskResultOutput,
+      annotations: readOnlyAnnotations,
+    },
+    taskResultHandler,
+  );
+
   const listSessionsHandler = safeHandler(
     async ({
       limit,
@@ -336,7 +545,7 @@ export function createMcpServer(gateway: SessionGateway): McpServer {
       before,
     }: z.output<typeof getSessionHistoryInputSchema>) => {
       const result = await gateway.getSessionHistory(session_id, limit, before);
-      return success(
+      return readSuccess(
         result,
         `Returned ${result.messages.length} text message${result.messages.length === 1 ? "" : "s"} from session ${session_id}.`,
       );
@@ -484,7 +693,7 @@ export function createMcpServer(gateway: SessionGateway): McpServer {
     {
       title: "Get OpenCode Session",
       description:
-        "Inspect one exposed root work session without returning workspace paths.",
+        "Inspect one exposed root work session: current agent/model/variant, activity and pending-input counts. Use this compact view to check runtime settings; request the full runtime options catalog only when choosing settings.",
       inputSchema: getSessionInputSchema,
       outputSchema: sessionDetailsOutputSchema,
       annotations: readOnlyAnnotations,
@@ -497,7 +706,7 @@ export function createMcpServer(gateway: SessionGateway): McpServer {
     {
       title: "Get OpenCode Session Status",
       description:
-        "Inspect backend activity and the correlated state of an optional submitted message.",
+        "Inspect backend activity and the correlated state of an optional submitted message (newest 100 messages). Without message_id no particular task was requested. For older tasks or complete result references use get_task_result. Session busy alone is not proof that a requested task started.",
       inputSchema: getSessionStatusInputSchema,
       outputSchema: sessionStatusOutputSchema,
       annotations: readOnlyAnnotations,
@@ -510,7 +719,7 @@ export function createMcpServer(gateway: SessionGateway): McpServer {
     {
       title: "Get OpenCode Session History",
       description:
-        "Read bounded text-only user and assistant history for one exposed session.",
+        "Read bounded user/assistant text previews. history_has_more concerns older messages; text_truncated concerns a preview. Follow content_ref with read_message_content for the complete visible original. Omissions are explicit; tool output and reasoning are not exposed. For a known task prefer get_task_result.",
       inputSchema: getSessionHistoryInputSchema,
       outputSchema: historyOutputSchema,
       annotations: readOnlyAnnotations,
@@ -531,85 +740,117 @@ export function createMcpServer(gateway: SessionGateway): McpServer {
     sendMessageHandler,
   );
 
-  server.server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const input = request.params.arguments ?? {};
-    switch (request.params.name) {
-      case "get_session_runtime_options":
-        return validatedToolCall(
-          runtimeOptionsInput,
-          runtimeOptionsOutput,
-          input,
-          optionsHandler,
-        );
-      case "update_session_runtime":
-        return validatedToolCall(
-          runtimeUpdateInput,
-          runtimeUpdateOutput,
-          input,
-          updateHandler,
-        );
-      case "get_project_activity":
-        return validatedToolCall(
-          activityInput,
-          activityOutput,
-          input,
-          activityHandler,
-        );
-      case "wait_for_project_activity":
-        return validatedToolCall(
-          waitActivityInput,
-          waitActivityOutput,
-          input,
-          waitHandler,
-        );
-      case "create_session":
-        return validatedToolCall(
-          createSessionInputSchema,
-          createSessionOutputSchema,
-          input,
-          createSessionHandler,
-        );
-      case "list_sessions":
-        return validatedToolCall(
-          listSessionsInputSchema,
-          listSessionsOutputSchema,
-          input,
-          listSessionsHandler,
-        );
-      case "get_session":
-        return validatedToolCall(
-          getSessionInputSchema,
-          sessionDetailsOutputSchema,
-          input,
-          getSessionHandler,
-        );
-      case "get_session_status":
-        return validatedToolCall(
-          getSessionStatusInputSchema,
-          sessionStatusOutputSchema,
-          input,
-          getSessionStatusHandler,
-        );
-      case "get_session_history":
-        return validatedToolCall(
-          getSessionHistoryInputSchema,
-          historyOutputSchema,
-          input,
-          getSessionHistoryHandler,
-        );
-      case "send_message":
-        return validatedToolCall(
-          sendMessageInputSchema,
-          sendMessageOutputSchema,
-          input,
-          sendMessageHandler,
-        );
-      default:
-        return errorResult(
-          new AdapterError("INVALID_ARGUMENT", "Tool name is invalid."),
-        );
-    }
-  });
+  server.server.setRequestHandler(
+    CallToolRequestSchema,
+    async (request, extra) => {
+      const input = request.params.arguments ?? {};
+      switch (request.params.name) {
+        case "get_message":
+          return validatedToolCall(
+            getMessageInput,
+            getMessageOutput,
+            input,
+            getMessageHandler,
+            extra.requestId,
+            request.params.name,
+          );
+        case "read_message_content":
+          return validatedToolCall(
+            readContentInput,
+            readContentOutput,
+            input,
+            readContentHandler,
+            extra.requestId,
+            request.params.name,
+          );
+        case "get_task_result":
+          return validatedToolCall(
+            taskResultInput,
+            taskResultOutput,
+            input,
+            taskResultHandler,
+            extra.requestId,
+            request.params.name,
+          );
+        case "get_session_runtime_options":
+          return validatedToolCall(
+            runtimeOptionsInput,
+            runtimeOptionsOutput,
+            input,
+            optionsHandler,
+          );
+        case "update_session_runtime":
+          return validatedToolCall(
+            runtimeUpdateInput,
+            runtimeUpdateOutput,
+            input,
+            updateHandler,
+          );
+        case "get_project_activity":
+          return validatedToolCall(
+            activityInput,
+            activityOutput,
+            input,
+            activityHandler,
+          );
+        case "wait_for_project_activity":
+          return validatedToolCall(
+            waitActivityInput,
+            waitActivityOutput,
+            input,
+            waitHandler,
+          );
+        case "create_session":
+          return validatedToolCall(
+            createSessionInputSchema,
+            createSessionOutputSchema,
+            input,
+            createSessionHandler,
+          );
+        case "list_sessions":
+          return validatedToolCall(
+            listSessionsInputSchema,
+            listSessionsOutputSchema,
+            input,
+            listSessionsHandler,
+          );
+        case "get_session":
+          return validatedToolCall(
+            getSessionInputSchema,
+            sessionDetailsOutputSchema,
+            input,
+            getSessionHandler,
+          );
+        case "get_session_status":
+          return validatedToolCall(
+            getSessionStatusInputSchema,
+            sessionStatusOutputSchema,
+            input,
+            getSessionStatusHandler,
+          );
+        case "get_session_history":
+          return validatedToolCall(
+            getSessionHistoryInputSchema,
+            historyOutputSchema,
+            input,
+            getSessionHistoryHandler,
+            extra.requestId,
+            request.params.name,
+          );
+        case "send_message":
+          return validatedToolCall(
+            sendMessageInputSchema,
+            sendMessageOutputSchema,
+            input,
+            sendMessageHandler,
+          );
+        default:
+          return errorResult(
+            new AdapterError("INVALID_ARGUMENT", "Tool name is invalid."),
+          );
+      }
+    },
+  );
 
   return server;
 }
@@ -619,6 +860,8 @@ async function validatedToolCall<Input>(
   outputSchema: z.ZodType,
   input: unknown,
   handler: (input: Input) => Promise<CallToolResult>,
+  readRequestId?: string | number,
+  readTool?: string,
 ): Promise<CallToolResult> {
   const parsed = await inputSchema.safeParseAsync(input);
   if (!parsed.success) {
@@ -637,6 +880,51 @@ async function validatedToolCall<Input>(
       ),
     );
   }
+  if (readRequestId !== undefined) {
+    const responseBytes = jsonBytes({
+      jsonrpc: "2.0",
+      id: readRequestId,
+      result,
+    });
+    if (responseBytes > READ_RESPONSE_BYTES)
+      return errorResult(
+        new AdapterError(
+          "RESPONSE_BUDGET_EXCEEDED",
+          "Read response exceeds the serialized budget; reduce the page size.",
+        ),
+      );
+    const data = result.structuredContent!;
+    const message = isRecord(data.message) ? data.message : undefined;
+    const descriptor = isRecord(message?.content) ? message.content : undefined;
+    // Known metadata only: never text, references/cursors, arguments or outputs.
+    process.stderr.write(
+      `[mcp] read=${JSON.stringify({
+        request: randomUUID(),
+        tool: readTool,
+        session_id: data.session_id,
+        message_id: data.message_id ?? data.submitted_message_id ?? message?.id,
+        revision: data.revision ?? descriptor?.revision,
+        total_bytes: data.total_bytes ?? descriptor?.total_bytes,
+        delivered_text_bytes:
+          typeof data.text === "string"
+            ? Buffer.byteLength(data.text)
+            : undefined,
+        reason: message?.truncation_reason ?? data.state_reason,
+        response_bytes: responseBytes,
+        budget_bytes: READ_RESPONSE_BYTES,
+      })}\n`,
+    );
+  }
+  return result;
+}
+
+function readSuccess(value: object, text: string): CallToolResult {
+  const result = success(value, text);
+  if (jsonBytes(result) > READ_RESPONSE_BYTES - 2048)
+    throw new AdapterError(
+      "RESPONSE_BUDGET_EXCEEDED",
+      "Read response exceeds the serialized budget; reduce the page size.",
+    );
   return result;
 }
 

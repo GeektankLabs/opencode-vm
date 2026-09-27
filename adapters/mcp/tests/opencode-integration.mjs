@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import {
   chmod,
@@ -37,6 +38,12 @@ let mcp;
 let provider;
 let mcpClient;
 const heldPrompts = new Map();
+const longReport =
+  'ÄÖß 😀 👩🏽‍💻\n```ts\nconst path = "\\\\example";\n```\n'.repeat(5000) +
+  "FINAL-TOKEN: delivery-a-original-end";
+assert.ok(Buffer.byteLength(longReport) >= 200 * 1024);
+const protocolObservations = new Set();
+const readResponseSizes = [];
 
 try {
   await mkdir(configDirectory, { recursive: true });
@@ -106,7 +113,13 @@ try {
         choices: [
           {
             index: 0,
-            delta: { role: "assistant", content: "MCP integration reply" },
+            delta: {
+              role: "assistant",
+              content:
+                lastText === "delivery-a-report"
+                  ? longReport
+                  : "MCP integration reply",
+            },
             finish_reason: null,
           },
         ],
@@ -196,8 +209,10 @@ try {
     throwOnError: true,
   });
   const currentProject = await backend.project.current({ directory: project });
+  const backendVersion = (await backend.global.health()).data?.version;
+  assert.ok(backendVersion);
   process.stderr.write(
-    `[integration] OpenCode project id=${currentProject.data?.id ?? "missing"} worktree=${currentProject.data?.worktree ?? "missing"}\n`,
+    `[integration] OpenCode ${backendVersion} project id=${currentProject.data?.id ?? "missing"} worktree=${currentProject.data?.worktree ?? "missing"}\n`,
   );
   await writeFile(credentialFile, token, { mode: 0o600 });
   await writeFile(
@@ -209,7 +224,7 @@ try {
       projectName: "integration-project",
       backendUrl,
       generation: "integration-generation",
-      opencodeVersion: OPEN_CODE_VERSION,
+      opencodeVersion: backendVersion,
       listenHost: "127.0.0.1",
       listenPort: mcpPort,
       credentialFile,
@@ -425,6 +440,36 @@ try {
   assert.equal(backendOlder.data?.length, 1);
   assert.equal(backendOlder.data[0]?.info.id, receipt.message_id);
 
+  // Delivery A capability check: direct legacy reads preserve the identities
+  // and parent relation used by the existing adapter; no history scan/model call.
+  const callsBeforeDirectRead = providerRequests.length;
+  const directMessage = await backend.session.message({
+    sessionID: sessionId,
+    messageID: backendNewest.data[0].info.id,
+  });
+  assert.deepEqual(directMessage.data, backendNewest.data[0]);
+  assert.equal(directMessage.data.info.parentID, receipt.message_id);
+  assert.equal(providerRequests.length, callsBeforeDirectRead);
+  const absentMessage = await mcpClient.callTool({
+    name: "get_message",
+    arguments: { session_id: sessionId, message_id: "msg_missing" },
+  });
+  assert.equal(
+    absentMessage._meta["opencode-vm/error"].code,
+    "MESSAGE_NOT_FOUND",
+  );
+  const absentSession = await mcpClient.callTool({
+    name: "get_message",
+    arguments: { session_id: "ses_missing", message_id: "msg_missing" },
+  });
+  assert.equal(
+    absentSession._meta["opencode-vm/error"].code,
+    "SESSION_NOT_FOUND",
+  );
+  process.stderr.write(
+    "[integration] direct message read preserves text, identity and parent correlation\n",
+  );
+
   const newestPage = structured(
     await mcpClient.callTool({
       name: "get_session_history",
@@ -464,6 +509,159 @@ try {
   );
   assert.ok(providerRequests.length > 0);
 
+  const reportSession = structured(
+    await mcpClient.callTool({
+      name: "create_session",
+      arguments: { title: "Delivery A originals" },
+    }),
+  ).session_id;
+  const reportReceipt = structured(
+    await mcpClient.callTool({
+      name: "send_message",
+      arguments: { session_id: reportSession, message: "delivery-a-report" },
+    }),
+  );
+  await waitForTask(reportSession, reportReceipt.message_id);
+  const taskReport = structured(
+    await mcpClient.callTool({
+      name: "get_task_result",
+      arguments: {
+        session_id: reportSession,
+        submitted_message_id: reportReceipt.message_id,
+      },
+    }),
+  );
+  assert.equal(taskReport.state, "completed");
+  assert.equal(taskReport.search_complete, true);
+  const reportId = taskReport.messages.find(
+    (item) => item.result_kind === "terminal",
+  ).id;
+  const reportMessage = structured(
+    await mcpClient.callTool({
+      name: "get_message",
+      arguments: { session_id: reportSession, message_id: reportId },
+    }),
+  ).message;
+  const reportReference = reportMessage.content.content_ref;
+  assert.equal(
+    reportMessage.content.total_bytes,
+    Buffer.byteLength(longReport),
+  );
+  const beforeReading = providerRequests.length;
+  let reconstructed = "",
+    contentCursor;
+  do {
+    const part = structured(
+      await mcpClient.callTool({
+        name: "read_message_content",
+        arguments: {
+          content_ref: reportReference,
+          ...(contentCursor ? { cursor: contentCursor } : {}),
+        },
+      }),
+    );
+    assert.equal(part.range.start, Buffer.byteLength(reconstructed));
+    reconstructed += part.text;
+    contentCursor = part.next_cursor;
+  } while (contentCursor);
+  assert.equal(reconstructed, longReport);
+  assert.equal(
+    createHash("sha256").update(reconstructed).digest("hex"),
+    reportMessage.content.sha256,
+  );
+  assert.equal(
+    providerRequests.length,
+    beforeReading,
+    "reading originals invoked a model",
+  );
+  // Existing backend noReply storage produces history beyond the previous status
+  // bound without executing a model or touching any user sessions.
+  for (let index = 0; index < 105; index++) {
+    await backend.session.prompt({
+      sessionID: reportSession,
+      noReply: true,
+      parts: [{ type: "text", text: `synthetic-followup-${index}` }],
+    });
+  }
+  assert.equal(
+    providerRequests.length,
+    beforeReading,
+    "noReply history seeding invoked a model",
+  );
+  const followup = structured(
+    await mcpClient.callTool({
+      name: "send_message",
+      arguments: { session_id: reportSession, message: "delivery-a-followup" },
+    }),
+  );
+  await waitForTask(reportSession, followup.message_id);
+  const olderStatus = structured(
+    await mcpClient.callTool({
+      name: "get_session_status",
+      arguments: {
+        session_id: reportSession,
+        message_id: reportReceipt.message_id,
+      },
+    }),
+  );
+  assert.equal(olderStatus.state, "unknown");
+  let searchCursor,
+    oldResult,
+    searchPages = 0;
+  const oldMessages = [];
+  do {
+    oldResult = structured(
+      await mcpClient.callTool({
+        name: "get_task_result",
+        arguments: {
+          session_id: reportSession,
+          submitted_message_id: reportReceipt.message_id,
+          ...(searchCursor ? { cursor: searchCursor } : {}),
+        },
+      }),
+    );
+    oldMessages.push(...oldResult.messages);
+    searchCursor = oldResult.next_cursor;
+    searchPages++;
+  } while (searchCursor);
+  assert.ok(searchPages > 5);
+  assert.equal(oldResult.state, "completed");
+  assert.ok(
+    oldMessages.some(
+      (item) =>
+        item.id === reportId && item.parent_id === reportReceipt.message_id,
+    ),
+  );
+  const followupResult = structured(
+    await mcpClient.callTool({
+      name: "get_task_result",
+      arguments: {
+        session_id: reportSession,
+        submitted_message_id: followup.message_id,
+      },
+    }),
+  );
+  assert.equal(followupResult.state, "completed");
+  assert.ok(
+    followupResult.messages.every(
+      (item) => item.parent_id === followup.message_id,
+    ),
+  );
+  for (const limit of [1, 20]) {
+    const preview = structured(
+      await mcpClient.callTool({
+        name: "get_session_history",
+        arguments: { session_id: reportSession, limit },
+      }),
+    );
+    assert.ok(preview.messages.every((item) => item.content?.content_ref));
+  }
+  assert.ok(readResponseSizes.every((size) => size <= 64 * 1024));
+  assert.ok(protocolObservations.has("negotiated:2025-11-25"));
+  process.stderr.write(
+    `[integration] Delivery A: ${Buffer.byteLength(longReport)} UTF-8 bytes reconstructed; old result recovered in ${searchPages} pages; protocol ${[...protocolObservations].join(", ")}; max read response ${Math.max(...readResponseSizes)} bytes\n`,
+  );
+
   const secondSession = structured(
     await mcpClient.callTool({
       name: "create_session",
@@ -502,6 +700,7 @@ try {
         name: "get_project_activity",
         arguments: {
           after_cursor: parallelCursor,
+          session_ids: [sessionId, secondSession],
           event_types: ["message.completed"],
         },
       }),
@@ -517,6 +716,7 @@ try {
     name: "wait_for_project_activity",
     arguments: {
       after_cursor: firstCompletion.next_cursor,
+      session_ids: [sessionId, secondSession],
       event_types: ["message.completed"],
       timeout_ms: 15000,
     },
@@ -542,11 +742,27 @@ try {
   mcp = undefined;
   ({ child: mcp } = await startAdapter(runtimeFile, readyFile));
   mcpClient = await connectMcp(mcpPort, token);
+  const expiredRead = await mcpClient.callTool({
+    name: "read_message_content",
+    arguments: { content_ref: reportReference },
+  });
+  assert.equal(
+    expiredRead._meta["opencode-vm/error"].code,
+    "READ_REFERENCE_EXPIRED",
+  );
+  const reacquired = structured(
+    await mcpClient.callTool({
+      name: "get_message",
+      arguments: { session_id: reportSession, message_id: reportId },
+    }),
+  );
+  assert.equal(reacquired.message.content.sha256, reportMessage.content.sha256);
   const persisted = structured(
     await mcpClient.callTool({
       name: "get_project_activity",
       arguments: {
         after_cursor: parallelCursor,
+        session_ids: [sessionId, secondSession],
         event_types: ["message.completed"],
       },
     }),
@@ -614,10 +830,58 @@ async function connectMcp(port, token) {
   });
   const transport = new StreamableHTTPClientTransport(
     new URL(`http://127.0.0.1:${port}/mcp`),
-    { requestInit: { headers: { "X-OCVM-MCP-Token": token } } },
+    {
+      requestInit: { headers: { "X-OCVM-MCP-Token": token } },
+      fetch: async (url, init) => {
+        const request =
+          typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
+        const header = new Headers(init?.headers).get("mcp-protocol-version");
+        if (header) protocolObservations.add(`header:${header}`);
+        if (request?.method === "initialize")
+          protocolObservations.add(`offered:${request.params.protocolVersion}`);
+        const response = await fetch(url, init);
+        if (
+          response.headers.get("content-type")?.includes("application/json")
+        ) {
+          const body = await response.clone().text();
+          if (request?.method === "initialize")
+            protocolObservations.add(
+              `negotiated:${JSON.parse(body).result.protocolVersion}`,
+            );
+          if (
+            [
+              "get_message",
+              "read_message_content",
+              "get_task_result",
+              "get_session_history",
+            ].includes(request?.params?.name)
+          )
+            readResponseSizes.push(Buffer.byteLength(body));
+        }
+        return response;
+      },
+    },
   );
   await client.connect(transport);
   return client;
+}
+
+async function waitForTask(sessionId, messageId) {
+  for (let i = 0; i < 160; i++) {
+    const status = structured(
+      await mcpClient.callTool({
+        name: "get_session_status",
+        arguments: { session_id: sessionId, message_id: messageId },
+      }),
+    );
+    if (status.state === "completed") return;
+    assert.ok(
+      !["failed", "aborted", "input_required"].includes(status.state),
+      JSON.stringify(status),
+    );
+    await delay(100);
+  }
+  throw new Error("Synthetic report did not complete");
 }
 
 function structured(result) {

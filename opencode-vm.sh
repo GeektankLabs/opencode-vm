@@ -34,7 +34,7 @@ OPENLIVE_PREVIOUS_COMMAND="$OPENLIVE_DIR/previous-command"
 OPENLIVE_AUTH_MARKER="__opencode_vm_openlive__"
 OPENLIVE_LOCK_PATH=""
 OPENLIVE_ADAPTER_VERSION="0.1.6"
-OPENLIVE_ADAPTER_TAG="v0.5.66"
+OPENLIVE_ADAPTER_TAG="v0.5.67"
 OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.6.tar"
 OPENLIVE_ADAPTER_SHA256="06f461873b8b299de98220aa577824eb9807672b26cb069541acebcdd2d973b9"
 OPENLIVE_ACP_SDK_VERSION="1.2.1"
@@ -44,10 +44,10 @@ OPENLIVE_MANAGER_DESCRIPTION="Read-only OpenLive voice session manager"
 OPENLIVE_MANAGER_PROMPT="You manage an OpenLive voice call. The voice_sessions tool is available and you must call it before listing, inspecting, summarizing, checking, attaching to, or creating project sessions. Never claim session details without a successful tool result. Ask for clarification if a requested session is ambiguous. Create a new work session only when the user explicitly asks for one. Apart from that explicit create action, you are read-only: do not edit files, run shell commands, create tasks, or mutate sessions. Keep responses brief and conversational: one or two plain sentences without Markdown, paths, URLs, code, or stray symbols. When attachment or creation succeeds, tell the user the next voice prompt will continue in that session."
 MCP_CONNECTOR_DIR="$SHARE_ROOT/mcp-connector"
 MCP_ADAPTER_CACHE_ROOT="$MCP_CONNECTOR_DIR/adapters"
-MCP_ADAPTER_VERSION="0.1.2"
-MCP_ADAPTER_TAG="v0.5.66"
-MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.2.tar"
-MCP_ADAPTER_SHA256="372015fde88dfbc734a0e9799888eb7f1b233dce1f524473643d05de1612f247"
+MCP_ADAPTER_VERSION="0.1.3"
+MCP_ADAPTER_TAG="v0.5.67"
+MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.3.tar"
+MCP_ADAPTER_SHA256="503e660ebdb694393e46e6e7b21873b4e9e961b065c6e8ec3876a538c80077c2"
 MCP_SDK_VERSION="1.30.1"
 MCP_OPENCODE_SDK_VERSION="1.18.21"
 MCP_TESTED_PROTOCOL_VERSION="2025-11-25"
@@ -159,7 +159,7 @@ DEFAULT_MCP_PORT=40960                # private incoming MCP connector
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.5.66"
+OCVM_VERSION="0.5.67"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -7971,7 +7971,8 @@ mcp_adapter_dev_valid() {
   local dir="$1"
   [[ -f "$dir/package.json" && -f "$dir/package-lock.json" && -f "$dir/tsconfig.json" \
     && -f "$dir/src/main.ts" && -f "$dir/src/types.ts" && -f "$dir/src/http.ts" \
-    && -f "$dir/src/opencode.ts" && -f "$dir/src/tools.ts" && -f "$dir/src/activity.ts" ]] || return 1
+    && -f "$dir/src/opencode.ts" && -f "$dir/src/tools.ts" && -f "$dir/src/activity.ts" \
+    && -f "$dir/src/content.ts" ]] || return 1
   [[ "$(jq -r '.version // empty' "$dir/package.json" 2>/dev/null)" == "$MCP_ADAPTER_VERSION" ]]
 }
 
@@ -7979,7 +7980,8 @@ mcp_adapter_release_valid() {
   local dir="$1"
   [[ -f "$dir/manifest.json" && -f "$dir/package.json" && -f "$dir/package-lock.json" \
     && -f "$dir/dist/main.js" && -f "$dir/dist/types.js" && -f "$dir/dist/http.js" \
-    && -f "$dir/dist/opencode.js" && -f "$dir/dist/tools.js" && -f "$dir/dist/activity.js" && -f "$dir/.archive-sha256" ]] || return 1
+    && -f "$dir/dist/opencode.js" && -f "$dir/dist/tools.js" && -f "$dir/dist/activity.js" \
+    && -f "$dir/dist/content.js" && -f "$dir/.archive-sha256" ]] || return 1
   [[ "$(<"$dir/.archive-sha256")" == "$MCP_ADAPTER_SHA256" ]] || return 1
   jq -e --arg version "$MCP_ADAPTER_VERSION" --arg mcp "$MCP_SDK_VERSION" \
     --arg opencode "$MCP_OPENCODE_SDK_VERSION" --arg protocol "$MCP_TESTED_PROTOCOL_VERSION" '

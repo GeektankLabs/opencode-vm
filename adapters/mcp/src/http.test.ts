@@ -18,6 +18,9 @@ import type {
   SessionDetailsResult,
   SessionHistoryResult,
   SessionStatusResult,
+  MessageResult,
+  MessageContentResult,
+  TaskResult,
 } from "./types.js";
 
 const token = "test-token-" + "x".repeat(43);
@@ -38,6 +41,15 @@ function runtime(): RuntimeDescriptor {
 }
 
 class FakeGateway implements SessionGateway {
+  async getMessage(): Promise<MessageResult> {
+    throw new Error("fixture unused");
+  }
+  async readMessageContent(): Promise<MessageContentResult> {
+    throw new Error("fixture unused");
+  }
+  async getTaskResult(): Promise<TaskResult> {
+    throw new Error("fixture unused");
+  }
   async getSessionRuntimeOptions(): Promise<RuntimeOptions> {
     return {
       agents: ["plan", "build"],
@@ -143,7 +155,7 @@ class FakeGateway implements SessionGateway {
   }
 }
 
-test("official MCP client discovers and invokes the ten stateless HTTP tools", async () => {
+test("official MCP client discovers thirteen stateless HTTP tools and invokes the original surface", async () => {
   const gateway = new FakeGateway();
   const server = new McpHttpServer(runtime(), token, gateway);
   const port = await server.start();
@@ -157,12 +169,15 @@ test("official MCP client discovers and invokes the ten stateless HTTP tools", a
     const listed = await client.listTools();
     assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), [
       "create_session",
+      "get_message",
       "get_project_activity",
       "get_session",
       "get_session_history",
       "get_session_runtime_options",
       "get_session_status",
+      "get_task_result",
       "list_sessions",
+      "read_message_content",
       "send_message",
       "update_session_runtime",
       "wait_for_project_activity",
@@ -247,6 +262,26 @@ test("official MCP client discovers and invokes the ten stateless HTTP tools", a
     );
 
     for (const request of [
+      {
+        name: "get_message",
+        arguments: { session_id: "ses", message_id: "msg", path: "/secret" },
+      },
+      {
+        name: "read_message_content",
+        arguments: { content_ref: "file:///secret" },
+      },
+      {
+        name: "read_message_content",
+        arguments: { content_ref: "valid.shape", max_bytes: 0 },
+      },
+      {
+        name: "get_task_result",
+        arguments: {
+          session_id: "ses",
+          submitted_message_id: "msg",
+          limit: 21,
+        },
+      },
       { name: "update_session_runtime", arguments: { session_id: "ses" } },
       { name: "get_project_activity", arguments: { limit: 101 } },
       {

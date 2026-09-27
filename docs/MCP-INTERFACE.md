@@ -2,7 +2,7 @@
 
 This document defines the incoming MCP interface exposed by `opencode-vm web` sessions (enabled by default since 0.5.61) and by terminal `start` sessions with a project-specific OpenAI MCP assignment (since 0.5.62). It describes the server side that external MCP clients use. It is separate from `opencode-vm mcps`, which configures MCP servers that OpenCode consumes as tools.
 
-The implemented adapter is version **0.1.2**, uses `@modelcontextprotocol/sdk` **1.30.1** and `@opencode-ai/sdk` **1.18.21**, and was tested with MCP protocol revision **2025-11-25**. It uses stateless Streamable HTTP with JSON responses. The SDK also advertises `2025-06-18`, `2025-03-26`, `2024-11-05`, and `2024-10-07`, but those revisions are not the release-tested contract.
+The implemented adapter is version **0.1.3**, uses `@modelcontextprotocol/sdk` **1.30.1** and `@opencode-ai/sdk` **1.18.21**, and was tested with MCP protocol revision **2025-11-25**. It uses stateless Streamable HTTP with JSON responses. The SDK also advertises `2025-06-18`, `2025-03-26`, `2024-11-05`, and `2024-10-07`, but those revisions are not the release-tested contract. Delivery A adds three ordinary reading tools; it does not migrate the transport, SDK or native task protocol. The observed combinations and outstanding ChatGPT acceptance are recorded in [PLAN_MCP_READING.md](../PLAN_MCP_READING.md).
 
 ## 1. Runtime model
 
@@ -56,6 +56,7 @@ HTTP boundary rules:
 | Request body over 256 KiB | HTTP 413 |
 | Non-JSON content type | HTTP 415 |
 | Malformed JSON | HTTP 400 |
+| JSON-RPC ID over 1024 serialized UTF-8 bytes | HTTP 400, without reflecting the oversized ID |
 | More than 16 concurrent HTTP requests | HTTP 503 with `Retry-After: 1` |
 
 `Host` must be `127.0.0.1:<port>` or `localhost:<port>`. `Origin` may be absent; when present it must be `http://127.0.0.1:<port>` or `http://localhost:<port>`. The adapter does not enable permissive browser CORS.
@@ -88,6 +89,8 @@ Absolute workspace paths and OpenCode's internal project ID are never returned.
 ## 4. Tool contract
 
 All input schemas are strict: unknown fields are rejected. Every successful call returns both concise text in `content` and the JSON object below in `structuredContent`.
+
+The established structured-result representation is retained deliberately: the official SDK client and local tunnel-control-plane test can see the complete data without duplicating large pages in a second JSON text block. MCP 2025-11-25 recommends that duplication for backward compatibility (SHOULD); clients that only consume text blocks are not yet accepted for these reads. Real ChatGPT visibility must be checked separately. Any future text fallback must fit the same total response budget.
 
 Session IDs, message IDs, and `before` values must contain 1 to 256 non-whitespace, non-control characters. The cursor has its separate base64url constraint below.
 
@@ -203,6 +206,8 @@ Input:
 
 `message_id` is optional. Without it, the result reports session-wide backend activity and pending input, but cannot identify completion of a particular turn.
 
+Since 0.1.3, results also include `observed_at` (ISO observation time) and `source:"backend"`. Without a message ID, `task_status_reason:"not_requested"` explains that the legacy `state` is session-wide, not proof of a requested task starting. A correlated `unknown` includes `outside_history_or_not_observed` or `non_terminal_evidence`. Backend request failures remain errors, not fabricated task states.
+
 Output:
 
 ```json
@@ -229,6 +234,8 @@ Output:
 | `aborted` | A correlated assistant message was aborted. |
 
 Correlation uses the submitted user `message_id` and assistant `parentID`. `tool-calls`, `unknown`, and unrecognized future finish values are non-terminal; `error` is failed. An earlier tool-call iteration does not prevent a later terminal assistant message from completing the turn. Status reads at most 100 backend messages. If the user message or required terminal evidence is outside that bound, the state is `unknown`, not guessed.
+
+Use `get_task_result` to search beyond that bound. A question/permission explicitly linked to this turn remains actionable, but session-wide or later-turn pending input no longer overrides this turn's terminal evidence. `completed` describes execution evidence, not how much text the caller has read. `length` and `content-filter` are terminal generation reasons, not proof of a regularly finished report.
 
 ### `get_session_history`
 
@@ -264,7 +271,99 @@ Output:
 }
 ```
 
-Only user and assistant messages are returned. The adapter includes non-synthetic, non-ignored text parts and excludes attachments, reasoning, system messages, and raw tool inputs or outputs. Total returned text is capped at 32,000 characters across the response. `text_truncated` marks a shortened message; `truncated` also becomes true when the backend supplies another opaque page cursor. `completed`, `finish`, `error`, `parent_id`, and `next_before` are omitted when not applicable.
+Only user and assistant messages are returned. The adapter includes non-synthetic, non-ignored text parts and excludes attachments, reasoning, system messages, and raw tool inputs or outputs. `completed`, `finish`, `error`, `parent_id`, and `next_before` are omitted when not applicable.
+
+**Delivery A migration (0.1.3):** text is now a preview of at most 1024 UTF-8 bytes per message, possibly smaller to preserve metadata within the response budget. The old shared 32,000-JavaScript-code-unit clipping is replaced by the complete reading path below. Existing fields remain: `truncated` still means more history **or** any shortened preview. New clients should instead use:
+
+- `history_has_more`: another backend history page exists; follow `next_before`.
+- Per-message `content_complete`: this preview contains all selected visible text. It does not mean all backend parts were exposed.
+- `text_truncated` with `truncation_reason:"preview_limit"|"response_budget"`: the preview is shorter; read the message's `content.content_ref`.
+- `content.availability` and `content.omitted_parts`: distinguish empty visible text and excluded parts.
+
+Every returned message includes the content descriptor defined under `get_message`, even when the response budget leaves its preview empty. Metadata takes precedence over previews. A page may contain fewer than `limit` entries if metadata itself requires a smaller backend page; the resulting `next_before` still resumes correctly.
+
+### `get_message`
+
+Read-only, idempotent, closed-world. Directly reads a known message, without scanning history or starting model work:
+
+```json
+{"session_id":"ses_...","message_id":"msg_..."}
+```
+
+Returns `session_id` and `message`. The message contains the same identity, role, parent, time, finish/error and preview fields as history, plus:
+
+```json
+{
+  "content_complete":false,
+  "text_truncated":true,
+  "truncation_reason":"preview_limit",
+  "content":{
+    "content_ref":"<opaque authenticated reference>",
+    "revision":"visible-text-v1:<sha256>",
+    "unit":"utf8_bytes",
+    "total_bytes":320036,
+    "sha256":"<hash of the complete selected visible text>",
+    "availability":"available",
+    "omitted_parts":[{"type":"tool","count":1,"reason":"part_not_exposed"}]
+  }
+}
+```
+
+Projection `visible-text-v1` concatenates selected text parts in backend order, with **no inserted separators or normalization**. The exact same projection is used in previews and content reads. Invalid Unicode source text fails explicitly rather than being silently repaired. Availability is `available` for nonempty selected text, `empty` for empty text/no parts, or `not_exposed` when only excluded parts exist. Omitted categories are `text` (synthetic/ignored), `reasoning`, `tool`, `file`, and `other`; only type/count/reason are disclosed. No heuristic secret redactor or raw-tool-output export is introduced.
+
+The hash covers only the deliverable visible UTF-8 text, including the empty string when applicable. It neither hashes hidden parts nor proves that the model finished its intended report. Inspect the preserved `finish`/`error` separately. Absence, unknown source loss and actual backend failures are not inferred from a short string or empty part list.
+
+### `read_message_content`
+
+Read-only, idempotent, closed-world:
+
+```json
+{"content_ref":"<reference>","cursor":"<optional next_cursor>","max_bytes":8192}
+```
+
+`max_bytes` is an integer `4..16384`, default `8192`. It bounds unescaped UTF-8 text, **not** JSON wire size; the server may return less. Four bytes permit any Unicode scalar value without a stalled page. Responses include:
+
+```json
+{
+  "session_id":"ses_...",
+  "message_id":"msg_...",
+  "revision":"visible-text-v1:<sha256>",
+  "unit":"utf8_bytes",
+  "total_bytes":320036,
+  "sha256":"<complete visible-text hash>",
+  "range":{"start":0,"end":8192},
+  "text":"<original text page>",
+  "has_more":true,
+  "next_cursor":"<opaque content cursor>",
+  "content_complete":false
+}
+```
+
+Ranges are byte offsets into the unescaped UTF-8 projection, start inclusive/end exclusive, always on code-point boundaries. Keep the same `content_ref`, append text without separators, and follow `next_cursor` until `has_more:false` (no next cursor). Verify contiguous ranges, total byte length and SHA-256 programmatically. `content_complete` is true only when **this response alone** contains the entire projection (`start=0`, `end=total_bytes`); it is not a caller read receipt. An empty projection returns `[0,0)`, no continuation and its empty-text hash, while `get_message` retains the explanation of omitted parts.
+
+References and cursors are authenticated, scope-bound, opaque strings up to 16384 characters. They are valid only for the current adapter process lifetime, not indefinitely persisted capability URLs. Every call rechecks current session exposure. They accept no filesystem paths. On adapter restart, reacquire a reference through `get_message` using stable session/message IDs. A cursor cannot be used with a different message/revision reference.
+
+There is no historical snapshot store. Every page rereads the source; a changed visible projection yields `CONTENT_CHANGED` and requires a new `get_message` and restart of concatenation. A previously referenced message that disappears yields `CONTENT_UNAVAILABLE`; excluded sessions still yield non-disclosing `SESSION_NOT_FOUND`. A backend timeout is `BACKEND_UNAVAILABLE`, not proof of source loss. Permanently growing messages need not be fully traversable until stable.
+
+**Budgets:** These tools, history and task-result reads allow at most 48 KiB of serialized structured payload and 64 KiB for the complete JSON-RPC result response, including `content`, `structuredContent`, escaping and the envelope. Preview shrinking/page reduction and content-page shrinking preserve references and continuation. A metadata-only result that cannot fit fails with `RESPONSE_BUDGET_EXCEEDED`; it is never sliced into invalid JSON. These limits do not assert a universal ChatGPT/context limit. Lower `max_bytes` if needed for a tested client.
+
+### `get_task_result`
+
+Read-only, idempotent, closed-world; an ordinary MCP tool, not native MCP task execution:
+
+```json
+{"session_id":"ses_...","submitted_message_id":"msg_user","cursor":"<optional next_cursor>","limit":20}
+```
+
+The user message is read directly and validated. The adapter scans backward in bounded backend pages (`limit:1..20`, default `20`), selecting assistants solely by the existing `parentID`. It stops when it reaches the requested user message. No permanent result index or model summary is created.
+
+Returns `session_id`, `submitted_message_id`, `observed_at`, `source:"backend"`, `state`, `search_complete`, optional `next_cursor`, `order:"newest_first"`, and `messages`. Each message includes the same content descriptor as `get_message` plus `result_kind:"terminal"|"intermediate"`. Terminal denotes a recognized terminal finish/error/abort; tool-call iterations are intermediate. Multiple terminal constituents are retained, and terminal metadata can legitimately have no visible report text.
+
+**Keep results from every page, in returned newest-first order.** Follow `next_cursor` even for an empty page. Reverse the accumulated list if chronological presentation is desired. Until `search_complete:true`, state is `unknown` with `state_reason:"search_incomplete"`; this is not absence. Complete scans report `completed`, `failed` or `aborted` only from correlated evidence. Otherwise state stays `unknown` with `non_terminal_evidence` or `no_terminal_evidence`. Session busy or another task's pending input is not used to guess an older task's state; use `get_session_status` for current live work. Terminal deep reads reconcile the same MCP unresolved-admission guard as status reads, allowing a subsequent explicit prompt after a long turn.
+
+Search cursors carry only bounded progress/evidence metadata and are authenticated to the session/user query. The adapter verifies the observed session update stamp, requested user projection and newest-message projection before and after each page and again on continuation. An observed change yields `SEARCH_CHANGED`; restart without a cursor and discard the old search-page accumulation. This is an optimistic observation boundary, **not a backend transactional snapshot or archival guarantee**. It relies on backend history ordering/update metadata and cannot detect arbitrary out-of-band database edits that bypass that metadata. Content references independently verify visible-text revisions at read time. Failure to reach a directly readable user through backend pagination is an explicit compatibility failure, not a false empty result.
+
+Recommended workflow: poll the receipt's status; obtain `get_task_result` pages through `search_complete`; read terminal message references via `read_message_content` (or reacquire with `get_message`). Finding, completing execution and reading are separate. None of these tools marks a report read/discussed or submits a new prompt.
 
 ### `send_message`
 
@@ -284,7 +383,7 @@ Output:
 {"session_id":"ses_...","message_id":"msg_<32 hex characters>","state":"submitted"}
 ```
 
-This is an asynchronous admission receipt, not a completion result. The prompt may run commands and modify project files inside the VM. Poll `get_session_status` with the returned `message_id`, then retrieve text with `get_session_history`.
+This is an asynchronous admission receipt, not a completion result. The prompt may run commands and modify project files inside the VM. Poll `get_session_status` with the returned `message_id`, then retrieve correlated results with `get_task_result` and originals with `read_message_content`. History remains a preview/navigation surface.
 
 The adapter preserves the session's agent, provider/model, and variant. If current session metadata lacks those settings, it uses the latest user-message settings from a bounded 20-message lookup; otherwise it returns `BACKEND_INCOMPATIBLE`.
 
@@ -422,8 +521,16 @@ Tool failures return `isError: true` and sanitized text. Machine-readable error 
 | `CURSOR_EXPIRED` | Cursor epoch or retained range no longer matches the journal. |
 | `ACTIVITY_UNAVAILABLE` | Journal could not be initialized/read/persisted safely. |
 | `INTERNAL_ERROR` | An unexpected adapter error occurred; internal details were suppressed. |
+| `MESSAGE_NOT_FOUND` | Message is absent or not exposed in the requested session. |
+| `CONTENT_UNAVAILABLE` | A previously referenced message is no longer available from the source. |
+| `CONTENT_CHANGED` | Visible text no longer matches the reference revision; reacquire and restart. |
+| `READ_REFERENCE_EXPIRED` | Content/search reference belongs to another adapter lifetime; reacquire with stable IDs. |
+| `SEARCH_CHANGED` | Observed result-search boundary changed; restart the search without a cursor. |
+| `RESPONSE_BUDGET_EXCEEDED` | Required read metadata/result does not fit; reduce the page limit. No partial JSON is returned. |
 
 HTTP authentication and request-boundary failures use HTTP status codes rather than these tool codes.
+
+Reading diagnostics use the existing stderr log: an internal request identifier, tool, session/message IDs where applicable, visible-content revision/length, delivered text length, complete serialized response size/budget and known preview/search/error cause. No prompt, answer, reasoning, cursor/token, tool arguments or raw tool results are logged. There is no separate telemetry/export product.
 
 ## 7. Authentication and lifecycle
 
@@ -461,4 +568,4 @@ The endpoint is bound only to guest `127.0.0.1` and is verified through host `12
 
 This interface can create empty root work sessions, change idle-session runtime settings, continue exposed sessions and read project activity. It does not delete, fork, or interrupt sessions; upload attachments; answer permissions/questions; expose a shell directly; or discover other projects.
 
-Automated package, fake-backend, and disposable real-OpenCode tests cover the ten-tool protocol, creation without a model call, runtime changes and validation, two independently running sessions with ordered completion events, bounded waits, journal recovery after adapter restart, pending input and no automatic resend on uncertainty. Real macOS/Lima and actual ChatGPT text/Voice operation still require target-host acceptance. After upgrading, reconnect the project runtime and refresh the external client's tool catalog; ChatGPT custom apps may require a tool refresh or republishing to expose new tools.
+Automated package, fake-backend, disposable real-OpenCode and local tunnel-control-plane tests cover thirteen tools, complete original-text reconstruction, deep result searches, revision/reference handling, creation without a model call, runtime changes and validation, independent session completions, bounded waits, journal restart recovery, pending input and no automatic resend on uncertainty. Real macOS/Lima and actual ChatGPT text/Voice operation still require target-host acceptance. After upgrading, reconnect the project runtime and refresh the external client's tool catalog; ChatGPT custom apps may require a tool refresh or republishing to expose new tools. See the exact tested combinations and external acceptance procedure in [PLAN_MCP_READING.md](../PLAN_MCP_READING.md).

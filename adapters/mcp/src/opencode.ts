@@ -9,7 +9,20 @@ import type {
   QuestionV2Request,
   SessionV2Info,
 } from "@opencode-ai/sdk/v2";
-import { AdapterError, MAX_HISTORY_TEXT, isRecord } from "./types.js";
+import { AdapterError, isRecord } from "./types.js";
+import {
+  ReadReferences,
+  DEFAULT_CONTENT_BYTES,
+  MAX_CONTENT_BYTES,
+  READ_PAYLOAD_BYTES,
+  describeMessage,
+  digest,
+  fitPreviews,
+  jsonBytes,
+  utf8Prefix,
+  visibleContent,
+} from "./content.js";
+import type { ContentReference } from "./content.js";
 import type {
   ActivityQuery,
   ActivityResult,
@@ -19,7 +32,6 @@ import type {
   RuntimeUpdateResult,
   SessionRuntime,
   CreateSessionResult,
-  HistoryMessage,
   ListSessionsResult,
   PendingInput,
   ProjectIdentity,
@@ -30,6 +42,9 @@ import type {
   SessionHistoryResult,
   SessionStatusResult,
   SessionSummary,
+  MessageResult,
+  MessageContentResult,
+  TaskResult,
 } from "./types.js";
 
 const BACKEND_DEADLINE_MS = 8_000;
@@ -43,6 +58,19 @@ type OpenCodeClient = ReturnType<typeof createOpencodeClient>;
 type MessageWithParts = { info: Message; parts: Part[] };
 type MessagePage = { items: MessageWithParts[]; next?: string };
 
+type ResultCursor = {
+  kind: "result";
+  session: string;
+  user: string;
+  boundary: string;
+  before: string;
+  assistants: number;
+  allCompleted: boolean;
+  failed: boolean;
+  aborted: boolean;
+  latestFinish?: string;
+};
+
 type PendingDetails = PendingInput & {
   permissionsList: PermissionV2Request[];
   questionsList: QuestionV2Request[];
@@ -55,6 +83,18 @@ type SessionCursor = {
 };
 
 export interface SessionGateway {
+  getMessage(sessionId: string, messageId: string): Promise<MessageResult>;
+  readMessageContent(
+    reference: string,
+    cursor?: string,
+    maxBytes?: number,
+  ): Promise<MessageContentResult>;
+  getTaskResult(
+    sessionId: string,
+    messageId: string,
+    cursor?: string,
+    limit?: number,
+  ): Promise<TaskResult>;
   getSessionRuntimeOptions(sessionId?: string): Promise<RuntimeOptions>;
   updateSessionRuntime(
     sessionId: string,
@@ -85,6 +125,7 @@ export class OpenCodeGateway implements SessionGateway {
   private compatibilityPromise: Promise<void> | undefined;
   private readonly submissionLocks = new Set<string>();
   private readonly unresolved = new Map<string, string>();
+  private readonly readReferences = new ReadReferences();
   private journal?: ActivityJournal;
   private readonly collectorStop = new AbortController();
   private collector?: Promise<void>;
@@ -494,6 +535,9 @@ export class OpenCodeGateway implements SessionGateway {
     if (!messageId) {
       return {
         ...base,
+        observed_at: new Date().toISOString(),
+        source: "backend",
+        task_status_reason: "not_requested",
         state:
           pending.permissions + pending.questions > 0
             ? "input_required"
@@ -507,13 +551,27 @@ export class OpenCodeGateway implements SessionGateway {
       sessionId,
       STATUS_HISTORY_LIMIT,
     );
-    return this.correlatedStatus(
+    const result = this.correlatedStatus(
       sessionId,
       messageId,
       messages,
       activity,
       pending,
     );
+    return {
+      ...result,
+      observed_at: new Date().toISOString(),
+      source: "backend",
+      ...(result.state === "unknown"
+        ? {
+            task_status_reason: messages.some(
+              (item) => item.info.id === messageId,
+            )
+              ? ("non_terminal_evidence" as const)
+              : ("outside_history_or_not_observed" as const),
+          }
+        : {}),
+    };
   }
 
   private correlatedStatus(
@@ -546,15 +604,15 @@ export class OpenCodeGateway implements SessionGateway {
     const pendingForTurn =
       pending.permissionsList.some(
         (request) =>
-          !request.source || assistantIds.includes(request.source.messageID),
+          request.source && assistantIds.includes(request.source.messageID),
       ) ||
       pending.questionsList.some(
         (request) =>
-          !request.tool || assistantIds.includes(request.tool.messageID),
+          request.tool && assistantIds.includes(request.tool.messageID),
       );
 
     let state: SessionStatusResult["state"];
-    if (pendingForTurn || pending.permissions + pending.questions > 0) {
+    if (pendingForTurn) {
       state = "input_required";
     } else if (assistants.some((message) => isAborted(message.info))) {
       state = "aborted";
@@ -574,6 +632,8 @@ export class OpenCodeGateway implements SessionGateway {
       isCompletedFinish(latestAssistant.info.finish)
     ) {
       state = "completed";
+    } else if (pendingForTurn || pending.permissions + pending.questions > 0) {
+      state = "input_required";
     } else if (activity !== "idle") {
       state = "running";
     } else if (assistants.length === 0) {
@@ -609,49 +669,366 @@ export class OpenCodeGateway implements SessionGateway {
       (message) =>
         message.info.role === "user" || message.info.role === "assistant",
     );
-    let remaining = MAX_HISTORY_TEXT;
-    let textWasTruncated = false;
-    const messages: HistoryMessage[] = visible.map((message) => {
-      const full = message.parts
-        .filter(
-          (part): part is Extract<Part, { type: "text" }> =>
-            part.type === "text" && !part.synthetic && !part.ignored,
-        )
-        .map((part) => part.text)
-        .join("");
-      const text = full.slice(0, remaining);
-      const textTruncated = text.length < full.length;
-      remaining -= text.length;
-      textWasTruncated ||= textTruncated;
-      const info = message.info;
-      return {
-        id: info.id,
-        role: info.role,
-        ...(info.role === "assistant" ? { parent_id: info.parentID } : {}),
-        text,
-        created: info.time.created,
-        ...(info.role === "assistant" && typeof info.time.completed === "number"
-          ? { completed: info.time.completed }
-          : {}),
-        ...(info.role === "assistant" && info.finish
-          ? { finish: info.finish }
-          : {}),
-        ...(info.role === "assistant" && info.error
-          ? {
-              error: isAborted(info)
-                ? ("aborted" as const)
-                : ("failed" as const),
-            }
-          : {}),
-        text_truncated: textTruncated,
-      };
-    });
-    return {
+    const messages = visible.map((message) =>
+      describeMessage(message, this.readReferences),
+    );
+    const result = {
       session_id: sessionId,
       messages,
       ...(page.next ? { next_before: page.next } : {}),
-      truncated: Boolean(page.next) || textWasTruncated,
+      truncated:
+        Boolean(page.next) ||
+        messages.some((message) => message.text_truncated),
+      history_has_more: Boolean(page.next),
     };
+    try {
+      fitPreviews(result, messages);
+    } catch (error) {
+      if (
+        error instanceof AdapterError &&
+        error.code === "RESPONSE_BUDGET_EXCEEDED" &&
+        boundedLimit > 1
+      )
+        return this.getSessionHistory(
+          sessionId,
+          Math.floor(boundedLimit / 2),
+          before,
+        );
+      throw error;
+    }
+    result.truncated ||= messages.some((message) => message.text_truncated);
+    return result;
+  }
+
+  async getMessage(
+    sessionId: string,
+    messageId: string,
+  ): Promise<MessageResult> {
+    await this.requireExposedSession(sessionId);
+    const message = describeMessage(
+      await this.message(sessionId, messageId),
+      this.readReferences,
+    );
+    return fitPreviews({ session_id: sessionId, message }, [message]);
+  }
+
+  async readMessageContent(
+    reference: string,
+    cursor?: string,
+    maxBytes = DEFAULT_CONTENT_BYTES,
+  ): Promise<MessageContentResult> {
+    const maximum = integerInRange(maxBytes, 4, MAX_CONTENT_BYTES, "max_bytes");
+    const ref = this.readReferences.decode<ContentReference>(
+      reference,
+      "content",
+    );
+    await this.requireExposedSession(ref.session);
+    let start = 0;
+    if (cursor) {
+      const position = this.readReferences.decode<
+        ContentReference & { kind: "content"; offset: number }
+      >(cursor, "content");
+      if (
+        position.session !== ref.session ||
+        position.message !== ref.message ||
+        position.revision !== ref.revision ||
+        !Number.isSafeInteger(position.offset) ||
+        position.offset < 0
+      ) {
+        throw new AdapterError(
+          "INVALID_ARGUMENT",
+          "Content cursor does not belong to this reference.",
+        );
+      }
+      start = position.offset;
+    }
+    let stored: MessageWithParts;
+    try {
+      stored = await this.message(ref.session, ref.message);
+    } catch (error) {
+      if (error instanceof AdapterError && error.code === "MESSAGE_NOT_FOUND")
+        throw new AdapterError(
+          "CONTENT_UNAVAILABLE",
+          "Previously referenced message is no longer available from the source.",
+        );
+      throw error;
+    }
+    const full = visibleContent(stored).text;
+    const sha256 = digest(full);
+    const revision = `visible-text-v1:${sha256}`;
+    if (revision !== ref.revision)
+      throw new AdapterError(
+        "CONTENT_CHANGED",
+        "Visible text changed. Call get_message and restart reading its new revision.",
+      );
+    const bytes = Buffer.from(full, "utf8");
+    if (
+      start > bytes.length ||
+      (start < bytes.length && (bytes[start]! & 0xc0) === 0x80)
+    )
+      throw new AdapterError("INVALID_ARGUMENT", "Content offset is invalid.");
+    let size = maximum;
+    for (;;) {
+      const text = utf8Prefix(bytes.subarray(start).toString("utf8"), size);
+      const end = start + Buffer.byteLength(text);
+      const more = end < bytes.length;
+      const result: MessageContentResult = {
+        session_id: ref.session,
+        message_id: ref.message,
+        revision,
+        unit: "utf8_bytes",
+        total_bytes: bytes.length,
+        sha256,
+        range: { start, end },
+        text,
+        has_more: more,
+        ...(more
+          ? { next_cursor: this.readReferences.encode({ ...ref, offset: end }) }
+          : {}),
+        content_complete: start === 0 && !more,
+      };
+      if (jsonBytes(result) <= READ_PAYLOAD_BYTES) return result;
+      size = Math.floor(size / 2);
+      if (size < 4)
+        throw new AdapterError(
+          "RESPONSE_BUDGET_EXCEEDED",
+          "Content metadata exceeds the response budget.",
+        );
+    }
+  }
+
+  async getTaskResult(
+    sessionId: string,
+    messageId: string,
+    cursor?: string,
+    limit = 20,
+  ): Promise<TaskResult> {
+    const boundedLimit = integerInRange(limit, 1, 20, "limit");
+    const session = await this.requireExposedSession(sessionId);
+    const user = await this.message(sessionId, messageId);
+    if (user.info.role !== "user")
+      throw new AdapterError(
+        "INVALID_ARGUMENT",
+        "submitted_message_id must identify a user message.",
+      );
+    const newest = await this.messages(sessionId, 1);
+    const boundary = this.resultBoundary(
+      session.time.updated,
+      user,
+      newest.items[0],
+    );
+    const scan: ResultCursor = cursor
+      ? this.readReferences.decode<ResultCursor>(cursor, "result")
+      : {
+          kind: "result",
+          session: sessionId,
+          user: messageId,
+          boundary,
+          before: "",
+          assistants: 0,
+          allCompleted: true,
+          failed: false,
+          aborted: false,
+        };
+    if (scan.session !== sessionId || scan.user !== messageId)
+      throw new AdapterError(
+        "INVALID_ARGUMENT",
+        "Result cursor belongs to another query.",
+      );
+    if (scan.boundary !== boundary)
+      throw new AdapterError(
+        "SEARCH_CHANGED",
+        "Session changed during result search. Restart get_task_result without a cursor.",
+      );
+    const page = await this.messages(
+      sessionId,
+      boundedLimit,
+      scan.before || undefined,
+    );
+    const messages: TaskResult["messages"] = [];
+    let foundUser = false;
+    for (const stored of [...page.items].reverse()) {
+      if (stored.info.id === messageId) {
+        foundUser = true;
+        break;
+      }
+      const info = stored.info;
+      if (info.role !== "assistant" || info.parentID !== messageId) continue;
+      if (!scan.assistants) scan.latestFinish = info.finish;
+      scan.assistants++;
+      scan.allCompleted &&= typeof info.time.completed === "number";
+      scan.failed ||=
+        (hasError(info) && !isAborted(info)) || info.finish === "error";
+      scan.aborted ||= isAborted(info);
+      messages.push({
+        ...describeMessage(stored, this.readReferences),
+        result_kind:
+          isCompletedFinish(info.finish) ||
+          hasError(info) ||
+          isAborted(info) ||
+          info.finish === "error"
+            ? "terminal"
+            : "intermediate",
+      });
+    }
+    // No historical snapshots: reject an observable change rather than silently
+    // mixing search boundaries. Cursors are query-bound and contain only metadata.
+    const verifiedSession = await this.requireExposedSession(sessionId);
+    const verifiedHead = await this.messages(sessionId, 1);
+    const verifiedUser = await this.message(sessionId, messageId);
+    if (
+      this.resultBoundary(
+        verifiedSession.time.updated,
+        verifiedUser,
+        verifiedHead.items[0],
+      ) !== boundary
+    )
+      throw new AdapterError(
+        "SEARCH_CHANGED",
+        "Session changed during result search. Restart without a cursor.",
+      );
+    if (!foundUser && !page.next)
+      throw new AdapterError(
+        "BACKEND_INCOMPATIBLE",
+        "Stored user message was not reachable through backend history.",
+      );
+    if (!foundUser && page.next === scan.before)
+      throw incompatible("OpenCode repeated a result-search cursor.");
+    let state: TaskResult["state"] = "unknown";
+    if (foundUser) {
+      if (scan.aborted) state = "aborted";
+      else if (scan.failed) state = "failed";
+      else if (
+        scan.assistants &&
+        scan.allCompleted &&
+        isCompletedFinish(scan.latestFinish)
+      )
+        state = "completed";
+      // Session-wide busy/pending signals cannot establish this older task's state.
+    }
+    const result: TaskResult = {
+      session_id: sessionId,
+      submitted_message_id: messageId,
+      state,
+      ...(state === "unknown"
+        ? {
+            state_reason: !foundUser
+              ? ("search_incomplete" as const)
+              : scan.assistants
+                ? ("non_terminal_evidence" as const)
+                : ("no_terminal_evidence" as const),
+          }
+        : {}),
+      observed_at: new Date().toISOString(),
+      source: "backend",
+      search_complete: foundUser,
+      order: "newest_first",
+      messages,
+      ...(!foundUser
+        ? {
+            next_cursor: this.readReferences.encode({
+              ...scan,
+              before: page.next!,
+            }),
+          }
+        : {}),
+    };
+    try {
+      fitPreviews(result, messages);
+      if (
+        ["completed", "failed", "aborted"].includes(state) &&
+        this.unresolved.get(sessionId) === messageId
+      )
+        this.unresolved.delete(sessionId);
+      return result;
+    } catch (error) {
+      if (
+        error instanceof AdapterError &&
+        error.code === "RESPONSE_BUDGET_EXCEEDED" &&
+        boundedLimit > 1
+      )
+        return this.getTaskResult(
+          sessionId,
+          messageId,
+          cursor,
+          Math.floor(boundedLimit / 2),
+        );
+      throw error;
+    }
+  }
+
+  private resultBoundary(
+    updated: number,
+    user: MessageWithParts,
+    head?: MessageWithParts,
+  ): string {
+    const stamp = (item: MessageWithParts | undefined) =>
+      item
+        ? {
+            info: {
+              id: item.info.id,
+              role: item.info.role,
+              time: item.info.time,
+              ...(item.info.role === "assistant"
+                ? {
+                    parent: item.info.parentID,
+                    finish: item.info.finish,
+                    error: item.info.error?.name,
+                  }
+                : {}),
+            },
+            visible: visibleContent(item),
+          }
+        : null;
+    return digest(
+      JSON.stringify({ updated, user: stamp(user), head: stamp(head) }),
+    );
+  }
+
+  private async message(
+    sessionId: string,
+    messageId: string,
+  ): Promise<MessageWithParts> {
+    let stored: MessageWithParts | undefined;
+    try {
+      const response = await this.client.session.message(
+        {
+          sessionID: sessionId,
+          messageID: messageId,
+          directory: this.runtime.project,
+        },
+        { signal: this.deadline(), throwOnError: false },
+      );
+      if (response.response?.status === 404)
+        throw new AdapterError(
+          "MESSAGE_NOT_FOUND",
+          "Message is absent or not exposed in this session.",
+        );
+      if (response.response && !response.response.ok)
+        throw unavailable("Could not read the stored OpenCode message.");
+      stored = response.data;
+    } catch (error) {
+      if (error instanceof AdapterError) throw error;
+      if (httpStatus(error) === 404)
+        throw new AdapterError(
+          "MESSAGE_NOT_FOUND",
+          "Message is absent or not exposed in this session.",
+        );
+      throw unavailable("Could not read the stored OpenCode message.");
+    }
+    if (
+      !stored ||
+      stored.info?.id !== messageId ||
+      stored.info.sessionID !== sessionId ||
+      !["user", "assistant"].includes(stored.info.role)
+    )
+      throw new AdapterError(
+        "MESSAGE_NOT_FOUND",
+        "Message is absent or not exposed in this session.",
+      );
+    if (!Array.isArray(stored.parts))
+      throw incompatible("OpenCode returned unsupported message content.");
+    return stored;
   }
 
   async sendMessage(
@@ -804,10 +1181,14 @@ export class OpenCodeGateway implements SessionGateway {
     try {
       const response = await this.client.v2.session.get(
         { sessionID: sessionId },
-        { signal: this.deadline() },
+        { signal: this.deadline(), throwOnError: false },
       );
+      if (response.response?.status === 404) throw sessionNotFound();
+      if (response.response && !response.response.ok)
+        throw unavailable("Could not inspect the OpenCode session.");
       session = response.data?.data;
     } catch (error) {
+      if (error instanceof AdapterError) throw error;
       if (httpStatus(error) === 404) throw sessionNotFound();
       throw unavailable("Could not inspect the OpenCode session.");
     }

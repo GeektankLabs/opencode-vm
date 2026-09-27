@@ -4,7 +4,11 @@ Status: Local MCP MVP, project-based managed tunnel register and requested sessi
 
 Date: 2026-09-25
 
-Last updated: 2026-09-26
+Last updated: 2026-09-27
+
+## Phase 6: Delivery A — Complete Original Reading (0.5.67 / Adapter 0.1.3)
+
+Three additive tools (`get_task_result`, `get_message`, `read_message_content`) provide bounded deep result searches and complete revision-bound original-text reads. History's shared text clipping is replaced by UTF-8 previews with references, explicit omissions and serialized response budgets. The existing transport/SDK/revision baseline is preserved. No snapshots, durable result index, automatic write retries, raw tool output or discussion state are added. Decisions, test evidence and required hosted ChatGPT acceptance are maintained in `PLAN_MCP_READING.md` and `docs/MCP-INTERFACE.md`; historical text-budget/no-content-reading statements below are superseded by this phase.
 
 ## Phase 5: Runtime Configuration and Project Activity (0.5.66 / Adapter 0.1.2)
 

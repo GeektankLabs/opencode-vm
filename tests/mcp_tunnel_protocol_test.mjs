@@ -1,6 +1,7 @@
 // Optional real tunnel-client interoperability check, with a local control plane.
 // Build adapters/mcp first; set OCVM_TUNNEL_CLIENT to the pinned full client binary.
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -9,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { McpHttpServer } from "../adapters/mcp/dist/http.js";
+import { OpenCodeGateway } from "../adapters/mcp/dist/opencode.js";
 
 const binary = process.env.OCVM_TUNNEL_CLIENT;
 if (!binary) throw new Error("Set OCVM_TUNNEL_CLIENT to tunnel-client v0.0.15.");
@@ -24,8 +26,29 @@ const token = "test-local-token-must-not-leak";
 const summary = { id: "ses_fixture", title: "Fixture", created: 1, updated: 2, activity: "idle" };
 const pending = { permissions: 0, questions: 0 };
 const fixtureRuntime = { agent: "build", provider_id: "fixture", model_id: "model", variant: "default" };
+const original = 'ÄÖß 👩🏽‍💻\n```js\nconst test = "original";\n```\n'.repeat(5000) + "TUNNEL-REPORT-END";
+const readRuntime = { schema: 1, project: temp, projectHash: "fixture", projectName: "fixture", generation: "fixture", backendUrl: "http://127.0.0.1:1", listenHost: "127.0.0.1", listenPort: 0 };
+const stored = [
+  { info: { id: "msg_fixture", sessionID: summary.id, role: "user", time: { created: 1 } }, parts: [{ type: "text", text: "synthetic task" }] },
+  { info: { id: "msg_reply", sessionID: summary.id, role: "assistant", parentID: "msg_fixture", time: { created: 2, completed: 3 }, finish: "stop" }, parts: [{ type: "text", text: original }] },
+];
+const readGateway = new OpenCodeGateway(readRuntime, {
+  global: { async health() { return { data: { healthy: true } }; } },
+  project: { async current() { return { data: { id: "fixture" } }; } },
+  v2: { session: {
+    async list() { return { data: { data: [], cursor: {} } }; },
+    async get() { return { data: { data: { id: summary.id, projectID: "fixture", location: { directory: temp }, time: { created: 1, updated: 3 } } } }; },
+  } },
+  session: {
+    async message({ messageID }) { return { data: stored.find((item) => item.info.id === messageID) }; },
+    async messages({ limit }) { return { data: stored.slice(-limit), response: { headers: new Headers(limit < 2 ? { "x-next-cursor": "older" } : {}) } }; },
+  },
+});
 let submissions = 0, creations = 0;
 const gateway = {
+  getMessage: (...args) => readGateway.getMessage(...args),
+  readMessageContent: (...args) => readGateway.readMessageContent(...args),
+  getTaskResult: (...args) => readGateway.getTaskResult(...args),
   async getSessionRuntimeOptions() { return { agents: ["build", "plan"], providers: [{ provider_id: "fixture", name: "Fixture" }], models: [{ provider_id: "fixture", model_id: "model", name: "Model", variants: ["default"] }], truncated: false }; },
   async updateSessionRuntime(sessionId, patch) { return { session_id: sessionId, previous: fixtureRuntime, current: { ...fixtureRuntime, ...patch }, state: "updated" }; },
   async getProjectActivity() { return { events: [], next_cursor: "fixture-cursor", has_more: false, tracking: { connected: true, partial: false } }; },
@@ -93,9 +116,40 @@ try {
   }
   assert.ok(connection?.mcp_url, diagnostics);
   client = new Client({ name: "ocvm-tunnel-test", version: "1.0.0" });
-  await client.connect(new StreamableHTTPClientTransport(new URL(connection.mcp_url)));
+  const revisions = new Set();
+  const sizes = [];
+  await client.connect(new StreamableHTTPClientTransport(new URL(connection.mcp_url), {
+    fetch: async (url, init) => {
+      const request = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
+      if (request?.method === "initialize") revisions.add(`offered:${request.params.protocolVersion}`);
+      const response = await fetch(url, init);
+      if (response.headers.get("content-type")?.includes("application/json")) {
+        const body = await response.clone().text();
+        if (request?.method === "initialize") revisions.add(`negotiated:${JSON.parse(body).result.protocolVersion}`);
+        if (["get_message", "get_task_result", "read_message_content"].includes(request?.params?.name)) sizes.push(Buffer.byteLength(body));
+      }
+      return response;
+    },
+  }));
   const tools = await client.listTools();
-  assert.equal(tools.tools.length, 10);
+  assert.equal(tools.tools.length, 13);
+  const task = await client.callTool({ name: "get_task_result", arguments: { session_id: summary.id, submitted_message_id: "msg_fixture" } });
+  assert.equal(task.structuredContent?.state, "completed");
+  const message = await client.callTool({ name: "get_message", arguments: { session_id: summary.id, message_id: "msg_reply" } });
+  assert.ok(!message.isError, JSON.stringify(message));
+  const descriptor = message.structuredContent.message.content;
+  let cursor, reconstructed = "";
+  do {
+    const result = await client.callTool({ name: "read_message_content", arguments: { content_ref: descriptor.content_ref, ...(cursor ? { cursor } : {}) } });
+    assert.ok(!result.isError, JSON.stringify(result));
+    reconstructed += result.structuredContent.text;
+    cursor = result.structuredContent.next_cursor;
+  } while (cursor);
+  assert.equal(reconstructed, original);
+  assert.equal(createHash("sha256").update(reconstructed).digest("hex"), descriptor.sha256);
+  assert.ok(sizes.every((size) => size <= 64 * 1024));
+  assert.ok(revisions.has("negotiated:2025-11-25"));
+  console.log(`PASS: local tunnel control plane reconstructed ${Buffer.byteLength(original)} UTF-8 bytes; client-side ${[...revisions].join(", ")}; max read response ${Math.max(...sizes)} bytes.`);
   for (const [name, args] of [
     ["get_session_runtime_options", {}],
     ["update_session_runtime", { session_id: summary.id, agent: "plan" }],
@@ -121,7 +175,7 @@ try {
   const direct = await fetch(`http://127.0.0.1:${port}/healthz`);
   assert.equal(direct.status, 401, "the local endpoint still requires its token");
   assert.ok(!diagnostics.includes(key) && !diagnostics.includes(token), "credentials leaked into tunnel diagnostics");
-  console.log("PASS: tunnel-client v0.0.15 discovers and invokes all ten tools through its local tunnel control plane using the generated profile.");
+  console.log("PASS: tunnel-client v0.0.15 discovers and invokes all thirteen tools through its local tunnel control plane using the generated profile.");
 
   // Optional Linux/systemd check: real checksum installer and managed service,
   // with outbound traffic confined to a disposable local control-plane fixture.

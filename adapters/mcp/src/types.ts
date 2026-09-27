@@ -1,9 +1,8 @@
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { dirname, isAbsolute } from "node:path";
 
-export const ADAPTER_VERSION = "0.1.2";
+export const ADAPTER_VERSION = "0.1.3";
 export const MCP_TRANSPORT = "streamable-http-stateless";
-export const MAX_HISTORY_TEXT = 32_000;
 
 export type RuntimeDescriptor = {
   schema: 1;
@@ -84,6 +83,26 @@ export type SessionStatusResult = {
   state: CorrelatedState;
   pending_input: PendingInput;
   assistant_message_ids: string[];
+  observed_at?: string;
+  source?: "backend";
+  task_status_reason?:
+    | "not_requested"
+    | "outside_history_or_not_observed"
+    | "non_terminal_evidence";
+};
+
+export type ContentDescriptor = {
+  content_ref: string;
+  revision: string;
+  unit: "utf8_bytes";
+  total_bytes: number;
+  sha256: string;
+  availability: "available" | "empty" | "not_exposed";
+  omitted_parts: Array<{
+    type: string;
+    count: number;
+    reason: "part_not_exposed";
+  }>;
 };
 
 export type HistoryMessage = {
@@ -96,6 +115,9 @@ export type HistoryMessage = {
   finish?: string;
   error?: "aborted" | "failed";
   text_truncated: boolean;
+  content_complete?: boolean;
+  truncation_reason?: "preview_limit" | "response_budget";
+  content?: ContentDescriptor;
 };
 
 export type SessionHistoryResult = {
@@ -103,6 +125,37 @@ export type SessionHistoryResult = {
   messages: HistoryMessage[];
   next_before?: string;
   truncated: boolean;
+  history_has_more?: boolean;
+};
+
+export type MessageResult = { session_id: string; message: HistoryMessage };
+export type MessageContentResult = {
+  session_id: string;
+  message_id: string;
+  revision: string;
+  unit: "utf8_bytes";
+  total_bytes: number;
+  sha256: string;
+  range: { start: number; end: number };
+  text: string;
+  has_more: boolean;
+  next_cursor?: string;
+  content_complete: boolean;
+};
+export type TaskResult = {
+  session_id: string;
+  submitted_message_id: string;
+  state: CorrelatedState;
+  state_reason?:
+    "search_incomplete" | "non_terminal_evidence" | "no_terminal_evidence";
+  observed_at: string;
+  source: "backend";
+  search_complete: boolean;
+  next_cursor?: string;
+  order: "newest_first";
+  messages: Array<
+    HistoryMessage & { result_kind: "terminal" | "intermediate" }
+  >;
 };
 
 export type SendMessageResult = {
@@ -221,6 +274,12 @@ export const ADAPTER_ERROR_CODES = [
   "CURSOR_EXPIRED",
   "ACTIVITY_UNAVAILABLE",
   "INTERNAL_ERROR",
+  "MESSAGE_NOT_FOUND",
+  "CONTENT_UNAVAILABLE",
+  "CONTENT_CHANGED",
+  "READ_REFERENCE_EXPIRED",
+  "SEARCH_CHANGED",
+  "RESPONSE_BUDGET_EXCEEDED",
 ] as const;
 
 export type AdapterErrorCode = (typeof ADAPTER_ERROR_CODES)[number];

@@ -3,6 +3,11 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { createHash } from "node:crypto";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { McpHttpServer } from "./http.js";
+import { READ_RESPONSE_BYTES, READ_PAYLOAD_BYTES } from "./content.js";
 import type { SessionV2Info } from "@opencode-ai/sdk/v2";
 import { OpenCodeGateway } from "./opencode.js";
 import { AdapterError } from "./types.js";
@@ -191,6 +196,21 @@ function fakeClient(state: FakeState) {
       },
     },
     session: {
+      async message(parameters: { sessionID: string; messageID: string }) {
+        const item = state.messages.find(
+          (message) =>
+            message.info.id === parameters.messageID &&
+            (!message.info.sessionID ||
+              message.info.sessionID === parameters.sessionID),
+        );
+        if (!item) throw Object.assign(new Error("absent"), { status: 404 });
+        return {
+          data: {
+            ...item,
+            info: { ...item.info, sessionID: parameters.sessionID },
+          },
+        };
+      },
       async create(
         parameters: Record<string, unknown>,
         options: { signal: AbortSignal },
@@ -270,6 +290,474 @@ function baseState(sessions = [session("ses_work")]): FakeState {
     runtimeCalls: [],
   };
 }
+
+function stored(
+  id: string,
+  text: string,
+  parent?: string,
+  finish = "stop",
+): FakeState["messages"][number] {
+  return {
+    info: {
+      id,
+      sessionID: "ses_work",
+      role: parent ? "assistant" : "user",
+      time: { created: 1, ...(parent ? { completed: 2 } : {}) },
+      ...(parent ? { parentID: parent, finish } : {}),
+    },
+    parts: [{ id: `part_${id}`, type: "text", text }],
+  };
+}
+
+test("Delivery A: original UTF-8 content is fully reconstructible independent of history size", async () => {
+  const state = baseState();
+  const text =
+    'ÄÖß👩🏽‍💻\n```ts\nconst value = "\\path";\n```\n'.repeat(6000) +
+    "END-OF-REPORT";
+  assert.ok(Buffer.byteLength(text) >= 200 * 1024);
+  state.messages = [
+    stored("user", "task"),
+    stored("report", text, "user"),
+    stored("following", "following user"),
+  ];
+  const splitAt = text.indexOf("```ts", 1000);
+  state.messages[1]!.parts[0]!.text = text.slice(0, splitAt);
+  // Preserve selected part order; never include hidden, ignored or synthetic text.
+  state.messages[1]!.parts.push(
+    { type: "reasoning", text: "hidden-reasoning-secret" },
+    { type: "text", text: text.slice(splitAt) },
+    { type: "text", text: "synthetic-secret", synthetic: true },
+    { type: "text", text: "ignored-secret", ignored: true },
+  );
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  const overview = await gateway.getSessionHistory("ses_work", 20);
+  assert.equal(overview.history_has_more, false);
+  assert.equal(overview.truncated, true);
+  assert.equal(overview.messages.at(-1)?.text, "following user");
+  const latest = await gateway.getSessionHistory("ses_work", 1);
+  const reportPage = await gateway.getSessionHistory(
+    "ses_work",
+    1,
+    latest.next_before,
+  );
+  const report = (await gateway.getMessage("ses_work", "report")).message;
+  assert.equal(
+    report.content?.content_ref,
+    reportPage.messages[0]?.content?.content_ref,
+  );
+  assert.equal(
+    report.content?.revision,
+    overview.messages[1]?.content?.revision,
+  );
+  assert.equal(report.truncation_reason, "preview_limit");
+  const ref = report.content!.content_ref;
+  let cursor: string | undefined;
+  let reconstructed = "";
+  let count = 0;
+  do {
+    const part = await gateway.readMessageContent(ref, cursor, 777);
+    assert.equal(part.range.start, Buffer.byteLength(reconstructed));
+    assert.ok(Buffer.byteLength(part.text) <= 777);
+    assert.ok(part.text.isWellFormed());
+    reconstructed += part.text;
+    assert.equal(part.range.end, Buffer.byteLength(reconstructed));
+    assert.equal(part.sha256, report.content!.sha256);
+    assert.equal(part.has_more, Boolean(part.next_cursor));
+    cursor = part.next_cursor;
+    count++;
+  } while (cursor);
+  assert.ok(count > 1);
+  assert.equal(reconstructed, text);
+  assert.equal(
+    createHash("sha256").update(reconstructed).digest("hex"),
+    report.content!.sha256,
+  );
+  assert.equal(state.promptCalls.length, 0);
+  assert.doesNotMatch(
+    JSON.stringify(overview),
+    /hidden-reasoning-secret|synthetic-secret|ignored-secret/u,
+  );
+});
+
+test("Delivery A: revisions, invalid/future references and missing sources fail explicitly", async () => {
+  const state = baseState();
+  state.messages = [
+    stored("report", "😀abcdef".repeat(100), "user", "length"),
+    stored("other", "other"),
+  ];
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  const report = (await gateway.getMessage("ses_work", "report")).message;
+  assert.equal(report.finish, "length");
+  const ref = report.content!.content_ref;
+  const first = await gateway.readMessageContent(ref, undefined, 4);
+  assert.equal(first.text, "😀");
+  const other = (await gateway.getMessage("ses_work", "other")).message.content!
+    .content_ref;
+  await assert.rejects(gateway.readMessageContent(other, first.next_cursor), {
+    code: "INVALID_ARGUMENT",
+  });
+  const [body, signature] = ref.split(".");
+  const tampered = Buffer.from(
+    JSON.stringify({
+      ...JSON.parse(Buffer.from(body!, "base64url").toString()),
+      message: "other",
+    }),
+  ).toString("base64url");
+  await assert.rejects(gateway.readMessageContent(`${tampered}.${signature}`), {
+    code: "INVALID_ARGUMENT",
+  });
+  state.messages[0]!.parts[0]!.text += "changed";
+  await assert.rejects(gateway.readMessageContent(ref, first.next_cursor), {
+    code: "CONTENT_CHANGED",
+  });
+  const changed = (await gateway.getMessage("ses_work", "report")).message;
+  assert.notEqual(changed.content!.revision, report.content!.revision);
+  state.messages.shift();
+  await assert.rejects(
+    gateway.readMessageContent(changed.content!.content_ref),
+    { code: "CONTENT_UNAVAILABLE" },
+  );
+  await assert.rejects(gateway.getMessage("ses_work", "report"), {
+    code: "MESSAGE_NOT_FOUND",
+  });
+  const restarted = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  await assert.rejects(restarted.readMessageContent(other), {
+    code: "READ_REFERENCE_EXPIRED",
+  });
+});
+
+test("Delivery A: all read paths recheck session confinement, including previously issued references", async () => {
+  const state = baseState();
+  state.messages = [stored("user", "task"), stored("report", "answer", "user")];
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  const ref = (await gateway.getMessage("ses_work", "report")).message.content!
+    .content_ref;
+  for (const changes of [
+    { parentID: "parent" },
+    { agent: "openlive-manager" },
+    { projectID: "foreign" },
+    { location: { directory: "/foreign" } },
+    { time: { created: 1, updated: 2, archived: 3 } },
+  ]) {
+    state.sessions[0] = session("ses_work", changes);
+    await assert.rejects(gateway.getMessage("ses_work", "report"), {
+      code: "SESSION_NOT_FOUND",
+    });
+    await assert.rejects(gateway.readMessageContent(ref), {
+      code: "SESSION_NOT_FOUND",
+    });
+    await assert.rejects(gateway.getTaskResult("ses_work", "user"), {
+      code: "SESSION_NOT_FOUND",
+    });
+  }
+  state.sessions[0] = session("ses_work");
+  state.messages[1]!.info.sessionID = "ses_other";
+  await assert.rejects(gateway.getMessage("ses_work", "report"), {
+    code: "MESSAGE_NOT_FOUND",
+  });
+});
+
+test("Delivery A: empty visible text is distinct from omitted tool content", async () => {
+  const state = baseState();
+  const step = stored("step", "", "user", "tool-calls");
+  step.parts = [
+    {
+      type: "tool",
+      state: {
+        output: "output-secret",
+        input: { password: "argument-secret" },
+      },
+    },
+  ];
+  state.messages = [stored("empty", ""), step];
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  const empty = await gateway.getMessage("ses_work", "empty");
+  const omitted = await gateway.getMessage("ses_work", "step");
+  assert.equal(empty.message.content!.availability, "empty");
+  assert.equal(omitted.message.content!.availability, "not_exposed");
+  assert.equal(omitted.message.text_truncated, false);
+  assert.deepEqual(omitted.message.content!.omitted_parts, [
+    { type: "tool", count: 1, reason: "part_not_exposed" },
+  ]);
+  assert.doesNotMatch(
+    JSON.stringify(omitted),
+    /output-secret|argument-secret/u,
+  );
+  const read = await gateway.readMessageContent(
+    omitted.message.content!.content_ref,
+  );
+  assert.equal(read.text, "");
+  assert.equal(read.has_more, false);
+  assert.equal(read.content_complete, true); // complete visible projection, not hidden parts
+});
+
+test("Delivery A: bounded search recovers old tasks with 130 steps without confusing a later blocked task", async () => {
+  const state = baseState();
+  state.messages = [
+    stored("user1", "old task"),
+    ...Array.from({ length: 130 }, (_, i) =>
+      stored(`step${i}`, "", "user1", "tool-calls"),
+    ),
+    stored("final1", "old report", "user1"),
+    stored("user2", "new task"),
+    stored("step2", "", "user2", "tool-calls"),
+  ];
+  state.questions = [
+    { sessionID: "ses_work", tool: { messageID: "step2", callID: "call" } },
+  ];
+  state.statuses.ses_work = { type: "busy" };
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  assert.equal(
+    (await gateway.getSessionStatus("ses_work", "user1")).state,
+    "unknown",
+  );
+  let cursor: string | undefined;
+  const ids: string[] = [];
+  let searches = 0;
+  do {
+    const result = await gateway.getTaskResult("ses_work", "user1", cursor, 20);
+    ids.push(...result.messages.map((message) => message.id));
+    assert.ok(
+      result.messages.every((message) => message.parent_id === "user1"),
+    );
+    if (!result.search_complete) {
+      assert.equal(result.state, "unknown");
+      assert.equal(result.state_reason, "search_incomplete");
+    } else assert.equal(result.state, "completed");
+    cursor = result.next_cursor;
+    searches++;
+  } while (cursor);
+  assert.ok(searches > 5);
+  assert.equal(ids.length, 131);
+  assert.equal(new Set(ids).size, ids.length);
+  assert.equal(ids[0], "final1");
+  const second = await gateway.getTaskResult("ses_work", "user2");
+  assert.equal(second.state, "unknown");
+  assert.equal(second.state_reason, "non_terminal_evidence");
+  state.messages.push(stored("final2", "new report", "user2"));
+  assert.equal(
+    (await gateway.getTaskResult("ses_work", "user2")).state,
+    "completed",
+  );
+  assert.equal(
+    (await gateway.getSessionStatus("ses_work", "user2")).state,
+    "input_required",
+  ); // explicitly correlated pending input
+  state.questions = [
+    {
+      sessionID: "ses_work",
+      tool: { messageID: "later-task", callID: "call" },
+    },
+  ];
+  assert.equal(
+    (await gateway.getSessionStatus("ses_work", "user2")).state,
+    "completed",
+  );
+  assert.equal(state.promptCalls.length, 0);
+});
+
+test("Delivery A: result cursors reject changed boundaries and query switches; empty pages remain resumable", async () => {
+  const state = baseState();
+  state.messages = [
+    stored("user1", "old"),
+    stored("final1", "answer", "user1"),
+    ...Array.from({ length: 25 }, (_, i) => stored(`later${i}`, "later")),
+  ];
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  const first = await gateway.getTaskResult("ses_work", "user1");
+  assert.equal(first.messages.length, 0);
+  assert.equal(first.search_complete, false);
+  assert.ok(first.next_cursor);
+  await assert.rejects(
+    gateway.getTaskResult("ses_work", "later1", first.next_cursor),
+    { code: "INVALID_ARGUMENT" },
+  );
+  state.messages.at(-1)!.parts[0]!.text = "changed head";
+  await assert.rejects(
+    gateway.getTaskResult("ses_work", "user1", first.next_cursor),
+    { code: "SEARCH_CHANGED" },
+  );
+  const again = await gateway.getTaskResult("ses_work", "user1");
+  const final = await gateway.getTaskResult(
+    "ses_work",
+    "user1",
+    again.next_cursor,
+  );
+  assert.equal(final.state, "completed");
+  assert.equal(final.messages[0]?.id, "final1");
+  await assert.rejects(gateway.getTaskResult("ses_work", "final1"), {
+    code: "INVALID_ARGUMENT",
+  });
+});
+
+test("Delivery A: completed deep result reconciles the MCP admission guard without resending", async () => {
+  const state = baseState();
+  state.promptAsync = async (parameters) => {
+    state.messages.push(stored(parameters.messageID as string, "task"));
+    return {};
+  };
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  const receipt = await gateway.sendMessage("ses_work", "long task");
+  state.messages.push(
+    ...Array.from({ length: 110 }, (_, i) =>
+      stored(`step-${i}`, "", receipt.message_id, "tool-calls"),
+    ),
+    stored("final", "done", receipt.message_id),
+  );
+  await assert.rejects(gateway.sendMessage("ses_work", "next"), {
+    code: "SESSION_BUSY",
+  });
+  let cursor: string | undefined;
+  do {
+    const page = await gateway.getTaskResult(
+      "ses_work",
+      receipt.message_id,
+      cursor,
+    );
+    cursor = page.next_cursor;
+  } while (cursor);
+  assert.equal(state.promptCalls.length, 1);
+  await gateway.sendMessage("ses_work", "next");
+  assert.equal(state.promptCalls.length, 2);
+});
+
+test("Delivery A: full serialized MCP responses stay bounded, including escaped text and Unicode", async () => {
+  const state = baseState();
+  const text =
+    "\u0000".repeat(20000) +
+    '\u0000\u0001\n"\\😀'.repeat(10000) +
+    "TAIL-MARKER";
+  state.messages = [
+    stored("user", "task"),
+    stored("report", text, "user", "length"),
+  ];
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  const token = "fixture-token";
+  const server = new McpHttpServer(
+    { ...runtime(), listenPort: 0 },
+    token,
+    gateway,
+  );
+  const port = await server.start();
+  const client = new Client({ name: "delivery-a", version: "1" });
+  const wireSizes: number[] = [];
+  const transport = new StreamableHTTPClientTransport(
+    new URL(`http://127.0.0.1:${port}/mcp`),
+    {
+      requestInit: { headers: { "X-OCVM-MCP-Token": token } },
+      fetch: async (url, init) => {
+        const response = await fetch(url, init);
+        if (response.headers.get("content-type")?.includes("application/json"))
+          wireSizes.push((await response.clone().arrayBuffer()).byteLength);
+        return response;
+      },
+    },
+  );
+  try {
+    await client.connect(transport);
+    for (const tool of ["get_session_history", "get_task_result"]) {
+      const result = await client.callTool({
+        name: tool,
+        arguments: {
+          session_id: "ses_work",
+          ...(tool === "get_task_result"
+            ? { submitted_message_id: "user" }
+            : {}),
+        },
+      });
+      assert.ok(!result.isError, JSON.stringify(result));
+    }
+    const message = await client.callTool({
+      name: "get_message",
+      arguments: { session_id: "ses_work", message_id: "report" },
+    });
+    assert.ok(!message.isError, JSON.stringify(message));
+    const descriptor = (
+      message.structuredContent as unknown as {
+        message: { content: { content_ref: string; sha256: string } };
+      }
+    ).message.content;
+    let cursor: string | undefined;
+    let full = "";
+    do {
+      const result = await client.callTool({
+        name: "read_message_content",
+        arguments: {
+          content_ref: descriptor.content_ref,
+          ...(cursor ? { cursor } : {}),
+          max_bytes: 16384,
+        },
+      });
+      assert.ok(!result.isError, JSON.stringify(result));
+      const data = result.structuredContent as unknown as {
+        text: string;
+        next_cursor?: string;
+      };
+      if (!cursor)
+        assert.ok(
+          Buffer.byteLength(data.text) < 8192,
+          "JSON escaping/metadata must shrink the first all-control-character page",
+        );
+      full += data.text;
+      cursor = data.next_cursor;
+    } while (cursor);
+    assert.equal(full, text);
+    assert.equal(
+      createHash("sha256").update(full).digest("hex"),
+      descriptor.sha256,
+    );
+    assert.ok(wireSizes.every((size) => size <= READ_RESPONSE_BYTES));
+    assert.equal(state.promptCalls.length, 0);
+    const oversizedId = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: {
+        "X-OCVM-MCP-Token": token,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: "x".repeat(70000),
+        method: "tools/call",
+        params: {
+          name: "get_message",
+          arguments: { session_id: "ses_work", message_id: "report" },
+        },
+      }),
+    });
+    assert.equal(oversizedId.status, 400);
+    assert.ok((await oversizedId.arrayBuffer()).byteLength < 1024);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test("Delivery A: large metadata reduces history pages without losing continuation", async () => {
+  const id = "界".repeat(256);
+  const state = baseState([session(id)]);
+  state.messages = Array.from({ length: 20 }, (_, i) => {
+    const message = stored(
+      `${"界".repeat(250)}${i}`,
+      "large preview".repeat(1000),
+    );
+    message.info.sessionID = id;
+    return message;
+  });
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  let before: string | undefined;
+  const ids = new Set<string>();
+  do {
+    const page = await gateway.getSessionHistory(id, 20, before);
+    assert.ok(Buffer.byteLength(JSON.stringify(page)) <= READ_PAYLOAD_BYTES);
+    for (const message of page.messages) {
+      assert.ok(message.content?.content_ref);
+      assert.ok(!ids.has(message.id));
+      ids.add(message.id);
+    }
+    before = page.next_before;
+  } while (before);
+  assert.equal(ids.size, 20);
+});
 
 test("creation binds runtime defaults and a root project session without sending a prompt", async () => {
   const state = baseState([]);
@@ -856,11 +1344,17 @@ test("history returns only bounded user and assistant text", async () => {
 
   const result = await gateway.getSessionHistory("ses_work", 10);
   assert.equal(result.messages.length, 2);
-  assert.equal(result.messages[0]?.text.length, 20_000);
-  assert.equal(result.messages[1]?.text.length, 12_000);
+  assert.equal(result.messages[0]?.text.length, 1024);
+  assert.equal(result.messages[1]?.text.length, 1024);
   assert.equal(result.messages[1]?.text_truncated, true);
   assert.equal(result.truncated, true);
-  assert.doesNotMatch(JSON.stringify(result), /secret|reasoning|system/u);
+  assert.doesNotMatch(
+    JSON.stringify(result),
+    /secret|hidden reasoning|hidden system/u,
+  );
+  assert.deepEqual(result.messages[1]?.content?.omitted_parts, [
+    { type: "reasoning", count: 1, reason: "part_not_exposed" },
+  ]);
 });
 
 test("history returns newest bounded pages and follows opaque cursors", async () => {
@@ -938,13 +1432,17 @@ test("correlated status requires terminal assistant evidence", async () => {
   ];
   const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
 
-  assert.deepEqual(await gateway.getSessionStatus("ses_work", "msg_user"), {
+  const observed = await gateway.getSessionStatus("ses_work", "msg_user");
+  assert.ok(observed.observed_at);
+  assert.deepEqual(observed, {
     session_id: "ses_work",
     message_id: "msg_user",
     backend_activity: "idle",
     state: "completed",
     pending_input: { permissions: 0, questions: 0 },
     assistant_message_ids: ["msg_assistant"],
+    observed_at: observed.observed_at,
+    source: "backend",
   });
   assert.equal(
     (await gateway.getSessionStatus("ses_work", "msg_absent")).state,

@@ -9,7 +9,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import type { SessionGateway } from "./opencode.js";
 import { createMcpServer } from "./tools.js";
-import { ADAPTER_VERSION, MCP_TRANSPORT } from "./types.js";
+import { ADAPTER_VERSION, MCP_TRANSPORT, isRecord } from "./types.js";
 import type { RuntimeDescriptor } from "./types.js";
 
 export const MAX_REQUEST_BODY_BYTES = 256 * 1024;
@@ -170,6 +170,23 @@ export class McpHttpServer {
         return;
       }
 
+      // A reflected, arbitrarily large JSON-RPC ID would defeat bounded read
+      // responses even if their content is empty. Reject without reflecting it.
+      if (
+        isRecord(body) &&
+        body.id !== undefined &&
+        Buffer.byteLength(JSON.stringify(body.id)) > 1024
+      ) {
+        writeJson(response, 400, {
+          jsonrpc: "2.0",
+          id: null,
+          error: {
+            code: -32600,
+            message: "Request ID exceeds 1024 serialized bytes.",
+          },
+        });
+        return;
+      }
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
         enableJsonResponse: true,
