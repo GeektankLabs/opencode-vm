@@ -70,8 +70,8 @@ class EditorTest(unittest.TestCase):
               'parse_attach_flags --launcher\n[ "$SESSION_LAUNCHER_ENABLED" = 1 ]')
         self.assertEqual(shell(code + '\nparse_attach_flags --unknown', check=False).returncode, 2)
         self.assertEqual(SCRIPT.count('OC_LAUNCHER_ENABLED="${19:-1}"'), 2)
-        self.assertEqual(SCRIPT.count('"${SESSION_LAUNCHER_ENABLED:-1}" ||'), 1)
-        self.assertEqual(SCRIPT.count('"${SESSION_LAUNCHER_ENABLED:-1}"; then'), 1)
+        self.assertEqual(SCRIPT.count('"${SESSION_LAUNCHER_ENABLED:-1}" "$(project_state_dir'), 1)
+        self.assertEqual(SCRIPT.count('"${SESSION_LAUNCHER_ENABLED:-1}" "$proj_state/taskboard/taskboard.db" "$(test -f'), 1)
 
         with tempfile.TemporaryDirectory() as tmp:
             stage(Path(tmp) / 'share')
@@ -220,8 +220,12 @@ ssh() { case " $* " in *" -f -N "*) printf '%s\n' "$@" > "$TEST_DIR/forward" ;; 
         self.assertIn('app.icon', launcher)
 
     def test_taskboard_runtime_descriptor_tracks_service_lifecycle(self):
-        code = function('stop_taskboard') + '\n' + function('start_taskboard') + '\n'
-        code += '''systemctl() {
+        code = "\n".join(function(name) for name in
+                           ("taskboard_runtime_dir", "taskboard_failure", "taskboard_prepare_runtime",
+                            "stop_taskboard", "start_taskboard")) + '\n'
+        code += '''taskboard_state_guard() { :; }
+OC_TASKBOARD_LOG_WRITER_PY=fixture
+systemctl() {
   if [ "$1" = is-active ]; then return 0; fi
   printf '%s\\n' not-found
 }
@@ -230,6 +234,7 @@ curl() { return 0; }
 ss() { return 0; }
 SESS_SHARE="$1/share"
 PROJ_DIR="$1"
+OCVM_TASKBOARD_RUNTIME_DIR="$1/.opencode-vm/taskboard"
 OC_TASKBOARD_DB="$1/data/taskboard.db"
 OC_TASKBOARD_BIN=/bin/true
 OC_OPENLIVE_PROJECT_HASH=project-hash
@@ -238,19 +243,52 @@ OC_PORT=4096
 mkdir -p "$SESS_SHARE"
 start_taskboard
 [ "$OC_TASKBOARD_READY" = 1 ]
-[ -f "$SESS_SHARE/taskboard/runtime.json" ]
+[ -f "$OCVM_TASKBOARD_RUNTIME_DIR/runtime.json" ]
 stop_taskboard
-[ ! -f "$SESS_SHARE/taskboard/runtime.json" ]
+[ ! -f "$OCVM_TASKBOARD_RUNTIME_DIR/runtime.json" ]
 start_taskboard
 '''
         with tempfile.TemporaryDirectory() as tmp:
             shell(code, tmp)
-            descriptor = Path(tmp) / 'share/taskboard/runtime.json'
+            descriptor = Path(tmp) / '.opencode-vm/taskboard/runtime.json'
             self.assertEqual(json.loads(descriptor.read_text()),
-                             {'schema': 1, 'share': str(Path(tmp) / 'share'),
-                              'projectHash': 'project-hash', 'taskboardPort': 4101})
+                             {'schema': 1, 'projectHash': 'project-hash',
+                              'runtimeDir': str(Path(tmp) / '.opencode-vm/taskboard'),
+                              'log': str(Path(tmp) / '.opencode-vm/taskboard/taskboard.log'),
+                              'taskboardPort': 4101})
+            self.assertFalse((Path(tmp) / 'share/taskboard.log').exists())
+            self.assertTrue((Path(tmp) / '.opencode-vm/taskboard/taskboard.log').exists())
             self.assertEqual(descriptor.stat().st_mode & 0o777, 0o600)
             self.assertEqual(descriptor.parent.stat().st_mode & 0o777, 0o700)
+
+    def test_taskboard_runtime_is_project_local_and_editor_exposes_the_path(self):
+        self.assertIn('OCVM_TASKBOARD_RUNTIME_DIR="$PROJ_DIR/.opencode-vm/taskboard"', SCRIPT)
+        self.assertIn('--setenv="OCVM_TASKBOARD_RUNTIME_DIR=${OCVM_TASKBOARD_RUNTIME_DIR:-}"', SCRIPT)
+        self.assertIn("'{schema:1,projectHash:$hash,runtimeDir:$dir,log:$log,taskboardPort:$port}'", SCRIPT)
+        self.assertNotIn('StandardOutput=append:$SESS_SHARE/taskboard.log', SCRIPT)
+
+    def test_taskboard_failed_start_publishes_vm_local_diagnostic(self):
+        code = "\n".join(function(name) for name in
+                           ("taskboard_runtime_dir", "taskboard_failure", "taskboard_prepare_runtime",
+                            "stop_taskboard", "start_taskboard"))
+        code += '''
+taskboard_state_guard() { :; }
+OC_TASKBOARD_LOG_WRITER_PY=fixture
+systemctl() { printf '%s\n' not-found; }
+SESS_SHARE="$1/share"
+PROJ_DIR="$1"
+OCVM_TASKBOARD_RUNTIME_DIR="$1/.opencode-vm/taskboard"
+OC_TASKBOARD_ENABLED=1
+OC_TASKBOARD_BIN="$1/missing-taskboard"
+OC_PORT=4096
+OC_OPENLIVE_PROJECT_HASH=project-hash
+start_taskboard || true
+[ -f "$OCVM_TASKBOARD_RUNTIME_DIR/failure.json" ]
+[ ! -f "$OCVM_TASKBOARD_RUNTIME_DIR/runtime.json" ]
+[ -f "$OCVM_TASKBOARD_RUNTIME_DIR/taskboard.log" ]
+[ ! -e "$SESS_SHARE/taskboard.log" ]
+'''
+        shell(code, tempfile.mkdtemp())
 
     def test_dark_theme_default_preserves_personal_choice(self):
         config = SCRIPT.split("<<'EDITOR_CONFIG'\n", 1)[1].split('\nEDITOR_CONFIG', 1)[0]

@@ -400,16 +400,17 @@ class LauncherProxyTest(unittest.TestCase):
             base = free_port_block(6)
             key = "cHJvamVjdA"
             project_hash = "launcher-test-project"
+            taskboard_state = root / "taskboard-state"
+            taskboard_state.mkdir(mode=0o700)
+            taskboard_state.chmod(0o700)
             runtime = {"schema": 1, "share": str(share), "projectHash": project_hash,
                        "editorPort": base + 4, "backendPort": base - 1,
                        "mcpEnabled": False, "mcpPort": 0}
             runtime_file = editor / "runtime.json"
             runtime_file.write_text(json.dumps(runtime))
             runtime_file.chmod(0o600)
-            board_dir = share / "taskboard"
-            board_dir.mkdir(mode=0o700)
-            board_file = board_dir / "runtime.json"
-            board_runtime = {"schema": 1, "share": str(share), "projectHash": project_hash,
+            board_file = taskboard_state / "runtime.json"
+            board_runtime = {"schema": 1, "projectHash": project_hash,
                              "taskboardPort": base + 5}
             board_file.write_text(json.dumps(board_runtime))
             board_file.chmod(0o600)
@@ -441,7 +442,7 @@ class LauncherProxyTest(unittest.TestCase):
             proxy_log = (root / "proxy.log").open("wb")
             proxy = subprocess.Popen([
                 sys.executable, str(proxy_file), str(base), str(backend.server_address[1]), key,
-                "", "", "0", "", "", "ocvm-web-test", str(share), project_hash, "1", "bi-mcrepo",
+                "", "", "0", "", "", "ocvm-web-test", str(share), project_hash, "1", "bi-mcrepo", str(taskboard_state),
             ], stdout=subprocess.DEVNULL, stderr=proxy_log)
             other_proxy = None
             try:
@@ -499,7 +500,7 @@ class LauncherProxyTest(unittest.TestCase):
                 other_port = free_port_block(1)
                 other_proxy = subprocess.Popen([
                     sys.executable, str(proxy_file), str(other_port), str(backend.server_address[1]), key,
-                    "", "", "0", "", "", "ocvm-second-project", str(share), project_hash, "1", "raspiblitz",
+                    "", "", "0", "", "", "ocvm-second-project", str(share), project_hash, "1", "raspiblitz", str(taskboard_state),
                 ], stdout=subprocess.DEVNULL, stderr=proxy_log)
                 deadline = time.monotonic() + 4
                 while True:
@@ -619,12 +620,27 @@ class LauncherProxyTest(unittest.TestCase):
                 markup = LauncherMarkup()
                 markup.feed(stopped_board.decode("utf-8"))
                 self.assertEqual(json.loads(markup.mount["data-apps"]), [])
+                (taskboard_state / "failure.json").write_text(json.dumps({
+                    "schema": 1, "projectHash": project_hash,
+                    "log": str(taskboard_state / "taskboard.log"),
+                    "reason": "Taskboard readiness timed out",
+                }))
+                (taskboard_state / "failure.json").chmod(0o600)
+                status, _, failed_board = http_request(base, PROJECT_PATH, headers=auth)
+                self.assertEqual(status, 200)
+                markup = LauncherMarkup()
+                markup.feed(failed_board.decode("utf-8"))
+                failed_apps = json.loads(markup.mount["data-apps"])
+                self.assertEqual([app["id"] for app in failed_apps], ["taskboard"])
+                self.assertFalse(failed_apps[0]["ready"])
+                self.assertIn("readiness timed out", failed_apps[0]["error"])
+                self.assertIn("taskboard.log", failed_apps[0]["log"])
 
                 proxy.terminate()
                 proxy.wait(timeout=4)
                 proxy = subprocess.Popen([
                     sys.executable, str(proxy_file), str(base), str(backend.server_address[1]), key,
-                    "", "", "0", "", "", "ocvm-web-test", str(share), project_hash, "0", "<Test & Spaß>",
+                    "", "", "0", "", "", "ocvm-web-test", str(share), project_hash, "0", "<Test & Spaß>", str(taskboard_state),
                 ], stdout=subprocess.DEVNULL, stderr=proxy_log)
                 deadline = time.monotonic() + 4
                 while True:

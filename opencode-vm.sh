@@ -162,7 +162,7 @@ TASKBOARD_ARM64_SHA256="3749fb985f544fdb6788ba1dff69761e599ff82b3fe86d39ca54307c
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.5.91"
+OCVM_VERSION="0.5.95"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -10980,6 +10980,7 @@ LAUNCHER_SHARE = sys.argv[10] if len(sys.argv) > 10 else ""
 LAUNCHER_PROJECT_HASH = sys.argv[11] if len(sys.argv) > 11 else ""
 LAUNCHER_ENABLED = sys.argv[12] != "0" if len(sys.argv) > 12 else True
 PROJECT_TITLE = sys.argv[13] if len(sys.argv) > 13 else ""
+LAUNCHER_TASKBOARD_RUNTIME_DIR = sys.argv[14] if len(sys.argv) > 14 else ""
 if (PROJECT_TITLE in (".", "..") or "/" in PROJECT_TITLE or len(PROJECT_TITLE) > 255 or
         any(ord(char) < 32 or ord(char) == 127 for char in PROJECT_TITLE)):
     PROJECT_TITLE = ""
@@ -11085,6 +11086,8 @@ LAUNCHER_APP_REGISTRY = (
         "label": "Projektmanagement",
         "icon": "board",
         "runtime_file": "taskboard/runtime.json",
+        "runtime_location": "taskboard-state",
+        "failure_file": "failure.json",
         "port_field": "taskboardPort",
         "port_offset": 5,
         "scheme": "http",
@@ -11166,19 +11169,25 @@ LAUNCHER_JS = r"""
 
   const links = [];
   for (const app of apps) {
-    const link = document.createElement("a");
+    const link = document.createElement(app.ready === false ? "div" : "a");
     link.className = "app-entry";
     link.setAttribute("role", "menuitem");
     link.tabIndex = -1;
-    link.target = "_blank";
-    link.rel = "noopener noreferrer";
-    const target = new URL(window.location.href);
-    target.protocol = app.scheme + ":";
-    target.port = String(app.port);
-    target.pathname = "/";
-    target.search = "";
-    target.hash = "";
-    link.href = target.href;
+    if (app.ready === false) {
+      link.className += " unavailable";
+      link.setAttribute("aria-disabled", "true");
+      link.title = [app.error, app.log].filter(Boolean).join(" ");
+    } else {
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      const target = new URL(window.location.href);
+      target.protocol = app.scheme + ":";
+      target.port = String(app.port);
+      target.pathname = "/";
+      target.search = "";
+      target.hash = "";
+      link.href = target.href;
+    }
 
     const icon = document.createElement("span");
     icon.className = "app-icon";
@@ -11189,7 +11198,7 @@ LAUNCHER_JS = r"""
     const external = document.createElement("span");
     external.className = "external";
     external.setAttribute("aria-hidden", "true");
-    external.textContent = "↗";
+    external.textContent = app.ready === false ? "!" : "↗";
     link.append(icon, label, external);
     menu.appendChild(link);
     links.push(link);
@@ -11234,7 +11243,9 @@ LAUNCHER_JS = r"""
     event.preventDefault();
     links[next].focus();
   });
-  for (const link of links) link.addEventListener("click", () => close(false));
+  for (const link of links) link.addEventListener("click", () => {
+    if (link.getAttribute("aria-disabled") !== "true") close(false);
+  });
 
   const compact = window.matchMedia("(max-width: 640px)");
   function updateKeyboardVisibility() {
@@ -11325,8 +11336,11 @@ LAUNCHER_CSS = b"""\
   touch-action: manipulation;
 }
 .app-entry:hover, .app-entry:focus-visible { background: rgba(255,255,255,.1); }
+.app-entry.unavailable { cursor: help; color: #f0b75a; }
+.app-entry.unavailable .external { color: #f0b75a; }
 .app-icon { flex: 0 0 22px; width: 22px; height: 22px; color: #d4d4d8; }
-.app-label { flex: 1; }
+.app-label { flex: 1; min-width: 0; }
+.app-entry.unavailable .app-label { overflow-wrap: anywhere; font-size: 11px; line-height: 1.25; }
 .external { color: #a1a1aa; font-size: 17px; }
 .empty { padding: 12px 10px; color: #a1a1aa; }
 @media (max-width: 640px) {
@@ -11574,7 +11588,9 @@ def read_launcher_runtime(relative_path):
     if not LAUNCHER_SHARE or os.path.islink(LAUNCHER_SHARE):
         return None
     directory = os.path.join(LAUNCHER_SHARE, os.path.dirname(relative_path))
-    path = os.path.join(LAUNCHER_SHARE, relative_path)
+    path = relative_path if os.path.isabs(relative_path) else os.path.join(LAUNCHER_SHARE, relative_path)
+    if os.path.isabs(relative_path):
+        directory = os.path.dirname(path)
     try:
         directory_info = os.lstat(directory)
         if (not stat.S_ISDIR(directory_info.st_mode) or directory_info.st_uid != os.getuid() or
@@ -11593,10 +11609,43 @@ def read_launcher_runtime(relative_path):
             if fd >= 0:
                 os.close(fd)
         if (not isinstance(runtime, dict) or runtime.get("schema") != 1 or
-                runtime.get("share") != LAUNCHER_SHARE or
+                (runtime.get("share") not in (None, LAUNCHER_SHARE)) or
                 (LAUNCHER_PROJECT_HASH and runtime.get("projectHash") != LAUNCHER_PROJECT_HASH)):
             return None
         return runtime
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def launcher_taskboard_runtime_path(filename):
+    if LAUNCHER_TASKBOARD_RUNTIME_DIR:
+        return os.path.join(LAUNCHER_TASKBOARD_RUNTIME_DIR, filename)
+    return os.path.join(LAUNCHER_SHARE, "taskboard", filename)
+
+
+def read_launcher_failure(path):
+    directory = os.path.dirname(path)
+    try:
+        directory_info = os.lstat(directory)
+        if (not stat.S_ISDIR(directory_info.st_mode) or directory_info.st_uid != os.getuid() or
+                directory_info.st_mode & 0o077):
+            return None
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or
+                    info.st_mode & 0o777 != 0o600 or info.st_size > 8192):
+                return None
+            with os.fdopen(fd, "r", encoding="utf-8") as source:
+                fd = -1
+                value = json.load(source)
+        finally:
+            if fd >= 0:
+                os.close(fd)
+        if (not isinstance(value, dict) or value.get("schema") != 1 or
+                (LAUNCHER_PROJECT_HASH and value.get("projectHash") != LAUNCHER_PROJECT_HASH)):
+            return None
+        return value
     except (OSError, ValueError, TypeError):
         return None
 
@@ -11629,8 +11678,20 @@ def launcher_app_ready(app, runtime):
 def launcher_apps():
     apps = []
     for app in LAUNCHER_APP_REGISTRY:
-        runtime = read_launcher_runtime(app["runtime_file"])
+        runtime_file = app["runtime_file"]
+        if app.get("runtime_location") == "taskboard-state":
+            runtime_file = launcher_taskboard_runtime_path("runtime.json")
+        runtime = read_launcher_runtime(runtime_file)
         if runtime is None or not launcher_app_ready(app, runtime):
+            if app.get("id") == "taskboard":
+                failure = read_launcher_failure(launcher_taskboard_runtime_path(app["failure_file"]))
+                if failure:
+                    apps.append({
+                        "id": app["id"], "label": app["label"], "icon": app["icon"],
+                        "scheme": app["scheme"], "port": app.get("fixed_port", LISTEN_PORT + app.get("port_offset", 0)),
+                        "ready": False, "error": failure.get("reason", "Taskboard nicht bereit."),
+                        "log": failure.get("log", "VM-interner Taskboard-Logpfad nicht verfügbar."),
+                    })
             continue
         apps.append({
             "id": app["id"], "label": app["label"], "icon": app["icon"],
@@ -12076,7 +12137,7 @@ _stop_legacy_redirector() {
 }
 
 # start_proxy <name> <listen-port> <target-port> <seed-key> <cert> <key>
-#   [openlive-target project generation launcher-share project-hash launcher-enabled project-title]
+#   [openlive-target project generation launcher-share project-hash launcher-enabled project-title taskboard-runtime-dir]
 # Idempotent. Silent on failure — the caller owns the message, because what a
 # dead listener means differs per service. Returns non-zero if nothing is
 # listening after ~4s.
@@ -12084,6 +12145,7 @@ start_proxy() {
   local name="$1" listen="$2" target="$3" seedkey="$4" crt="$5" keyf="$6" remote="${7:-0}"
   local remote_project="${8:-}" remote_generation="${9:-}"
   local launcher_share="${10:-}" launcher_project="${11:-}" launcher_enabled="${12:-1}" project_title="${13:-}"
+  local taskboard_runtime_dir="${14:-}"
   local waited=0 marker="ocvm-proxy-$1"
   stop_proxy "$name"
   # `bash -c <loop> <marker> ...` rather than a forked subshell, so the marker
@@ -12093,15 +12155,15 @@ start_proxy() {
   setsid bash -c '
     marker="$0"; name="$1"; py="$2"; listen="$3"; target="$4"
      key="$5"; crt="$6"; keyf="$7"; remote="$8"; remote_project="$9"; remote_generation="${10}"
-       launcher_share="${11}"; launcher_project="${12}"; launcher_enabled="${13}"; project_title="${14}"
+        launcher_share="${11}"; launcher_project="${12}"; launcher_enabled="${13}"; project_title="${14}"; taskboard_runtime_dir="${15}"
       while true; do
-        python3 "$py" "$listen" "$target" "$key" "$crt" "$keyf" "$remote" "$remote_project" "$remote_generation" "$marker" "$launcher_share" "$launcher_project" "$launcher_enabled" "$project_title" \
+        python3 "$py" "$listen" "$target" "$key" "$crt" "$keyf" "$remote" "$remote_project" "$remote_generation" "$marker" "$launcher_share" "$launcher_project" "$launcher_enabled" "$project_title" "$taskboard_runtime_dir" \
         >>"/tmp/ocvm-proxy-$name.log" 2>&1 &
       echo $! > "/tmp/ocvm-proxy-$name.run.pid"
       wait $! || true
       sleep 1
     done' "$marker" "$name" "$OC_PROXY_PY" "$listen" "$target" "$seedkey" "$crt" "$keyf" "$remote" "$remote_project" "$remote_generation" \
-    "$launcher_share" "$launcher_project" "$launcher_enabled" "$project_title" </dev/null >/dev/null 2>&1 &
+    "$launcher_share" "$launcher_project" "$launcher_enabled" "$project_title" "$taskboard_runtime_dir" </dev/null >/dev/null 2>&1 &
   echo $! > "/tmp/ocvm-proxy-$name.sup.pid"
   while [ "$waited" -lt 20 ]; do
     if ss -ltn "sport = :$listen" 2>/dev/null | grep -q LISTEN; then
@@ -12148,10 +12210,185 @@ load_session_auth() {
   rm -f "$SESS_SHARE/editor/runtime.json"
 }
 
+taskboard_runtime_dir() {
+  local dir="${OCVM_TASKBOARD_RUNTIME_DIR:-$PROJ_DIR/.opencode-vm/taskboard}"
+  [[ "$dir" != *$'\n'* && "$dir" != *$'\r'* && "$dir" != *".."* ]] || return 1
+  printf '%s\n' "$dir"
+}
+
+# The pinned v0.6.0 binary owns SQL migration execution. Inspect its embedded
+# schema_migrations contract before and after it runs; never let an older binary
+# open a database with unknown migrations. The source of a one-time import is
+# retained. Backups use SQLite's online backup API (not a raw WAL-file copy).
+taskboard_state_guard() {
+  local operation="$1"
+  python3 - "$operation" "$PROJ_DIR" "$OC_TASKBOARD_DB" "${OC_TASKBOARD_LEGACY_DB:-}" "${OC_TASKBOARD_LEGACY_EXPECTED:-0}" <<'BOARD_STATE'
+import json, os, pathlib, shutil, sqlite3, sys, uuid
+
+operation, project, db_name, legacy_name, legacy_expected = sys.argv[1:]
+project = pathlib.Path(project)
+db = pathlib.Path(db_name)
+legacy = pathlib.Path(legacy_name) if legacy_name else None
+supported = ("001_initial.sql", "002_add_project_description.sql")
+state = project / ".opencode-vm"
+board = state / "taskboard"
+
+def safe_directory(path):
+    if path.is_symlink() or (path.exists() and not path.is_dir()):
+        raise ValueError(f"Unsafe Taskboard state directory: {path}")
+    path.mkdir(mode=0o700, exist_ok=True)
+    path.chmod(0o700)
+
+def safe_file(path):
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise ValueError(f"Unsafe Taskboard state file: {path}")
+
+def migrations(path):
+    safe_file(path)
+    with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
+        if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+            raise ValueError("Taskboard database integrity check failed")
+        table = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'").fetchone()
+        if not table:
+            raise ValueError("Taskboard database has no schema_migrations table")
+        versions = {row[0] for row in connection.execute("SELECT version FROM schema_migrations")}
+    if not versions or not versions.issubset(supported) or supported[0] not in versions or (supported[1] in versions and supported[0] not in versions):
+        raise ValueError("Taskboard database schema is newer or unsupported; refusing downgrade")
+    return versions
+
+def backup(source, destination):
+    safe_file(destination)
+    if destination.exists():
+        return
+    temporary = destination.with_name(destination.name + "." + uuid.uuid4().hex + ".tmp")
+    try:
+        with sqlite3.connect(f"file:{source}?mode=ro", uri=True) as existing, sqlite3.connect(temporary) as copy:
+            existing.backup(copy)
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+try:
+    if not str(db).startswith(str(board) + os.sep) or db.name != "taskboard.db":
+        raise ValueError("Taskboard DB must be inside the project-local state directory")
+    safe_directory(state)
+    safe_directory(board)
+    ignore = project / ".gitignore"
+    safe_file(ignore)
+    if not ignore.exists() or not any(line.strip() == ".opencode-vm/" for line in ignore.read_text().splitlines()):
+        with ignore.open("a", encoding="utf-8") as file:
+            file.write(("\n" if ignore.exists() and ignore.stat().st_size else "") + ".opencode-vm/\n")
+    safe_file(db)
+    metadata = board / "taskboard.metadata.json"
+    safe_file(metadata)
+    if operation == "preflight":
+        if not db.exists() and legacy_expected == "1" and (not legacy or not legacy.is_file()):
+            raise ValueError("Existing project-state DB is not mounted; refusing to start an empty Taskboard")
+        if not db.exists() and legacy and legacy.is_file():
+            old_metadata = legacy.with_name("taskboard.metadata.json")
+            safe_file(old_metadata)
+            if metadata.exists() and not old_metadata.exists():
+                raise ValueError("Incomplete Taskboard import; inspect state before retry")
+            if metadata.exists() and old_metadata.exists() and metadata.read_bytes() != old_metadata.read_bytes():
+                raise ValueError("Incomplete Taskboard import has changed metadata; refusing to mix versions")
+            migrations(legacy)
+            if old_metadata.exists() and not metadata.exists():
+                staged = metadata.with_name(metadata.name + "." + uuid.uuid4().hex + ".tmp")
+                try:
+                    shutil.copyfile(old_metadata, staged)
+                    os.chmod(staged, 0o600)
+                    os.replace(staged, metadata)
+                finally:
+                    staged.unlink(missing_ok=True)
+            backup(legacy, db)
+            print("[taskboard] Imported old project DB via SQLite backup; original retained.")
+        if db.exists():
+            versions = migrations(db)
+            if legacy and legacy.is_file() and legacy.with_name("taskboard.metadata.json").is_file() and not metadata.exists():
+                raise ValueError("Taskboard DB import has no metadata sidecar; original retained, inspect before use")
+            if supported[1] not in versions:
+                backup(db, board / "taskboard.pre-v0.6.0.db")
+                print("[taskboard] Pre-migration SQLite backup retained before upstream upgrade.")
+    elif operation == "verify":
+        if not db.exists() or migrations(db) != set(supported):
+            raise ValueError("Taskboard did not reach pinned v0.6.0 schema")
+    else:
+        raise ValueError("Unsupported Taskboard state operation")
+except (OSError, ValueError, sqlite3.Error) as error:
+    print("[taskboard] State validation failed: " + str(error), file=sys.stderr)
+    sys.exit(1)
+BOARD_STATE
+}
+
+taskboard_failure() {
+  local reason="$1" dir tmp log
+  dir="$(taskboard_runtime_dir 2>/dev/null || true)"
+  [[ -n "$dir" ]] || return 0
+  [ ! -L "$PROJ_DIR/.opencode-vm" ] && [ ! -L "$dir" ] || return 0
+  mkdir -p -m 700 "$dir" 2>/dev/null || return 0
+  chmod 700 "$dir" 2>/dev/null || true
+  log="$dir/taskboard.log"
+  tmp="$(mktemp "$dir/.failure.XXXXXX" 2>/dev/null || true)"
+  [[ -n "$tmp" ]] || return 0
+  if jq -n --arg hash "${OC_OPENLIVE_PROJECT_HASH:-unknown}" --arg log "$log" --arg reason "$reason" \
+      '{schema:1,projectHash:$hash,log:$log,reason:$reason}' > "$tmp"; then
+    chmod 600 "$tmp" && mv -f "$tmp" "$dir/failure.json"
+  else
+    rm -f "$tmp"
+  fi
+}
+
+taskboard_prepare_runtime() {
+  local dir log
+  dir="$(taskboard_runtime_dir)" || return 1
+  [ ! -L "$PROJ_DIR/.opencode-vm" ] && [ ! -L "$dir" ] || return 1
+  mkdir -p -m 700 "$dir" || return 1
+  chmod 700 "$dir" || return 1
+  rm -f "$dir/runtime.json" "$dir/failure.json"
+  log="$dir/taskboard.log"
+  [ ! -L "$log" ] || return 1
+  touch "$log" || return 1
+  chmod 600 "$log" || return 1
+}
+
+# Stream the service output through a bounded writer rather than letting
+# StandardOutput=append grow without limit between reconnects.
+read -r -d '' OC_TASKBOARD_LOG_WRITER_PY <<'BOARD_LOG' || true
+import os, pathlib, sys
+log = pathlib.Path(sys.argv[1])
+old = log.with_name(log.name + ".1")
+limit = 1024 * 1024
+def rotate(force=False):
+    if log.exists() and (force or log.stat().st_size >= limit):
+        if old.is_symlink() or log.is_symlink():
+            raise RuntimeError("Unsafe taskboard log")
+        with log.open("rb") as source:
+            source.seek(max(0, log.stat().st_size - limit))
+            content = source.read(limit)
+        with old.open("wb") as target:
+            target.write(content)
+        old.chmod(0o600)
+        log.unlink()
+rotate()
+with log.open("ab", buffering=0) as target:
+    os.chmod(log, 0o600)
+    while True:
+        chunk = sys.stdin.buffer.read1(4096)
+        if not chunk:
+            break
+        if target.tell() + len(chunk) > limit:
+            target.close()
+            rotate(True)
+            target = log.open("ab", buffering=0)
+            os.chmod(log, 0o600)
+        target.write(chunk)
+BOARD_LOG
+
 stop_taskboard() {
-  local description
-  [ ! -L "$SESS_SHARE/taskboard" ] || return 1
-  rm -f "$SESS_SHARE/taskboard/runtime.json"
+  local description dir
+  dir="$(taskboard_runtime_dir 2>/dev/null || true)"
+  [[ -z "$dir" ]] || rm -f "$dir/runtime.json" "$dir/failure.json"
   [ "$(systemctl show ocvm-taskboard.service -p LoadState --value 2>/dev/null)" != not-found ] || return 0
   description="$(systemctl show ocvm-taskboard.service -p Description --value 2>/dev/null)" || return 1
   [ "$description" = "opencode-vm taskboard $SESS_SHARE" ] || {
@@ -12165,19 +12402,27 @@ start_taskboard() {
   OC_TASKBOARD_READY=0
   [ "${OC_TASKBOARD_ENABLED:-0}" = "1" ] || return 0
   stop_taskboard || return 1
-  local port="$((OC_PORT + 5))" waited=0 dir="$SESS_SHARE/taskboard" tmp
+  taskboard_prepare_runtime || { taskboard_failure "Could not prepare VM-local runtime directory."; return 1; }
+  local port="$((OC_PORT + 5))" waited=0 dir tmp log
+  dir="$(taskboard_runtime_dir)"
+  log="$dir/taskboard.log"
+  if ! taskboard_state_guard preflight >> "$log" 2>&1; then
+    taskboard_failure "Taskboard state check failed (schema, migration or import)."
+    echo "[taskboard] State check failed; inspect $log. Existing DB was retained." >&2
+    return 1
+  fi
   if [ -z "${OC_TASKBOARD_BIN:-}" ]; then
     local arch="$(uname -m)"; [ "$arch" = aarch64 ] || arch=amd64
     OC_TASKBOARD_BIN="$HOME/.local/share/ocvm-taskboard/taskboard-0.6.0-$arch/taskboard"
   fi
   [ -x "$OC_TASKBOARD_BIN" ] || {
-    echo "[taskboard] Binary is not installed; re-run opencode-vm init." >&2
+    taskboard_failure "Taskboard binary is not installed."
+    echo "[taskboard] Binary is not installed; re-run opencode-vm init. Log: $log" >&2
     return 1
   }
-  [ -n "${OC_TASKBOARD_DB:-}" ] || return 1
-  mkdir -p "$(dirname "$OC_TASKBOARD_DB")" || return 1
   if ss -ltn "sport = :$port" | grep -q LISTEN; then
-    echo "[taskboard] Port $port is already occupied inside the VM." >&2
+    taskboard_failure "Taskboard port $port is already occupied inside the VM."
+    echo "[taskboard] Port $port is already occupied inside the VM. Log: $log" >&2
     return 1
   fi
   sudo -n systemd-run --quiet --collect --unit=ocvm-taskboard --service-type=exec \
@@ -12187,15 +12432,22 @@ start_taskboard() {
     --property=KillMode=control-group --property=TimeoutStopSec=10 \
     --property=Restart=on-failure --property=RestartSec=2 \
     --property=AppArmorProfile=opencode-sandbox \
-    --property="StandardOutput=append:$SESS_SHARE/taskboard.log" --property="StandardError=append:$SESS_SHARE/taskboard.log" \
-    --setenv="PATH=$PATH" -- "$OC_TASKBOARD_BIN" start --foreground --port "$port" --db "$OC_TASKBOARD_DB" || return 1
+    --property="StandardOutput=journal" --property="StandardError=journal" \
+    --setenv="PATH=$PATH" -- /bin/bash -c 'set -o pipefail; "$1" start --foreground --port "$2" --db "$3" 2>&1 | python3 -u -c "$4" "$5"' \
+      _ "$OC_TASKBOARD_BIN" "$port" "$OC_TASKBOARD_DB" "$OC_TASKBOARD_LOG_WRITER_PY" "$log" || {
+      taskboard_failure "Taskboard systemd service could not be started."
+      return 1
+    }
   while [ "$waited" -lt 100 ]; do
     if systemctl is-active --quiet ocvm-taskboard.service && curl -fsS --max-time 1 "http://127.0.0.1:$port/api/projects" >/dev/null 2>&1; then
-      [ ! -L "$dir" ] && [ ! -L "$dir/runtime.json" ] || return 1
-      mkdir -p -m 700 "$dir" && chmod 700 "$dir" || return 1
+      if ! taskboard_state_guard verify >> "$log" 2>&1; then
+        stop_taskboard || true
+        taskboard_failure "Taskboard schema verification after startup failed."
+        return 1
+      fi
       tmp="$(mktemp "$dir/.runtime.XXXXXX")" || return 1
-      if ! jq -n --arg share "$SESS_SHARE" --arg hash "$OC_OPENLIVE_PROJECT_HASH" --argjson port "$port" \
-          '{schema:1,share:$share,projectHash:$hash,taskboardPort:$port}' > "$tmp" ||
+      if ! jq -n --arg hash "$OC_OPENLIVE_PROJECT_HASH" --arg dir "$dir" --arg log "$log" --argjson port "$port" \
+          '{schema:1,projectHash:$hash,runtimeDir:$dir,log:$log,taskboardPort:$port}' > "$tmp" ||
           ! chmod 600 "$tmp" || ! mv -f "$tmp" "$dir/runtime.json"; then
         rm -f "$tmp"
         return 1
@@ -12208,7 +12460,8 @@ start_taskboard() {
     waited=$((waited + 1))
   done
   stop_taskboard || true
-  echo "[taskboard] Startup failed; inspect $SESS_SHARE/taskboard.log." >&2
+  taskboard_failure "Taskboard readiness timed out: GET /api/projects on port $port failed."
+  echo "[taskboard] Startup failed; inspect $log." >&2
   return 1
 }
 
@@ -12305,6 +12558,7 @@ EDITOR_CONFIG
     --property=AppArmorProfile=opencode-sandbox \
     --property="StandardOutput=append:$dir/server.log" --property="StandardError=append:$dir/server.log" \
     --setenv="PATH=$PATH" --setenv="HOME=$HOME" --setenv="OCVM_EDITOR_RUNTIME=$dir/runtime.json" \
+    --setenv="OCVM_TASKBOARD_RUNTIME_DIR=${OCVM_TASKBOARD_RUNTIME_DIR:-}" \
     --setenv="XDG_CONFIG_HOME=$SESS_SHARE/config" --setenv=XDG_DATA_HOME=/tmp/oc-xdg-data \
     --setenv=XDG_STATE_HOME=/tmp/oc-xdg-state --setenv="OCVM_HOST_LAN_IP=$OC_HOST_IP" \
     -- "$OC_EDITOR_BIN" --config "$dir/config.yaml" --disable-telemetry --disable-update-check \
@@ -12479,7 +12733,7 @@ start_web_proxies() {
   fi
   if ! start_proxy web-tls "$OC_PORT" "$OC_PORT_INTERNAL" "$OC_DIR_KEY" "$OC_TLS_CERT" "$OC_TLS_KEY" \
     "$OC_OPENLIVE_REMOTE_TARGET" "$OC_OPENLIVE_PROJECT_HASH" "$OC_OPENLIVE_REMOTE_GENERATION" \
-    "$SESS_SHARE" "$OC_OPENLIVE_PROJECT_HASH" "${OC_LAUNCHER_ENABLED:-1}" "$(basename "$PROJ_DIR")"; then
+    "$SESS_SHARE" "$OC_OPENLIVE_PROJECT_HASH" "${OC_LAUNCHER_ENABLED:-1}" "$(basename "$PROJ_DIR")" "${OCVM_TASKBOARD_RUNTIME_DIR:-}"; then
     echo "[web] Redirector did not bind port $OC_PORT — falling back to opencode on $OC_PORT directly."
     stop_all_proxies
     openlive_proxy_fallback
@@ -12496,7 +12750,7 @@ start_web_proxies() {
   # degrade at runtime (missing openssl, cert failure) in ways the host cannot
   # predict — which would leave LAN ports tunnelled to nothing.
   start_proxy web-plain "$(( OC_PORT + 1 ))" "$OC_PORT_INTERNAL" "$OC_DIR_KEY" "" "" \
-    0 "" "" "$SESS_SHARE" "$OC_OPENLIVE_PROJECT_HASH" "${OC_LAUNCHER_ENABLED:-1}" "$(basename "$PROJ_DIR")" ||
+    0 "" "" "$SESS_SHARE" "$OC_OPENLIVE_PROJECT_HASH" "${OC_LAUNCHER_ENABLED:-1}" "$(basename "$PROJ_DIR")" "${OCVM_TASKBOARD_RUNTIME_DIR:-}" ||
     echo "[web] WARNING: plain-HTTP web endpoint on $(( OC_PORT + 1 )) did not come up."
 
   # The a2a listeners come up here too, even though the sidecar behind them is
@@ -13091,7 +13345,7 @@ print_web_banner() {
     echo "  Browser:       http://${host}:$(( OC_PORT + 5 ))"
     echo "  Database:      ${OC_TASKBOARD_DB:-project state}/taskboard.db"
   else
-    echo "  unavailable — inspect $SESS_SHARE/taskboard.log"
+    echo "  unavailable — inspect $(taskboard_runtime_dir 2>/dev/null || echo 'VM-local Taskboard runtime directory')/taskboard.log"
   fi
   echo ""
   if [ "${OC_A2A:-1}" = "1" ]; then
@@ -13864,12 +14118,16 @@ attach_session() {
     OC_LAN_UP="${11:-1}"
     OC_OPENLIVE_PROJECT_HASH="${12:-}"
     OC_OPENLIVE_SCRIPT_VERSION="${13:-unknown}"
+    OCVM_TASKBOARD_RUNTIME_DIR="$PROJ_DIR/.opencode-vm/taskboard"
+    export OCVM_TASKBOARD_RUNTIME_DIR
     OC_MCP_ENABLED="${14:-0}"
     OC_MCP_PORT="${15:-40960}"
      OC_MCP_GENERATION="${16:-}"
      OC_EDITOR_ENABLED="${17:-0}"
      OC_TASKBOARD_DB="${18:-}"
      OC_TASKBOARD_METADATA_FILE="${OC_TASKBOARD_DB%.db}.metadata.json"
+     OC_TASKBOARD_LEGACY_DB="${20:-}"
+     OC_TASKBOARD_LEGACY_EXPECTED="${21:-0}"
      OC_TASKBOARD_ENABLED=0
      if [ "$OC_MODE" = web ] || [ "$OC_MODE" = tui-mcp ]; then OC_TASKBOARD_ENABLED=1; fi
      OC_LAUNCHER_ENABLED="${19:-1}"
@@ -14154,7 +14412,7 @@ attach_session() {
 
     # Sync-back happens via the EXIT trap installed above (covers Ctrl+C as
     # well as normal exit).
-   ' "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$effective_base" "$host_lan_ip" "${OC_WEB_TUI:-false}" "$sess_tls" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up" "$(proj_hash "$proj")" "$OCVM_VERSION" "$sess_mcp_enabled" "$sess_mcp_port" "$attach_controller" "$sess_editor_enabled" "$(project_state_dir "$proj")/taskboard/taskboard.db" "${SESSION_LAUNCHER_ENABLED:-1}" || {
+   ' "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$effective_base" "$host_lan_ip" "${OC_WEB_TUI:-false}" "$sess_tls" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up" "$(proj_hash "$proj")" "$OCVM_VERSION" "$sess_mcp_enabled" "$sess_mcp_port" "$attach_controller" "$sess_editor_enabled" "$proj/.opencode-vm/taskboard/taskboard.db" "${SESSION_LAUNCHER_ENABLED:-1}" "$(project_state_dir "$proj")/taskboard/taskboard.db" "$(test -f "$(project_state_dir "$proj")/taskboard/taskboard.db" && printf 1 || printf 0)" || {
     stop_mcp_host_watcher || true
     echo "[attach] Session command failed." >&2
     return 1
@@ -15748,12 +16006,16 @@ start_session() {
     OC_LAN_UP="${11:-1}"
     OC_OPENLIVE_PROJECT_HASH="${12:-}"
     OC_OPENLIVE_SCRIPT_VERSION="${13:-unknown}"
+    OCVM_TASKBOARD_RUNTIME_DIR="$PROJ_DIR/.opencode-vm/taskboard"
+    export OCVM_TASKBOARD_RUNTIME_DIR
     OC_MCP_ENABLED="${14:-0}"
     OC_MCP_PORT="${15:-40960}"
      OC_MCP_GENERATION="${16:-}"
      OC_EDITOR_ENABLED="${17:-0}"
      OC_TASKBOARD_DB="${18:-}"
      OC_TASKBOARD_METADATA_FILE="${OC_TASKBOARD_DB%.db}.metadata.json"
+     OC_TASKBOARD_LEGACY_DB="${20:-}"
+     OC_TASKBOARD_LEGACY_EXPECTED="${21:-0}"
      OC_TASKBOARD_ENABLED=0
      if [ "$OC_MODE" = web ] || [ "$OC_MODE" = tui-mcp ]; then OC_TASKBOARD_ENABLED=1; fi
      OC_LAUNCHER_ENABLED="${19:-1}"
@@ -16125,7 +16387,7 @@ EOF
 
     # Sync back happens via the EXIT trap installed above (covers both clean
     # exit and Ctrl+C-driven termination of the web server).
-   ' "$proj" "$sess_share" "$SESSION_MODE" "$effective_base" "${OC_WEB_TUI:-false}" "$host_lan_ip" "${SESSION_TLS:-0}" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up" "$(proj_hash "$proj")" "$OCVM_VERSION" "$effective_mcp_enabled" "${effective_mcp_port:-$DEFAULT_MCP_PORT}" "$controller_id" "$effective_editor_enabled" "$proj_state/taskboard/taskboard.db" "${SESSION_LAUNCHER_ENABLED:-1}"; then
+   ' "$proj" "$sess_share" "$SESSION_MODE" "$effective_base" "${OC_WEB_TUI:-false}" "$host_lan_ip" "${SESSION_TLS:-0}" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up" "$(proj_hash "$proj")" "$OCVM_VERSION" "$effective_mcp_enabled" "${effective_mcp_port:-$DEFAULT_MCP_PORT}" "$controller_id" "$effective_editor_enabled" "$proj/.opencode-vm/taskboard/taskboard.db" "${SESSION_LAUNCHER_ENABLED:-1}" "$proj_state/taskboard/taskboard.db" "$(test -f "$proj_state/taskboard/taskboard.db" && printf 1 || printf 0)"; then
     if ! stop_mcp_host_watcher; then
       echo "[mcp] Host readiness did not complete successfully; session failed closed." >&2
       return 1

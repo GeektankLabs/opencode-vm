@@ -114,6 +114,11 @@ Select a channel in **Output**, or open it through the command palette:
 - **OpenCode: Activity**: the latest 200 stored metadata events from the existing activity journal. Events can originate through multiple frontends; this is not a claim of MCP origin. Epoch and bounded/downtime coverage are explicit. With MCP disabled, activity collection is unavailable.
 - **MCP: Tunnel**: retained `mcp/tunnel.log`, when available.
 - **opencode-vm: Editor**: the editor's service log.
+- **Taskboard**: persistent project-local diagnostics under
+  `<project>/.opencode-vm/taskboard/`. The editor terminal and OpenCode agent
+  receive this location as `OCVM_TASKBOARD_RUNTIME_DIR`; inspect `taskboard.log`
+  there. `runtime.json` exists only after readiness; `failure.json` records a
+  startup reason and log path.
 
 Log views refresh every two seconds, read at most the latest 128 KiB per text log, and handle rotation/truncation. They can contain entries from before a reconnect. The extension does not create a second activity collector or call the MCP tools itself. Tool-call diagnostics record known metadata only: no prompt/answer bodies, credentials, references, cursors, arbitrary tool names or raw exceptions. Existing logs remain session-scoped.
 
@@ -122,6 +127,10 @@ Log views refresh every two seconds, read at most the latest 128 KiB per text lo
 The editor's `user-data/User` directory is copied to `~/.opencode-vm/project-state/<hash>/editor/user-data/User` during controlled finalization and restored for fresh enabled sessions. Existing settings are preserved; defaults are written only for a new profile. The editor never writes baseline settings into the project's `.vscode` directory. Extra extensions installed manually are session-local in this first version.
 
 Files uploaded or saved into the mounted project persist on the host immediately, including local commits and branch changes. Downloads go to the device running the browser. Files created only in the VM follow its ephemeral lifetime. A file readable by OpenCode is also available to the agent; placing a credential in a file avoids sending it as a chat message but does not create agent-private storage.
+Taskboard's DB, sidecar and bounded log survive a new VM with the mounted project.
+Runtime descriptors are removed when the service stops. The project's root
+`.gitignore` ignores `.opencode-vm/`, preventing accidental commits of generated
+state. The diagnostic log is capped at 1 MiB with one rotated 1 MiB copy.
 
 ## Validation
 
