@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-09-28-r9
+
+- Add a discovered-tool-only upload workflow for supported images and text/Markdown using session-bound, one-use attachment IDs; preserve normal `send_message` write/uncertain semantics.
+- Add an explicit PDF-to-Markdown/text fallback, size-aware splitting and coverage rules, plus a no-raw-upload policy for other unsupported types.
+- Add synthetic image/text, PDF extraction, limits, unsupported model/type and expired/one-use reference review scenarios. This package does not claim hosted ChatGPT or Voice attachment acceptance.
+
+## 2026-09-28-r8
+
+- Add an explicit recovery path for `SUBMISSION_UNRESOLVED`: inspect the exact old receipt and current guard, explain the remaining risk, and require fresh user approval tied to that guard.
+- Use `supersede_unresolved_submission` only when discovered; it atomically audits the operator decision and submits the approved next task once. Verify its own returned message ID without a second send.
+- Preserve the exact client UUID/request on uncertain recovery, never infer operator approval from the original task authorization, and stop on stale guards, active work or pending input.
+- Add synthetic regression scenarios; this instruction package does not claim hosted ChatGPT behavior or live override acceptance.
+
 ## 2026-09-27-r7
 
 - Explicitly classify each new `send_message` task as a write-capable, non-idempotent connector call, independently of a read-only remote task scope.

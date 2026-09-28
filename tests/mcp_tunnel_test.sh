@@ -241,8 +241,19 @@ assert b"New tunnel API key (Read + Use):" not in out
 assert (root + "/a").encode() in out and b"wrong project" in out
 value = json.load(open(config))
 assert len(value["keys"]) == 1 and len(value["tunnels"]) == 1 and len(value["projects"]) == 2
+new_tunnel = "tunnel_22222222222222222222222222222222"
+out = wizard("provider_cmd mcp new openai", root + "/e", [(b"Tunnel API key: choose", b"1\n"), (b"Tunnel: choose", new_tunnel.encode() + b"\n")])
+assert b"Tunnel ID:" not in out and b"Saved project connection" in out, "direct ID opened the separate prompt"
+value = json.load(open(config))
+e_id = hashlib.md5(os.fsencode(root + "/e")).hexdigest()
+assert value["projects"][e_id]["tunnelId"] == new_tunnel and new_tunnel in value["tunnels"]
+wizard(f"provider_cmd mcp rm openai --project {e_id}", root + "/a", [])
+wizard(f"provider_cmd mcp rm openai --tunnel-id {new_tunnel}", root + "/a", [])
 before = open(config, "rb").read()
-wizard("provider_cmd mcp new openai", root + "/b", [(b"Tunnel API key: choose", b"n\n"), (b"New tunnel API key (Read + Use):", b"sk-cancelled\n"), (b"Tunnel: choose", b"n\n"), (b"Tunnel ID:", b"\x03")], -signal.SIGINT)
+wizard("provider_cmd mcp new openai", root + "/e", [(b"Tunnel API key: choose", b"1\n"), (b"Tunnel: choose", b"tunnel_bad\n")], 2)
+assert open(config, "rb").read() == before, "invalid direct tunnel ID changed the register"
+out = wizard("provider_cmd mcp new openai", root + "/b", [(b"Tunnel API key: choose", b"n\n"), (b"New tunnel API key (Read + Use):", b"sk-cancelled\n"), (b"Tunnel: choose", b"n\n"), (b"Tunnel ID:", b"\x03")], -signal.SIGINT)
+assert b"https://platform.openai.com/settings/organization/tunnels" in out, "n lost the tunnel creation link"
 assert open(config, "rb").read() == before, "cancelled setup left partial pool entries"
 
 # Start at either the action menu or a partially specified command. Missing

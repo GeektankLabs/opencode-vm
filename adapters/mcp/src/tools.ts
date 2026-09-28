@@ -7,7 +7,10 @@ import type {
 import { CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod/v4";
 import type { SessionGateway } from "./opencode.js";
+import type { RuntimeDescriptor } from "./types.js";
+import { ProjectBoardService } from "./taskboard.js";
 import { traceToolCall } from "./diagnostics.js";
+import { SUPPORTED_ATTACHMENT_TYPES } from "./attachments.js";
 import {
   ACTIVITY_TYPES,
   ADAPTER_VERSION,
@@ -68,6 +71,77 @@ const taskResultInput = z
     limit: z.number().int().min(1).max(20).default(20),
     include_archived: z.boolean().optional(),
   })
+  .strict();
+
+const taskId = z
+  .string()
+  .min(1)
+  .max(256)
+  .regex(/^[^\s\x00-\x1f\x7f]+$/u);
+const taskInputBase = z.object({ project_id: taskId.optional() }).strict();
+const taskOutput = z
+  .object({
+    task_id: taskId,
+    project_id: taskId,
+    scope: z.literal("project-local"),
+    title: z.string(),
+    description: z.string(),
+    status: z.string(),
+    priority: z.string(),
+    position: z.number().optional(),
+    created_at: z.string().optional(),
+    updated_at: z.string().optional(),
+    comments: z.array(
+      z
+        .object({ id: z.string(), body: z.string(), created_at: z.string() })
+        .strict(),
+    ),
+    session_ids: z.array(z.string()),
+  })
+  .strict();
+const listTasksInput = taskInputBase
+  .extend({ status: z.string().min(1).max(64).optional() })
+  .strict();
+const getTaskInput = z.object({ task_id: taskId }).strict();
+const createTaskInput = taskInputBase
+  .extend({
+    title: z.string().trim().min(1).max(500),
+    description: z.string().max(32_000).optional(),
+    priority: z.string().max(64).optional(),
+    status: z.string().max(64).optional(),
+  })
+  .strict();
+const updateTaskInput = z
+  .object({
+    task_id: taskId,
+    title: z.string().trim().min(1).max(500).optional(),
+    description: z.string().max(32_000).optional(),
+    priority: z.string().max(64).optional(),
+    status: z.string().max(64).optional(),
+  })
+  .strict()
+  .refine((value) => Object.keys(value).some((key) => key !== "task_id"));
+const moveTaskInput = z
+  .object({
+    task_id: taskId,
+    status: z.string().min(1).max(64),
+    position: z.number().optional(),
+  })
+  .strict();
+const commentInput = z
+  .object({ task_id: taskId, body: z.string().trim().min(1).max(32_000) })
+  .strict();
+const linkTaskInput = z
+  .object({
+    task_id: taskId,
+    session_id: sessionId,
+    message_id: sessionId.optional(),
+    result: z.string().max(32_000).optional(),
+    artifact_refs: z.array(z.string().max(2048)).max(20).optional(),
+  })
+  .strict();
+const transferTaskInput = z
+  .object({ task_id: taskId, target_scope: z.string().min(1).max(64) })
   .strict();
 
 const projectSchema = z.object({ id: z.string(), name: z.string() }).strict();
@@ -149,6 +223,16 @@ const archiveSessionOutputSchema = z
     archived_at: z.number().int().positive(),
   })
   .strict();
+const receiptResolutionSchema = z
+  .object({
+    state: z.literal("unresolved"),
+    resolution: z.literal("superseded_by_operator"),
+    superseded_at: z.string(),
+    superseded_by_request_id: z.string().uuid(),
+    superseded_by_message_id: sessionId,
+    reason: z.string().optional(),
+  })
+  .strict();
 
 export const getSessionStatusInputSchema = z
   .object({ session_id: sessionId, message_id: sessionId.optional() })
@@ -167,6 +251,46 @@ export const sendMessageInputSchema = z
   .object({
     session_id: sessionId,
     message: z.string().min(1).max(32_000),
+    attachments: z.array(z.string().min(1).max(256)).max(32).optional(),
+  })
+  .strict();
+const supersedeSubmissionInputSchema = z
+  .object({
+    session_id: sessionId,
+    guarded_message_id: sessionId,
+    request_id: z.string().uuid(),
+    operator_authorized: z.literal(true),
+    reason: z
+      .string()
+      .trim()
+      .min(1)
+      .max(500)
+      .regex(/^[^\x00-\x1f\x7f]+$/u)
+      .optional(),
+    message: z.string().min(1).max(32_000),
+    attachments: z.array(z.string().min(1).max(256)).max(32).optional(),
+  })
+  .strict();
+
+const uploadAttachmentInputSchema = z
+  .object({
+    session_id: sessionId,
+    filename: z.string().min(1).max(255),
+    mime_type: z.string().min(1).max(128),
+    data_base64: z
+      .string()
+      .min(1)
+      .max(8 * 1024 * 1024),
+  })
+  .strict();
+const uploadAttachmentOutputSchema = z
+  .object({
+    attachment_id: z.string(),
+    filename: z.string(),
+    mime_type: z.enum(SUPPORTED_ATTACHMENT_TYPES),
+    size_bytes: z.number().int().positive(),
+    sha256: z.string(),
+    expires_at: z.string(),
   })
   .strict();
 
@@ -268,6 +392,23 @@ const activityOutput = z
           session_id: z.string(),
           session_title: z.string(),
           message_id: z.string().optional(),
+          guarded_message_id: z.string().optional(),
+          request_id: z.string().uuid().optional(),
+          reason: z.string().optional(),
+          operator_authorized: z.literal(true).optional(),
+          authorization_source: z.literal("operator_asserted").optional(),
+          guarded_receipt_state: z
+            .enum([
+              "unknown",
+              "submitted",
+              "running",
+              "input_required",
+              "completed",
+              "failed",
+              "aborted",
+            ])
+            .optional(),
+          last_activity_at: z.number().nonnegative().optional(),
           type: z.enum(ACTIVITY_TYPES),
           state: z.string(),
           assistant_message_ids: z.array(z.string()),
@@ -341,6 +482,7 @@ const sessionStatusOutputSchema = z
     active_assistant_message_ids: z.array(z.string()).optional(),
     pending_input_scope: z.literal("session").optional(),
     admission: admissionSchema.optional(),
+    receipt_resolution: receiptResolutionSchema.optional(),
     observed_at: z.string().optional(),
     source: z.literal("backend").optional(),
     task_status_reason: z
@@ -442,8 +584,10 @@ const taskResultOutput = z
         "search_incomplete",
         "non_terminal_evidence",
         "no_terminal_evidence",
+        "superseded_by_later_completed_turn",
       ])
       .optional(),
+    superseded_by_message_id: z.string().optional(),
     observed_at: z.string(),
     source: z.literal("backend"),
     search_complete: z.boolean(),
@@ -454,6 +598,7 @@ const taskResultOutput = z
         .extend({ result_kind: z.enum(["terminal", "intermediate"]) })
         .strict(),
     ),
+    receipt_resolution: receiptResolutionSchema.optional(),
   })
   .strict();
 
@@ -464,9 +609,80 @@ const sendMessageOutputSchema = z
     state: z.literal("submitted"),
     submitted_at: z.string().optional(),
     activity_cursor: z.string().optional(),
+    attachments: z
+      .array(
+        z
+          .object({
+            attachment_id: z.string(),
+            filename: z.string(),
+            mime_type: z.enum(SUPPORTED_ATTACHMENT_TYPES),
+            size_bytes: z.number().int().positive(),
+            sha256: z.string(),
+          })
+          .strict(),
+      )
+      .optional(),
   })
   .strict();
-
+const submissionGuardSnapshotSchema = z
+  .object({
+    observed_at: z.string(),
+    backend_activity: activitySchema,
+    active_assistant_message_ids: z.array(z.string()),
+    in_flight_tools: z.array(toolObservationSchema).max(10),
+    pending_input: pendingSchema,
+    guarded_message_id: z.string(),
+    guarded_receipt_state: z.enum([
+      "unknown",
+      "submitted",
+      "running",
+      "input_required",
+      "completed",
+      "failed",
+      "aborted",
+    ]),
+    last_activity_at: z.number().nonnegative().optional(),
+    coverage: z
+      .object({
+        message_limit: z.number().int().positive(),
+        messages_scanned: z.number().int().nonnegative(),
+        history_has_more: z.boolean(),
+        in_flight_total: z.number().int().nonnegative(),
+        in_flight_truncated: z.boolean(),
+        metadata_incomplete: z.boolean(),
+        unattributed_tools: z.number().int().nonnegative(),
+      })
+      .strict(),
+  })
+  .strict();
+const supersedeSubmissionOutputSchema = z
+  .object({
+    session_id: z.string(),
+    guarded_message_id: z.string(),
+    request_id: z.string().uuid(),
+    message_id: z.string(),
+    state: z.literal("submitted"),
+    resolution: z.literal("superseded_by_operator"),
+    superseded_at: z.string(),
+    submitted_at: z.string(),
+    authorization_source: z.literal("operator_asserted"),
+    preflight: submissionGuardSnapshotSchema,
+    activity_cursor: z.string().optional(),
+    attachments: z
+      .array(
+        z
+          .object({
+            attachment_id: z.string(),
+            filename: z.string(),
+            mime_type: z.enum(SUPPORTED_ATTACHMENT_TYPES),
+            size_bytes: z.number().int().positive(),
+            sha256: z.string(),
+          })
+          .strict(),
+      )
+      .optional(),
+  })
+  .strict();
 const createSessionOutputSchema = z
   .object({
     project: projectSchema,
@@ -494,11 +710,204 @@ const writeAnnotations: ToolAnnotations = {
   openWorldHint: true,
 };
 
-export function createMcpServer(gateway: SessionGateway): McpServer {
+export function createMcpServer(
+  gateway: SessionGateway,
+  runtime?: RuntimeDescriptor,
+): McpServer {
   const server = new McpServer({
     name: "opencode-vm",
     version: ADAPTER_VERSION,
   });
+
+  const board =
+    runtime?.taskboardUrl && runtime.taskboardMetadataFile
+      ? new ProjectBoardService(
+          runtime as RuntimeDescriptor & {
+            taskboardUrl: string;
+            taskboardMetadataFile: string;
+          },
+        )
+      : undefined;
+  if (board) {
+    const boardError =
+      "Board changes are shared with the project Taskboard web app.";
+    server.registerTool(
+      "list_project_tasks",
+      {
+        title: "List Project Tasks",
+        description: `List board-neutral tasks in the current project. ${boardError}`,
+        inputSchema: listTasksInput,
+        outputSchema: z.object({ tasks: z.array(taskOutput) }).strict(),
+        annotations: readOnlyAnnotations,
+      },
+      safeHandler(async (input) =>
+        success(
+          { tasks: await board.listTasks(input.project_id, input.status) },
+          "Returned project tasks.",
+        ),
+      ),
+    );
+    server.registerTool(
+      "get_project_task",
+      {
+        title: "Get Project Task",
+        description: "Read one stable project task by task_id.",
+        inputSchema: getTaskInput,
+        outputSchema: taskOutput,
+        annotations: readOnlyAnnotations,
+      },
+      safeHandler(async (input) =>
+        success(await board.getTask(input.task_id), "Returned project task."),
+      ),
+    );
+    server.registerTool(
+      "create_project_task",
+      {
+        title: "Create Project Task",
+        description: `Create a task in the project-local board. ${boardError}`,
+        inputSchema: createTaskInput,
+        outputSchema: taskOutput,
+        annotations: writeAnnotations,
+      },
+      safeHandler(async (input) =>
+        success(
+          await board.createTask({
+            projectId: input.project_id,
+            title: input.title,
+            description: input.description,
+            priority: input.priority,
+            status: input.status,
+          }),
+          "Created project task.",
+        ),
+      ),
+    );
+    server.registerTool(
+      "update_project_task",
+      {
+        title: "Update Project Task",
+        description:
+          "Update task title, description, priority or status by stable task_id.",
+        inputSchema: updateTaskInput,
+        outputSchema: taskOutput,
+        annotations: writeAnnotations,
+      },
+      safeHandler(async ({ task_id, ...patch }) =>
+        success(
+          await board.updateTask(task_id, patch),
+          "Updated project task.",
+        ),
+      ),
+    );
+    server.registerTool(
+      "move_project_task",
+      {
+        title: "Move Project Task",
+        description: "Move a task to a board status column.",
+        inputSchema: moveTaskInput,
+        outputSchema: taskOutput,
+        annotations: writeAnnotations,
+      },
+      safeHandler(async (input) =>
+        success(
+          await board.moveTask(input.task_id, input.status, input.position),
+          "Moved project task.",
+        ),
+      ),
+    );
+    server.registerTool(
+      "add_task_comment",
+      {
+        title: "Add Task Comment",
+        description:
+          "Add an integration comment to a project task. Comments are stored by the adapter until the backend provides native comments.",
+        inputSchema: commentInput,
+        outputSchema: z
+          .object({
+            task_id: taskId,
+            comment: z
+              .object({
+                id: z.string(),
+                body: z.string(),
+                created_at: z.string(),
+              })
+              .strict(),
+          })
+          .strict(),
+        annotations: writeAnnotations,
+      },
+      safeHandler(async (input) =>
+        success(
+          await board.addComment(input.task_id, input.body),
+          "Added task comment.",
+        ),
+      ),
+    );
+    server.registerTool(
+      "link_task_to_session",
+      {
+        title: "Link Task To Session",
+        description:
+          "Associate a project task with an OpenCode session and optional result/artifact references.",
+        inputSchema: linkTaskInput,
+        outputSchema: z
+          .object({
+            task_id: taskId,
+            links: z.array(
+              z
+                .object({
+                  session_id: sessionId,
+                  message_id: sessionId.optional(),
+                  result: z.string().optional(),
+                  artifact_refs: z.array(z.string()).optional(),
+                })
+                .strict(),
+            ),
+          })
+          .strict(),
+        annotations: writeAnnotations,
+      },
+      safeHandler(async (input) =>
+        success(
+          await board.linkTask(input.task_id, {
+            sessionId: input.session_id,
+            messageId: input.message_id,
+            result: input.result,
+            artifactRefs: input.artifact_refs,
+          }),
+          "Linked task to session.",
+        ),
+      ),
+    );
+    server.registerTool(
+      "transfer_project_task",
+      {
+        title: "Transfer Project Task",
+        description:
+          "Transfer a task between board scopes. Only project-local scope exists in this first phase; this tool fails closed until a global store is enabled.",
+        inputSchema: transferTaskInput,
+        outputSchema: z
+          .object({
+            task_id: taskId,
+            target_scope: z.string(),
+            state: z.literal("transferred"),
+          })
+          .strict(),
+        annotations: writeAnnotations,
+      },
+      safeHandler(async (input) => {
+        await board.transferTask();
+        return success(
+          {
+            task_id: input.task_id,
+            target_scope: input.target_scope,
+            state: "transferred",
+          },
+          "Task transfer completed.",
+        );
+      }),
+    );
+  }
 
   const progressHandler = safeHandler(
     async (input: z.output<typeof getSessionStatusInputSchema>) => {
@@ -568,7 +977,9 @@ export function createMcpServer(gateway: SessionGateway): McpServer {
       return readSuccess(
         result,
         result.search_complete
-          ? "Result search complete for this observed session boundary. Read terminal message content_refs; pages are newest first."
+          ? result.superseded_by_message_id
+            ? `Result search complete: the original receipt has no terminal assistant result, but the latest later user turn is complete (${result.superseded_by_message_id}). The old receipt may be superseded for admission; its own task state remains unknown.`
+            : "Result search complete for this observed session boundary. Read terminal message content_refs; pages are newest first."
           : "Result search incomplete. Save message references and continue with next_cursor, even for an empty page; unknown does not mean absent.",
       );
     },
@@ -602,7 +1013,7 @@ export function createMcpServer(gateway: SessionGateway): McpServer {
     {
       title: "Find Task Result",
       description:
-        "Find results by the original submitted user message ID, including older tasks beyond 100 messages. Set include_archived=true for archived project sessions by ID, including on cursor continuation. Bounded backward search: follow next_cursor until search_complete, retaining returned references (newest first). Intermediate tool-call steps are not reports. SEARCH_CHANGED means restart the search. Read terminal originals with read_message_content; finish=length/content-filter is not a regular generation finish. No new model call or native MCP task.",
+        "Find results by the original submitted user message ID, including older tasks beyond 100 messages. Set include_archived=true for archived project sessions by ID, including on cursor continuation. Bounded backward search: follow next_cursor until search_complete, retaining returned references (newest first). Intermediate tool-call steps are not reports. If a nonterminal old turn was overtaken, superseded_by_message_id identifies only a latest later user turn with its own terminal stop assistant; the requested old task remains unknown. SEARCH_CHANGED means restart the search. Read terminal originals with read_message_content; finish=length/content-filter is not a regular generation finish. No new model call or native MCP task.",
       inputSchema: taskResultInput,
       outputSchema: taskResultOutput,
       annotations: readOnlyAnnotations,
@@ -671,11 +1082,53 @@ export function createMcpServer(gateway: SessionGateway): McpServer {
     async ({
       session_id,
       message,
+      attachments,
     }: z.output<typeof sendMessageInputSchema>) => {
-      const result = await gateway.sendMessage(session_id, message);
+      const result = await gateway.sendMessage(
+        session_id,
+        message,
+        attachments,
+      );
       return success(
         result,
-        `Submitted message ${result.message_id} to session ${result.session_id}. Poll get_session_status before sending another message.`,
+        `Submitted message ${result.message_id} to session ${result.session_id}${result.attachments?.length ? ` with ${result.attachments.length} attachment${result.attachments.length === 1 ? "" : "s"}` : ""}. Poll get_session_status before sending another message.`,
+      );
+    },
+  );
+  const supersedeSubmissionHandler = safeHandler(
+    async (input: z.output<typeof supersedeSubmissionInputSchema>) => {
+      const result = await gateway.supersedeUnresolvedSubmission({
+        sessionId: input.session_id,
+        guardedMessageId: input.guarded_message_id,
+        requestId: input.request_id,
+        operatorAuthorized: input.operator_authorized,
+        message: input.message,
+        ...(input.reason ? { reason: input.reason } : {}),
+        ...(input.attachments ? { attachmentIds: input.attachments } : {}),
+      });
+      return success(
+        result,
+        `Operator override superseded guard ${result.guarded_message_id} and submitted exactly one new message ${result.message_id}. Verify that exact message_id before any further submission.`,
+      );
+    },
+  );
+
+  const uploadAttachmentHandler = safeHandler(
+    async ({
+      session_id,
+      filename,
+      mime_type,
+      data_base64,
+    }: z.output<typeof uploadAttachmentInputSchema>) => {
+      const result = await gateway.uploadAttachment(
+        session_id,
+        filename,
+        mime_type,
+        data_base64,
+      );
+      return success(
+        result,
+        `Uploaded ${result.filename} as ${result.attachment_id}; the reference expires at ${result.expires_at}.`,
       );
     },
   );
@@ -865,16 +1318,46 @@ export function createMcpServer(gateway: SessionGateway): McpServer {
   );
 
   server.registerTool(
+    "upload_attachment",
+    {
+      title: "Upload OpenCode Attachment",
+      description:
+        "Upload one validated PNG, JPEG, WebP, plain-text or Markdown file for an exposed project session. Supply canonical Base64 bytes, never a path. Returns a session-bound, one-use attachment_id that expires after ten minutes; pass up to four IDs (10 MiB total) in send_message.attachments. Images are limited to 5 MiB and text to 512 KiB each.",
+      inputSchema: uploadAttachmentInputSchema,
+      outputSchema: uploadAttachmentOutputSchema,
+      annotations: {
+        ...writeAnnotations,
+        destructiveHint: false,
+        openWorldHint: false,
+      },
+    },
+    uploadAttachmentHandler,
+  );
+
+  server.registerTool(
     "send_message",
     {
       title: "Send OpenCode Message",
       description:
-        "Submit one asynchronous prompt; this can run commands and change project files. Non-idempotent: do not blindly retry. SESSION_BUSY means active backend work or a concurrent MCP write. SUBMISSION_UNRESOLVED means an idle session's earlier receipt lacks verified terminal evidence; this new prompt was not sent. Inspect the original message ID, not a new session or invented unlock. SUBMISSION_UNCERTAIN means delivery may already have occurred.",
+        "Submit one asynchronous prompt; this can run commands and change project files. Optional attachments are one-use attachment_id values returned by upload_attachment, never paths. Non-idempotent: do not blindly retry an uncertain request. SESSION_BUSY means active backend work, pending input, or a concurrent MCP write. Historical receipt uncertainty does not block a technically idle session; inspect old receipts separately with get_task_result. SUBMISSION_UNCERTAIN means delivery may already have occurred; the exact same immediate retry is protected, while a different authorized follow-up may proceed when the backend is idle. Associated attachment references are consumed.",
       inputSchema: sendMessageInputSchema,
       outputSchema: sendMessageOutputSchema,
       annotations: writeAnnotations,
     },
     sendMessageHandler,
+  );
+
+  server.registerTool(
+    "supersede_unresolved_submission",
+    {
+      title: "Supersede Unresolved Submission",
+      description:
+        "Legacy explicit guard override for clients that need an auditable resolution record. Normal conversation continuation does not require this tool: an unresolved historical receipt does not block a technically idle session, and MCP does not decide whether prompts are duplicate tasks. Requires the client-generated UUID request_id to be reused unchanged for recovery, operator_authorized=true, and optionally a short reason. A stale/mismatched guard conflicts. Repeated identical request_id returns the recorded receipt or SUBMISSION_UNCERTAIN and never submits twice. This is an operator attestation, not independent human identity verification.",
+      inputSchema: supersedeSubmissionInputSchema,
+      outputSchema: supersedeSubmissionOutputSchema,
+      annotations: { ...writeAnnotations, idempotentHint: true },
+    },
+    supersedeSubmissionHandler,
   );
 
   server.server.setRequestHandler(
@@ -997,6 +1480,226 @@ export function createMcpServer(gateway: SessionGateway): McpServer {
               sendMessageOutputSchema,
               input,
               sendMessageHandler,
+            );
+          case "supersede_unresolved_submission":
+            return validatedToolCall(
+              supersedeSubmissionInputSchema,
+              supersedeSubmissionOutputSchema,
+              input,
+              supersedeSubmissionHandler,
+            );
+          case "upload_attachment":
+            return validatedToolCall(
+              uploadAttachmentInputSchema,
+              uploadAttachmentOutputSchema,
+              input,
+              uploadAttachmentHandler,
+            );
+          case "list_project_tasks":
+            return validatedToolCall(
+              listTasksInput,
+              z.object({ tasks: z.array(taskOutput) }).strict(),
+              input,
+              async (value) =>
+                board
+                  ? success(
+                      {
+                        tasks: await board.listTasks(
+                          value.project_id,
+                          value.status,
+                        ),
+                      },
+                      "Returned project tasks.",
+                    )
+                  : errorResult(
+                      new AdapterError(
+                        "TASKBOARD_UNAVAILABLE",
+                        "Taskboard is not enabled.",
+                      ),
+                    ),
+            );
+          case "get_project_task":
+            return validatedToolCall(
+              getTaskInput,
+              taskOutput,
+              input,
+              async (value) =>
+                board
+                  ? success(
+                      await board.getTask(value.task_id),
+                      "Returned project task.",
+                    )
+                  : errorResult(
+                      new AdapterError(
+                        "TASKBOARD_UNAVAILABLE",
+                        "Taskboard is not enabled.",
+                      ),
+                    ),
+            );
+          case "create_project_task":
+            return validatedToolCall(
+              createTaskInput,
+              taskOutput,
+              input,
+              async (value) =>
+                board
+                  ? success(
+                      await board.createTask({
+                        projectId: value.project_id,
+                        title: value.title,
+                        description: value.description,
+                        priority: value.priority,
+                        status: value.status,
+                      }),
+                      "Created project task.",
+                    )
+                  : errorResult(
+                      new AdapterError(
+                        "TASKBOARD_UNAVAILABLE",
+                        "Taskboard is not enabled.",
+                      ),
+                    ),
+            );
+          case "update_project_task":
+            return validatedToolCall(
+              updateTaskInput,
+              taskOutput,
+              input,
+              async (value) =>
+                board
+                  ? success(
+                      await board.updateTask(value.task_id, {
+                        title: value.title,
+                        description: value.description,
+                        priority: value.priority,
+                        status: value.status,
+                      }),
+                      "Updated project task.",
+                    )
+                  : errorResult(
+                      new AdapterError(
+                        "TASKBOARD_UNAVAILABLE",
+                        "Taskboard is not enabled.",
+                      ),
+                    ),
+            );
+          case "move_project_task":
+            return validatedToolCall(
+              moveTaskInput,
+              taskOutput,
+              input,
+              async (value) =>
+                board
+                  ? success(
+                      await board.moveTask(
+                        value.task_id,
+                        value.status,
+                        value.position,
+                      ),
+                      "Moved project task.",
+                    )
+                  : errorResult(
+                      new AdapterError(
+                        "TASKBOARD_UNAVAILABLE",
+                        "Taskboard is not enabled.",
+                      ),
+                    ),
+            );
+          case "add_task_comment":
+            return validatedToolCall(
+              commentInput,
+              z
+                .object({
+                  task_id: taskId,
+                  comment: z
+                    .object({
+                      id: z.string(),
+                      body: z.string(),
+                      created_at: z.string(),
+                    })
+                    .strict(),
+                })
+                .strict(),
+              input,
+              async (value) =>
+                board
+                  ? success(
+                      await board.addComment(value.task_id, value.body),
+                      "Added task comment.",
+                    )
+                  : errorResult(
+                      new AdapterError(
+                        "TASKBOARD_UNAVAILABLE",
+                        "Taskboard is not enabled.",
+                      ),
+                    ),
+            );
+          case "link_task_to_session":
+            return validatedToolCall(
+              linkTaskInput,
+              z
+                .object({
+                  task_id: taskId,
+                  links: z.array(
+                    z
+                      .object({
+                        session_id: sessionId,
+                        message_id: sessionId.optional(),
+                        result: z.string().optional(),
+                        artifact_refs: z.array(z.string()).optional(),
+                      })
+                      .strict(),
+                  ),
+                })
+                .strict(),
+              input,
+              async (value) =>
+                board
+                  ? success(
+                      await board.linkTask(value.task_id, {
+                        sessionId: value.session_id,
+                        messageId: value.message_id,
+                        result: value.result,
+                        artifactRefs: value.artifact_refs,
+                      }),
+                      "Linked task to session.",
+                    )
+                  : errorResult(
+                      new AdapterError(
+                        "TASKBOARD_UNAVAILABLE",
+                        "Taskboard is not enabled.",
+                      ),
+                    ),
+            );
+          case "transfer_project_task":
+            return validatedToolCall(
+              transferTaskInput,
+              z
+                .object({
+                  task_id: taskId,
+                  target_scope: z.string(),
+                  state: z.literal("transferred"),
+                })
+                .strict(),
+              input,
+              async (value) => {
+                if (!board)
+                  return errorResult(
+                    new AdapterError(
+                      "TASKBOARD_UNAVAILABLE",
+                      "Taskboard is not enabled.",
+                    ),
+                  );
+                await board.transferTask();
+                return success(
+                  {
+                    task_id: value.task_id,
+                    target_scope: value.target_scope,
+                    state: "transferred",
+                  },
+                  "Task transfer completed.",
+                );
+              },
             );
           default:
             return errorResult(

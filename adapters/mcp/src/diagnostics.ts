@@ -10,6 +10,8 @@ const tools = new Set([
   "get_session_status",
   "get_session_history",
   "send_message",
+  "supersede_unresolved_submission",
+  "upload_attachment",
   "get_session_runtime_options",
   "update_session_runtime",
   "get_project_activity",
@@ -36,11 +38,24 @@ export async function traceToolCall(
     typeof value === "string" && /^(ses|msg)_[a-zA-Z0-9]{1,128}$/u.test(value)
       ? value
       : undefined;
+  const requestId = (value: unknown) =>
+    typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(
+      value,
+    )
+      ? value
+      : undefined;
   const metadata = {
     request,
     tool,
     session_id: id(input.session_id),
     message_id: id(input.message_id ?? input.submitted_message_id),
+    ...(requestId(input.request_id)
+      ? { request_id: requestId(input.request_id) }
+      : {}),
+    ...(id(input.guarded_message_id)
+      ? { guarded_message_id: id(input.guarded_message_id) }
+      : {}),
   };
   const log = (data: object) => {
     try {

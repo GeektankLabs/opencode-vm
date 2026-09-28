@@ -34,7 +34,7 @@ OPENLIVE_PREVIOUS_COMMAND="$OPENLIVE_DIR/previous-command"
 OPENLIVE_AUTH_MARKER="__opencode_vm_openlive__"
 OPENLIVE_LOCK_PATH=""
 OPENLIVE_ADAPTER_VERSION="0.1.6"
-OPENLIVE_ADAPTER_TAG="v0.5.73"
+OPENLIVE_ADAPTER_TAG="v0.5.91"
 OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.6.tar"
 OPENLIVE_ADAPTER_SHA256="06f461873b8b299de98220aa577824eb9807672b26cb069541acebcdd2d973b9"
 OPENLIVE_ACP_SDK_VERSION="1.2.1"
@@ -44,10 +44,10 @@ OPENLIVE_MANAGER_DESCRIPTION="Read-only OpenLive voice session manager"
 OPENLIVE_MANAGER_PROMPT="You manage an OpenLive voice call. The voice_sessions tool is available and you must call it before listing, inspecting, summarizing, checking, attaching to, or creating project sessions. Never claim session details without a successful tool result. Ask for clarification if a requested session is ambiguous. Create a new work session only when the user explicitly asks for one. Apart from that explicit create action, you are read-only: do not edit files, run shell commands, create tasks, or mutate sessions. Keep responses brief and conversational: one or two plain sentences without Markdown, paths, URLs, code, or stray symbols. When attachment or creation succeeds, tell the user the next voice prompt will continue in that session."
 MCP_CONNECTOR_DIR="$SHARE_ROOT/mcp-connector"
 MCP_ADAPTER_CACHE_ROOT="$MCP_CONNECTOR_DIR/adapters"
-MCP_ADAPTER_VERSION="0.1.7"
-MCP_ADAPTER_TAG="v0.5.73"
-MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.7.tar"
-MCP_ADAPTER_SHA256="2bc7f7a569b3c07794e548ff881f702c7a8ab851c1370f54507f087209f6c49e"
+MCP_ADAPTER_VERSION="0.1.12"
+MCP_ADAPTER_TAG="v0.5.91"
+MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.12.tar"
+MCP_ADAPTER_SHA256="d24ba0ad22316ed36beb6aa7ea4eaa6daacbbf505b47c8cc4e61a7cb90e27dff"
 MCP_SDK_VERSION="1.30.1"
 MCP_OPENCODE_SDK_VERSION="1.18.21"
 MCP_TESTED_PROTOCOL_VERSION="2025-11-25"
@@ -107,7 +107,7 @@ SEARXNG_MCP_NPM_VERSION="1.0.3"           # pin for reproducible installs in pro
 OCVM_A2A_SPEC="opencode-a2a==1.2.0"
 OCVM_A2A_VENV='$HOME/.local/share/opencode-a2a-venv'
 # Bump when the install recipe changes, so existing bases re-provision.
-OCVM_A2A_STAMP_VERSION="1"
+OCVM_A2A_STAMP_VERSION="2"
 # Fixed default credential when the session has no --password. Deliberately a
 # documented constant rather than a generated secret: opencode-a2a refuses to
 # start without a credential, and a hidden random token would be worse than a
@@ -156,10 +156,13 @@ DEFAULT_LAN_ALLOW_UDP=""              # z.B. "192.168.178.20:53"              (o
 DEFAULT_HOST_LOCALHOST_FORWARD="yes"  # expose HOST_TCP_PORTS inside VM as localhost:PORT
 DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 DEFAULT_MCP_PORT=40960                # private incoming MCP connector
+TASKBOARD_VERSION="0.6.0"
+TASKBOARD_AMD64_SHA256="ea5d28c266d4cc7caf4aa86f5efd575871d6255ff2e41d61a84201f5d68647e9"
+TASKBOARD_ARM64_SHA256="3749fb985f544fdb6788ba1dff69761e599ff82b3fe86d39ca54307c0f523e9d"
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.5.73"
+OCVM_VERSION="0.5.91"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -176,6 +179,7 @@ KEEP_HISTORY=0
 SESSION_MCP_MODE=""
 SESSION_MCP_PORT=""
 SESSION_EDITOR_MODE=""                # empty = default on for web; retain explicit opt-out on reconnect
+SESSION_LAUNCHER_ENABLED=1           # invocation-local; web and attach default on
 SESSION_LAUNCH_MODE=""                 # explicit start/web intent; bare attach uses the saved UI mode
 
 need() {
@@ -249,6 +253,7 @@ run_with_spinner() {
 #   P      web  HTTPS      P+2    a2a HTTPS
 #   P+1    web  HTTP       P+3    a2a HTTP
 #   P+4    editor HTTPS (optional)
+#   P+5    Taskboard HTTP
 #
 # and inside the VM, never tunnelled to the LAN:
 #
@@ -265,8 +270,7 @@ web_editor_enabled() {
 
 validate_web_port() {
   local p="$1"
-  local last=3
-  [[ "${SESSION_EDITOR_MODE:-}" == disable ]] || last=4
+  local last=5
   if ! is_valid_port "$p" || (( p < 1026 || p > 65535 - last )); then
     echo "Invalid --port value: $p" >&2
     echo "opencode-vm web reserves a block around the base port:" >&2
@@ -275,6 +279,7 @@ validate_web_port() {
     echo "  P    web HTTPS         P+1  web HTTP" >&2
     echo "  P+2  a2a HTTPS         P+3  a2a HTTP" >&2
     echo "  P+4  editor HTTPS      (unless --no-editor)" >&2
+    echo "  P+5  Taskboard HTTP" >&2
     echo "so the base port must be between 1026 and $((65535 - last))." >&2
     exit 2
   fi
@@ -352,6 +357,7 @@ parse_web_flags() {
   SESSION_MCP_MODE=""
   SESSION_MCP_PORT=""
   SESSION_EDITOR_MODE=""
+  SESSION_LAUNCHER_ENABLED=1
   local _saw_password="" _saw_no_auth="" _saw_mcp="" _saw_no_mcp="" _saw_mcp_port=""
   OC_WEB_TUI=false
   # HTTPS by default: opencode hashes attachments via crypto.subtle, which
@@ -382,6 +388,8 @@ parse_web_flags() {
         fi
         SESSION_EDITOR_MODE="$editor_mode"
         ;;
+      --launcher) SESSION_LAUNCHER_ENABLED=1 ;;
+      --no-launcher) SESSION_LAUNCHER_ENABLED=0 ;;
       --tui) OC_WEB_TUI=true ;;
       --tls) SESSION_TLS=1 ;;
       --no-tls) SESSION_TLS=0 ;;
@@ -421,6 +429,18 @@ parse_web_flags() {
       SESSION_AUTH_MODE="set"
     fi
   fi
+}
+
+parse_attach_flags() {
+  SESSION_LAUNCHER_ENABLED=1
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      --launcher) SESSION_LAUNCHER_ENABLED=1 ;;
+      --no-launcher) SESSION_LAUNCHER_ENABLED=0 ;;
+      *) echo "Unknown option: $1" >&2; return 2 ;;
+    esac
+    shift
+  done
 }
 
 parse_start_flags() {
@@ -3033,7 +3053,8 @@ if [ -f "\$stamp" ]; then exit 0; fi
 rm -rf "\$venv"
 python3 -m venv "\$venv"
 "\$venv/bin/pip" install --quiet --upgrade pip
-"\$venv/bin/pip" install --quiet "$OCVM_A2A_SPEC"
+"\$venv/bin/pip" install --quiet "$OCVM_A2A_SPEC" 'sqlalchemy[asyncio]'
+"\$venv/bin/python" -c 'import greenlet'
 touch "\$stamp"
 A2ASNIP
 }
@@ -6157,9 +6178,12 @@ provider_mcp_cmd() {
     count="$(jq '.tunnels | length' <<<"$view")"
     if (( count > 0 )); then
       mcp_tunnel_choices "$view" tunnels
-      read -r -p "Tunnel: choose a number, n to register another tunnel ID, or q to cancel: " choice || return 1
+      read -r -p "Tunnel: choose a number, paste a tunnel_… ID, n for a new ID, or q to cancel: " choice || return 1
       case "$choice" in 0|q|Q) echo "[mcp-tunnel] Cancelled."; return 0 ;; esac
-      if [[ "$choice" != n && "$choice" != N ]]; then
+      if [[ "$choice" == tunnel_* ]]; then
+        [[ "$choice" =~ ^tunnel_[0-9a-f]{32}$ ]] || { echo "[mcp-tunnel] Invalid tunnel ID." >&2; return 2; }
+        tunnel_id="$choice"
+      elif [[ "$choice" != n && "$choice" != N ]]; then
         [[ "$choice" =~ ^[1-9][0-9]*$ && "${#choice}" -le 6 ]] || return 2
         tunnel_id="$(jq -er --argjson n "$choice" '.tunnels | keys_unsorted | .[$n - 1] // empty' <<<"$view")" || return 2
       fi
@@ -8009,7 +8033,7 @@ mcp_adapter_release_valid() {
   local dir="$1"
   [[ -f "$dir/manifest.json" && -f "$dir/package.json" && -f "$dir/package-lock.json" \
     && -f "$dir/dist/main.js" && -f "$dir/dist/types.js" && -f "$dir/dist/http.js" \
-    && -f "$dir/dist/opencode.js" && -f "$dir/dist/tools.js" && -f "$dir/dist/activity.js" \
+     && -f "$dir/dist/opencode.js" && -f "$dir/dist/tools.js" && -f "$dir/dist/taskboard.js" && -f "$dir/dist/activity.js" \
     && -f "$dir/dist/content.js" && -f "$dir/dist/diagnostics.js" && -f "$dir/.archive-sha256" ]] || return 1
   [[ "$(<"$dir/.archive-sha256")" == "$MCP_ADAPTER_SHA256" ]] || return 1
   jq -e --arg version "$MCP_ADAPTER_VERSION" --arg mcp "$MCP_SDK_VERSION" \
@@ -10446,8 +10470,8 @@ is_browser_unsafe_port() {
   return 1
 }
 
-# Web-mode forwarding: one SSH process carrying four public forwards, plus the
-# optional editor at P+4, host(0.0.0.0:X) -> VM(127.0.0.1:X).
+# Web-mode forwarding: one SSH process carrying the public P..P+5 service block,
+# host(0.0.0.0:X) -> VM(127.0.0.1:X).
 #
 # One SSH process for the complete public block:
 #   - ExitOnForwardFailure=yes makes the whole block bind atomically. Either all
@@ -10487,8 +10511,7 @@ finally:
 # WEB_PORT_BASE holds the base that was actually reserved.
 start_web_tunnels() {
   local vm="$1" req="$2" reserved="${3:-}"
-  local last=3
-  [[ "${4:-0}" != 1 ]] || last=4
+  local last=5
   [[ -n "$vm" && -n "$req" ]] || return 1
   WEB_PORT_BASE=""
 
@@ -10559,7 +10582,7 @@ start_web_tunnels() {
     done
     (( ok )) || continue
 
-    if [[ "$last" == 4 ]] && ! editor_guest_port_available "$vm" "$((base + 4))"; then
+    if [[ "${4:-0}" == 1 ]] && ! editor_guest_port_available "$vm" "$((base + 4))"; then
       continue
     fi
     local forwards=()
@@ -10589,7 +10612,8 @@ start_web_tunnels() {
         echo "[tunnel] Requested base port ${req} was unavailable — the block moved to ${base}."
       fi
       echo "[tunnel] LAN tunnels up (pid ${pid:-?}): ${base} web/https, $((base + 1)) web/http, $((base + 2)) a2a/https, $((base + 3)) a2a/http"
-      [[ "$last" != 4 ]] || echo "[tunnel] Editor HTTPS: $((base + 4))"
+       [[ "${4:-0}" != 1 ]] || echo "[tunnel] Editor HTTPS: $((base + 4))"
+       echo "[tunnel] Taskboard HTTP: $((base + 5))"
       rm -f "$err_file"
       return 0
     fi
@@ -10600,7 +10624,7 @@ start_web_tunnels() {
   fi
   rm -f "$err_file"
   echo "[tunnel] ERROR: no free browser-safe block of $((last + 1)) consecutive host ports in ${req}..$((req + 9 + last))." >&2
-  echo "[tunnel]   web mode needs P (web https), P+1 (web http), P+2 (a2a https), P+3 (a2a http), and P+4 unless --no-editor." >&2
+  echo "[tunnel]   web mode uses P (web https), P+1 (web http), P+2 (a2a https), P+3 (a2a http), P+4 (editor), and P+5 (taskboard)." >&2
   echo "[tunnel]   Diagnose: lsof -nP -iTCP:${req}-$((req + 9 + last)) -sTCP:LISTEN" >&2
   echo "[tunnel]   Pick another base: opencode-vm web --port 8080" >&2
   echo "[tunnel]   If a limactl process holds one, stop & restart the VM to clear it:" >&2
@@ -10609,12 +10633,11 @@ start_web_tunnels() {
 }
 
 # Select the guest-side fallback independently from SSH tunnel availability.
-# Even when LAN forwarding fails, P-2..P+3 must not overlap the private MCP
+# Even when LAN forwarding fails, P-2..P+5 must not overlap the private MCP
 # listener and the public ports must remain browser-safe.
 select_web_guest_base() {
   local req="$1" reserved="${2:-}" base p ok
-  local last=3
-  [[ "${3:-0}" != 1 ]] || last=4
+  local last=5
   for base in $(seq "$req" $((req + 9))); do
     (( base >= 1026 && base <= 65535 - last )) || continue
     if [[ -n "$reserved" ]] && (( reserved >= base - 2 && reserved <= base + last )); then
@@ -10698,6 +10721,51 @@ editor_ensure_installed_in_base() {
     limactl start "$BASE_NAME" --tty=false >/dev/null || return 1
   fi
   vm_exec "$BASE_NAME" "$OCVM_EDITOR_INSTALL_SH"$'\ninstall_editor'
+}
+
+# Taskboard is distributed as a pinned upstream single binary. The upstream
+# MCP command is intentionally not used: the OpenCode adapter owns our small,
+# board-neutral task surface.
+read -r -d '' OCVM_TASKBOARD_INSTALL_SH <<'TASKBOARD_INSTALL' || true
+install_taskboard() {
+  local version=0.6.0 arch digest root stage archive
+  case "$(uname -m)" in
+    aarch64|arm64) arch=arm64; digest=3749fb985f544fdb6788ba1dff69761e599ff82b3fe86d39ca54307c0f523e9d ;;
+    x86_64|amd64) arch=amd64; digest=ea5d28c266d4cc7caf4aa86f5efd575871d6255ff2e41d61a84201f5d68647e9 ;;
+    *) echo "[taskboard] Unsupported guest architecture." >&2; return 1 ;;
+  esac
+  root="$HOME/.local/share/ocvm-taskboard"
+  OC_TASKBOARD_BIN="$root/taskboard-$version-$arch/taskboard"
+  [ ! -L "$root" ] && [ ! -L "$root/taskboard-$version-$arch" ] || return 1
+  if [ -x "$OC_TASKBOARD_BIN" ] && [ -f "${OC_TASKBOARD_BIN%/*}/.sha256" ] &&
+     [ "$(cat "${OC_TASKBOARD_BIN%/*}/.sha256")" = "$digest" ]; then
+    return 0
+  fi
+  [ "${1:-}" != check ] || return 1
+  mkdir -p "$root" || return 1
+  stage="$(mktemp -d "$root/.install.XXXXXX")" || return 1
+  archive="$stage/taskboard.tar.gz"
+  if ! curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 300 \
+      "https://github.com/tcarac/taskboard/releases/download/v$version/taskboard-linux-$arch.tar.gz" -o "$archive" ||
+      ! printf '%s  %s\n' "$digest" "$archive" | sha256sum -c - ||
+      ! mkdir "$stage/build" || ! tar -xzf "$archive" --no-same-owner -C "$stage/build" ||
+      [ ! -x "$stage/build/taskboard-linux-$arch" ] || ! mv "$stage/build/taskboard-linux-$arch" "$stage/build/taskboard"; then
+    rm -rf "$stage"
+    echo "[taskboard] Installation failed; the board was not started." >&2
+    return 1
+  fi
+  printf '%s\n' "$digest" > "$stage/build/.sha256" || return 1
+  rm -rf "$root/taskboard-$version-$arch"
+  mv "$stage/build" "$root/taskboard-$version-$arch" || return 1
+  rm -rf "$stage"
+}
+TASKBOARD_INSTALL
+
+taskboard_ensure_installed_in_base() {
+  if ! is_vm_running "$BASE_NAME"; then
+    limactl start "$BASE_NAME" --tty=false >/dev/null || return 1
+  fi
+  vm_exec "$BASE_NAME" "$OCVM_TASKBOARD_INSTALL_SH"$'\ninstall_taskboard'
 }
 
 # Only the editor's User directory is persistent. Runtime credentials, downloaded
@@ -10873,28 +10941,28 @@ EDITOR_JS
 # ---------------------------------------------------------------------------
 # In-VM web redirector
 #
-# Why this exists: opencode's web UI only opens a project via the route
-# /<base64url(dir)>. Its root URL renders a project launcher whose list is
+# Why this exists: opencode's web UI opens a project via the route
+# /<base64url(dir)>. Its root URL renders a project picker whose list is
 # client-side state — in a fresh browser it is empty, so the bare host:port URL
-# reaches no project at all. opencode web has no project argument and no
-# redirect setting, so the only lever is an HTTP hop in front of it.
+# reaches no project at all. opencode web has no project argument or redirect
+# setting, so this HTTP hop seeds the browser and enters the active project.
 #
 # Design: opencode moves to a VM-internal port; this listens on the port the
 # SSH tunnel forwards to, so every host-side URL, tunnel and firewall rule
 # stays exactly as before. A browser navigating to "/" gets a 302 to the
-# project deep link; everything else is spliced through as raw TCP, which
-# keeps the UI's WebSocket upgrade (and keep-alive, and chunked bodies)
-# untouched — we never parse or re-emit them.
+# project deep link. Only the narrowly matched HTML shell is buffered and
+# eligible for launcher injection; every other response is spliced through as
+# raw TCP, keeping WebSockets, APIs, assets and uploads untouched.
 #
 # The redirect is gated on "Accept: text/html" so only browser navigation is
 # rewritten. API clients, the host-side tunnel probe (curl /) and
 # `opencode attach` do not send that, so they pass straight through to
-# opencode and still see the real root.
+# OpenCode and still see the real root.
 #
 # Kept free of single quotes: this is embedded in the single-quoted in-VM
 # script as a positional argument.
 read -r -d '' OCVM_WEB_REDIRECT_PY <<'PYSRC' || true
-import socket, sys, threading, select, ssl, base64, json, os
+import socket, sys, threading, select, ssl, base64, json, os, stat, html, re
 
 LISTEN_PORT = int(sys.argv[1])
 TARGET_PORT = int(sys.argv[2])
@@ -10908,6 +10976,17 @@ KEY_FILE = sys.argv[5] if len(sys.argv) > 5 else ""
 REMOTE_TARGET = sys.argv[6] if len(sys.argv) > 6 else "0"
 REMOTE_PROJECT = sys.argv[7] if len(sys.argv) > 7 else ""
 REMOTE_GENERATION = sys.argv[8] if len(sys.argv) > 8 else ""
+LAUNCHER_SHARE = sys.argv[10] if len(sys.argv) > 10 else ""
+LAUNCHER_PROJECT_HASH = sys.argv[11] if len(sys.argv) > 11 else ""
+LAUNCHER_ENABLED = sys.argv[12] != "0" if len(sys.argv) > 12 else True
+PROJECT_TITLE = sys.argv[13] if len(sys.argv) > 13 else ""
+if (PROJECT_TITLE in (".", "..") or "/" in PROJECT_TITLE or len(PROJECT_TITLE) > 255 or
+        any(ord(char) < 32 or ord(char) == 127 for char in PROJECT_TITLE)):
+    PROJECT_TITLE = ""
+try:
+    PROJECT_TITLE.encode("utf-8")
+except UnicodeEncodeError:
+    PROJECT_TITLE = ""
 TLS_ENABLED = bool(CERT_FILE and KEY_FILE)
 
 TLS_CONTEXT = None
@@ -10975,7 +11054,7 @@ SEED_JS = """
 
 SEED_HTML = (
     "<!doctype html><html><head><meta charset=\"utf-8\">"
-    "<title>opencode</title>"
+    "<title>" + html.escape(PROJECT_TITLE or "OpenCode") + "</title>"
     "<noscript><meta http-equiv=\"refresh\" content=\"0;url=/" + KEY + "\"></noscript>"
     "<script>" + SEED_JS + "</script></head><body></body></html>"
 ).encode("utf-8")
@@ -10988,6 +11067,277 @@ SEED_RESPONSE = (
     b"Connection: close\r\n"
     b"\r\n" + SEED_HTML
 )
+
+# One catalog keeps launcher layout, icons and endpoint resolution extensible.
+LAUNCHER_APP_REGISTRY = (
+    {
+        "id": "editor",
+        "label": "Editor",
+        "icon": "editor",
+        "runtime_file": "editor/runtime.json",
+        "port_field": "editorPort",
+        "port_offset": 4,
+        "scheme": "https",
+        "health_path": "/healthz",
+    },
+    {
+        "id": "taskboard",
+        "label": "Projektmanagement",
+        "icon": "board",
+        "runtime_file": "taskboard/runtime.json",
+        "port_field": "taskboardPort",
+        "port_offset": 5,
+        "scheme": "http",
+        "health_path": "/api/projects",
+    },
+)
+
+LAUNCHER_JS = r"""
+"use strict";
+(() => {
+  const host = document.getElementById("ocvm-vm-launcher");
+  if (!host || host.dataset.initialized === "true") return;
+  host.dataset.initialized = "true";
+  let apps = [];
+  try { apps = JSON.parse(host.dataset.apps || "[]"); } catch (_) {}
+  if (!Array.isArray(apps)) apps = [];
+  apps = apps.filter(app => app && /^[a-z0-9-]{1,32}$/.test(app.id) &&
+    typeof app.label === "string" && app.label.length <= 48 &&
+    (app.scheme === "http" || app.scheme === "https") &&
+    Number.isInteger(app.port) && app.port > 0 && app.port <= 65535 &&
+    ["editor", "board", "terminal", "app"].includes(app.icon));
+
+  const root = host.attachShadow({ mode: "open" });
+  const stylesheet = document.createElement("link");
+  stylesheet.rel = "stylesheet";
+  stylesheet.href = "/__ocvm/launcher.css";
+  root.appendChild(stylesheet);
+
+  const SVG_NS = "http://www.w3.org/2000/svg";
+  function makeIcon(kind, className) {
+    const svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("class", className);
+    svg.setAttribute("viewBox", "0 0 32 32");
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("focusable", "false");
+    const add = (tag, attributes) => {
+      const element = document.createElementNS(SVG_NS, tag);
+      for (const [name, value] of Object.entries(attributes)) element.setAttribute(name, value);
+      svg.appendChild(element);
+    };
+    if (kind === "vm") {
+      add("rect", { x: "2", y: "2", width: "28", height: "28", rx: "8", fill: "#172126" });
+      add("path", { d: "M5 13h22v13H6l-1-1z", fill: "#e8f1ee" });
+      add("path", { d: "M7 15h18v8H8l-1-1z", fill: "#101c21" });
+      add("path", { d: "m10 17 3 2.5-3 2.5M16 22h5", fill: "none", stroke: "#f5faf8", "stroke-width": "2", "stroke-linecap": "square" });
+      add("path", { d: "M14 5h4v4h3l-5 5-5-5h3z", fill: "#53dec0" });
+    } else if (kind === "editor") {
+      add("path", { d: "m7 23 .8-4.2L20.9 5.7a2.3 2.3 0 0 1 3.3 0l2.1 2.1a2.3 2.3 0 0 1 0 3.3L13.2 24.2z", fill: "none", stroke: "currentColor", "stroke-width": "2.2", "stroke-linejoin": "round" });
+      add("path", { d: "m18.5 8.1 5.4 5.4M7 27h18", fill: "none", stroke: "currentColor", "stroke-width": "2.2", "stroke-linecap": "round" });
+    } else if (kind === "board") {
+      add("rect", { x: "5", y: "5", width: "22", height: "22", rx: "2", fill: "none", stroke: "currentColor", "stroke-width": "2" });
+      add("path", { d: "M12.3 5v22M19.7 5v22M7.5 10h2.5M14 10h3M21 10h3M7.5 16h2.5M14 16h3M21 16h3", fill: "none", stroke: "currentColor", "stroke-width": "1.8", "stroke-linecap": "round" });
+    }
+    return svg;
+  }
+
+  const shell = document.createElement("div");
+  shell.className = "shell";
+  const trigger = document.createElement("button");
+  trigger.className = "trigger";
+  trigger.type = "button";
+  trigger.setAttribute("aria-label", "Project apps");
+  trigger.setAttribute("aria-haspopup", "menu");
+  trigger.setAttribute("aria-expanded", "false");
+  trigger.title = "Project apps";
+  const triggerGlyph = document.createElement("span");
+  triggerGlyph.className = "trigger-glyph";
+  triggerGlyph.setAttribute("aria-hidden", "true");
+  triggerGlyph.appendChild(makeIcon("vm", "icon-svg"));
+  trigger.appendChild(triggerGlyph);
+
+  const menu = document.createElement("div");
+  menu.className = "menu";
+  menu.id = "ocvm-vm-app-menu";
+  menu.setAttribute("role", "menu");
+  menu.setAttribute("aria-label", "Project apps");
+  menu.hidden = true;
+  trigger.setAttribute("aria-controls", menu.id);
+
+  const links = [];
+  for (const app of apps) {
+    const link = document.createElement("a");
+    link.className = "app-entry";
+    link.setAttribute("role", "menuitem");
+    link.tabIndex = -1;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    const target = new URL(window.location.href);
+    target.protocol = app.scheme + ":";
+    target.port = String(app.port);
+    target.pathname = "/";
+    target.search = "";
+    target.hash = "";
+    link.href = target.href;
+
+    const icon = document.createElement("span");
+    icon.className = "app-icon";
+    icon.appendChild(makeIcon(app.icon, "icon-svg"));
+    const label = document.createElement("span");
+    label.className = "app-label";
+    label.textContent = app.label;
+    const external = document.createElement("span");
+    external.className = "external";
+    external.setAttribute("aria-hidden", "true");
+    external.textContent = "↗";
+    link.append(icon, label, external);
+    menu.appendChild(link);
+    links.push(link);
+  }
+  if (!links.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = "No project apps are ready";
+    menu.appendChild(empty);
+  }
+  shell.append(menu, trigger);
+  root.appendChild(shell);
+
+  function close(restoreFocus) {
+    menu.hidden = true;
+    trigger.setAttribute("aria-expanded", "false");
+    if (restoreFocus) trigger.focus();
+  }
+  function open() {
+    menu.hidden = false;
+    trigger.setAttribute("aria-expanded", "true");
+    if (links.length) links[0].focus();
+  }
+  trigger.addEventListener("click", () => menu.hidden ? open() : close(false));
+  document.addEventListener("pointerdown", event => {
+    if (!menu.hidden && !event.composedPath().includes(host)) close(false);
+  });
+  root.addEventListener("keydown", event => {
+    if (event.key === "Escape" && !menu.hidden) {
+      event.preventDefault();
+      close(true);
+      return;
+    }
+    if (menu.hidden || !links.length) return;
+    const current = links.indexOf(root.activeElement);
+    let next = current;
+    if (event.key === "ArrowDown") next = (current + 1 + links.length) % links.length;
+    else if (event.key === "ArrowUp") next = (current - 1 + links.length) % links.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = links.length - 1;
+    else return;
+    event.preventDefault();
+    links[next].focus();
+  });
+  for (const link of links) link.addEventListener("click", () => close(false));
+
+  const compact = window.matchMedia("(max-width: 640px)");
+  function updateKeyboardVisibility() {
+    const viewport = window.visualViewport;
+    const keyboardOpen = compact.matches && viewport &&
+      window.innerHeight - viewport.height > 180;
+    host.classList.toggle("keyboard-open", Boolean(keyboardOpen));
+  }
+  compact.addEventListener?.("change", updateKeyboardVisibility);
+  window.visualViewport?.addEventListener("resize", updateKeyboardVisibility);
+  updateKeyboardVisibility();
+})();
+"""
+
+LAUNCHER_CSS = b"""\
+:host {
+  all: initial;
+  color-scheme: dark;
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  pointer-events: none;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 14px;
+  line-height: 1.4;
+}
+:host(.keyboard-open) { display: none; }
+.shell {
+  position: fixed;
+  left: max(12px, env(safe-area-inset-left));
+  bottom: calc(48px + env(safe-area-inset-bottom));
+  pointer-events: none;
+}
+.trigger {
+  pointer-events: auto;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 1px solid rgba(255,255,255,.16);
+  border-radius: 50%;
+  color: #f4f4f5;
+  background: rgba(31, 35, 42, .94);
+  box-shadow: 0 3px 14px rgba(0,0,0,.34);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 650;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+.trigger:hover, .trigger[aria-expanded="true"] { background: #343a44; }
+.trigger:focus-visible, .app-entry:focus-visible {
+  outline: 2px solid #8ab4f8;
+  outline-offset: 2px;
+}
+.trigger-glyph { display: grid; place-items: center; width: 28px; height: 28px; }
+.icon-svg { display: block; width: 100%; height: 100%; }
+.menu {
+  pointer-events: auto;
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 9px);
+  box-sizing: border-box;
+  width: min(240px, calc(100vw - 24px - env(safe-area-inset-left) - env(safe-area-inset-right)));
+  max-height: min(45vh, 340px);
+  max-height: min(45dvh, 340px);
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid rgba(255,255,255,.14);
+  border-radius: 12px;
+  color: #f4f4f5;
+  background: rgba(28, 31, 36, .98);
+  box-shadow: 0 8px 26px rgba(0,0,0,.42);
+  backdrop-filter: blur(12px);
+}
+.menu[hidden] { display: none; }
+.app-entry {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-height: 44px;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border-radius: 8px;
+  color: inherit;
+  text-decoration: none;
+  touch-action: manipulation;
+}
+.app-entry:hover, .app-entry:focus-visible { background: rgba(255,255,255,.1); }
+.app-icon { flex: 0 0 22px; width: 22px; height: 22px; color: #d4d4d8; }
+.app-label { flex: 1; }
+.external { color: #a1a1aa; font-size: 17px; }
+.empty { padding: 12px 10px; color: #a1a1aa; }
+@media (max-width: 640px) {
+  .shell { bottom: calc(56px + env(safe-area-inset-bottom)); }
+  .menu { width: min(260px, calc(100vw - 24px - env(safe-area-inset-left) - env(safe-area-inset-right))); }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .menu { animation: ocvm-launcher-in 100ms ease-out; }
+  @keyframes ocvm-launcher-in { from { opacity: .7; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+}
+"""
 
 
 def header_value(rest, wanted):
@@ -11110,6 +11460,322 @@ def read_head(sock):
     return head
 
 
+def http_parts(head):
+    header, separator, remainder = head.partition(b"\r\n\r\n")
+    if not separator:
+        return None, [], remainder
+    lines = header.split(b"\r\n")
+    fields = []
+    for line in lines[1:]:
+        if not line:
+            continue
+        if line[:1] in (b" ", b"\t"):
+            return None, [], remainder
+        name, colon, value = line.partition(b":")
+        if not colon:
+            return None, [], remainder
+        fields.append((name.strip().lower(), value.strip()))
+    return lines[0], fields, remainder
+
+
+def values(fields, name):
+    return [value for key, value in fields if key == name]
+
+
+def request_target(head):
+    line = head.partition(b"\r\n")[0].split(b" ")
+    if len(line) != 3:
+        return None, None
+    return line[0], line[1]
+
+
+def wants_launcher_document(head):
+    if not KEY or (not LAUNCHER_ENABLED and not PROJECT_TITLE):
+        return False
+    method, target = request_target(head)
+    status, fields, buffered = http_parts(head)
+    if status is None or method != b"GET" or not target or target[:1] != b"/":
+        return False
+    if buffered:
+        return False
+    path = target.split(b"?", 1)[0].split(b"#", 1)[0]
+    project_path = b"/" + KEY.encode("ascii", "strict")
+    # OpenCode may navigate from the project into this top-level SPA route;
+    # reloading it must restore the launcher in the new document.
+    if path != b"/new-session" and path != project_path and not path.startswith(project_path + b"/"):
+        return False
+    if b"text/html" not in b", ".join(values(fields, b"accept")).lower():
+        return False
+    if values(fields, b"upgrade") or values(fields, b"transfer-encoding"):
+        return False
+    lengths = values(fields, b"content-length")
+    return not lengths or lengths == [b"0"]
+
+
+def rewrite_launcher_request(head):
+    status, fields, buffered = http_parts(head)
+    if status is None:
+        return head
+    lines = [status]
+    for name, value in fields:
+        if name in (b"accept-encoding", b"connection", b"proxy-connection", b"cache-control",
+                    b"if-none-match", b"if-modified-since"):
+            continue
+        lines.append(name + b": " + value)
+    lines.extend((b"Accept-Encoding: identity", b"Cache-Control: no-cache", b"Connection: close", b""))
+    return b"\r\n".join(lines) + b"\r\n" + buffered
+
+
+def close_browser_request(head):
+    # A raw-spliced keep-alive connection would bypass inspection for its next
+    # request. Browser API/asset fetches must finish their upstream connection
+    # so a later document navigation reaches the launcher matcher again.
+    status, fields, buffered = http_parts(head)
+    if (status is None or not values(fields, b"sec-fetch-mode") or
+            values(fields, b"upgrade") or
+            any(b"upgrade" in [token.strip().lower() for token in value.split(b",")]
+                for value in values(fields, b"connection"))):
+        return head, False
+    lines = [status]
+    for name, value in fields:
+        if name not in (b"connection", b"proxy-connection"):
+            lines.append(name + b": " + value)
+    lines.extend((b"Connection: close", b""))
+    return b"\r\n".join(lines) + b"\r\n" + buffered, True
+
+
+def launcher_policy_allows_self(policies, directives_to_check, scheme):
+    for policy in policies:
+        # Multiple CSP policies are enforced together; every one must allow the
+        # same-origin external script and stylesheet we add.
+        for item in policy.decode("latin1").split(","):
+            directives = {}
+            for raw in item.split(";"):
+                words = raw.strip().split()
+                if words and words[0].lower() not in directives:
+                    directives[words[0].lower()] = words[1:]
+            directive = next((name for name in directives_to_check if name in directives), None)
+            required_integrity = directives.get("require-sri-for", [])
+            if any(kind.lower() in ("script", "style") for kind in required_integrity):
+                return False
+            sources = directives.get(directive, directives.get("default-src"))
+            if sources is None:
+                continue
+            if "'none'" in [source.lower() for source in sources]:
+                return False
+            if "'strict-dynamic'" in [source.lower() for source in sources]:
+                return False
+            if not any(source.lower() in ("'self'", "*", scheme + ":") for source in sources):
+                return False
+    return True
+
+
+def read_launcher_runtime(relative_path):
+    if not LAUNCHER_SHARE or os.path.islink(LAUNCHER_SHARE):
+        return None
+    directory = os.path.join(LAUNCHER_SHARE, os.path.dirname(relative_path))
+    path = os.path.join(LAUNCHER_SHARE, relative_path)
+    try:
+        directory_info = os.lstat(directory)
+        if (not stat.S_ISDIR(directory_info.st_mode) or directory_info.st_uid != os.getuid() or
+                directory_info.st_mode & 0o077):
+            return None
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            file_info = os.fstat(fd)
+            if (not stat.S_ISREG(file_info.st_mode) or file_info.st_uid != os.getuid() or
+                    file_info.st_mode & 0o777 != 0o600 or file_info.st_size > 16384):
+                return None
+            with os.fdopen(fd, "r", encoding="utf-8") as source:
+                fd = -1
+                runtime = json.load(source)
+        finally:
+            if fd >= 0:
+                os.close(fd)
+        if (not isinstance(runtime, dict) or runtime.get("schema") != 1 or
+                runtime.get("share") != LAUNCHER_SHARE or
+                (LAUNCHER_PROJECT_HASH and runtime.get("projectHash") != LAUNCHER_PROJECT_HASH)):
+            return None
+        return runtime
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def launcher_app_ready(app, runtime):
+    port = runtime.get(app["port_field"])
+    if not isinstance(port, int) or isinstance(port, bool) or port != LISTEN_PORT + app["port_offset"]:
+        return False
+    sock = None
+    try:
+        sock = socket.create_connection(("127.0.0.1", port), timeout=0.5)
+        if app["scheme"] == "https":
+            context = ssl._create_unverified_context()
+            sock = context.wrap_socket(sock, server_hostname="localhost")
+        sock.settimeout(0.5)
+        sock.sendall(("GET " + app["health_path"] + " HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").encode("ascii"))
+        response = read_head(sock)
+        status = response.partition(b"\r\n")[0].split(b" ")
+        return len(status) >= 2 and status[1] == b"200"
+    except (OSError, ssl.SSLError, ValueError):
+        return False
+    finally:
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+
+def launcher_apps():
+    apps = []
+    for app in LAUNCHER_APP_REGISTRY:
+        runtime = read_launcher_runtime(app["runtime_file"])
+        if runtime is None or not launcher_app_ready(app, runtime):
+            continue
+        apps.append({
+            "id": app["id"], "label": app["label"], "icon": app["icon"],
+            "scheme": app["scheme"], "port": runtime[app["port_field"]],
+        })
+    return apps
+
+
+def launcher_asset_response(head):
+    if not KEY or not LAUNCHER_ENABLED:
+        return None
+    method, target = request_target(head)
+    if target is None:
+        return None
+    path = target.split(b"?", 1)[0]
+    assets = {
+        b"/__ocvm/launcher.js": (LAUNCHER_JS.encode("utf-8"), b"application/javascript; charset=utf-8"),
+        b"/__ocvm/launcher.css": (LAUNCHER_CSS, b"text/css; charset=utf-8"),
+    }
+    asset = assets.get(path)
+    if asset is None:
+        return None
+    body, content_type = asset
+    if method not in (b"GET", b"HEAD"):
+        return b"HTTP/1.1 405 Method Not Allowed\r\nAllow: GET, HEAD\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    response_body = b"" if method == b"HEAD" else body
+    return (b"HTTP/1.1 200 OK\r\nContent-Type: " + content_type + b"\r\nCache-Control: no-store\r\n" +
+            b"X-Content-Type-Options: nosniff\r\nContent-Length: " + str(len(body)).encode() +
+            b"\r\nConnection: close\r\n\r\n" + response_body)
+
+
+def launcher_html_request(head):
+    if not wants_launcher_document(head):
+        return None
+    status, request_fields, _ = http_parts(head)
+    accept_encoding = values(request_fields, b"accept-encoding")
+    for value in accept_encoding:
+        if b"identity;q=0" in value.replace(b" ", b"").lower():
+            return None
+    return True
+
+
+def inject_launcher(response_prefix, upstream):
+    header, separator, buffered = response_prefix.partition(b"\r\n\r\n")
+    if not separator:
+        return None, response_prefix
+    lines = header.split(b"\r\n")
+    status = lines[0].split(b" ")
+    fields = []
+    for line in lines[1:]:
+        name, colon, value = line.partition(b":")
+        if not colon or line[:1] in (b" ", b"\t"):
+            return None, response_prefix
+        fields.append((name.strip().lower(), value.strip()))
+    if len(status) < 2 or status[1] != b"200":
+        return None, response_prefix
+    content_types = values(fields, b"content-type")
+    content_lengths = values(fields, b"content-length")
+    if len(content_types) != 1 or len(content_lengths) != 1 or values(fields, b"transfer-encoding"):
+        return None, response_prefix
+    if b"content-encoding" in dict(fields) and values(fields, b"content-encoding") != [b"identity"]:
+        return None, response_prefix
+    media = content_types[0].split(b";", 1)[0].strip().lower()
+    charset = b"utf-8"
+    if b";" in content_types[0]:
+        params = content_types[0].split(b";", 1)[1].lower()
+        for param in params.split(b";"):
+            key, sep, value = param.strip().partition(b"=")
+            if sep and key.strip() == b"charset":
+                charset = value.strip().strip(b"\"'")
+    if media != b"text/html" or charset not in (b"utf-8", b"utf8"):
+        return None, response_prefix
+    scheme = "https" if TLS_ENABLED else "http"
+    if LAUNCHER_ENABLED and (
+            not launcher_policy_allows_self(values(fields, b"content-security-policy"),
+                                            ("script-src-elem", "script-src"), scheme) or
+            not launcher_policy_allows_self(values(fields, b"content-security-policy"),
+                                            ("style-src-elem", "style-src"), scheme)):
+        return None, response_prefix
+    try:
+        length = int(content_lengths[0])
+    except ValueError:
+        return None, response_prefix
+    if not content_lengths[0].isdigit():
+        return None, response_prefix
+    if length <= 0 or length > 2 * 1024 * 1024 or len(buffered) > length:
+        return None, response_prefix
+
+    body = buffered
+    consumed = response_prefix
+    old_timeout = upstream.gettimeout()
+    try:
+        upstream.settimeout(10)
+        while len(body) < length:
+            chunk = upstream.recv(min(65536, length - len(body)))
+            if not chunk:
+                return None, consumed
+            body += chunk
+            consumed += chunk
+    except OSError:
+        return None, consumed
+    finally:
+        try:
+            upstream.settimeout(old_timeout)
+        except OSError:
+            pass
+
+    lowered = body.lower()
+    if (lowered.count(b"</head>") != 1 or lowered.count(b"</body>") != 1 or
+            not re.search(rb"<script\b[^>]*\bsrc\s*=", body, re.I) or
+            (LAUNCHER_ENABLED and (b"id=\"ocvm-vm-launcher\"" in lowered or
+                                   b"id='ocvm-vm-launcher'" in lowered or
+                                   re.search(rb"<meta\b[^>]*http-equiv\s*=\s*(['\"]?)content-security-policy\b", body, re.I)))):
+        return None, consumed
+    head_at = lowered.find(b"</head>")
+    title = None
+    if PROJECT_TITLE:
+        title = re.search(rb"<title>OpenCode</title>", body[:head_at], re.I)
+        if title:
+            body = (body[:title.start()] + b"<title>" + html.escape(PROJECT_TITLE).encode("utf-8") +
+                    b"</title>" + body[title.end():])
+    if not LAUNCHER_ENABLED and title is None:
+        return None, consumed
+    if LAUNCHER_ENABLED:
+        apps_json = html.escape(json.dumps(launcher_apps(), separators=(",", ":"), ensure_ascii=True), quote=True)
+        head_at = body.lower().find(b"</head>")
+        body_at = body.lower().find(b"</body>")
+        head_insert = b'<link rel="stylesheet" href="/__ocvm/launcher.css">'
+        body_insert = (b'<div id="ocvm-vm-launcher" data-apps="' + apps_json.encode("ascii") +
+                       b'"></div><script defer src="/__ocvm/launcher.js"></script>')
+        new_body = body[:head_at] + head_insert + body[head_at:body_at] + body_insert + body[body_at:]
+    else:
+        new_body = body
+
+    rewritten = [lines[0]]
+    for line in lines[1:]:
+        name = line.partition(b":")[0].strip().lower()
+        if name in (b"content-length", b"etag", b"last-modified", b"content-md5", b"content-digest",
+                    b"connection", b"keep-alive"):
+            continue
+        rewritten.append(line)
+    rewritten.extend((b"Cache-Control: no-store", b"Content-Length: " + str(len(new_body)).encode(), b"Connection: close", b""))
+    return b"\r\n".join(rewritten) + b"\r\n" + new_body, consumed
+
+
 def reply_and_close(sock, payload):
     # The request head is fully drained by now, so this closes with FIN, not a
     # RST that would lose the response.
@@ -11121,7 +11787,8 @@ def reply_and_close(sock, payload):
     close_all(sock)
 
 
-def splice(a, b):
+def splice(a, b, close_browser=False):
+    response_prefix = b""
     try:
         while True:
             # A TLS socket can hold already-decrypted bytes that select() cannot
@@ -11134,6 +11801,23 @@ def splice(a, b):
                 chunk = src.recv(65536)
                 if not chunk:
                     return
+                if close_browser and src is b:
+                    response_prefix += chunk
+                    header, separator, body = response_prefix.partition(b"\r\n\r\n")
+                    if not separator and len(response_prefix) <= 32768:
+                        continue
+                    if separator and header.startswith(b"HTTP/1."):
+                        lines = header.split(b"\r\n")
+                        if all(b":" in line and line[:1] not in (b" ", b"\t") for line in lines[1:]):
+                            lines = [line for line in lines if line.partition(b":")[0].lower() not in
+                                     (b"connection", b"proxy-connection", b"keep-alive")]
+                            chunk = b"\r\n".join(lines + [b"Connection: close", b""]) + b"\r\n" + body
+                        else:
+                            chunk = response_prefix
+                    else:
+                        chunk = response_prefix
+                    close_browser = False
+                    response_prefix = b""
                 dst.sendall(chunk)
     except OSError:
         return
@@ -11181,6 +11865,11 @@ def handle(conn):
         reply_and_close(client, SEED_RESPONSE)
         return
 
+    asset = launcher_asset_response(head)
+    if asset is not None:
+        reply_and_close(client, asset)
+        return
+
     is_openlive = wants_openlive_gateway(head)
     remote_port = openlive_port() if is_openlive else 0
     if is_openlive and not remote_port:
@@ -11210,9 +11899,20 @@ def handle(conn):
         close_all(client)
         return
     try:
-        if head:
-            upstream.sendall(head)
-        splice(client, upstream)
+        inject_document = launcher_html_request(head)
+        upstream.settimeout(10 if inject_document else None)
+        forwarded, close_browser = (rewrite_launcher_request(head), False) if inject_document else close_browser_request(head)
+        upstream.sendall(forwarded)
+        if inject_document:
+            response_prefix = read_head(upstream)
+            rewritten, consumed = inject_launcher(response_prefix, upstream)
+            upstream.settimeout(None)
+            if rewritten is not None:
+                reply_and_close(client, rewritten)
+                return
+            if consumed:
+                client.sendall(consumed)
+        splice(client, upstream, close_browser)
     except OSError:
         pass
     finally:
@@ -11375,13 +12075,15 @@ _stop_legacy_redirector() {
   return 0
 }
 
-# start_proxy <name> <listen-port> <target-port> <seed-key> <cert> <key> [openlive-target project generation]
+# start_proxy <name> <listen-port> <target-port> <seed-key> <cert> <key>
+#   [openlive-target project generation launcher-share project-hash launcher-enabled project-title]
 # Idempotent. Silent on failure — the caller owns the message, because what a
 # dead listener means differs per service. Returns non-zero if nothing is
 # listening after ~4s.
 start_proxy() {
   local name="$1" listen="$2" target="$3" seedkey="$4" crt="$5" keyf="$6" remote="${7:-0}"
   local remote_project="${8:-}" remote_generation="${9:-}"
+  local launcher_share="${10:-}" launcher_project="${11:-}" launcher_enabled="${12:-1}" project_title="${13:-}"
   local waited=0 marker="ocvm-proxy-$1"
   stop_proxy "$name"
   # `bash -c <loop> <marker> ...` rather than a forked subshell, so the marker
@@ -11390,15 +12092,16 @@ start_proxy() {
   # background job holding stdout keeps `limactl shell` from ever returning.
   setsid bash -c '
     marker="$0"; name="$1"; py="$2"; listen="$3"; target="$4"
-    key="$5"; crt="$6"; keyf="$7"; remote="$8"; remote_project="$9"; remote_generation="${10}"
-    while true; do
-      python3 "$py" "$listen" "$target" "$key" "$crt" "$keyf" "$remote" "$remote_project" "$remote_generation" "$marker" \
+     key="$5"; crt="$6"; keyf="$7"; remote="$8"; remote_project="$9"; remote_generation="${10}"
+       launcher_share="${11}"; launcher_project="${12}"; launcher_enabled="${13}"; project_title="${14}"
+      while true; do
+        python3 "$py" "$listen" "$target" "$key" "$crt" "$keyf" "$remote" "$remote_project" "$remote_generation" "$marker" "$launcher_share" "$launcher_project" "$launcher_enabled" "$project_title" \
         >>"/tmp/ocvm-proxy-$name.log" 2>&1 &
       echo $! > "/tmp/ocvm-proxy-$name.run.pid"
       wait $! || true
       sleep 1
     done' "$marker" "$name" "$OC_PROXY_PY" "$listen" "$target" "$seedkey" "$crt" "$keyf" "$remote" "$remote_project" "$remote_generation" \
-    </dev/null >/dev/null 2>&1 &
+    "$launcher_share" "$launcher_project" "$launcher_enabled" "$project_title" </dev/null >/dev/null 2>&1 &
   echo $! > "/tmp/ocvm-proxy-$name.sup.pid"
   while [ "$waited" -lt 20 ]; do
     if ss -ltn "sport = :$listen" 2>/dev/null | grep -q LISTEN; then
@@ -11431,7 +12134,7 @@ load_session_auth() {
   return 0
 }
 
-stop_editor() {
+  stop_editor() {
   local description
   OC_EDITOR_READY=0
   [ "$(systemctl show ocvm-editor.service -p LoadState --value 2>/dev/null)" != not-found ] || return 0
@@ -11443,6 +12146,70 @@ stop_editor() {
   }
   sudo -n systemctl stop ocvm-editor.service || return 1
   rm -f "$SESS_SHARE/editor/runtime.json"
+}
+
+stop_taskboard() {
+  local description
+  [ ! -L "$SESS_SHARE/taskboard" ] || return 1
+  rm -f "$SESS_SHARE/taskboard/runtime.json"
+  [ "$(systemctl show ocvm-taskboard.service -p LoadState --value 2>/dev/null)" != not-found ] || return 0
+  description="$(systemctl show ocvm-taskboard.service -p Description --value 2>/dev/null)" || return 1
+  [ "$description" = "opencode-vm taskboard $SESS_SHARE" ] || {
+    echo "[taskboard] Existing service belongs to another runtime; refusing to stop it." >&2
+    return 1
+  }
+  sudo -n systemctl stop ocvm-taskboard.service || return 1
+}
+
+start_taskboard() {
+  OC_TASKBOARD_READY=0
+  [ "${OC_TASKBOARD_ENABLED:-0}" = "1" ] || return 0
+  stop_taskboard || return 1
+  local port="$((OC_PORT + 5))" waited=0 dir="$SESS_SHARE/taskboard" tmp
+  if [ -z "${OC_TASKBOARD_BIN:-}" ]; then
+    local arch="$(uname -m)"; [ "$arch" = aarch64 ] || arch=amd64
+    OC_TASKBOARD_BIN="$HOME/.local/share/ocvm-taskboard/taskboard-0.6.0-$arch/taskboard"
+  fi
+  [ -x "$OC_TASKBOARD_BIN" ] || {
+    echo "[taskboard] Binary is not installed; re-run opencode-vm init." >&2
+    return 1
+  }
+  [ -n "${OC_TASKBOARD_DB:-}" ] || return 1
+  mkdir -p "$(dirname "$OC_TASKBOARD_DB")" || return 1
+  if ss -ltn "sport = :$port" | grep -q LISTEN; then
+    echo "[taskboard] Port $port is already occupied inside the VM." >&2
+    return 1
+  fi
+  sudo -n systemd-run --quiet --collect --unit=ocvm-taskboard --service-type=exec \
+    --description="opencode-vm taskboard $SESS_SHARE" \
+    --property="User=$(id -un)" --property="Group=$(id -gn)" \
+    --property="WorkingDirectory=$PROJ_DIR" --property=UMask=0077 \
+    --property=KillMode=control-group --property=TimeoutStopSec=10 \
+    --property=Restart=on-failure --property=RestartSec=2 \
+    --property=AppArmorProfile=opencode-sandbox \
+    --property="StandardOutput=append:$SESS_SHARE/taskboard.log" --property="StandardError=append:$SESS_SHARE/taskboard.log" \
+    --setenv="PATH=$PATH" -- "$OC_TASKBOARD_BIN" start --foreground --port "$port" --db "$OC_TASKBOARD_DB" || return 1
+  while [ "$waited" -lt 100 ]; do
+    if systemctl is-active --quiet ocvm-taskboard.service && curl -fsS --max-time 1 "http://127.0.0.1:$port/api/projects" >/dev/null 2>&1; then
+      [ ! -L "$dir" ] && [ ! -L "$dir/runtime.json" ] || return 1
+      mkdir -p -m 700 "$dir" && chmod 700 "$dir" || return 1
+      tmp="$(mktemp "$dir/.runtime.XXXXXX")" || return 1
+      if ! jq -n --arg share "$SESS_SHARE" --arg hash "$OC_OPENLIVE_PROJECT_HASH" --argjson port "$port" \
+          '{schema:1,share:$share,projectHash:$hash,taskboardPort:$port}' > "$tmp" ||
+          ! chmod 600 "$tmp" || ! mv -f "$tmp" "$dir/runtime.json"; then
+        rm -f "$tmp"
+        return 1
+      fi
+      OC_TASKBOARD_READY=1
+      echo "[taskboard] Ready on HTTP port $port."
+      return 0
+    fi
+    sleep 0.2
+    waited=$((waited + 1))
+  done
+  stop_taskboard || true
+  echo "[taskboard] Startup failed; inspect $SESS_SHARE/taskboard.log." >&2
+  return 1
 }
 
 start_editor() {
@@ -11693,25 +12460,26 @@ start_web_proxies() {
   # Before binding anything: a pre-0.5.6 redirector may still own $OC_PORT.
   _stop_legacy_redirector
   if [ ! -f "$SESS_SHARE/lib/proxy.py" ] || ! command -v python3 >/dev/null 2>&1; then
-    echo "[web] No redirector available — root URL will show the project launcher."
+    echo "[web] No redirector available — OpenCode is reachable, but project seeding and the VM launcher are unavailable."
     openlive_proxy_fallback
     return 0
   fi
   ensure_web_tls
   # The block is contiguous and relative to the effective base, so the internal
-  # ports move with it. The host reserved P..P+3 before handing P down here.
+  # ports move with it. The host reserved P..P+5 before handing P down here.
   OC_PORT_INTERNAL=$(( OC_PORT - 1 ))
   OC_A2A_INTERNAL=$(( OC_PORT - 2 ))
   # Run from /tmp rather than straight off the share: the supervisor re-reads
   # the script on every respawn, and a stalled virtiofs mount would turn one
   # proxy crash into a permanently dead listener.
   if ! cp -f "$SESS_SHARE/lib/proxy.py" "$OC_PROXY_PY"; then
-    echo "[web] Could not stage the proxy — root URL will show the project launcher."
+    echo "[web] Could not stage the proxy — OpenCode is reachable, but project seeding and the VM launcher are unavailable."
     openlive_proxy_fallback
     return 0
   fi
   if ! start_proxy web-tls "$OC_PORT" "$OC_PORT_INTERNAL" "$OC_DIR_KEY" "$OC_TLS_CERT" "$OC_TLS_KEY" \
-    "$OC_OPENLIVE_REMOTE_TARGET" "$OC_OPENLIVE_PROJECT_HASH" "$OC_OPENLIVE_REMOTE_GENERATION"; then
+    "$OC_OPENLIVE_REMOTE_TARGET" "$OC_OPENLIVE_PROJECT_HASH" "$OC_OPENLIVE_REMOTE_GENERATION" \
+    "$SESS_SHARE" "$OC_OPENLIVE_PROJECT_HASH" "${OC_LAUNCHER_ENABLED:-1}" "$(basename "$PROJ_DIR")"; then
     echo "[web] Redirector did not bind port $OC_PORT — falling back to opencode on $OC_PORT directly."
     stop_all_proxies
     openlive_proxy_fallback
@@ -11727,7 +12495,8 @@ start_web_proxies() {
   # rule host-side would be a second source of truth, and ensure_web_tls can
   # degrade at runtime (missing openssl, cert failure) in ways the host cannot
   # predict — which would leave LAN ports tunnelled to nothing.
-  start_proxy web-plain "$(( OC_PORT + 1 ))" "$OC_PORT_INTERNAL" "$OC_DIR_KEY" "" "" ||
+  start_proxy web-plain "$(( OC_PORT + 1 ))" "$OC_PORT_INTERNAL" "$OC_DIR_KEY" "" "" \
+    0 "" "" "$SESS_SHARE" "$OC_OPENLIVE_PROJECT_HASH" "${OC_LAUNCHER_ENABLED:-1}" "$(basename "$PROJ_DIR")" ||
     echo "[web] WARNING: plain-HTTP web endpoint on $(( OC_PORT + 1 )) did not come up."
 
   # The a2a listeners come up here too, even though the sidecar behind them is
@@ -11938,14 +12707,15 @@ prepare_mcp_adapter() {
   tmp="$runtime.$$.tmp"
   rm -f "$SESS_SHARE/mcp/ready.json" "$tmp"
   jq -n --arg project "$project" --arg projectHash "$OC_OPENLIVE_PROJECT_HASH" \
-    --arg projectName "$(basename "$PROJ_DIR")" --arg backendUrl "http://127.0.0.1:$OC_PORT_INTERNAL" \
+     --arg projectName "$(basename "$PROJ_DIR")" --arg backendUrl "http://127.0.0.1:$OC_PORT_INTERNAL" \
     --arg generation "$OC_MCP_GENERATION" --arg opencodeVersion "$version" \
-    --arg credentialFile "$SESS_SHARE/mcp/credential" --arg managerFile "$SESS_SHARE/openlive/manager.json" \
-    --argjson listenPort "$OC_MCP_PORT" \
-    '{schema:1,project:$project,projectHash:$projectHash,projectName:$projectName,
-      backendUrl:$backendUrl,generation:$generation,opencodeVersion:$opencodeVersion,
-      listenHost:"127.0.0.1",listenPort:$listenPort,credentialFile:$credentialFile,
-      managerFile:$managerFile}' > "$tmp" || return 1
+     --arg credentialFile "$SESS_SHARE/mcp/credential" --arg managerFile "$SESS_SHARE/openlive/manager.json" \
+     --arg taskboardUrl "http://127.0.0.1:$((OC_PORT + 5))" --arg taskboardMetadataFile "${OC_TASKBOARD_METADATA_FILE:-}" \
+     --argjson listenPort "$OC_MCP_PORT" \
+     '{schema:1,project:$project,projectHash:$projectHash,projectName:$projectName,
+       backendUrl:$backendUrl,generation:$generation,opencodeVersion:$opencodeVersion,
+       listenHost:"127.0.0.1",listenPort:$listenPort,credentialFile:$credentialFile,
+       managerFile:$managerFile,taskboardUrl:$taskboardUrl,taskboardMetadataFile:$taskboardMetadataFile}' > "$tmp" || return 1
   chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
   mv -f "$tmp" "$runtime" || { rm -f "$tmp"; return 1; }
   export OCVM_MCP_RUNTIME="$runtime"
@@ -12055,6 +12825,7 @@ wait_for_mcp_adapter() {
 
 run_mcp_tui() {
   load_session_auth
+  start_taskboard || return 1
   stop_mcp_adapter || return 1
   prepare_mcp_adapter || return 1
   local log="$SESS_SHARE/mcp/backend.log" rc=0
@@ -12315,6 +13086,14 @@ print_web_banner() {
     fi
     echo ""
   fi
+  echo "Taskboard (project-local Kanban)"
+  if [ "${OC_TASKBOARD_READY:-0}" = "1" ]; then
+    echo "  Browser:       http://${host}:$(( OC_PORT + 5 ))"
+    echo "  Database:      ${OC_TASKBOARD_DB:-project state}/taskboard.db"
+  else
+    echo "  unavailable — inspect $SESS_SHARE/taskboard.log"
+  fi
+  echo ""
   if [ "${OC_A2A:-1}" = "1" ]; then
     echo "A2A  (protocol 1.0)"
     # Empty when the sidecar bailed out before naming itself (not installed, or
@@ -12882,8 +13661,9 @@ attach_session() {
       set -euo pipefail
       PROJ_DIR="$1"; SESS_SHARE="$2"; OC_PORT="$3"; OC_HOST_IP="$4"; OC_TLS="${5:-0}"
       . "$SESS_SHARE/lib/web.sh"
-      stop_editor
-      stop_mcp_adapter
+       stop_editor
+       stop_taskboard
+       stop_mcp_adapter
       stop_all_proxies
       stop_openlive_gateway
       for base in $(seq "$OC_PORT" $(( OC_PORT + 9 ))); do
@@ -13051,6 +13831,10 @@ attach_session() {
     vm_exec "$SESS_NAME" "$OCVM_EDITOR_INSTALL_SH"$'\ninstall_editor' ||
       echo "[editor] Installation unavailable; OpenCode will continue without the editor." >&2
   fi
+  if [[ "$sess_mode" == web || "$sess_mode" == tui-mcp ]]; then
+    vm_exec "$SESS_NAME" "$OCVM_TASKBOARD_INSTALL_SH"$'\ninstall_taskboard' ||
+      echo "[taskboard] Installation unavailable; OpenCode will continue without the board." >&2
+  fi
   if [[ "$sess_mcp_enabled" == "1" ]]; then
     trap _attach_tunnel_cleanup EXIT HUP TERM
     mcp_watch_host_ready "$SESS_NAME" "$proj" "$(session_share_dir "$proj")" \
@@ -13082,8 +13866,13 @@ attach_session() {
     OC_OPENLIVE_SCRIPT_VERSION="${13:-unknown}"
     OC_MCP_ENABLED="${14:-0}"
     OC_MCP_PORT="${15:-40960}"
-    OC_MCP_GENERATION="${16:-}"
-    OC_EDITOR_ENABLED="${17:-0}"
+     OC_MCP_GENERATION="${16:-}"
+     OC_EDITOR_ENABLED="${17:-0}"
+     OC_TASKBOARD_DB="${18:-}"
+     OC_TASKBOARD_METADATA_FILE="${OC_TASKBOARD_DB%.db}.metadata.json"
+     OC_TASKBOARD_ENABLED=0
+     if [ "$OC_MODE" = web ] || [ "$OC_MODE" = tui-mcp ]; then OC_TASKBOARD_ENABLED=1; fi
+     OC_LAUNCHER_ENABLED="${19:-1}"
 
     # Shared in-VM web library (materialized into the session share by
     # install_web_lib on the host, and mounted here at the same path). It owns
@@ -13120,6 +13909,8 @@ attach_session() {
       mcp_watch_ready()   { [ "${OC_MCP_ENABLED:-0}" != "1" ]; }
       stop_editor()      { return 0; }
       start_editor()     { [ "${OC_EDITOR_ENABLED:-0}" != "1" ]; }
+      stop_taskboard()   { return 0; }
+      start_taskboard()  { [ "${OC_TASKBOARD_ENABLED:-0}" != "1" ]; }
     fi
 
     export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/.config/composer/vendor/bin:/tmp/go/bin:/tmp/pnpm-store:$PATH"
@@ -13220,6 +14011,7 @@ attach_session() {
       set +e
       trap "" INT TERM HUP
       stop_editor || echo "[editor] Could not stop editor cleanly." >&2
+      stop_taskboard || echo "[taskboard] Could not stop taskboard cleanly." >&2
       if ! stop_mcp_adapter; then
         MCP_SHUTDOWN_FAILED=1
       fi
@@ -13283,9 +14075,10 @@ attach_session() {
       run_mcp_tui
     elif [ "$OC_MODE" = "web" ]; then
       stop_mcp_adapter
-      stop_all_proxies
-      stop_openlive_gateway
-      reap_stale_opencode "$OC_PORT_INTERNAL"
+       stop_all_proxies
+       stop_openlive_gateway
+       start_taskboard || echo "[taskboard] Unavailable; OpenCode continues without the board." >&2
+       reap_stale_opencode "$OC_PORT_INTERNAL"
       reap_stale_opencode "$OC_PORT"
       if ! prepare_openlive_adapter; then
         rm -f "$SESS_SHARE/openlive/runtime.json"
@@ -13361,7 +14154,7 @@ attach_session() {
 
     # Sync-back happens via the EXIT trap installed above (covers Ctrl+C as
     # well as normal exit).
-  ' "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$effective_base" "$host_lan_ip" "${OC_WEB_TUI:-false}" "$sess_tls" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up" "$(proj_hash "$proj")" "$OCVM_VERSION" "$sess_mcp_enabled" "$sess_mcp_port" "$attach_controller" "$sess_editor_enabled" || {
+   ' "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$effective_base" "$host_lan_ip" "${OC_WEB_TUI:-false}" "$sess_tls" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up" "$(proj_hash "$proj")" "$OCVM_VERSION" "$sess_mcp_enabled" "$sess_mcp_port" "$attach_controller" "$sess_editor_enabled" "$(project_state_dir "$proj")/taskboard/taskboard.db" "${SESSION_LAUNCHER_ENABLED:-1}" || {
     stop_mcp_host_watcher || true
     echo "[attach] Session command failed." >&2
     return 1
@@ -14481,9 +15274,13 @@ start_session() {
   # (idempotent, web mode only). Same BEFORE-stop-for-clone placement as above.
   if [[ "$SESSION_MODE" == "web" ]]; then
     a2a_ensure_installed_in_base || echo "[run] A2A install skipped; session will start without A2A." >&2
+    taskboard_ensure_installed_in_base || echo "[taskboard] Base installation failed; will retry inside the session." >&2
     if [[ "$effective_editor_enabled" == 1 ]]; then
       editor_ensure_installed_in_base || echo "[editor] Base installation failed; will retry inside the session." >&2
     fi
+  fi
+  if [[ "$SESSION_MODE" == "tui-mcp" ]]; then
+    taskboard_ensure_installed_in_base || echo "[taskboard] Base installation failed; MCP task tools may be unavailable." >&2
   fi
 
   # Ensure base VM is stopped for clone — always attempt stop defensively
@@ -14539,7 +15336,7 @@ start_session() {
   # per-project RAM/CPU overrides are independent, and spelling out every
   # combination as its own limactl line does not scale.
   local -a clone_args
-  clone_args=( --mount-only "${mount_proj}:w" --mount-only "${sess_share}:w" )
+  clone_args=( --mount-only "${mount_proj}:w" --mount-only "${sess_share}:w" --mount-only "${proj_state}:w" )
   if [[ -n "$share_mount" ]]; then
     clone_args+=( --mount-only "${share_dir}:w" )
   fi
@@ -14953,10 +15750,15 @@ start_session() {
     OC_OPENLIVE_SCRIPT_VERSION="${13:-unknown}"
     OC_MCP_ENABLED="${14:-0}"
     OC_MCP_PORT="${15:-40960}"
-    OC_MCP_GENERATION="${16:-}"
-    OC_EDITOR_ENABLED="${17:-0}"
+     OC_MCP_GENERATION="${16:-}"
+     OC_EDITOR_ENABLED="${17:-0}"
+     OC_TASKBOARD_DB="${18:-}"
+     OC_TASKBOARD_METADATA_FILE="${OC_TASKBOARD_DB%.db}.metadata.json"
+     OC_TASKBOARD_ENABLED=0
+     if [ "$OC_MODE" = web ] || [ "$OC_MODE" = tui-mcp ]; then OC_TASKBOARD_ENABLED=1; fi
+     OC_LAUNCHER_ENABLED="${19:-1}"
 
-    # Shared in-VM web library (materialized into the session share by
+     # Shared in-VM web library (materialized into the session share by
     # install_web_lib on the host, and mounted here at the same path). It owns
     # the TLS material, the proxy in front of opencode and the connect banner —
     # all of which attach_session needs identically. Fails safe: without it,
@@ -14991,6 +15793,8 @@ start_session() {
       mcp_watch_ready()   { [ "${OC_MCP_ENABLED:-0}" != "1" ]; }
       stop_editor()      { return 0; }
       start_editor()     { [ "${OC_EDITOR_ENABLED:-0}" != "1" ]; }
+      stop_taskboard()   { return 0; }
+      start_taskboard()  { [ "${OC_TASKBOARD_ENABLED:-0}" != "1" ]; }
     fi
 
     export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/.config/composer/vendor/bin:/tmp/go/bin:/tmp/pnpm-store:$PATH"
@@ -15236,6 +16040,8 @@ EOF
         stop_mcp_adapter
         stop_all_proxies
         stop_openlive_gateway
+        stop_taskboard
+        start_taskboard || echo "[taskboard] Unavailable; OpenCode continues without the board." >&2
         reap_stale_opencode "$OC_PORT_INTERNAL"
         reap_stale_opencode "$OC_PORT"
         if ! prepare_openlive_adapter; then
@@ -15319,7 +16125,7 @@ EOF
 
     # Sync back happens via the EXIT trap installed above (covers both clean
     # exit and Ctrl+C-driven termination of the web server).
-  ' "$proj" "$sess_share" "$SESSION_MODE" "$effective_base" "${OC_WEB_TUI:-false}" "$host_lan_ip" "${SESSION_TLS:-0}" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up" "$(proj_hash "$proj")" "$OCVM_VERSION" "$effective_mcp_enabled" "${effective_mcp_port:-$DEFAULT_MCP_PORT}" "$controller_id" "$effective_editor_enabled"; then
+   ' "$proj" "$sess_share" "$SESSION_MODE" "$effective_base" "${OC_WEB_TUI:-false}" "$host_lan_ip" "${SESSION_TLS:-0}" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up" "$(proj_hash "$proj")" "$OCVM_VERSION" "$effective_mcp_enabled" "${effective_mcp_port:-$DEFAULT_MCP_PORT}" "$controller_id" "$effective_editor_enabled" "$proj_state/taskboard/taskboard.db" "${SESSION_LAUNCHER_ENABLED:-1}"; then
     if ! stop_mcp_host_watcher; then
       echo "[mcp] Host readiness did not complete successfully; session failed closed." >&2
       return 1
@@ -15578,6 +16384,7 @@ case "$cmd" in
     ;;
 
   attach)
+    parse_attach_flags "$@"
     attach_session
     ;;
 
@@ -15646,7 +16453,7 @@ Usage:
                                            #   non-interactive override of the prompt
   opencode-vm web [--port PORT] [--password PW|--no-auth] [--no-tls] [--tui]
                    [--no-a2a|--require-a2a] [--mcp-port PORT|--no-mcp]
-                   [--no-editor|--editor]
+                   [--no-editor|--editor] [--no-launcher|--launcher]
                   [--keep-history] [--reconnect|--fresh|--cancel-if-exists]
                                            # start web server session (default port 4096)
                                            # provides: web UI, REST API, TUI attach, A2A agent
@@ -15659,12 +16466,16 @@ Usage:
                                            #   valid range for P: 1026-65532 (65531 with editor)
                                            # Editor: files, upload/download, local Git,
                                            #   terminal and diagnostic logs via code-server.
-                                           #   --no-editor disables it for this session;
+                                            #   --no-editor disables it for this session;
                                            #   attach/reconnect retain that choice. --editor
                                            #   re-enables it; fresh web starts default on.
                                            #   Always HTTPS, including with --no-tls.
                                            #   Editor login uses the same password (no username);
-                                           #   --no-auth also disables editor authentication.
+                                            #   --no-auth also disables editor authentication.
+                                            # Launcher: on by default in Web UI; includes
+                                            #   ready Editor and Projektmanagement entries.
+                                            #   --no-launcher hides only the launcher for
+                                            #   this run; --launcher explicitly enables it.
                                            # --password PW: HTTP Basic on all four
                                            #   public endpoints (also \$OCVM_WEB_PASSWORD).
                                            #   Persisted per session, so 'attach' keeps it.
@@ -15693,7 +16504,9 @@ Usage:
                                            # --tui: also start TUI in terminal (experimental)
                                            # --keep-history: load project-specific history
                                            #   (default starts with empty session list)
-  opencode-vm attach                       # reconnect to the project's session VM
+  opencode-vm attach [--no-launcher|--launcher]
+                                           # reconnect to the project's session VM;
+                                           # launcher defaults on for web sessions
                                            # (auto-starts a stopped-but-kept VM)
   opencode-vm vscode-trust {status|reset}  # inspect or reset this project's
                                             # remembered VS Code trust choice

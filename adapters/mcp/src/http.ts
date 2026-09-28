@@ -12,7 +12,7 @@ import { createMcpServer } from "./tools.js";
 import { ADAPTER_VERSION, MCP_TRANSPORT, isRecord } from "./types.js";
 import type { RuntimeDescriptor } from "./types.js";
 
-export const MAX_REQUEST_BODY_BYTES = 256 * 1024;
+export const MAX_REQUEST_BODY_BYTES = 8 * 1024 * 1024;
 const DEFAULT_MAX_CONCURRENT_REQUESTS = 16;
 
 class BodyTooLargeError extends Error {}
@@ -192,7 +192,7 @@ export class McpHttpServer {
         enableJsonResponse: true,
         maxRequestBodySize: MAX_REQUEST_BODY_BYTES,
       });
-      const mcp = createMcpServer(this.gateway);
+       const mcp = createMcpServer(this.gateway, this.runtime);
       this.activeMcpServers.add(mcp);
       try {
         await mcp.connect(transport);

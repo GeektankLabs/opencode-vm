@@ -145,7 +145,7 @@ try {
     },
   }));
   const tools = await client.listTools();
-  assert.equal(tools.tools.length, 15);
+  assert.equal(tools.tools.length, 17);
   const task = await client.callTool({ name: "get_task_result", arguments: { session_id: summary.id, submitted_message_id: "msg_fixture" } });
   assert.equal(task.structuredContent?.state, "completed");
   const message = await client.callTool({ name: "get_message", arguments: { session_id: summary.id, message_id: "msg_reply" } });
@@ -229,7 +229,7 @@ try {
   const direct = await fetch(`http://127.0.0.1:${port}/healthz`);
   assert.equal(direct.status, 401, "the local endpoint still requires its token");
   assert.ok(!diagnostics.includes(key) && !diagnostics.includes(token), "credentials leaked into tunnel diagnostics");
-  console.log("PASS: tunnel-client v0.0.15 discovers and invokes all fifteen tools through its local tunnel control plane using the generated profile.");
+  console.log("PASS: tunnel-client v0.0.15 discovers and invokes all seventeen tools through its local tunnel control plane using the generated profile.");
 
   // Optional Linux/systemd check: real checksum installer and managed service,
   // with outbound traffic confined to a disposable local control-plane fixture.

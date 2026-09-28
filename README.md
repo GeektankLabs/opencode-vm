@@ -240,10 +240,11 @@ A web session owns a small contiguous block around the base port `P` you pass to
 | `P+2` | A2A, **HTTPS** | yes |
 | `P+3` | A2A, **HTTP** | yes |
 | `P+4` | Project editor, **HTTPS** (unless `--no-editor`) | yes |
+| `P+5` | Project-local Taskboard, **HTTP** | yes |
 
-With the default `--port 4096` that is `4094`–`4099`, plus editor port `4100`. Valid base ports are `1026`–`65531` by default (`65532` with `--no-editor`).
+With the default `--port 4096` that is `4094`–`4101`, including editor port `4100` and Taskboard port `4101`. Valid base ports are `1026`–`65530`.
 
-Browsers additionally hardcode an unsafe-port list (Chromium's `kRestrictedPorts` — e.g. `6000`, `6665`–`6669`, `6697`, `10080`) and refuse such ports with `ERR_UNSAFE_PORT` no matter what listens there. A `--port` whose public block `P`–`P+3` (through `P+4` with the editor) touches that list is therefore rejected, and if a stored session port would land the block on one, the whole block shifts to the next browser-safe base instead.
+Browsers additionally hardcode an unsafe-port list (Chromium's `kRestrictedPorts` — e.g. `6000`, `6665`–`6669`, `6697`, `10080`) and refuse such ports with `ERR_UNSAFE_PORT` no matter what listens there. A `--port` whose public block `P`–`P+5` touches that list is therefore rejected, and if a stored session port would land the block on one, the whole block shifts to the next browser-safe base instead.
 
 The offsets are a fixed contract, because the A2A agent card has to advertise an absolute URL. If any port in the block is taken, the **whole block** moves to the next free one — the relationships never drift apart. The host port and the VM port are always the same number.
 
@@ -256,6 +257,8 @@ opencode-vm web                          # Web UI and editor
 opencode-vm attach                       # resume web session and editor
 opencode-vm web --no-editor              # deliberately omit the editor
 opencode-vm web --reconnect --editor     # re-enable after --no-editor
+opencode-vm web --no-launcher            # hide only the VM app menu for this run
+opencode-vm attach --no-launcher         # same opt-out when resuming a web session
 ```
 
 The browser editor uses code-server inside the project VM: files, search, diffs, local Git commits/branches, Markdown preview, a VM terminal, and status/log channels. File upload (Explorer menu or drag-and-drop) and download are enabled immediately. The profile starts with manual saving, AI features off, no extension recommendations, and automatic Git fetch disabled. The only added extension supplies the VM status and Output channels.
@@ -263,6 +266,10 @@ The browser editor uses code-server inside the project VM: files, search, diffs,
 Its **HTTPS address is printed in the service banner**, using the effective base plus four; port collisions move the whole service block. The editor reuses the self-signed certificate and the web password (password-only editor login). Explicit `--no-auth` applies to both; editor HTTPS remains enabled even with web `--no-tls`. Browser webviews such as Markdown preview require trusting the certificate, not merely bypassing its warning.
 
 The explicit `--no-editor` choice is retained on reconnect/attach; a fresh web session starts with the editor again. Older web sessions without a recorded opt-out also gain the editor on reconnect. Editor preferences survive session recreation in project state. Files and local Git operations affect the same mounted working tree as the host. See [Web editor setup, logs and certificate trust](docs/WEB-EDITOR.md).
+
+The normal OpenCode project page includes a small **VM** launcher at the lower left. Ready **Editor** and **Projektmanagement** (Taskboard) entries open in separate tabs, using P+4 HTTPS and P+5 HTTP respectively. Entries appear only when their project-matching runtime descriptor and local health endpoint are valid. The launcher defaults on for fresh web sessions and web reconnect/attach; `--no-launcher` hides it for one invocation, and `--launcher` explicitly enables it. The proxy adds it only to safe OpenCode HTML document responses; OpenCode remains the top-level page, while APIs, assets, uploads and WebSockets keep their direct routes.
+
+OpenCode Web UI browser tabs use the project directory name as their title (for example, `opencode-vm`). This also works with `--no-launcher`; the OpenCode favicon stays the same. Reconnect and reload existing tabs to pick up a newly installed script.
 
 ### Incoming MCP connector
 
@@ -274,13 +281,17 @@ opencode-vm web --mcp-port 40960
 opencode-vm web --no-mcp
 ```
 
-New sessions select a free loopback port from `40960..41059`; the first available endpoint is `http://127.0.0.1:40960/mcp`. Explicit ports and reconnects keep their selected port. The adapter uses stateless Streamable HTTP and exposes fifteen tools: `list_sessions`, `create_session`, `archive_session`, `get_session`, `get_session_status`, `get_session_progress`, `get_session_history`, `get_task_result`, `get_message`, `read_message_content`, asynchronous `send_message`, `get_session_runtime_options`, `update_session_runtime`, `get_project_activity`, and `wait_for_project_activity`. `create_session` accepts an optional title and creates an empty work session using the project's default work agent/model; send its first prompt with `send_message`. `archive_session` requires an explicit request, preserves history and verifies the archived timestamp; archived content can be read by known ID using `include_archived:true` on the stored-content tools. OpenCode permission requests and questions are handled in Web UI/TUI.
+New sessions select a free loopback port from `40960..41059`; the first available endpoint is `http://127.0.0.1:40960/mcp`. Explicit ports and reconnects keep their selected port. The adapter uses stateless Streamable HTTP and exposes seventeen core session tools, including `upload_attachment` and `supersede_unresolved_submission`, plus eight board-neutral task tools: `list_project_tasks`, `get_project_task`, `create_project_task`, `update_project_task`, `move_project_task`, `add_task_comment`, `link_task_to_session`, and `transfer_project_task`. `transfer_project_task` is reserved for the future global scope and fails closed in this first phase. `create_session` accepts an optional title and creates an empty work session using the project's default work agent/model; send its first prompt with `send_message`. `archive_session` requires an explicit request, preserves history and verifies the archived timestamp; archived content can be read by known ID using `include_archived:true` on the stored-content tools. OpenCode permission requests and questions are handled in Web UI/TUI.
+
+Since opencode-vm 0.5.78 / MCP adapter 0.1.9, upload PNG/JPEG/WebP, plain-text or Markdown bytes with `upload_attachment`, then pass its session-bound, one-use `attachment_id` in `send_message.attachments`. No filesystem path is accepted. Images are limited to 5 MiB, text files to 512 KiB, and attachments expire after ten minutes; an image requires an active model with image-input capability. The exact schema, error codes, MIME checks and client requirements are in [`docs/MCP-INTERFACE.md`](docs/MCP-INTERFACE.md).
 
 Since 0.5.67, `get_task_result` finds original reports by their submitted user-message ID with bounded, resumable searches beyond the fast status window. `get_message` directly addresses a known message; `read_message_content` reads its full visible original in revision-bound UTF-8 pages with a SHA-256 checksum. History is a small preview with content references and explicit omissions. No model regeneration is needed. Changed content or expired references are reported explicitly; reading does not mark a result discussed. See [`PLAN_MCP_READING.md`](PLAN_MCP_READING.md) for scope, measured compatibility and outstanding real ChatGPT acceptance.
 
 Since 0.5.68, `get_session_progress` shows recorded tool names, pending/running states, the last finished step, timestamps and task IDs in a bounded recent-message window. Arguments, titles, outputs and reasoning remain private; tool completion does not imply task success. `get_project_activity` accepts `tail:true` for a recent filtered overview, followed by ordinary cursor reads/waits. Save each returned cursor separately under its `filter_key`; tail is not an acknowledgement of older history. See [`PLAN_MCP_PROGRESS.md`](PLAN_MCP_PROGRESS.md) for limits, tests and target-host acceptance.
 
-Since 0.5.70, admission distinguishes real backend/concurrent-write `SESSION_BUSY` from `SUBMISSION_UNRESOLVED` when an idle session still has an unverified old receipt. Before a new write, bounded resumable result checks can recover terminal evidence outside the 100-message status window. Idle alone never unlocks a task. Session/status reads expose admission tracking, and task `running` now requires correlated unfinished-assistant/tool evidence as well as backend activity. See [`PLAN_MCP_ADMISSION.md`](PLAN_MCP_ADMISSION.md) for recovery semantics and error/log interpretation.
+Since MCP adapter 0.1.12, historical unresolved receipts no longer block normal conversation continuation. `send_message` checks only current backend activity, pending input, the adapter's in-flight write lock, and an exact immediate retry of an uncertain transport request. MCP performs no semantic duplicate/task decision; the running session context handles that. Old receipt state remains inspectable through status/result reads. See [`PLAN_MCP_ADMISSION.md`](PLAN_MCP_ADMISSION.md) for the root cause and reduced admission contract.
+
+`supersede_unresolved_submission` remains a legacy auditable guard-resolution workflow. It is not required for normal continuation: an unresolved old receipt does not block an idle session, and MCP does not infer duplicate tasks. Its UUID/replay guarantees still apply when a client explicitly chooses that workflow.
 
 Since 0.5.66, clients can query live agent/provider/model/variant options, update idle sessions, and follow all project sessions through a private persistent activity journal. Retain `next_cursor` to retrieve later completion/error/input-required events without polling every session. Receipts preserve `message_id` and add an activity cursor; status remains authoritative and response text stays in history. The journal retains 5,000 events across adapter restarts, reports expired cursors explicitly, and supports waits up to 15 seconds. Collection and cross-client concurrency limits are documented in [`PLAN_MCP_ACTIVITY.md`](PLAN_MCP_ACTIVITY.md).
 
@@ -288,7 +299,7 @@ Every request requires the dedicated token in the `X-OCVM-MCP-Token` header. The
 
 The endpoint is enabled by default for web sessions. Reconnect preserves the port/token and re-evaluates the project configuration; `--no-mcp` suppresses MCP and its OpenAI tunnel for that invocation only. A fresh MCP-enabled session rotates the token. A source checkout builds its adjacent adapter in the VM. A standalone installed script downloads its pinned, SHA-256-verified adapter release into a content-addressed cache only when MCP is enabled.
 
-The token grants access to bounded project-session history and to `send_message`, which can cause commands and project file changes. Treat it as a project-scoped write credential. The exact contract is in [`docs/MCP-INTERFACE.md`](docs/MCP-INTERFACE.md).
+The token grants access to bounded project-session history and to write tools such as `send_message` and the explicitly authorized guard-override operation, which can cause commands and project file changes. Treat it as a project-scoped write credential. The exact contract is in [`docs/MCP-INTERFACE.md`](docs/MCP-INTERFACE.md).
 
 #### Connect ChatGPT through OpenAI MCP
 

@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { lstat, readFile } from "node:fs/promises";
 import { createOpencodeClient } from "@opencode-ai/sdk/v2";
+import type { FilePartInput, TextPartInput } from "@opencode-ai/sdk/v2";
 import { ActivityJournal } from "./activity.js";
+import { AttachmentStore, submittedAttachment } from "./attachments.js";
+import type { AttachmentDescriptor } from "./attachments.js";
 import type {
   Message,
   Part,
@@ -48,8 +51,10 @@ import type {
   SessionProgressResult,
   ToolObservation,
   AdmissionState,
-  AdmissionErrorReason,
   ArchiveSessionResult,
+  SubmissionGuardOverrideInput,
+  SubmissionGuardOverrideResult,
+  SubmissionGuardSnapshot,
 } from "./types.js";
 
 const BACKEND_DEADLINE_MS = 8_000;
@@ -57,8 +62,6 @@ const ADMISSION_DEADLINE_MS = 15_000;
 const BACKEND_PAGE_SIZE = 20;
 const MAX_SESSION_PAGES = 10;
 const STATUS_HISTORY_LIMIT = 100;
-const ADMISSION_SEARCH_PAGES = 25;
-const ADMISSION_SEARCH_MS = 10_000;
 const OPENLIVE_MANAGER_AGENT = "openlive-manager";
 
 type OpenCodeClient = ReturnType<typeof createOpencodeClient>;
@@ -76,6 +79,13 @@ type ResultCursor = {
   failed: boolean;
   aborted: boolean;
   latestFinish?: string;
+  newerTurn?: {
+    assistantSeen: boolean;
+    assistantParentId?: string;
+    assistantCompleted: boolean;
+    userSeen: boolean;
+    userId?: string;
+  };
   archived?: boolean;
 };
 
@@ -139,7 +149,20 @@ export interface SessionGateway {
     before?: string,
     includeArchived?: boolean,
   ): Promise<SessionHistoryResult>;
-  sendMessage(sessionId: string, message: string): Promise<SendMessageResult>;
+  uploadAttachment(
+    sessionId: string,
+    filename: string,
+    mimeType: string,
+    dataBase64: string,
+  ): Promise<AttachmentDescriptor>;
+  sendMessage(
+    sessionId: string,
+    message: string,
+    attachmentIds?: string[],
+  ): Promise<SendMessageResult>;
+  supersedeUnresolvedSubmission(
+    input: SubmissionGuardOverrideInput,
+  ): Promise<SubmissionGuardOverrideResult>;
 }
 
 export class OpenCodeGateway implements SessionGateway {
@@ -148,11 +171,12 @@ export class OpenCodeGateway implements SessionGateway {
   private compatibilityPromise: Promise<void> | undefined;
   private readonly submissionLocks = new Set<string>();
   private readonly unresolved = new Map<string, string>();
-  private readonly admissionSearch = new Map<
+  private readonly uncertainSubmissions = new Map<
     string,
-    { messageId: string; cursor: string }
+    { message: string; attachmentIds: string[]; messageId: string }
   >();
   private readonly readReferences = new ReadReferences();
+  private readonly attachments = new AttachmentStore();
   private journal?: ActivityJournal;
   private readonly collectorStop = new AbortController();
   private collector?: Promise<void>;
@@ -168,7 +192,9 @@ export class OpenCodeGateway implements SessionGateway {
     client?: OpenCodeClient,
     private readonly backendDeadlineMs = BACKEND_DEADLINE_MS,
     private readonly admissionDeadlineMs = ADMISSION_DEADLINE_MS,
-    private readonly admissionSearchMs = ADMISSION_SEARCH_MS,
+    // Kept as an ignored constructor slot for source-level test/runtime callers
+    // while admission no longer performs historical receipt searches.
+    _legacyAdmissionSearchMs?: number,
   ) {
     const password = process.env.OPENCODE_SERVER_PASSWORD;
     const username = process.env.OPENCODE_SERVER_USERNAME || "opencode";
@@ -205,6 +231,7 @@ export class OpenCodeGateway implements SessionGateway {
 
   async close(): Promise<void> {
     this.collectorStop.abort();
+    this.attachments.close();
     await Promise.allSettled(
       [this.collector, this.sweeper].filter((value) => value !== undefined),
     );
@@ -776,9 +803,14 @@ export class OpenCodeGateway implements SessionGateway {
       activity,
       pending,
     );
+    const receiptResolution = await this.journal?.receiptResolution(
+      sessionId,
+      messageId,
+    );
     return {
       ...result,
       admission: this.admissionState(sessionId),
+      ...(receiptResolution ? { receipt_resolution: receiptResolution } : {}),
       pending_input_scope: "session",
       observed_at: new Date().toISOString(),
       source: "backend",
@@ -875,6 +907,8 @@ export class OpenCodeGateway implements SessionGateway {
 
     if (state === "completed" || state === "failed" || state === "aborted") {
       this.retireReceipt(sessionId, messageId);
+      if (this.uncertainSubmissions.get(sessionId)?.messageId === messageId)
+        this.uncertainSubmissions.delete(sessionId);
     }
     return {
       ...base,
@@ -1106,6 +1140,31 @@ export class OpenCodeGateway implements SessionGateway {
         break;
       }
       const info = stored.info;
+      const newerTurn = (scan.newerTurn ??= {
+        assistantSeen: false,
+        assistantCompleted: false,
+        userSeen: false,
+      });
+      // Pages are scanned newest-to-oldest. Capture only the newest assistant
+      // and user after the guarded receipt, and later require them to correlate.
+      // An unresolved newer user must prevent an older completed turn from
+      // being mistaken for proof that the session has moved on safely.
+      if (
+        info.role === "assistant" &&
+        info.parentID !== messageId &&
+        !newerTurn.assistantSeen
+      ) {
+        newerTurn.assistantSeen = true;
+        newerTurn.assistantParentId = info.parentID;
+        newerTurn.assistantCompleted =
+          typeof info.time.completed === "number" &&
+          info.finish === "stop" &&
+          !hasError(info) &&
+          !isAborted(info);
+      } else if (info.role === "user" && !newerTurn.userSeen) {
+        newerTurn.userSeen = true;
+        newerTurn.userId = info.id;
+      }
       if (info.role !== "assistant" || info.parentID !== messageId) continue;
       if (!scan.assistants) scan.latestFinish = info.finish;
       scan.assistants++;
@@ -1168,6 +1227,20 @@ export class OpenCodeGateway implements SessionGateway {
         state = "completed";
       // Session-wide busy/pending signals cannot establish this older task's state.
     }
+    const supersededBy =
+      state === "unknown" &&
+      foundUser &&
+      scan.newerTurn?.userSeen &&
+      scan.newerTurn.userId &&
+      scan.newerTurn.assistantSeen &&
+      scan.newerTurn.assistantCompleted &&
+      scan.newerTurn.assistantParentId === scan.newerTurn.userId
+        ? scan.newerTurn.userId
+        : undefined;
+    const receiptResolution = await this.journal?.receiptResolution(
+      sessionId,
+      messageId,
+    );
     const result: TaskResult = {
       session_id: sessionId,
       submitted_message_id: messageId,
@@ -1176,16 +1249,20 @@ export class OpenCodeGateway implements SessionGateway {
         ? {
             state_reason: !foundUser
               ? ("search_incomplete" as const)
-              : scan.assistants
-                ? ("non_terminal_evidence" as const)
-                : ("no_terminal_evidence" as const),
+              : supersededBy
+                ? ("superseded_by_later_completed_turn" as const)
+                : scan.assistants
+                  ? ("non_terminal_evidence" as const)
+                  : ("no_terminal_evidence" as const),
           }
         : {}),
+      ...(supersededBy ? { superseded_by_message_id: supersededBy } : {}),
       observed_at: new Date().toISOString(),
       source: "backend",
       search_complete: foundUser,
       order: "newest_first",
       messages,
+      ...(receiptResolution ? { receipt_resolution: receiptResolution } : {}),
       ...(!foundUser
         ? {
             next_cursor: this.readReferences.encode({
@@ -1293,9 +1370,20 @@ export class OpenCodeGateway implements SessionGateway {
     return stored;
   }
 
+  async uploadAttachment(
+    sessionId: string,
+    filename: string,
+    mimeType: string,
+    dataBase64: string,
+  ): Promise<AttachmentDescriptor> {
+    await this.requireExposedSession(sessionId);
+    return this.attachments.upload(sessionId, filename, mimeType, dataBase64);
+  }
+
   async sendMessage(
     sessionId: string,
     message: string,
+    attachmentIds: string[] = [],
   ): Promise<SendMessageResult> {
     if (message.length < 1 || message.length > 32_000) {
       throw new AdapterError(
@@ -1311,18 +1399,68 @@ export class OpenCodeGateway implements SessionGateway {
         "write_in_progress",
       );
     }
+    const uncertain = this.uncertainSubmissions.get(sessionId);
+    if (
+      uncertain &&
+      uncertain.message === message &&
+      JSON.stringify(uncertain.attachmentIds) === JSON.stringify(attachmentIds)
+    ) {
+      throw new AdapterError(
+        "SUBMISSION_UNCERTAIN",
+        "This exact prompt may already have been admitted; inspect its message_id before retrying.",
+        uncertain.messageId,
+      );
+    }
     this.submissionLocks.add(sessionId);
     this.collecting.delete(sessionId);
     try {
       const session = await this.requireExposedSession(sessionId);
       await this.requireIdle(sessionId);
       const settings = await this.promptSettings(session);
+      const initialAttachments = this.attachments.resolve(
+        sessionId,
+        attachmentIds,
+      );
+      if (
+        initialAttachments.some((attachment) =>
+          attachment.mime_type.startsWith("image/"),
+        )
+      ) {
+        await this.requireImageInput(
+          settings.model.providerID,
+          settings.model.modelID,
+        );
+      }
       // Runtime lookup can race another frontend. Recheck before admission;
       // this is still not a cross-client backend transaction.
       await this.requireIdle(sessionId);
+      const attachments = this.attachments.resolve(sessionId, attachmentIds);
+      const parts: Array<TextPartInput | FilePartInput> = [
+        { type: "text", text: message },
+      ];
+      for (const attachment of attachments) {
+        if (attachment.mime_type.startsWith("image/")) {
+          parts.push({
+            type: "file",
+            mime: attachment.mime_type,
+            filename: attachment.filename,
+            url: `data:${attachment.mime_type};base64,${attachment.data.toString("base64")}`,
+          });
+        } else {
+          parts.push({
+            type: "text",
+            text: `\n\n[Attachment: ${attachment.filename} (${attachment.mime_type})]\n${attachment.data.toString("utf8")}`,
+          });
+        }
+      }
       const messageId = `msg_${randomUUID().replaceAll("-", "")}`;
       const activityCursor = await this.journal?.track(sessionId, messageId);
       const submittedAt = new Date().toISOString();
+      const submittedAttachments = attachments.map(submittedAttachment);
+      this.attachments.consume(sessionId, attachments);
+      // A different prompt is an explicit continuation; it ends the narrow
+      // immediate-retry window for an older uncertain transport call.
+      this.uncertainSubmissions.delete(sessionId);
       this.unresolved.set(sessionId, messageId);
       try {
         await this.client.session.promptAsync(
@@ -1333,11 +1471,16 @@ export class OpenCodeGateway implements SessionGateway {
             agent: settings.agent,
             model: settings.model,
             ...(settings.variant ? { variant: settings.variant } : {}),
-            parts: [{ type: "text", text: message }],
+            parts,
           },
           { signal: AbortSignal.timeout(this.admissionDeadlineMs) },
         );
       } catch {
+        this.uncertainSubmissions.set(sessionId, {
+          message,
+          attachmentIds: [...attachmentIds],
+          messageId,
+        });
         throw new AdapterError(
           "SUBMISSION_UNCERTAIN",
           "OpenCode did not confirm whether the message was admitted; do not retry automatically.",
@@ -1362,9 +1505,282 @@ export class OpenCodeGateway implements SessionGateway {
         state: "submitted",
         submitted_at: submittedAt,
         ...(activityCursor ? { activity_cursor: activityCursor } : {}),
+        ...(submittedAttachments.length
+          ? { attachments: submittedAttachments }
+          : {}),
       };
     } finally {
       this.submissionLocks.delete(sessionId);
+    }
+  }
+
+  async supersedeUnresolvedSubmission(
+    input: SubmissionGuardOverrideInput,
+  ): Promise<SubmissionGuardOverrideResult> {
+    const {
+      sessionId,
+      guardedMessageId,
+      operatorAuthorized,
+      message,
+      attachmentIds = [],
+    } = input;
+    const requestId = input.requestId.toLowerCase();
+    const reason = input.reason?.trim();
+    if (
+      operatorAuthorized !== true ||
+      !sessionId ||
+      sessionId.length > 256 ||
+      /[\s\x00-\x1f\x7f]/u.test(sessionId) ||
+      !guardedMessageId ||
+      guardedMessageId.length > 256 ||
+      /[\s\x00-\x1f\x7f]/u.test(guardedMessageId) ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(
+        requestId,
+      ) ||
+      message.length < 1 ||
+      message.length > 32_000 ||
+      (input.reason !== undefined &&
+        (!reason || reason.length > 500 || /[\x00-\x1f\x7f]/u.test(reason))) ||
+      attachmentIds.length > 32
+    ) {
+      throw new AdapterError(
+        "INVALID_ARGUMENT",
+        "A valid session, guarded message, UUID request_id, explicit operator_authorized=true, message, and optional short reason are required.",
+      );
+    }
+
+    await this.requireExposedSession(sessionId);
+    const journal = this.requireJournal();
+    const fingerprint = digest(
+      JSON.stringify({
+        sessionId,
+        guardedMessageId,
+        requestId,
+        reason: reason ?? null,
+        message,
+        attachmentIds,
+      }),
+    );
+    const replay = async (
+      record: NonNullable<
+        Awaited<ReturnType<ActivityJournal["guardOverride"]>>
+      >,
+    ) => {
+      if (record.fingerprint !== fingerprint)
+        throw new AdapterError(
+          "SUBMISSION_GUARD_CONFLICT",
+          "This request_id is already bound to a different guard override request.",
+        );
+      if (record.state === "submitted" && record.result)
+        return structuredClone(record.result);
+      throw new AdapterError(
+        "SUBMISSION_UNCERTAIN",
+        "This guard override request may already have reached OpenCode. Inspect its new message_id; do not retry with a new request_id.",
+        record.message_id,
+      );
+    };
+    const existing = await journal.guardOverride(requestId);
+    if (existing) return replay(existing);
+
+    if (this.submissionLocks.has(sessionId))
+      throw new AdapterError(
+        "SESSION_BUSY",
+        "The session has an MCP write in progress.",
+        guardedMessageId,
+        "write_in_progress",
+      );
+    this.submissionLocks.add(sessionId);
+    this.collecting.delete(sessionId);
+    try {
+      const session = await this.requireExposedSession(sessionId);
+      const alreadyRecorded = await journal.guardOverride(requestId);
+      if (alreadyRecorded) return replay(alreadyRecorded);
+      if (this.unresolved.get(sessionId) !== guardedMessageId)
+        throw staleGuard();
+
+      if (this.unresolved.get(sessionId) !== guardedMessageId)
+        throw staleGuard();
+
+      let preflight = await this.submissionGuardSnapshot(
+        sessionId,
+        guardedMessageId,
+      );
+      const settings = await this.promptSettings(session);
+      const attachments = this.attachments.resolve(sessionId, attachmentIds);
+      if (
+        attachments.some((attachment) =>
+          attachment.mime_type.startsWith("image/"),
+        )
+      ) {
+        await this.requireImageInput(
+          settings.model.providerID,
+          settings.model.modelID,
+        );
+      }
+      // Recheck the exact guard and all live admission signals immediately before
+      // the write-ahead audit record and the one backend admission attempt.
+      if (this.unresolved.get(sessionId) !== guardedMessageId)
+        throw staleGuard();
+      preflight = await this.submissionGuardSnapshot(
+        sessionId,
+        guardedMessageId,
+      );
+
+      const parts: Array<TextPartInput | FilePartInput> = [
+        { type: "text", text: message },
+      ];
+      for (const attachment of attachments) {
+        if (attachment.mime_type.startsWith("image/")) {
+          parts.push({
+            type: "file",
+            mime: attachment.mime_type,
+            filename: attachment.filename,
+            url: `data:${attachment.mime_type};base64,${attachment.data.toString("base64")}`,
+          });
+        } else {
+          parts.push({
+            type: "text",
+            text: `\n\n[Attachment: ${attachment.filename} (${attachment.mime_type})]\n${attachment.data.toString("utf8")}`,
+          });
+        }
+      }
+      const messageId = `msg_${randomUUID().replaceAll("-", "")}`;
+      const prepared = await journal.prepareGuardOverride({
+        request_id: requestId,
+        fingerprint,
+        session_id: sessionId,
+        session_title: session.title,
+        guarded_message_id: guardedMessageId,
+        message_id: messageId,
+        ...(reason ? { reason } : {}),
+        preflight,
+      });
+      if (!prepared.created) return replay(prepared.record);
+
+      this.attachments.consume(sessionId, attachments);
+      this.unresolved.set(sessionId, messageId);
+      try {
+        await this.client.session.promptAsync(
+          {
+            sessionID: sessionId,
+            directory: this.runtime.project,
+            messageID: messageId,
+            agent: settings.agent,
+            model: settings.model,
+            ...(settings.variant ? { variant: settings.variant } : {}),
+            parts,
+          },
+          { signal: AbortSignal.timeout(this.admissionDeadlineMs) },
+        );
+      } catch {
+        throw new AdapterError(
+          "SUBMISSION_UNCERTAIN",
+          "OpenCode did not confirm whether the superseding message was admitted; inspect its message_id and do not retry automatically.",
+          messageId,
+        );
+      }
+
+      const result: SubmissionGuardOverrideResult = {
+        session_id: sessionId,
+        guarded_message_id: guardedMessageId,
+        request_id: requestId,
+        message_id: messageId,
+        state: "submitted",
+        resolution: "superseded_by_operator",
+        superseded_at: prepared.record.superseded_at,
+        submitted_at: new Date().toISOString(),
+        authorization_source: "operator_asserted",
+        preflight,
+        activity_cursor: prepared.record.activity_cursor,
+        ...(attachments.length
+          ? { attachments: attachments.map(submittedAttachment) }
+          : {}),
+      };
+      await journal
+        .completeGuardOverride(requestId, session.title, result)
+        .catch(() => {
+          this.tracking.partial = true;
+          process.stderr.write(
+            "[mcp] activity persistence failed after guard override admission\n",
+          );
+        });
+      return result;
+    } finally {
+      this.submissionLocks.delete(sessionId);
+    }
+  }
+
+  private async submissionGuardSnapshot(
+    sessionId: string,
+    guardedMessageId: string,
+  ): Promise<SubmissionGuardSnapshot> {
+    const [status, progress] = await Promise.all([
+      this.getSessionStatus(sessionId, guardedMessageId),
+      this.getSessionProgress(sessionId),
+    ]);
+    if (this.unresolved.get(sessionId) !== guardedMessageId) throw staleGuard();
+    if (
+      status.backend_activity !== progress.backend_activity ||
+      JSON.stringify(status.pending_input) !==
+        JSON.stringify(progress.pending_input)
+    )
+      throw new AdapterError(
+        "SUBMISSION_GUARD_CONFLICT",
+        "Session activity changed during override inspection. Read the current guard and retry only after review.",
+        guardedMessageId,
+      );
+    this.assertIdle(
+      status.backend_activity,
+      status.pending_input,
+      guardedMessageId,
+    );
+    if (
+      status.active_assistant_message_ids?.length ||
+      progress.coverage.in_flight_total > 0 ||
+      progress.coverage.metadata_incomplete
+    )
+      throw new AdapterError(
+        "SESSION_BUSY",
+        "Stored active assistant/tool evidence prevents superseding this guard. Inspect the session before proceeding.",
+        guardedMessageId,
+        "backend_active",
+      );
+    return {
+      observed_at: new Date().toISOString(),
+      backend_activity: status.backend_activity,
+      active_assistant_message_ids: status.active_assistant_message_ids ?? [],
+      in_flight_tools: progress.in_flight_tools,
+      pending_input: status.pending_input,
+      guarded_message_id: guardedMessageId,
+      guarded_receipt_state: status.state,
+      ...(progress.last_activity_at !== undefined
+        ? { last_activity_at: progress.last_activity_at }
+        : {}),
+      coverage: progress.coverage,
+    };
+  }
+
+  private async requireImageInput(
+    providerId: string,
+    modelId: string,
+  ): Promise<void> {
+    const response = await this.backendCall(
+      () =>
+        this.client.v2.model.list(
+          { location: { directory: this.runtime.project } },
+          { signal: this.deadline() },
+        ),
+      "Could not verify the selected model's image-input support.",
+    );
+    const model = response.data?.data?.find(
+      (candidate) =>
+        candidate.providerID === providerId && candidate.id === modelId,
+    );
+    if (!model?.capabilities?.input?.includes("image")) {
+      throw new AdapterError(
+        "MODEL_DOES_NOT_SUPPORT_ATTACHMENT_TYPE",
+        "The session's selected model is not confirmed to support image input; choose an image-capable model before submitting this attachment.",
+      );
     }
   }
 
@@ -1867,21 +2283,13 @@ export class OpenCodeGateway implements SessionGateway {
   }
 
   private async requireIdle(id: string): Promise<void> {
-    const check = async () => {
-      const [activity, pending] = await Promise.all([
-        this.activity(id),
-        this.pending(id),
-      ]);
-      this.assertIdle(activity, pending, this.unresolved.get(id));
-    };
-    await check();
-    if (!this.unresolved.has(id)) {
-      this.admissionSearch.delete(id);
-      return;
-    }
-    await this.reconcileAdmission(id);
-    // A terminal old receipt never establishes that the whole session is idle.
-    await check();
+    // Receipt uncertainty belongs to the old request, not to the session. Only
+    // current backend activity and pending input can prevent a new prompt.
+    const [activity, pending] = await Promise.all([
+      this.activity(id),
+      this.pending(id),
+    ]);
+    this.assertIdle(activity, pending);
   }
 
   private admissionState(id: string): AdmissionState {
@@ -1895,8 +2303,6 @@ export class OpenCodeGateway implements SessionGateway {
   private retireReceipt(id: string, receipt: string): void {
     if (this.unresolved.get(id) !== receipt) return;
     this.unresolved.delete(id);
-    if (this.admissionSearch.get(id)?.messageId === receipt)
-      this.admissionSearch.delete(id);
   }
 
   private assertIdle(
@@ -1918,116 +2324,6 @@ export class OpenCodeGateway implements SessionGateway {
         receipt,
         "backend_active",
       );
-  }
-
-  private unresolvedAdmission(
-    receipt: string,
-    reason: AdmissionErrorReason,
-  ): AdapterError {
-    return new AdapterError(
-      "SUBMISSION_UNRESOLVED",
-      `The requested operation was not admitted. The session was observed idle, but the previous receipt could not be confirmed terminal (${reason}). Inspect this original task with get_task_result; idle alone does not authorize clearing it.`,
-      receipt,
-      reason,
-    );
-  }
-
-  private async reconcileAdmission(id: string): Promise<void> {
-    const receipt = this.unresolved.get(id);
-    if (!receipt) return;
-    const unchanged = () => {
-      const current = this.unresolved.get(id);
-      if (current && current !== receipt)
-        throw this.unresolvedAdmission(current, "receipt_changed");
-      return current === receipt;
-    };
-    let status: SessionStatusResult;
-    try {
-      status = await this.getSessionStatus(id, receipt);
-    } catch (error) {
-      if (error instanceof AdapterError && error.code === "BACKEND_UNAVAILABLE")
-        throw this.unresolvedAdmission(receipt, "backend_unavailable");
-      throw error;
-    }
-    this.assertIdle(status.backend_activity, status.pending_input, receipt);
-    if (!unchanged()) return; // Another correlated read retired exactly this receipt.
-    if (["completed", "failed", "aborted"].includes(status.state)) {
-      this.retireReceipt(id, receipt);
-      return;
-    }
-    if (
-      status.state !== "unknown" ||
-      status.task_status_reason !== "outside_history_or_not_observed"
-    )
-      throw this.unresolvedAdmission(receipt, "receipt_not_terminal");
-
-    // Reuse the authenticated result-search contract. Bound each attempt and
-    // retain only its cursor, not message contents; subsequent attempts resume.
-    const saved = this.admissionSearch.get(id);
-    let cursor = saved?.messageId === receipt ? saved.cursor : undefined;
-    const signal = AbortSignal.timeout(this.admissionSearchMs);
-    const end = Date.now() + this.admissionSearchMs;
-    for (
-      let page = 0;
-      page < ADMISSION_SEARCH_PAGES && Date.now() < end && !signal.aborted;
-      page++
-    ) {
-      let result: TaskResult;
-      try {
-        result = await this.getTaskResult(
-          id,
-          receipt,
-          cursor,
-          BACKEND_PAGE_SIZE,
-          signal,
-        );
-      } catch (error) {
-        if (!unchanged()) return;
-        if (
-          !(error instanceof AdapterError) ||
-          error.code === "SESSION_NOT_FOUND"
-        )
-          throw error;
-        if (signal.aborted)
-          throw this.unresolvedAdmission(receipt, "search_incomplete");
-        if (
-          error.code === "SEARCH_CHANGED" ||
-          error.code === "READ_REFERENCE_EXPIRED"
-        ) {
-          this.admissionSearch.delete(id);
-          throw this.unresolvedAdmission(receipt, "search_changed");
-        }
-        if (
-          error.code === "MESSAGE_NOT_FOUND" ||
-          error.code === "CONTENT_UNAVAILABLE"
-        )
-          throw this.unresolvedAdmission(receipt, "receipt_unavailable");
-        if (error.code === "BACKEND_UNAVAILABLE")
-          throw this.unresolvedAdmission(receipt, "backend_unavailable");
-        if (
-          error.code === "BACKEND_INCOMPATIBLE" ||
-          error.code === "INVALID_ARGUMENT"
-        ) {
-          this.admissionSearch.delete(id);
-          throw this.unresolvedAdmission(receipt, "backend_incompatible");
-        }
-        throw error;
-      }
-      if (!unchanged()) return;
-      if (result.search_complete) {
-        this.admissionSearch.delete(id);
-        if (["completed", "failed", "aborted"].includes(result.state)) {
-          this.retireReceipt(id, receipt);
-          return;
-        }
-        throw this.unresolvedAdmission(receipt, "receipt_not_terminal");
-      }
-      if (!result.next_cursor)
-        throw this.unresolvedAdmission(receipt, "backend_incompatible");
-      cursor = result.next_cursor;
-      this.admissionSearch.set(id, { messageId: receipt, cursor });
-    }
-    throw this.unresolvedAdmission(receipt, "search_incomplete");
   }
 
   private requireJournal(): ActivityJournal {
@@ -2333,6 +2629,13 @@ function sessionNotFound(): AdapterError {
   return new AdapterError(
     "SESSION_NOT_FOUND",
     "The session does not exist or is not exposed by this project endpoint.",
+  );
+}
+
+function staleGuard(): AdapterError {
+  return new AdapterError(
+    "SUBMISSION_GUARD_CONFLICT",
+    "The guarded receipt is no longer the exact active admission guard. Read the current session guard before any new override request.",
   );
 }
 

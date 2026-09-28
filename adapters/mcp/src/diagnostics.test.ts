@@ -34,6 +34,24 @@ test("communication logs correlate calls without copying input or results", asyn
   assert.doesNotMatch(lines.join(""), /PRIVATE|SECRET/);
 });
 
+test("attachment upload diagnostics never log uploaded bytes or filenames", async () => {
+  const lines: string[] = [];
+  await traceToolCall(
+    "upload_attachment",
+    {
+      session_id: "ses_123",
+      filename: "PRIVATE-MOCKUP.png",
+      mime_type: "image/png",
+      data_base64: "SECRET-BASE64-PAYLOAD",
+    },
+    async () => ({ content: [{ type: "text", text: "Uploaded." }] }),
+    (line) => lines.push(line),
+  );
+  assert.match(lines[0]!, /"tool":"upload_attachment"/u);
+  assert.match(lines[0]!, /"session_id":"ses_123"/u);
+  assert.doesNotMatch(lines.join(""), /PRIVATE|SECRET|mockup|base64|data:/iu);
+});
+
 test("failed calls are logged without retries, raw errors or unknown tool names", async () => {
   const lines: string[] = [];
   const error = new Error("PRIVATE EXCEPTION");

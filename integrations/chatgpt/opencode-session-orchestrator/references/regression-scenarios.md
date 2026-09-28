@@ -12,6 +12,24 @@ These are review cases for the instructions, not permission to submit live tasks
 | D — `send_message` has no unambiguous receipt. | Inspect original invocation/ID, history or activity; no fresh send or approval-card provocation. Consider another attempt only after non-delivery is established and authorized. |
 | E — “Send this as a write operation, but make its content read-only.” | Invoke the actual write-capable `send_message` once with an explicit read-only remote scope; leave any on-screen approval decision to host/backend controls. |
 
+## Attachment workflow cases
+
+These cases review instructions only; they do not authorize or perform live uploads.
+
+| Scenario | Required behavior |
+|---|---|
+| Selected connector exposes `upload_attachment` and `send_message.attachments`; user asks to send an available PNG mockup | Read the attachment workflow, use bytes from the current chat/file context, upload for the exact target session, then use the returned ID exactly once in the authorized `send_message`. Never send a local path or invented ID. |
+| Same request with JPEG/WebP, plain text or Markdown | Use the same controlled upload flow, validate the declared supported type/size against the discovered schema, and send returned IDs only. |
+| User asks to send a PDF and embedded text is available | Extract relevant text with the current product's existing file/PDF capability without OCR; preserve headings, useful tables and page/section/source markers in Markdown or plain text, then upload the converted text file. Never send the PDF as a raw attachment. |
+| PDF is scanned | Use only an already available suitable PDF/OCR capability if needed. If none is available or extraction is uncertain, disclose the limitation and ask for a usable text/export or targeted pages; do not invent OCR results. |
+| Extracted PDF text exceeds a per-file limit | Split at useful section/page boundaries into UTF-8 Markdown/text files, keeping each at most 512 KiB and clearly labeling part order and source coverage. |
+| PDF extraction needs more than four files or would exceed the message limits | Do not truncate silently or evade limits with repeated sends. Narrow to relevant pages/sections or ask the user to choose scope; state exactly what is covered and omitted. |
+| File type is unsupported | Do not upload raw bytes. Convert/extract to a faithful supported text/image form only when the current tools can do so; otherwise report the type-specific limitation. |
+| Upload result is missing/uncertain, ID is expired/used, or an attachment error occurs | Do not invent/replay IDs or blindly repeat a non-idempotent upload/send. Preserve existing uncertain-receipt recovery; re-upload only after a definitive failure and with the existing task authorization, then use its new returned ID once. |
+| Model rejects an image for missing image-input capability | Do not bypass the check or switch connection/model. Report the rejection; change runtime only after applicable user authorization. |
+| Attachment upload succeeds and message is admitted | Correlate the receipt with its message ID. Remember the staged ID is consumed, while the submitted file part remains in OpenCode session history under its normal retention. |
+| Connector lacks either `upload_attachment` or the `send_message.attachments` parameter | Do not guess a tool/schema or send a path; use only a separately authorized supported alternative or explain the selected connector cannot transfer the file natively. |
+
 ## Original reading and workflow cases
 
 | Scenario | Required behavior |
@@ -31,6 +49,11 @@ These are review cases for the instructions, not permission to submit live tasks
 | Send is pending while a host approval is requested | Preserve the original call rather than sending again. |
 | `SESSION_BUSY` accompanies idle | Describe and inspect the exact conflict; do not bypass or invent a successful resend. |
 | `SUBMISSION_UNRESOLVED` names an older receipt while backend is idle | Explain that the new request was rejected; inspect the old task and do not infer terminal completion from idle. |
+| An idle unresolved receipt has no later terminal evidence and no override tool is exposed | Keep the normal guard; do not retry, abort or move the same task to another session. |
+| `supersede_unresolved_submission` is available but fresh approval for the exact current `guarded_message_id` was not given | Explain the receipt/risk and do not invoke the override, even if the original task was already authorized. |
+| User explicitly approves superseding the exact current guard | Invoke the combined override-and-send operation once with a new UUID and the approved message; verify its returned new `message_id`, and do not send the same message again. |
+| Override request is uncertain or repeated | Inspect/reuse the same request UUID and exact fields; never generate a new key or duplicate the prompt. |
+| Guard changed, backend is active, or permissions/questions are pending before override | Stop on conflict/busy/input-required; re-read state and require fresh approval for any changed guard. |
 | Backend is busy while an older task has only completed tool-call steps | Do not attribute session-wide busy to that old task without correlated unfinished evidence. |
 | `SUBMISSION_UNCERTAIN` follows a lost send response | Keep the attempted new message ID and verify delivery; never classify it as a definite pre-admission rejection or blindly resend. |
 | Journal cursor expires or collection is partial | Explain the observation gap and reconstruct; do not claim no activity. |

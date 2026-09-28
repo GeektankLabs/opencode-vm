@@ -1,7 +1,7 @@
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { dirname, isAbsolute } from "node:path";
 
-export const ADAPTER_VERSION = "0.1.7";
+export const ADAPTER_VERSION = "0.1.12";
 export const MCP_TRANSPORT = "streamable-http-stateless";
 
 export type RuntimeDescriptor = {
@@ -16,6 +16,8 @@ export type RuntimeDescriptor = {
   listenPort: number;
   credentialFile: string;
   managerFile?: string;
+  taskboardUrl?: string;
+  taskboardMetadataFile?: string;
 };
 
 export type ReadyDescriptor = {
@@ -93,6 +95,7 @@ export type SessionStatusResult = {
   active_assistant_message_ids?: string[];
   pending_input_scope?: "session";
   admission?: AdmissionState;
+  receipt_resolution?: ReceiptResolution;
   observed_at?: string;
   source?: "backend";
   task_status_reason?:
@@ -190,7 +193,11 @@ export type TaskResult = {
   submitted_message_id: string;
   state: CorrelatedState;
   state_reason?:
-    "search_incomplete" | "non_terminal_evidence" | "no_terminal_evidence";
+    | "search_incomplete"
+    | "non_terminal_evidence"
+    | "no_terminal_evidence"
+    | "superseded_by_later_completed_turn";
+  superseded_by_message_id?: string;
   observed_at: string;
   source: "backend";
   search_complete: boolean;
@@ -199,6 +206,53 @@ export type TaskResult = {
   messages: Array<
     HistoryMessage & { result_kind: "terminal" | "intermediate" }
   >;
+  receipt_resolution?: ReceiptResolution;
+};
+
+export type ReceiptResolution = {
+  state: "unresolved";
+  resolution: "superseded_by_operator";
+  superseded_at: string;
+  superseded_by_request_id: string;
+  superseded_by_message_id: string;
+  reason?: string;
+};
+
+export type SubmissionGuardSnapshot = {
+  observed_at: string;
+  backend_activity: SessionActivity;
+  active_assistant_message_ids: string[];
+  in_flight_tools: ToolObservation[];
+  pending_input: PendingInput;
+  guarded_message_id: string;
+  guarded_receipt_state: CorrelatedState;
+  last_activity_at?: number;
+  coverage: SessionProgressResult["coverage"];
+};
+
+export type SubmissionGuardOverrideInput = {
+  sessionId: string;
+  guardedMessageId: string;
+  requestId: string;
+  operatorAuthorized: true;
+  message: string;
+  reason?: string;
+  attachmentIds?: string[];
+};
+
+export type SubmissionGuardOverrideResult = {
+  session_id: string;
+  guarded_message_id: string;
+  request_id: string;
+  message_id: string;
+  state: "submitted";
+  resolution: "superseded_by_operator";
+  superseded_at: string;
+  submitted_at: string;
+  authorization_source: "operator_asserted";
+  preflight: SubmissionGuardSnapshot;
+  activity_cursor?: string;
+  attachments?: SendMessageResult["attachments"];
 };
 
 export type SendMessageResult = {
@@ -207,6 +261,13 @@ export type SendMessageResult = {
   state: "submitted";
   submitted_at?: string;
   activity_cursor?: string;
+  attachments?: Array<{
+    attachment_id: string;
+    filename: string;
+    mime_type: string;
+    size_bytes: number;
+    sha256: string;
+  }>;
 };
 
 export type SessionRuntime = {
@@ -246,6 +307,7 @@ export const ACTIVITY_TYPES = [
   "session.idle",
   "session.busy",
   "session.runtime_changed",
+  "submission.guard_overridden",
 ] as const;
 export type ActivityType = (typeof ACTIVITY_TYPES)[number];
 export type ActivityEvent = {
@@ -255,6 +317,13 @@ export type ActivityEvent = {
   session_id: string;
   session_title: string;
   message_id?: string;
+  guarded_message_id?: string;
+  request_id?: string;
+  reason?: string;
+  operator_authorized?: true;
+  authorization_source?: "operator_asserted";
+  guarded_receipt_state?: CorrelatedState;
+  last_activity_at?: number;
   type: ActivityType;
   state: string;
   assistant_message_ids: string[];
@@ -320,6 +389,7 @@ export const ADAPTER_ERROR_CODES = [
   "BACKEND_INCOMPATIBLE",
   "SUBMISSION_UNCERTAIN",
   "SUBMISSION_UNRESOLVED",
+  "SUBMISSION_GUARD_CONFLICT",
   "CREATION_UNCERTAIN",
   "ARCHIVE_UNCERTAIN",
   "INVALID_AGENT",
@@ -337,6 +407,16 @@ export const ADAPTER_ERROR_CODES = [
   "READ_REFERENCE_EXPIRED",
   "SEARCH_CHANGED",
   "RESPONSE_BUDGET_EXCEEDED",
+  "ATTACHMENT_NOT_FOUND",
+  "UNSUPPORTED_MEDIA_TYPE",
+  "ATTACHMENT_TOO_LARGE",
+  "ATTACHMENT_ACCESS_DENIED",
+  "INVALID_ATTACHMENT_REFERENCE",
+  "MODEL_DOES_NOT_SUPPORT_ATTACHMENT_TYPE",
+  "TASK_NOT_FOUND",
+  "TASKBOARD_UNAVAILABLE",
+  "TASKBOARD_ERROR",
+  "TASK_SCOPE_UNAVAILABLE",
 ] as const;
 
 export type AdapterErrorCode = (typeof ADAPTER_ERROR_CODES)[number];
@@ -389,6 +469,12 @@ export async function loadRuntimeDescriptor(
   const opencodeVersion = requiredString(value, "opencodeVersion", 128);
   const credentialFile = requiredString(value, "credentialFile", 4096);
   const managerFile = optionalString(value, "managerFile", 4096);
+  const taskboardUrl = optionalString(value, "taskboardUrl", 2048);
+  const taskboardMetadataFile = optionalString(
+    value,
+    "taskboardMetadataFile",
+    4096,
+  );
 
   if (!isAbsolute(project)) throw new Error("MCP project must be absolute.");
   if ((await realpath(project).catch(() => undefined)) !== project) {
@@ -398,6 +484,7 @@ export async function loadRuntimeDescriptor(
     throw new Error("MCP project identity is invalid.");
   }
   validateBackendUrl(backendUrl);
+  if (taskboardUrl) validateBackendUrl(taskboardUrl);
   if (!isSafeLabel(generation) || /[\r\n]/u.test(opencodeVersion)) {
     throw new Error("MCP runtime identity is invalid.");
   }
@@ -415,9 +502,12 @@ export async function loadRuntimeDescriptor(
   }
   if (
     !isAbsolute(credentialFile) ||
-    (managerFile && !isAbsolute(managerFile))
+    (managerFile && !isAbsolute(managerFile)) ||
+    (taskboardMetadataFile && !isAbsolute(taskboardMetadataFile))
   ) {
-    throw new Error("MCP credential and manager paths must be absolute.");
+    throw new Error(
+      "MCP credential, manager and taskboard paths must be absolute.",
+    );
   }
   await requirePrivateRegularFile(credentialFile, 0o600, "credential");
 
@@ -433,6 +523,8 @@ export async function loadRuntimeDescriptor(
     listenPort,
     credentialFile,
     ...(managerFile ? { managerFile } : {}),
+    ...(taskboardUrl ? { taskboardUrl } : {}),
+    ...(taskboardMetadataFile ? { taskboardMetadataFile } : {}),
   };
 }
 

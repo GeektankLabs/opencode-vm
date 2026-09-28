@@ -5,6 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { McpHttpServer, MAX_REQUEST_BODY_BYTES } from "./http.js";
 import type { SessionGateway } from "./opencode.js";
+import type { AttachmentDescriptor } from "./attachments.js";
 import { AdapterError } from "./types.js";
 import type {
   ActivityQuery,
@@ -24,6 +25,8 @@ import type {
   MessageContentResult,
   TaskResult,
   SessionProgressResult,
+  SubmissionGuardOverrideInput,
+  SubmissionGuardOverrideResult,
 } from "./types.js";
 
 const token = "test-token-" + "x".repeat(43);
@@ -71,8 +74,22 @@ class FakeGateway implements SessionGateway {
   async readMessageContent(): Promise<MessageContentResult> {
     throw new Error("fixture unused");
   }
-  async getTaskResult(): Promise<TaskResult> {
-    throw new Error("fixture unused");
+  async getTaskResult(
+    sessionId: string,
+    submittedMessageId: string,
+  ): Promise<TaskResult> {
+    return {
+      session_id: sessionId,
+      submitted_message_id: submittedMessageId,
+      state: "unknown",
+      state_reason: "superseded_by_later_completed_turn",
+      superseded_by_message_id: "msg_later",
+      observed_at: new Date().toISOString(),
+      source: "backend",
+      search_complete: true,
+      order: "newest_first",
+      messages: [],
+    };
   }
   async getSessionRuntimeOptions(): Promise<RuntimeOptions> {
     return {
@@ -123,6 +140,18 @@ class FakeGateway implements SessionGateway {
   listBarrier: Promise<void> | undefined;
   createCalls: Array<string | undefined> = [];
   archiveCalls: string[] = [];
+  uploadCalls: Array<{
+    session_id: string;
+    filename: string;
+    mime_type: string;
+    data_base64: string;
+  }> = [];
+  sendCalls: Array<{
+    session_id: string;
+    message: string;
+    attachments?: string[];
+  }> = [];
+  supersedeCalls: SubmissionGuardOverrideInput[] = [];
 
   async archiveSession(sessionId: string): Promise<ArchiveSessionResult> {
     this.archiveCalls.push(sessionId);
@@ -176,16 +205,94 @@ class FakeGateway implements SessionGateway {
     return { session_id: sessionId, messages: [], truncated: false };
   }
 
-  async sendMessage(sessionId: string): Promise<SendMessageResult> {
+  async uploadAttachment(
+    sessionId: string,
+    filename: string,
+    mimeType: string,
+    dataBase64: string,
+  ): Promise<AttachmentDescriptor> {
+    this.uploadCalls.push({
+      session_id: sessionId,
+      filename,
+      mime_type: mimeType,
+      data_base64: dataBase64,
+    });
+    return {
+      attachment_id: "att_0123456789abcdef0123456789abcdef",
+      filename,
+      mime_type: "image/png",
+      size_bytes: 4,
+      sha256: "a".repeat(64),
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+    };
+  }
+
+  async sendMessage(
+    sessionId: string,
+    message: string,
+    attachments?: string[],
+  ): Promise<SendMessageResult> {
+    this.sendCalls.push({
+      session_id: sessionId,
+      message,
+      ...(attachments ? { attachments } : {}),
+    });
     return {
       session_id: sessionId,
       message_id: "msg_receipt",
       state: "submitted",
+      ...(attachments?.length
+        ? {
+            attachments: attachments.map((attachment_id) => ({
+              attachment_id,
+              filename: "mockup.png",
+              mime_type: "image/png",
+              size_bytes: 4,
+              sha256: "a".repeat(64),
+            })),
+          }
+        : {}),
+    };
+  }
+
+  async supersedeUnresolvedSubmission(
+    input: SubmissionGuardOverrideInput,
+  ): Promise<SubmissionGuardOverrideResult> {
+    this.supersedeCalls.push(input);
+    return {
+      session_id: input.sessionId,
+      guarded_message_id: input.guardedMessageId,
+      request_id: input.requestId,
+      message_id: "msg_superseding",
+      state: "submitted",
+      resolution: "superseded_by_operator",
+      superseded_at: new Date().toISOString(),
+      submitted_at: new Date().toISOString(),
+      authorization_source: "operator_asserted",
+      preflight: {
+        observed_at: new Date().toISOString(),
+        backend_activity: "idle",
+        active_assistant_message_ids: [],
+        in_flight_tools: [],
+        pending_input: { permissions: 0, questions: 0 },
+        guarded_message_id: input.guardedMessageId,
+        guarded_receipt_state: "unknown",
+        coverage: {
+          message_limit: 100,
+          messages_scanned: 1,
+          history_has_more: false,
+          in_flight_total: 0,
+          in_flight_truncated: false,
+          metadata_incomplete: false,
+          unattributed_tools: 0,
+        },
+      },
+      activity_cursor: "cursor",
     };
   }
 }
 
-test("official MCP client discovers fifteen stateless HTTP tools and invokes archive by ID", async () => {
+test("official MCP client discovers seventeen stateless HTTP tools and invokes archive by ID", async () => {
   const gateway = new FakeGateway();
   const server = new McpHttpServer(runtime(), token, gateway);
   const port = await server.start();
@@ -211,7 +318,9 @@ test("official MCP client discovers fifteen stateless HTTP tools and invokes arc
       "list_sessions",
       "read_message_content",
       "send_message",
+      "supersede_unresolved_submission",
       "update_session_runtime",
+      "upload_attachment",
       "wait_for_project_activity",
     ]);
     const listTool = listed.tools.find((tool) => tool.name === "list_sessions");
@@ -219,6 +328,12 @@ test("official MCP client discovers fifteen stateless HTTP tools and invokes arc
     assert.equal(listTool?.annotations?.readOnlyHint, true);
     assert.equal(sendTool?.annotations?.destructiveHint, true);
     assert.equal(sendTool?.annotations?.idempotentHint, false);
+    const uploadTool = listed.tools.find(
+      (tool) => tool.name === "upload_attachment",
+    );
+    assert.equal(uploadTool?.annotations?.readOnlyHint, false);
+    assert.equal(uploadTool?.annotations?.destructiveHint, false);
+    assert.equal(uploadTool?.annotations?.idempotentHint, false);
     const createTool = listed.tools.find(
       (tool) => tool.name === "create_session",
     );
@@ -296,6 +411,20 @@ test("official MCP client discovers fifteen stateless HTTP tools and invokes arc
         ?.messages,
       [],
     );
+    const taskResult = await client.callTool({
+      name: "get_task_result",
+      arguments: { session_id: "ses", submitted_message_id: "msg_old" },
+    });
+    assert.equal(
+      (taskResult.structuredContent as Record<string, unknown> | undefined)
+        ?.state_reason,
+      "superseded_by_later_completed_turn",
+    );
+    assert.equal(
+      (taskResult.structuredContent as Record<string, unknown> | undefined)
+        ?.superseded_by_message_id,
+      "msg_later",
+    );
     const sent = await client.callTool({
       name: "send_message",
       arguments: { session_id: "ses", message: "continue" },
@@ -306,6 +435,73 @@ test("official MCP client discovers fifteen stateless HTTP tools and invokes arc
         ?.message_id,
       "msg_receipt",
     );
+    assert.deepEqual(gateway.sendCalls.at(-1), {
+      session_id: "ses",
+      message: "continue",
+    });
+    const overrideRequestId = "01234567-89ab-4def-8123-456789abcdef";
+    const override = await client.callTool({
+      name: "supersede_unresolved_submission",
+      arguments: {
+        session_id: "ses",
+        guarded_message_id: "msg_old",
+        request_id: overrideRequestId,
+        operator_authorized: true,
+        reason: "Reviewed the old unresolved receipt; continue once.",
+        message: "continue with the approved task",
+      },
+    });
+    assert.equal(override.isError, undefined);
+    assert.equal(
+      (override.structuredContent as Record<string, unknown>)?.message_id,
+      "msg_superseding",
+    );
+    assert.deepEqual(gateway.supersedeCalls.at(-1), {
+      sessionId: "ses",
+      guardedMessageId: "msg_old",
+      requestId: overrideRequestId,
+      operatorAuthorized: true,
+      reason: "Reviewed the old unresolved receipt; continue once.",
+      message: "continue with the approved task",
+    });
+    const overrideTool = listed.tools.find(
+      (tool) => tool.name === "supersede_unresolved_submission",
+    );
+    assert.equal(overrideTool?.annotations?.idempotentHint, true);
+    const upload = await client.callTool({
+      name: "upload_attachment",
+      arguments: {
+        session_id: "ses",
+        filename: "mockup.png",
+        mime_type: "image/png",
+        data_base64: "iVBORw0KGgo=",
+      },
+    });
+    assert.equal(upload.isError, undefined);
+    assert.equal(
+      (upload.structuredContent as Record<string, unknown>)?.attachment_id,
+      "att_0123456789abcdef0123456789abcdef",
+    );
+    assert.deepEqual(gateway.uploadCalls.at(-1), {
+      session_id: "ses",
+      filename: "mockup.png",
+      mime_type: "image/png",
+      data_base64: "iVBORw0KGgo=",
+    });
+    const attached = await client.callTool({
+      name: "send_message",
+      arguments: {
+        session_id: "ses",
+        message: "Use this as a visual reference.",
+        attachments: ["att_0123456789abcdef0123456789abcdef"],
+      },
+    });
+    assert.equal(attached.isError, undefined);
+    assert.deepEqual(gateway.sendCalls.at(-1), {
+      session_id: "ses",
+      message: "Use this as a visual reference.",
+      attachments: ["att_0123456789abcdef0123456789abcdef"],
+    });
 
     for (const request of [
       {
@@ -383,6 +579,35 @@ test("official MCP client discovers fifteen stateless HTTP tools and invokes arc
       },
       { name: "list_sessions", arguments: { unexpected: true } },
       { name: "get_session", arguments: { session_id: "bad id" } },
+      {
+        name: "upload_attachment",
+        arguments: {
+          session_id: "ses",
+          filename: "secret.png",
+          mime_type: "image/png",
+          data_base64: "Ynl0ZXM=",
+          path: "/etc/passwd",
+        },
+      },
+      {
+        name: "supersede_unresolved_submission",
+        arguments: {
+          session_id: "ses",
+          guarded_message_id: "msg_old",
+          request_id: "01234567-89ab-cdef-0123-456789abcdef",
+          operator_authorized: false,
+          message: "continue",
+        },
+      },
+      {
+        name: "supersede_unresolved_submission",
+        arguments: {
+          session_id: "ses",
+          guarded_message_id: "msg_old",
+          request_id: "01234567-89ab-4def-8123-456789abcdef",
+          message: "continue",
+        },
+      },
       {
         name: "get_session_status",
         arguments: { session_id: "ses", message_id: "bad\nmessage" },

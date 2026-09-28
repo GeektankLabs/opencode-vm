@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent Connectivity Hub</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="header">
+      <div><p class="eyebrow">OPENCODE VM / OPERATIONS</p><h1>Agent Connectivity Hub</h1><p class="subtitle">Status, Diagnose und Anleitungen für Agent- und MCP-Verbindungen.</p></div>
+      <div class="header-actions"><span id="updated" class="muted">Status wird geladen ...</span><button id="refresh" class="button">Aktualisieren</button><a class="button secondary" href="https://github.com/GeektankLabs/opencode-vm" target="_blank" rel="noreferrer">Doku</a></div>
+    </header>
+    <section class="section"><div class="section-heading"><div><p class="eyebrow">01 / RUNTIME</p><h2>Konfigurierte Verbindungen</h2></div><span id="connection-count" class="count"></span></div><div id="connections" class="cards"></div></section>
+    <nav id="tabs" class="tabs" aria-label="Bereichsnavigation"></nav>
+    <section class="overview-grid"><div class="panel"><div class="panel-heading"><div><p class="eyebrow">SIGNALS</p><h2>Schnellübersicht</h2></div></div><div id="notices" class="notice-list"></div></div><div class="panel"><div class="panel-heading"><div><p class="eyebrow">DIAGNOSTICS</p><h2>Letzte Ereignisse</h2></div><button id="show-logs" class="text-button">Alle Logs anzeigen</button></div><div id="events" class="events"></div></div></section>
+    <section class="lower-grid"><article class="panel"><p class="eyebrow">GET STARTED</p><h2>Setup &amp; Anleitungen</h2><div id="guides"></div></article><article class="panel"><p class="eyebrow">CLIENT PACKAGE</p><h2>Skill &amp; Client Integration</h2><div id="skill"></div></article><article class="panel"><p class="eyebrow">BOUNDARIES</p><h2>Hinweise &amp; Voraussetzungen</h2><ul class="plain-list"><li><strong>Read-only Hub.</strong> Keine Credential-Eingabe und keine Start-/Stop-Aktionen.</li><li>Die CLI bleibt der Einrichtungsweg; dieser Dienst liest nur sichere lokale Metadaten.</li><li>OpenLive ist eine getrennte ACP-/Voice-Integration, nicht automatisch ein A2A- oder MCP-Status.</li><li>Health ohne verlässlichen Laufzeitnachweis wird als <strong>unknown/stale</strong> dargestellt.</li></ul></article></section>
+    <footer>Agent Connectivity Hub <span>·</span> Read-only <span>·</span> <a href="/healthz">Healthcheck</a></footer>
+  </main><script src="/app.js"></script>
+</body>
+</html>

@@ -10,8 +10,24 @@ import type {
   ActivityType,
   ActivityResult,
   SessionStatusResult,
+  ReceiptResolution,
+  SubmissionGuardOverrideResult,
+  SubmissionGuardSnapshot,
 } from "./types.js";
 
+type GuardOverrideRecord = {
+  request_id: string;
+  fingerprint: string;
+  session_id: string;
+  guarded_message_id: string;
+  message_id: string;
+  reason?: string;
+  preflight: SubmissionGuardSnapshot;
+  superseded_at: string;
+  activity_cursor: string;
+  state: "prepared" | "submitted";
+  result?: SubmissionGuardOverrideResult;
+};
 type Store = {
   schema: 1;
   project: string;
@@ -20,6 +36,8 @@ type Store = {
   events: ActivityEvent[];
   observations: Record<string, ActivitySnapshot>;
   watched: Record<string, string[]>;
+  guardOverrides?: Record<string, GuardOverrideRecord>;
+  resolutions?: Record<string, ReceiptResolution>;
 };
 type EventInput = Omit<ActivityEvent, "event_id" | "cursor" | "timestamp">;
 const terminal = new Set(["completed", "failed", "aborted"]);
@@ -79,7 +97,10 @@ export class ActivityJournal {
           store.next < 1 ||
           !Array.isArray(store.events) ||
           !isRecord(store.observations) ||
-          !isRecord(store.watched)
+          !isRecord(store.watched) ||
+          (store.guardOverrides !== undefined &&
+            !isRecord(store.guardOverrides)) ||
+          (store.resolutions !== undefined && !isRecord(store.resolutions))
         )
           throw new Error();
         let previous = 0;
@@ -112,8 +133,12 @@ export class ActivityJournal {
         events: [],
         observations: {},
         watched: {},
+        guardOverrides: {},
+        resolutions: {},
       };
     }
+    store.guardOverrides ??= {};
+    store.resolutions ??= {};
     const journal = new ActivityJournal(path, store, maximum);
     await journal.commit(() => true);
     return journal;
@@ -127,6 +152,142 @@ export class ActivityJournal {
   }
   trackedMessages(id: string): string[] {
     return [...(this.store.watched[id] ?? [])];
+  }
+
+  async guardOverride(requestId: string): Promise<GuardOverrideRecord | undefined> {
+    await this.tail;
+    this.check();
+    const record = this.store.guardOverrides?.[requestId];
+    return record ? structuredClone(record) : undefined;
+  }
+
+  async receiptResolution(
+    sessionId: string,
+    messageId: string,
+  ): Promise<ReceiptResolution | undefined> {
+    await this.tail;
+    this.check();
+    const resolution = this.store.resolutions?.[resolutionKey(sessionId, messageId)];
+    return resolution ? structuredClone(resolution) : undefined;
+  }
+
+  async prepareGuardOverride(input: {
+    request_id: string;
+    fingerprint: string;
+    session_id: string;
+    session_title: string;
+    guarded_message_id: string;
+    message_id: string;
+    reason?: string;
+    preflight: SubmissionGuardSnapshot;
+  }): Promise<{ record: GuardOverrideRecord; created: boolean }> {
+    let result: { record: GuardOverrideRecord; created: boolean } | undefined;
+    await this.commit((draft) => {
+      const prior = draft.guardOverrides![input.request_id];
+      if (prior) {
+        if (
+          prior.fingerprint !== input.fingerprint ||
+          prior.session_id !== input.session_id ||
+          prior.guarded_message_id !== input.guarded_message_id
+        )
+          throw new AdapterError(
+            "SUBMISSION_GUARD_CONFLICT",
+            "This request_id is already bound to a different guard override request.",
+          );
+        result = { record: prior, created: false };
+        return false;
+      }
+      const supersededAt = new Date().toISOString();
+      const record: GuardOverrideRecord = {
+        request_id: input.request_id,
+        fingerprint: input.fingerprint,
+        session_id: input.session_id,
+        guarded_message_id: input.guarded_message_id,
+        message_id: input.message_id,
+        ...(input.reason ? { reason: input.reason } : {}),
+        preflight: input.preflight,
+        superseded_at: supersededAt,
+        activity_cursor: this.cursorFor(draft.next - 1),
+        state: "prepared",
+      };
+      draft.guardOverrides![input.request_id] = record;
+      draft.resolutions![resolutionKey(input.session_id, input.guarded_message_id)] = {
+        state: "unresolved",
+        resolution: "superseded_by_operator",
+        superseded_at: supersededAt,
+        superseded_by_request_id: input.request_id,
+        superseded_by_message_id: input.message_id,
+        ...(input.reason ? { reason: input.reason } : {}),
+      };
+      draft.watched[input.session_id] = [
+        ...new Set([...(draft.watched[input.session_id] ?? []), input.message_id]),
+      ].slice(-100);
+      this.push(draft, {
+        session_id: input.session_id,
+        session_title: input.session_title.slice(0, 160),
+        message_id: input.message_id,
+        guarded_message_id: input.guarded_message_id,
+        request_id: input.request_id,
+        ...(input.reason ? { reason: input.reason } : {}),
+        operator_authorized: true,
+        authorization_source: "operator_asserted",
+        guarded_receipt_state: input.preflight.guarded_receipt_state,
+        ...(input.preflight.last_activity_at !== undefined
+          ? { last_activity_at: input.preflight.last_activity_at }
+          : {}),
+        type: "submission.guard_overridden",
+        state: "superseded_by_operator",
+        assistant_message_ids: [],
+        source: "mcp",
+      });
+      result = { record, created: true };
+      return true;
+    });
+    if (!result)
+      throw new AdapterError(
+        "ACTIVITY_UNAVAILABLE",
+        "Could not persist the submission guard override.",
+      );
+    return structuredClone(result);
+  }
+
+  async completeGuardOverride(
+    requestId: string,
+    sessionTitle: string,
+    result: SubmissionGuardOverrideResult,
+  ): Promise<void> {
+    await this.commit((draft) => {
+      const record = draft.guardOverrides![requestId];
+      if (!record || record.message_id !== result.message_id)
+        throw new AdapterError(
+          "ACTIVITY_UNAVAILABLE",
+          "The prepared guard override record is unavailable.",
+        );
+      if (record.state === "submitted") return false;
+      record.state = "submitted";
+      record.result = result;
+      const snapshot =
+        draft.observations[result.session_id] ??
+        this.empty(result.session_id, sessionTitle);
+      snapshot.session_title = sessionTitle.slice(0, 160);
+      if (!snapshot.messages.some((item) => item.message_id === result.message_id)) {
+        const submitted: SessionStatusResult = {
+          session_id: result.session_id,
+          message_id: result.message_id,
+          state: "submitted",
+          backend_activity: "idle",
+          pending_input: { permissions: 0, questions: 0 },
+          assistant_message_ids: [],
+        };
+        snapshot.messages.push(submitted);
+        draft.observations[result.session_id] = snapshot;
+        this.push(
+          draft,
+          this.event(snapshot, "message.submitted", "submitted", "mcp", submitted),
+        );
+      }
+      return true;
+    });
   }
 
   async track(sessionId: string, messageId: string): Promise<string> {
@@ -546,6 +707,18 @@ export class ActivityJournal {
         delete draft.observations[key];
       for (const key of Object.keys(draft.watched).slice(0, -500))
         delete draft.watched[key];
+      const retainedOverrideRequests = new Set(
+        draft.events
+          .filter((event) => event.type === "submission.guard_overridden")
+          .map((event) => event.request_id)
+          .filter((id): id is string => Boolean(id)),
+      );
+      for (const requestId of Object.keys(draft.guardOverrides ?? {}))
+        if (!retainedOverrideRequests.has(requestId))
+          delete draft.guardOverrides![requestId];
+      for (const [key, resolution] of Object.entries(draft.resolutions ?? {}))
+        if (!draft.guardOverrides?.[resolution.superseded_by_request_id])
+          delete draft.resolutions![key];
       const temporary = `${this.path}.${randomUUID()}.tmp`;
       try {
         const file = await open(temporary, "wx", 0o600);
@@ -571,4 +744,8 @@ export class ActivityJournal {
     this.tail = operation.catch(() => undefined);
     return operation;
   }
+}
+
+function resolutionKey(sessionId: string, messageId: string): string {
+  return JSON.stringify([sessionId, messageId]);
 }

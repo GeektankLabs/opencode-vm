@@ -157,11 +157,32 @@ def main():
     if args.check:
         require(destination.is_file() and destination.read_bytes() == data, "ZIP missing or stale; rebuild it")
         require(checksum.is_file() and checksum.read_text(encoding="utf-8") == expected, "Checksum missing or stale")
+        latest = destination.parent / "latest.json"
+        latest_data = json.loads(latest.read_text(encoding="utf-8")) if latest.is_file() else {}
+        require(latest_data == {
+            "schema": 1,
+            "name": manifest["name"],
+            "revision": manifest["revision"],
+            "download": "https://github.com/GeektankLabs/opencode-vm/raw/refs/heads/main/integrations/chatgpt/opencode-session-orchestrator.zip",
+            "sha256": digest,
+            "checksum": "integrations/chatgpt/opencode-session-orchestrator.zip.sha256",
+            "docs": "https://github.com/GeektankLabs/opencode-vm/blob/main/docs/CHATGPT.md",
+        }, "latest.json missing or stale")
         print(f'OK: {manifest["name"]} {manifest["revision"]}, inventory/ZIP/checksum match')
     else:
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(data)
         checksum.write_bytes(expected.encode("utf-8"))
+        latest = destination.parent / "latest.json"
+        latest.write_text(json.dumps({
+            "schema": 1,
+            "name": manifest["name"],
+            "revision": manifest["revision"],
+            "download": "https://github.com/GeektankLabs/opencode-vm/raw/refs/heads/main/integrations/chatgpt/opencode-session-orchestrator.zip",
+            "sha256": digest,
+            "checksum": "integrations/chatgpt/opencode-session-orchestrator.zip.sha256",
+            "docs": "https://github.com/GeektankLabs/opencode-vm/blob/main/docs/CHATGPT.md",
+        }, indent=2) + "\n", encoding="utf-8")
         print(f"{destination}\nSHA-256: {digest}")
 
 

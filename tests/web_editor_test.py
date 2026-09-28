@@ -58,7 +58,47 @@ class EditorTest(unittest.TestCase):
             shell(function("write_senv") + '\nwrite_senv "$1/state" vm /project hash web 4096 0 1 generation controller 1 40960 0 1\n'
                   '. "$1/state"\n[ "$SESS_EDITOR_ENABLED" = 0 ]\n[ "$SESS_EDITOR_DISABLED" = 1 ]\n'
                   'write_senv "$1/state" vm /project hash tui 4096 0\n'
-                  '. "$1/state"\n[ "$SESS_EDITOR_ENABLED" = 0 ]\n[ "$SESS_EDITOR_DISABLED" = 0 ]', tmp)
+                   '. "$1/state"\n[ "$SESS_EDITOR_ENABLED" = 0 ]\n[ "$SESS_EDITOR_DISABLED" = 0 ]', tmp)
+
+    def test_launcher_defaults_on_for_web_and_attach_with_invocation_opt_out(self):
+        code = 'DEFAULT_OC_PORT=4096\n' + function('parse_web_flags') + '\n' + function('parse_attach_flags')
+        shell(code + '\nparse_web_flags\n[ "$SESSION_LAUNCHER_ENABLED" = 1 ]\n'
+              'parse_web_flags --no-launcher --editor\n[ "$SESSION_LAUNCHER_ENABLED" = 0 ]\n'
+              'parse_web_flags --launcher\n[ "$SESSION_LAUNCHER_ENABLED" = 1 ]\n'
+              'parse_attach_flags --no-launcher\n[ "$SESSION_LAUNCHER_ENABLED" = 0 ]\n'
+              'parse_attach_flags\n[ "$SESSION_LAUNCHER_ENABLED" = 1 ]\n'
+              'parse_attach_flags --launcher\n[ "$SESSION_LAUNCHER_ENABLED" = 1 ]')
+        self.assertEqual(shell(code + '\nparse_attach_flags --unknown', check=False).returncode, 2)
+        self.assertEqual(SCRIPT.count('OC_LAUNCHER_ENABLED="${19:-1}"'), 2)
+        self.assertEqual(SCRIPT.count('"${SESSION_LAUNCHER_ENABLED:-1}" ||'), 1)
+        self.assertEqual(SCRIPT.count('"${SESSION_LAUNCHER_ENABLED:-1}"; then'), 1)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            stage(Path(tmp) / 'share')
+            web_code = function('start_web_proxies') + '''
+load_session_auth() { :; }
+_stop_legacy_redirector() { :; }
+ensure_web_tls() { OC_TLS_CERT=""; OC_TLS_KEY=""; }
+start_proxy() { printf '%s:%s:%s\\n' "$1" "${12:-unset}" "${13:-unset}" >> "$TEST_OUTPUT"; }
+SESS_SHARE="$1/share"
+PROJ_DIR="$1/bi-mcrepo"
+OC_PROXY_PY="$1/running-proxy.py"
+OC_PORT=4096
+OC_DIR_KEY=project
+OC_A2A=0
+OC_OPENLIVE_REMOTE_TARGET=0
+OC_OPENLIVE_PROJECT_HASH=project-hash
+OC_OPENLIVE_REMOTE_GENERATION=""
+TEST_OUTPUT="$1/forwarded"
+OC_LAUNCHER_ENABLED=0
+start_web_proxies
+OC_LAUNCHER_ENABLED=1
+start_web_proxies
+'''
+            shell(web_code, tmp)
+            self.assertEqual((Path(tmp) / 'forwarded').read_text().splitlines(),
+                             ['web-tls:0:bi-mcrepo', 'web-plain:0:bi-mcrepo',
+                              'web-tls:1:bi-mcrepo', 'web-plain:1:bi-mcrepo'])
 
     def test_attach_upgrades_old_default_but_retains_explicit_opt_out(self):
         choice = '  local sess_editor_disabled=' + SCRIPT.split('  local sess_editor_disabled=', 1)[1].split('  local prior_mcp_enabled=', 1)[0]
@@ -74,18 +114,18 @@ class EditorTest(unittest.TestCase):
     def test_default_public_port_block_includes_editor(self):
         code = 'BROWSER_UNSAFE_PORTS=(6000)\nis_valid_port() { [[ "$1" =~ ^[0-9]+$ ]] && (( 1 <= 10#$1 && 10#$1 <= 65535 )); }\n'
         code += function('is_browser_unsafe_port') + '\n' + function('validate_web_port') + '\n'
-        shell(code + 'SESSION_EDITOR_MODE=""\nvalidate_web_port 65531')
-        self.assertEqual(shell(code + 'SESSION_EDITOR_MODE=""\nvalidate_web_port 65532', check=False).returncode, 2)
+        shell(code + 'SESSION_EDITOR_MODE=""\nvalidate_web_port 65530')
+        self.assertEqual(shell(code + 'SESSION_EDITOR_MODE=""\nvalidate_web_port 65531', check=False).returncode, 2)
         self.assertEqual(shell(code + 'SESSION_EDITOR_MODE=""\nvalidate_web_port 5996', check=False).returncode, 2)
-        shell(code + 'SESSION_EDITOR_MODE=disable\nvalidate_web_port 65532\nvalidate_web_port 5996')
+        shell(code + 'SESSION_EDITOR_MODE=disable\nvalidate_web_port 65530\nvalidate_web_port 5994')
 
     def test_port_boundaries_and_private_mcp_overlap(self):
         code = 'BROWSER_UNSAFE_PORTS=(6000)\n' + function("is_browser_unsafe_port") + "\n" + function("select_web_guest_base")
         self.assertEqual(shell(code + "\nselect_web_guest_base 4096 4100 1").stdout.strip(), "4103")
-        self.assertEqual(shell(code + "\nselect_web_guest_base 4096 4100 0").stdout.strip(), "4096")
+        self.assertEqual(shell(code + "\nselect_web_guest_base 4096 4100 0").stdout.strip(), "4103")
         self.assertEqual(shell(code + "\nselect_web_guest_base 5996 '' 1").stdout.strip(), "6001")
         self.assertNotEqual(shell(code + "\nselect_web_guest_base 65532 '' 1", check=False).returncode, 0)
-        self.assertEqual(shell(code + "\nselect_web_guest_base 65531 '' 1").stdout.strip(), "65531")
+        self.assertEqual(shell(code + "\nselect_web_guest_base 65530 '' 1").stdout.strip(), "65530")
 
     def test_host_collision_moves_entire_five_port_block(self):
         code = '\n'.join(function(name) for name in ["start_web_tunnels", "is_browser_unsafe_port"])
@@ -108,10 +148,32 @@ ssh() {
             result = shell(code + '\nTEST_DIR="$1"\nstart_web_tunnels oc-editor-test 4096 "" 1\nprintf "BASE=%s\\n" "$WEB_PORT_BASE"', tmp)
             self.assertIn("BASE=4102", result.stdout)
             forwards = (Path(tmp) / "forward").read_text()
-            for port in range(4102, 4107):
+            for port in range(4102, 4108):
                 self.assertIn(f"0.0.0.0:{port}:127.0.0.1:{port}", forwards)
             self.assertNotIn("0.0.0.0:4100:", forwards)
             Path("/tmp/ocvm-tunnel-oc-editor-test-4102.pid").unlink(missing_ok=True)
+
+    def test_editor_guest_port_collision_moves_entire_block(self):
+        code = '\n'.join(function(name) for name in ["start_web_tunnels", "is_browser_unsafe_port"])
+        code += r'''
+BROWSER_UNSAFE_PORTS=()
+load_policy() { :; }
+lima_guest_user() { printf guest; }
+limactl() { printf 2222; }
+stop_web_tunnels() { :; }
+_port_free_for_bind() { return 0; }
+editor_guest_port_available() { [ "$2" != 4100 ]; }
+pgrep() { printf 12345; }
+ssh() { case " $* " in *" -f -N "*) printf '%s\n' "$@" > "$TEST_DIR/forward" ;; esac; }
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            result = shell(code + '\nTEST_DIR="$1"\nstart_web_tunnels oc-editor-guest-test 4096 "" 1\nprintf "BASE=%s\\n" "$WEB_PORT_BASE"', tmp)
+            self.assertIn("BASE=4097", result.stdout)
+            forwards = (Path(tmp) / "forward").read_text()
+            for port in range(4097, 4103):
+                self.assertIn(f"0.0.0.0:{port}:127.0.0.1:{port}", forwards)
+            self.assertNotIn("0.0.0.0:4096:", forwards)
+            Path("/tmp/ocvm-tunnel-oc-editor-guest-test-4097.pid").unlink(missing_ok=True)
 
     def test_guest_probe_detects_an_existing_listener(self):
         code = 'vm_exec() { bash -c "$2" _ "${@:3}"; }\n' + function("editor_guest_port_available")
@@ -130,6 +192,9 @@ ssh() {
             subprocess.run(["shellcheck", "-s", "bash", "--severity=error", str(root / "share/lib/web.sh"), str(root / "share/lib/editor-install.sh")], check=True)
             extension = root / "share/editor/extensions/ocvm.project-tools-0.1.0"
             subprocess.run(["node", "--check", str(extension / "extension.js")], check=True)
+            installer = root / "taskboard-install.sh"
+            installer.write_text(payload("OCVM_TASKBOARD_INSTALL_SH", "TASKBOARD_INSTALL"))
+            subprocess.run(["bash", "-n", str(installer)], check=True)
             self.assertEqual(json.loads((extension / "package.json").read_text())["extensionKind"], ["workspace"])
             user = root / "share/editor/user-data/User"
             user.mkdir(parents=True)
@@ -137,6 +202,55 @@ ssh() {
             shell(function("editor_sync_preferences") + '\neditor_sync_preferences "$1/share" "$1/state"\neditor_sync_preferences "$1/state" "$1/new"', root)
             self.assertEqual((root / "new/editor/user-data/User/settings.json").read_text(), (user / "settings.json").read_text())
             self.assertFalse((root / "new/editor/config.yaml").exists())
+
+    def test_launcher_catalog_registers_taskboard_on_its_runtime_port(self):
+        redirector = payload("OCVM_WEB_REDIRECT_PY", "PYSRC")
+        launcher = SCRIPT.split('LAUNCHER_JS = r"""\n', 1)[1].split('\n"""\n\nLAUNCHER_CSS', 1)[0]
+        registry = SCRIPT.split("LAUNCHER_APP_REGISTRY = (", 1)[1].split("\n)", 1)[0]
+        self.assertEqual(registry.count('"id":'), 2)
+        self.assertIn('"id": "editor"', registry)
+        self.assertIn('"port_offset": 4', registry)
+        self.assertIn('"id": "taskboard"', registry)
+        self.assertIn('"label": "Projektmanagement"', registry)
+        self.assertIn('"runtime_file": "taskboard/runtime.json"', registry)
+        self.assertIn('"port_offset": 5', registry)
+        self.assertIn('for app in LAUNCHER_APP_REGISTRY', redirector)
+        self.assertIn('"board"', launcher)
+        self.assertIn('link.target = "_blank"', launcher)
+        self.assertIn('app.icon', launcher)
+
+    def test_taskboard_runtime_descriptor_tracks_service_lifecycle(self):
+        code = function('stop_taskboard') + '\n' + function('start_taskboard') + '\n'
+        code += '''systemctl() {
+  if [ "$1" = is-active ]; then return 0; fi
+  printf '%s\\n' not-found
+}
+sudo() { return 0; }
+curl() { return 0; }
+ss() { return 0; }
+SESS_SHARE="$1/share"
+PROJ_DIR="$1"
+OC_TASKBOARD_DB="$1/data/taskboard.db"
+OC_TASKBOARD_BIN=/bin/true
+OC_OPENLIVE_PROJECT_HASH=project-hash
+OC_TASKBOARD_ENABLED=1
+OC_PORT=4096
+mkdir -p "$SESS_SHARE"
+start_taskboard
+[ "$OC_TASKBOARD_READY" = 1 ]
+[ -f "$SESS_SHARE/taskboard/runtime.json" ]
+stop_taskboard
+[ ! -f "$SESS_SHARE/taskboard/runtime.json" ]
+start_taskboard
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            shell(code, tmp)
+            descriptor = Path(tmp) / 'share/taskboard/runtime.json'
+            self.assertEqual(json.loads(descriptor.read_text()),
+                             {'schema': 1, 'share': str(Path(tmp) / 'share'),
+                              'projectHash': 'project-hash', 'taskboardPort': 4101})
+            self.assertEqual(descriptor.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(descriptor.parent.stat().st_mode & 0o777, 0o700)
 
     def test_dark_theme_default_preserves_personal_choice(self):
         config = SCRIPT.split("<<'EDITOR_CONFIG'\n", 1)[1].split('\nEDITOR_CONFIG', 1)[0]

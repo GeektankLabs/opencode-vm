@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "name": "opencode-session-orchestrator",
-  "revision": "2026-09-27-r7",
+  "revision": "2026-09-28-r9",
   "files": [
     "SKILL.md",
     "CHANGELOG.md",
@@ -9,6 +9,7 @@
     "assets/icon.svg",
     "references/approval-flow.md",
     "references/approval-sources.md",
+    "references/attachments.md",
     "references/content-protocol.md",
     "references/clarification-sessions.md",
     "references/decision-preparation.md",

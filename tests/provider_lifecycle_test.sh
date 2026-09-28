@@ -177,6 +177,9 @@ wait_for_mcp_adapter() { kill -0 "$OC_WEB_PID"; }
         handler = ""
     code = prelude + '''
 stop_all_proxies() { :; }; stop_openlive_gateway() { :; }; stop_a2a() { :; }; stop_editor() { :; }
+# This lifecycle harness owns only its fixture shell; never inspect or control
+# another project's live Taskboard service from the shared CI/dev VM.
+start_taskboard() { :; }; stop_taskboard() { :; }
 check_sqlite_dbs() { :; }; rsync() { :; }
 OC_PORT_INTERNAL=4095
 VM_DATA="$TEST_GUEST/oc-xdg-data"; VM_STATE="$TEST_GUEST/state"

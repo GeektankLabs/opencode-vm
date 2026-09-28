@@ -11,6 +11,7 @@ import {
 } from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
+import { deflateSync } from "node:zlib";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -215,6 +216,14 @@ try {
               reasoning: true,
               variants: { medium: {}, high: {} },
               modalities: { input: ["text"], output: ["text"] },
+              limit: { context: 32_000, output: 4_096 },
+            },
+            "vision-model": {
+              name: "Vision test model",
+              tool_call: true,
+              reasoning: true,
+              variants: { medium: {}, high: {} },
+              modalities: { input: ["text", "image"], output: ["text"] },
               limit: { context: 32_000, output: 4_096 },
             },
           },
@@ -556,6 +565,158 @@ try {
   );
   assert.ok(providerRequests.length > 0);
 
+  const attachmentSession = structured(
+    await mcpClient.callTool({
+      name: "create_session",
+      arguments: { title: "MCP attachment integration" },
+    }),
+  ).session_id;
+  const imageBytes = onePixelPng();
+  const imageUpload = structured(
+    await mcpClient.callTool({
+      name: "upload_attachment",
+      arguments: {
+        session_id: attachmentSession,
+        filename: "launcher-mockup.png",
+        mime_type: "image/png",
+        data_base64: imageBytes.toString("base64"),
+      },
+    }),
+  );
+  assert.equal(imageUpload.size_bytes, imageBytes.length);
+  assert.equal(
+    imageUpload.sha256,
+    createHash("sha256").update(imageBytes).digest("hex"),
+  );
+  const noPath = await mcpClient.callTool({
+    name: "send_message",
+    arguments: {
+      session_id: attachmentSession,
+      message: "This path must not be accepted.",
+      attachments: ["/etc/passwd"],
+    },
+  });
+  assert.equal(
+    noPath._meta["opencode-vm/error"].code,
+    "INVALID_ATTACHMENT_REFERENCE",
+  );
+  const missingAttachment = await mcpClient.callTool({
+    name: "send_message",
+    arguments: {
+      session_id: attachmentSession,
+      message: "This reference was never uploaded.",
+      attachments: ["att_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+    },
+  });
+  assert.equal(
+    missingAttachment._meta["opencode-vm/error"].code,
+    "ATTACHMENT_NOT_FOUND",
+  );
+  const tooManyAttachments = await mcpClient.callTool({
+    name: "send_message",
+    arguments: {
+      session_id: attachmentSession,
+      message: "This message exceeds the attachment count limit.",
+      attachments: Array.from(
+        { length: 5 },
+        (_, index) => `att_${index.toString(16).padStart(32, "0")}`,
+      ),
+    },
+  });
+  assert.equal(
+    tooManyAttachments._meta["opencode-vm/error"].code,
+    "ATTACHMENT_TOO_LARGE",
+  );
+  const noImageSupportCount = providerRequests.length;
+  const unsupportedImage = await mcpClient.callTool({
+    name: "send_message",
+    arguments: {
+      session_id: attachmentSession,
+      message: "Describe this visual.",
+      attachments: [imageUpload.attachment_id],
+    },
+  });
+  assert.equal(
+    unsupportedImage._meta["opencode-vm/error"].code,
+    "MODEL_DOES_NOT_SUPPORT_ATTACHMENT_TYPE",
+  );
+  assert.equal(providerRequests.length, noImageSupportCount);
+  const imageModel = structured(
+    await mcpClient.callTool({
+      name: "update_session_runtime",
+      arguments: { session_id: attachmentSession, model_id: "vision-model" },
+    }),
+  );
+  assert.equal(imageModel.current.model_id, "vision-model");
+  const visionTextReceipt = structured(
+    await mcpClient.callTool({
+      name: "send_message",
+      arguments: {
+        session_id: attachmentSession,
+        message: "vision-model-text-control",
+      },
+    }),
+  );
+  await waitForTask(attachmentSession, visionTextReceipt.message_id);
+  const textBytes = Buffer.from(
+    "Launcher details: anchor the control at the lower left.\n",
+  );
+  const textUpload = structured(
+    await mcpClient.callTool({
+      name: "upload_attachment",
+      arguments: {
+        session_id: attachmentSession,
+        filename: "launcher-notes.md",
+        mime_type: "text/markdown",
+        data_base64: textBytes.toString("base64"),
+      },
+    }),
+  );
+  const attachmentReceipt = structured(
+    await mcpClient.callTool({
+      name: "send_message",
+      arguments: {
+        session_id: attachmentSession,
+        message: "Implement this launcher UX from the mockup.",
+        attachments: [textUpload.attachment_id, imageUpload.attachment_id],
+      },
+    }),
+  );
+  assert.equal(attachmentReceipt.state, "submitted");
+  assert.equal(attachmentReceipt.attachments.length, 2);
+  await waitForTask(attachmentSession, attachmentReceipt.message_id);
+  const attachmentRequest = providerRequests.at(-1);
+  const attachmentContent = attachmentRequest.messages.at(-1).content;
+  assert.ok(Array.isArray(attachmentContent));
+  const visualInput = attachmentContent.find(
+    (part) => part.type === "image_url",
+  );
+  assert.ok(
+    visualInput,
+    "OpenCode must send an image part to the model provider",
+  );
+  assert.equal(
+    visualInput.image_url.url,
+    `data:image/png;base64,${imageBytes.toString("base64")}`,
+  );
+  assert.ok(
+    attachmentContent.some(
+      (part) =>
+        part.type === "text" &&
+        part.text.includes("anchor the control at the lower left"),
+    ),
+    "Markdown must be sent to OpenCode as readable text",
+  );
+  const storedAttachment = await backend.session.message({
+    sessionID: attachmentSession,
+    messageID: attachmentReceipt.message_id,
+  });
+  assert.ok(storedAttachment.data.parts.some((part) => part.type === "file"));
+  assert.equal(providerRequests.length, noImageSupportCount + 2);
+  process.stderr.write(
+    "[integration] attachment upload: text part, stored OpenCode file part and actual provider image_url verified\n",
+  );
+
   const reportSession = structured(
     await mcpClient.callTool({
       name: "create_session",
@@ -881,8 +1042,78 @@ try {
       count + 1,
       "reconciliation must not replay the old prompt",
     );
+
+    // Simulate a guarded MCP receipt whose own turn has only a stored user
+    // message, then prove the real OpenCode history has advanced through the
+    // newest subsequent completed user turn before allowing one new write.
+    const staleSession = (
+      await admissionGateway.createSession("Stale guard recovery")
+    ).session_id;
+    const staleMessageId = `msg_${"b".repeat(32)}`;
+    await backend.session.prompt({
+      sessionID: staleSession,
+      messageID: staleMessageId,
+      noReply: true,
+      parts: [{ type: "text", text: "simulated older accepted request" }],
+    });
+    admissionGateway.unresolved.set(staleSession, staleMessageId);
+    for (let i = 0; i < 105; i++) {
+      await backend.session.prompt({
+        sessionID: staleSession,
+        noReply: true,
+        parts: [{ type: "text", text: `subsequent note ${i}` }],
+      });
+    }
+    const laterMessageId = `msg_${"c".repeat(32)}`;
+    const laterTask = await backend.session.prompt({
+      sessionID: staleSession,
+      messageID: laterMessageId,
+      parts: [{ type: "text", text: "later-session-turn" }],
+    });
+    assert.equal(laterTask.data?.info.finish, "stop");
+    assert.equal(typeof laterTask.data?.info.time.completed, "number");
+    let staleResult;
+    let staleCursor;
+    do {
+      staleResult = await admissionGateway.getTaskResult(
+        staleSession,
+        staleMessageId,
+        staleCursor,
+      );
+      staleCursor = staleResult.next_cursor;
+    } while (!staleResult.search_complete);
+    assert.equal(staleResult.state, "unknown");
+    assert.equal(staleResult.superseded_by_message_id, laterMessageId);
+    const beforeSupersededWrite = providerRequests.length;
+    const afterSuperseded = await admissionGateway.sendMessage(
+      staleSession,
+      "admission-after-superseded-turn",
+    );
+    assert.notEqual(afterSuperseded.message_id, staleMessageId);
+    for (let i = 0; i < 100; i++) {
+      const current = await backend.session.messages({
+        sessionID: staleSession,
+        limit: 10,
+      });
+      if (
+        current.data?.some(
+          (item) =>
+            item.info.parentID === afterSuperseded.message_id &&
+            item.info.finish === "stop" &&
+            typeof item.info.time.completed === "number",
+        )
+      )
+        break;
+      if (i === 99) throw new Error("Post-supersession task did not finish");
+      await delay(100);
+    }
+    assert.equal(
+      providerRequests.length,
+      beforeSupersededWrite + 1,
+      "supersession admits exactly one new prompt without replaying the old receipt",
+    );
     process.stderr.write(
-      "[integration] old idle receipt beyond 100 messages reconciled before exactly one new submission\n",
+      "[integration] old terminal receipt recovered and stale nonterminal receipt superseded only by the latest completed turn\n",
     );
   } finally {
     await admissionGateway.close();
@@ -1028,26 +1259,61 @@ try {
     ).data?.filter((message) => message.info.id === receipt.message_id).length,
     1,
   );
-  const archiveResult = structured(await mcpClient.callTool({
-    name: "archive_session",
-    arguments: { session_id: reportSession },
-  }));
+  const archiveResult = structured(
+    await mcpClient.callTool({
+      name: "archive_session",
+      arguments: { session_id: reportSession },
+    }),
+  );
   assert.equal(archiveResult.state, "archived");
-  assert.equal((await backend.v2.session.get({ sessionID: reportSession })).data?.data?.time.archived, archiveResult.archived_at);
-  const hidden = await mcpClient.callTool({ name: "get_message", arguments: { session_id: reportSession, message_id: reportId } });
-  assert.equal(hidden._meta["opencode-vm/error"].code, "SESSION_NOT_FOUND");
-  const archivedMessage = structured(await mcpClient.callTool({
+  assert.equal(
+    (await backend.v2.session.get({ sessionID: reportSession })).data?.data
+      ?.time.archived,
+    archiveResult.archived_at,
+  );
+  const hidden = await mcpClient.callTool({
     name: "get_message",
-    arguments: { session_id: reportSession, message_id: reportId, include_archived: true },
-  }));
-  assert.equal(archivedMessage.message.content.sha256, reportMessage.content.sha256);
-  const archivedPage = structured(await mcpClient.callTool({
-    name: "read_message_content",
-    arguments: { content_ref: archivedMessage.message.content.content_ref, max_bytes: 256 },
-  }));
+    arguments: { session_id: reportSession, message_id: reportId },
+  });
+  assert.equal(hidden._meta["opencode-vm/error"].code, "SESSION_NOT_FOUND");
+  const archivedMessage = structured(
+    await mcpClient.callTool({
+      name: "get_message",
+      arguments: {
+        session_id: reportSession,
+        message_id: reportId,
+        include_archived: true,
+      },
+    }),
+  );
+  assert.equal(
+    archivedMessage.message.content.sha256,
+    reportMessage.content.sha256,
+  );
+  const archivedPage = structured(
+    await mcpClient.callTool({
+      name: "read_message_content",
+      arguments: {
+        content_ref: archivedMessage.message.content.content_ref,
+        max_bytes: 256,
+      },
+    }),
+  );
   assert.equal(archivedPage.range.start, 0);
-  assert.equal(structured(await mcpClient.callTool({ name: "get_session", arguments: { session_id: reportSession, include_archived: true } })).archived_at, archiveResult.archived_at);
-  assert.ok(!structured(await mcpClient.callTool({ name: "list_sessions", arguments: {} })).sessions.some((item) => item.id === reportSession));
+  assert.equal(
+    structured(
+      await mcpClient.callTool({
+        name: "get_session",
+        arguments: { session_id: reportSession, include_archived: true },
+      }),
+    ).archived_at,
+    archiveResult.archived_at,
+  );
+  assert.ok(
+    !structured(
+      await mcpClient.callTool({ name: "list_sessions", arguments: {} }),
+    ).sessions.some((item) => item.id === reportSession),
+  );
   process.stdout.write("MCP real OpenCode integration passed.\n");
 } finally {
   await writeFile(toolGate, "release").catch(() => {});
@@ -1132,21 +1398,24 @@ async function connectMcp(port, token) {
 }
 
 async function waitForTask(sessionId, messageId) {
+  let lastStatus;
   for (let i = 0; i < 160; i++) {
-    const status = structured(
+    lastStatus = structured(
       await mcpClient.callTool({
         name: "get_session_status",
         arguments: { session_id: sessionId, message_id: messageId },
       }),
     );
-    if (status.state === "completed") return;
+    if (lastStatus.state === "completed") return;
     assert.ok(
-      !["failed", "aborted", "input_required"].includes(status.state),
-      JSON.stringify(status),
+      !["failed", "aborted", "input_required"].includes(lastStatus.state),
+      JSON.stringify(lastStatus),
     );
     await delay(100);
   }
-  throw new Error("Synthetic report did not complete");
+  throw new Error(
+    `Synthetic report did not complete: ${JSON.stringify(lastStatus)}`,
+  );
 }
 
 function structured(result) {
@@ -1209,6 +1478,40 @@ async function readBody(request) {
 
 function sseChunk(value) {
   return `data: ${JSON.stringify(value)}\n\n`;
+}
+
+function onePixelPng() {
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(1, 0);
+  header.writeUInt32BE(1, 4);
+  header[8] = 8; // bit depth
+  header[9] = 2; // RGB
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk("IHDR", header),
+    pngChunk("IDAT", deflateSync(Buffer.from([0, 0xff, 0, 0]))),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+function pngChunk(name, data) {
+  const type = Buffer.from(name, "ascii");
+  const payload = Buffer.concat([type, data]);
+  const length = Buffer.alloc(4);
+  const checksum = Buffer.alloc(4);
+  length.writeUInt32BE(data.length);
+  checksum.writeUInt32BE(crc32(payload));
+  return Buffer.concat([length, payload, checksum]);
+}
+
+function crc32(bytes) {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit++)
+      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
 }
 
 async function waitForHealth(baseUrl, diagnostics, child) {

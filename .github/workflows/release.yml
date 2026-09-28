@@ -180,7 +180,9 @@ jobs:
           python3 tests/release_metadata_test.py
           python3 tests/release_state_test.py
           python3 -B tests/web_editor_test.py
+          python3 -B tests/web_launcher_proxy_test.py
           node --test tests/web_editor_extension_test.cjs
+          node --test tests/web_launcher_dom_test.cjs
           bash -n opencode-vm.sh tests/mcp_adapter_test.sh tests/openlive_test.sh tests/besprechung_test.sh scripts/build-mcp-adapter.sh scripts/build-openlive-adapter.sh
           shellcheck --severity=error opencode-vm.sh tests/mcp_adapter_test.sh tests/openlive_test.sh tests/besprechung_test.sh scripts/build-mcp-adapter.sh scripts/build-openlive-adapter.sh
           bash tests/besprechung_test.sh

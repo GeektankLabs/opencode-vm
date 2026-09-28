@@ -1,12 +1,12 @@
 ---
 name: opencode-session-orchestrator
-description: Coordinate authorized OpenCode-style MCP sessions through the user's selected connection. Use for task submission, approval troubleshooting, tool progress, recent activity, complete result retrieval, session switching, decision briefs and implementation planning. Discover actual capabilities; separate approval, acceptance, execution and read coverage. Do not use this skill as permission to change connection settings or start unrequested work.
+description: Coordinate authorized OpenCode-style MCP sessions through the user's selected connection. Use for task submission, supported file attachments, approval troubleshooting, tool progress, recent activity, complete result retrieval, session switching, decision briefs and implementation planning. Discover actual capabilities; separate approval, acceptance, execution and read coverage. Do not use this skill as permission to change connection settings or start unrequested work.
 license: MIT
 ---
 
 # OpenCode Session Orchestrator
 
-Release marker: **2026-09-27-r7**. This is the skill revision, not an MCP version.
+Release marker: **2026-09-28-r9**. This is the skill revision, not an MCP version.
 
 This is a client-side workflow skill. The user supplies a working compatible MCP connection, including when using Secure MCP Tunnel. The skill contains no tunnel, account, server alias or credentials and does not configure the connection.
 
@@ -16,6 +16,7 @@ Read references when their workflow is relevant:
 
 - Sending or troubleshooting approval: [Approval flow](references/approval-flow.md).
 - Product-setting advice: [Dated documentation notes](references/approval-sources.md); recheck official documentation.
+- Sending an image, text file, Markdown file or PDF-derived text to a session: [Attachment workflow](references/attachments.md). Read it before staging file bytes or using `send_message.attachments`.
 - Long, partial or changing results: [Content protocol](references/content-protocol.md).
 - Running tools, recent events or session attention: [Progress and activity](references/progress-activity.md).
 - Research, decisions or planning: [Decision preparation](references/decision-preparation.md).
@@ -106,7 +107,11 @@ After one submission:
 5. For unknown/lost responses, inspect the existing receipt/request ID, stored messages, full task search or relevant journal. Absence from one bounded page is not proof of non-delivery.
 6. Retry only when authorized and non-delivery is established, or when a supported idempotency contract safely recovers the identical request. Never duplicate a pending approval or hard-denied call.
 
-For `SESSION_BUSY`, inspect the actual reason: the backend may be active or another MCP write may be in progress even if a previous session snapshot said idle. When the server reports `SUBMISSION_UNRESOLVED`, the new task was **not admitted**; its correlation ID identifies the older, unverified receipt. Inspect that older task with available reads and wait for terminal evidence rather than retrying the new task or inventing an unlock. If the new send itself returns `SUBMISSION_UNCERTAIN`, delivery may have occurred; follow its original ID and never blindly resend. Do not manually abort or move work to another session to bypass a guard. Reads may have documented internal bookkeeping; do not invent an additional repair operation.
+For `SESSION_BUSY`, inspect the actual reason: the backend may be active or another MCP write may be in progress even if a previous session snapshot said idle. When the server reports `SUBMISSION_UNRESOLVED`, the new task was **not admitted**; its correlation ID identifies the older, unverified receipt. First inspect that exact receipt with `get_task_result`/`get_session_status`, then inspect the current `get_session` guard, backend activity, pending input and progress. Follow terminal evidence through the ordinary safe path; do not retry while the receipt is unresolved.
+
+If a discovered connector exposes `supersede_unresolved_submission` and the receipt remains unresolved, do **not** call it automatically. Explain the exact currently guarded `guarded_message_id` and the remaining duplicate-delivery risk. Ask for a fresh user decision that explicitly approves superseding that exact ID and submitting the currently requested next task. An earlier general approval to send the task is not approval to bypass its current guard. If approved, invoke the combined override-and-send operation once with that exact guard, `operator_authorized:true`, a new client-generated UUID `request_id`, and the approved message. The operation itself submits the new task; do not follow it with `send_message` for the same task. Verify the returned new `message_id` with `get_session_status`. If the response is uncertain, inspect that new ID and retry only the identical operation with the identical UUID/request if needed; never generate a new UUID or blindly resubmit. If the guard changed or the server detects active work/pending input, stop, re-read state and obtain a new guard-specific user decision before any new override. The authorization field is a client attestation, not proof of human identity.
+
+If the new ordinary send itself returns `SUBMISSION_UNCERTAIN`, delivery may have occurred; follow its original ID and never blindly resend. Do not manually abort or move work to another session to bypass a guard. Reads may have documented internal bookkeeping; do not invent an additional repair operation.
 
 A normal receipt is concise: task purpose, target, ID and verified state. Reserve extended permission diagnostics for an actual fault.
 
