@@ -46,8 +46,8 @@ grep -qF 'Release inputs changed without incrementing OCVM_VERSION.' "$RELEASE_W
   fail "release workflow does not reject unversioned release-input changes"
 grep -qF '.draft == false and .prerelease == false' "$RELEASE_WORKFLOW" ||
   fail "release workflow does not reject draft or prerelease no-ops"
-grep -qF 'index($openlive) != null and index($mcp) != null and index("SHA256SUMS") != null' "$RELEASE_WORKFLOW" ||
-  fail "release workflow does not verify both existing adapter assets"
+grep -qF 'index($openlive) != null and index($mcp) != null and index($hub) != null and index("SHA256SUMS") != null' "$RELEASE_WORKFLOW" ||
+  fail "release workflow does not verify existing adapter and Hub assets"
 grep -qF 'gh release download "$OPENLIVE_RELEASE_TAG"' "$RELEASE_WORKFLOW" ||
   fail "release workflow does not download existing assets for verification"
 grep -qF '! cmp "$state_dir/assets/opencode-vm.sh" opencode-vm.sh' "$RELEASE_WORKFLOW" ||
