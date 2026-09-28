@@ -947,9 +947,10 @@ try {
     progressReceipt.message_id,
   );
   assert.equal(liveProgress.in_flight_tools[0]?.call_id, runningTool.callID);
-  assert.equal(
-    liveProgress.in_flight_tools[0]?.started_at,
-    runningTool.state.time.start,
+  // The backend can refresh a running tool's start time between snapshots.
+  assert.ok(
+    liveProgress.in_flight_tools[0]?.started_at >= runningTool.state.time.start &&
+      liveProgress.in_flight_tools[0]?.started_at <= Date.now(),
   );
   assert.equal(providerRequests.length, callsBeforeProgress);
   assert.doesNotMatch(
