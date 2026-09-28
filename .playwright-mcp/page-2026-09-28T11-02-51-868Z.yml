@@ -1,0 +1,22 @@
+- generic [active] [ref=f1e1]:
+  - generic [ref=f1e3]:
+    - banner [ref=f1e4]:
+      - generic [ref=f1e5]:
+        - button "Home" [ref=f1e7]
+        - generic [ref=f1e14]:
+          - link "New session" [ref=f1e15]:
+            - /url: /new-session?draftId=20b7c518-1363-413f-b8ff-55977256cecf
+          - button "Close tab" [ref=f1e21]
+        - button "New session" [ref=f1e25]
+    - main [ref=f1e28]:
+      - generic [ref=f1e47]:
+        - generic [ref=f1e50]:
+          - generic [ref=f1e51]:
+            - textbox "Prompt" [ref=f1e52]
+            - generic: Ask anything, / for commands, @ for context...
+          - generic [ref=f1e53]:
+            - button "Add images and files" [ref=f1e56]
+            - button "Send" [disabled] [ref=f1e59]
+        - button "New project" [ref=f1e63]
+  - generic:
+    - region "Notifications alt+T"

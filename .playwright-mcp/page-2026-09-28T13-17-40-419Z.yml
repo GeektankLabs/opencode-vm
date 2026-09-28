@@ -1,0 +1,95 @@
+- main [ref=e2]:
+  - generic [ref=e3]:
+    - generic [ref=e4]:
+      - paragraph [ref=e5]: OPENCODE VM / OPERATIONS
+      - heading "Agent Connectivity Hub" [level=1] [ref=e6]
+      - paragraph [ref=e7]: Status, Diagnose und Anleitungen für Agent- und MCP-Verbindungen.
+    - generic [ref=e8]:
+      - generic [ref=e9]: Zuletzt aktualisiert 15:17:40
+      - button "Aktualisieren" [ref=e10] [cursor=pointer]
+      - link "Doku" [ref=e11] [cursor=pointer]:
+        - /url: https://github.com/GeektankLabs/opencode-vm
+  - generic [ref=e12]:
+    - generic [ref=e13]:
+      - generic [ref=e14]:
+        - paragraph [ref=e15]: 01 / RUNTIME
+        - heading "Konfigurierte Verbindungen" [level=2] [ref=e16]
+      - generic [ref=e17]: 0 erkannt
+    - generic [ref=e18]: Keine konfigurierte Verbindung für dieses Projekt. Die verfügbaren Einrichtungsschritte stehen weiter unten.
+  - navigation "Bereichsnavigation" [ref=e20]:
+    - button "Übersicht" [ref=e21] [cursor=pointer]
+    - button "Skill & Client Integration" [ref=e22] [cursor=pointer]
+  - generic [ref=e23]:
+    - generic [ref=e24]:
+      - generic [ref=e26]:
+        - paragraph [ref=e27]: SIGNALS
+        - heading "Schnellübersicht" [level=2] [ref=e28]
+      - generic [ref=e30]:
+        - strong [ref=e31]: Keine projektbezogene Verbindung konfiguriert
+        - paragraph [ref=e32]: Die lokalen Registries und Session-Marker enthalten für dieses Projekt keine aktive Connector-Konfiguration.
+    - generic [ref=e33]:
+      - generic [ref=e34]:
+        - generic [ref=e35]:
+          - paragraph [ref=e36]: DIAGNOSTICS
+          - heading "Letzte Ereignisse" [level=2] [ref=e37]
+        - button "Alle Logs anzeigen" [ref=e38] [cursor=pointer]
+      - generic [ref=e39]: Keine sicheren Ereignisse aus den erlaubten Logquellen.
+  - generic [ref=e41]:
+    - article [ref=e42]:
+      - paragraph [ref=e43]: GET STARTED
+      - heading "Setup & Anleitungen" [level=2] [ref=e44]
+      - generic [ref=e45]:
+        - generic [ref=e46]:
+          - heading "Secure MCP Tunnel" [level=3] [ref=e47]
+          - list [ref=e48]:
+            - listitem [ref=e49]: OpenAI Tunnel und eingeschränkten Tunnel API-Key anlegen.
+            - listitem [ref=e50]: opencode-vm provider mcp new openai im Projektverzeichnis ausführen.
+            - listitem [ref=e51]: Mit opencode-vm web starten und provider mcp status openai prüfen.
+          - link "Dokumentation öffnen" [ref=e52] [cursor=pointer]:
+            - /url: https://github.com/GeektankLabs/opencode-vm/blob/main/docs/MCP-TUNNEL.md
+        - generic [ref=e53]:
+          - heading "A2A Agent Interface" [level=3] [ref=e54]
+          - list [ref=e55]:
+            - listitem [ref=e56]: Eine Web-Session mit opencode-vm web starten.
+            - listitem [ref=e57]: Agent Card und /health über den dokumentierten A2A-Port verifizieren.
+            - listitem [ref=e58]: Für Diagnose opencode-vm a2a status oder a2a check verwenden.
+          - link "Dokumentation öffnen" [ref=e59] [cursor=pointer]:
+            - /url: https://github.com/GeektankLabs/opencode-vm/blob/main/docs/A2A-INTERFACE.md
+        - generic [ref=e60]:
+          - heading "OpenLive ACP" [level=3] [ref=e61]
+          - list [ref=e62]:
+            - listitem [ref=e63]: OpenLive-Bridge mit opencode-vm openlive install einrichten.
+            - listitem [ref=e64]: Die Web-Session als gemeinsamer Runtime-Endpunkt bereitstellen.
+            - listitem [ref=e65]: Status und Diagnose mit opencode-vm openlive status prüfen.
+          - link "Dokumentation öffnen" [ref=e66] [cursor=pointer]:
+            - /url: https://github.com/GeektankLabs/opencode-vm/blob/main/PLAN_OPENLIVE.md
+    - article [ref=e67]:
+      - paragraph [ref=e68]: CLIENT PACKAGE
+      - heading "Skill & Client Integration" [level=2] [ref=e69]
+      - generic [ref=e70]:
+        - paragraph [ref=e71]:
+          - strong [ref=e72]: opencode-session-orchestrator
+          - text: Revision 2026-09-28-r9. Instruction-only Paket, getrennt von der MCP-Verbindung.
+        - generic [ref=e73]: "SHA-256: 839d4415d25e434aaa4972ab852840fca14f5bc0f4e8b50438790445ce3aa908"
+        - generic [ref=e74]:
+          - link "Latest herunterladen" [ref=e75] [cursor=pointer]:
+            - /url: https://github.com/GeektankLabs/opencode-vm/raw/refs/heads/main/integrations/chatgpt/opencode-session-orchestrator.zip
+          - link "Installation" [ref=e76] [cursor=pointer]:
+            - /url: https://github.com/GeektankLabs/opencode-vm/blob/main/docs/CHATGPT.md
+    - article [ref=e77]:
+      - paragraph [ref=e78]: BOUNDARIES
+      - heading "Hinweise & Voraussetzungen" [level=2] [ref=e79]
+      - list [ref=e80]:
+        - listitem [ref=e81]:
+          - strong [ref=e82]: Read-only Hub.
+          - text: Keine Credential-Eingabe und keine Start-/Stop-Aktionen.
+        - listitem [ref=e83]: Die CLI bleibt der Einrichtungsweg; dieser Dienst liest nur sichere lokale Metadaten.
+        - listitem [ref=e84]: OpenLive ist eine getrennte ACP-/Voice-Integration, nicht automatisch ein A2A- oder MCP-Status.
+        - listitem [ref=e85]:
+          - text: Health ohne verlässlichen Laufzeitnachweis wird als
+          - strong [ref=e86]: unknown/stale
+          - text: dargestellt.
+  - generic [ref=e87]:
+    - text: Agent Connectivity Hub · Read-only ·
+    - link "Healthcheck" [ref=e88] [cursor=pointer]:
+      - /url: /healthz

@@ -34,7 +34,7 @@ OPENLIVE_PREVIOUS_COMMAND="$OPENLIVE_DIR/previous-command"
 OPENLIVE_AUTH_MARKER="__opencode_vm_openlive__"
 OPENLIVE_LOCK_PATH=""
 OPENLIVE_ADAPTER_VERSION="0.1.6"
-OPENLIVE_ADAPTER_TAG="v0.5.91"
+OPENLIVE_ADAPTER_TAG="v0.5.102"
 OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.6.tar"
 OPENLIVE_ADAPTER_SHA256="06f461873b8b299de98220aa577824eb9807672b26cb069541acebcdd2d973b9"
 OPENLIVE_ACP_SDK_VERSION="1.2.1"
@@ -44,14 +44,17 @@ OPENLIVE_MANAGER_DESCRIPTION="Read-only OpenLive voice session manager"
 OPENLIVE_MANAGER_PROMPT="You manage an OpenLive voice call. The voice_sessions tool is available and you must call it before listing, inspecting, summarizing, checking, attaching to, or creating project sessions. Never claim session details without a successful tool result. Ask for clarification if a requested session is ambiguous. Create a new work session only when the user explicitly asks for one. Apart from that explicit create action, you are read-only: do not edit files, run shell commands, create tasks, or mutate sessions. Keep responses brief and conversational: one or two plain sentences without Markdown, paths, URLs, code, or stray symbols. When attachment or creation succeeds, tell the user the next voice prompt will continue in that session."
 MCP_CONNECTOR_DIR="$SHARE_ROOT/mcp-connector"
 MCP_ADAPTER_CACHE_ROOT="$MCP_CONNECTOR_DIR/adapters"
-MCP_ADAPTER_VERSION="0.1.12"
-MCP_ADAPTER_TAG="v0.5.91"
-MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.12.tar"
-MCP_ADAPTER_SHA256="d24ba0ad22316ed36beb6aa7ea4eaa6daacbbf505b47c8cc4e61a7cb90e27dff"
+MCP_ADAPTER_VERSION="0.1.16"
+MCP_ADAPTER_TAG="v0.5.102"
+MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.16.tar"
+MCP_ADAPTER_SHA256="a92c88fd1e418b3cb2b9becd4a9445e8d62a0a9c46abe96765867f38cf66cbe5"
 MCP_SDK_VERSION="1.30.1"
 MCP_OPENCODE_SDK_VERSION="1.18.21"
 MCP_TESTED_PROTOCOL_VERSION="2025-11-25"
 MCP_TUNNEL_DIR="$SHARE_ROOT/mcp-tunnel/openai"
+HUB_ASSET_TAG="v0.5.102"
+HUB_ASSET_FILENAME="opencode-vm-hub-1.tar"
+HUB_ASSET_SHA256="1c20384f46c0b3553996933e7a1bbc92d610ff0bcb8b98f7d74357491a7f3957"
 
 # Per-project VM sizing. The shared base VM is always provisioned at these
 # values; a project that needs more (or less) stores an override in its own
@@ -156,13 +159,14 @@ DEFAULT_LAN_ALLOW_UDP=""              # z.B. "192.168.178.20:53"              (o
 DEFAULT_HOST_LOCALHOST_FORWARD="yes"  # expose HOST_TCP_PORTS inside VM as localhost:PORT
 DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 DEFAULT_MCP_PORT=40960                # private incoming MCP connector
+AGENT_HUB_PORT=4180                   # first host-local Agent Connectivity Hub port (4180..4199)
 TASKBOARD_VERSION="0.6.0"
 TASKBOARD_AMD64_SHA256="ea5d28c266d4cc7caf4aa86f5efd575871d6255ff2e41d61a84201f5d68647e9"
 TASKBOARD_ARM64_SHA256="3749fb985f544fdb6788ba1dff69761e599ff82b3fe86d39ca54307c0f523e9d"
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.5.95"
+OCVM_VERSION="0.5.102"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -356,9 +360,11 @@ parse_web_flags() {
   SESSION_A2A="${OCVM_A2A:-1}"
   SESSION_MCP_MODE=""
   SESSION_MCP_PORT=""
+  SESSION_HUB_MODE=""
+  SESSION_TASKBOARD_MODE=""
   SESSION_EDITOR_MODE=""
   SESSION_LAUNCHER_ENABLED=1
-  local _saw_password="" _saw_no_auth="" _saw_mcp="" _saw_no_mcp="" _saw_mcp_port=""
+  local _saw_password="" _saw_no_auth="" _saw_mcp="" _saw_no_mcp="" _saw_mcp_port="" _saw_hub="" _saw_no_hub="" _saw_taskboard="" _saw_no_taskboard=""
   OC_WEB_TUI=false
   # HTTPS by default: opencode hashes attachments via crypto.subtle, which
   # browsers expose only to secure origins, so plain HTTP over a LAN address
@@ -379,6 +385,10 @@ parse_web_flags() {
       --mcp-port) shift; SESSION_MCP_PORT="${1:?Missing MCP port value}"; _saw_mcp_port=1 ;;
       --mcp-port=*) SESSION_MCP_PORT="${1#*=}"; _saw_mcp_port=1 ;;
       --no-mcp) SESSION_MCP_MODE="disable"; _saw_no_mcp=1 ;;
+      --hub) SESSION_HUB_MODE="enable"; _saw_hub=1 ;;
+      --no-hub) SESSION_HUB_MODE="disable"; _saw_no_hub=1 ;;
+      --taskboard) SESSION_TASKBOARD_MODE="enable"; _saw_taskboard=1 ;;
+      --no-taskboard) SESSION_TASKBOARD_MODE="disable"; _saw_no_taskboard=1 ;;
       --editor|--no-editor)
         local editor_mode=enable
         [[ "$1" != --no-editor ]] || editor_mode=disable
@@ -415,6 +425,14 @@ parse_web_flags() {
     echo "--mcp-port and --no-mcp are mutually exclusive." >&2
     exit 2
   fi
+  if [[ -n "${_saw_hub:-}" && -n "${_saw_no_hub:-}" ]]; then
+    echo "--hub and --no-hub are mutually exclusive." >&2
+    exit 2
+  fi
+  if [[ -n "${_saw_taskboard:-}" && -n "${_saw_no_taskboard:-}" ]]; then
+    echo "--taskboard and --no-taskboard are mutually exclusive." >&2
+    exit 2
+  fi
   [[ -z "${_saw_mcp_port:-}" ]] || SESSION_MCP_MODE="enable"
   [[ -z "${SESSION_MCP_PORT:-}" ]] || validate_mcp_port "$SESSION_MCP_PORT"
 
@@ -433,14 +451,29 @@ parse_web_flags() {
 
 parse_attach_flags() {
   SESSION_LAUNCHER_ENABLED=1
+  SESSION_HUB_MODE=""
+  SESSION_TASKBOARD_MODE=""
+  local _saw_hub="" _saw_no_hub="" _saw_taskboard="" _saw_no_taskboard=""
   while [[ "$#" -gt 0 ]]; do
     case "$1" in
       --launcher) SESSION_LAUNCHER_ENABLED=1 ;;
       --no-launcher) SESSION_LAUNCHER_ENABLED=0 ;;
+      --hub) SESSION_HUB_MODE="enable"; _saw_hub=1 ;;
+      --no-hub) SESSION_HUB_MODE="disable"; _saw_no_hub=1 ;;
+      --taskboard) SESSION_TASKBOARD_MODE="enable"; _saw_taskboard=1 ;;
+      --no-taskboard) SESSION_TASKBOARD_MODE="disable"; _saw_no_taskboard=1 ;;
       *) echo "Unknown option: $1" >&2; return 2 ;;
     esac
     shift
   done
+  if [[ -n "$_saw_hub" && -n "$_saw_no_hub" ]]; then
+    echo "--hub and --no-hub are mutually exclusive." >&2
+    return 2
+  fi
+  if [[ -n "$_saw_taskboard" && -n "$_saw_no_taskboard" ]]; then
+    echo "--taskboard and --no-taskboard are mutually exclusive." >&2
+    return 2
+  fi
 }
 
 parse_start_flags() {
@@ -7530,7 +7563,7 @@ update_cmd() {
 }
 
 install_cmd() {
-  local source_path target_dir target_path shell_name shell_rc
+  local source_path target_dir target_path shell_name shell_rc staged asset
 
   target_dir="$HOME/bin"
   target_path="$target_dir/opencode-vm"
@@ -7547,28 +7580,32 @@ install_cmd() {
   # Create ~/bin if needed
   mkdir -p "$target_dir"
 
-  # Resolve target path (follow symlinks portably, no readlink -f)
-  local resolved_target="$target_path"
-  if [[ -e "$target_path" ]]; then
-    local t="$target_path"
-    while [[ -L "$t" ]]; do
-      local d
-      d="$(cd "$(dirname "$t")" && pwd -P)"
-      t="$(readlink "$t")"
-      [[ "$t" == /* ]] || t="$d/$t"
+  # Replace the directory entry, not a symlink's referent (which may be the
+  # checkout we are running). This also works when invoked from the installed
+  # script itself, without trying to copy a file onto itself.
+  if [[ -d "$target_path" ]]; then
+    echo "[install] Target is a directory: $target_path" >&2
+    return 1
+  fi
+  staged="$(mktemp "$target_dir/.opencode-vm.XXXXXX")" || return 1
+  if ! cp "$source_path" "$staged" || ! chmod 755 "$staged" || ! mv -f "$staged" "$target_path"; then
+    rm -f "$staged"
+    echo "[install] Could not install opencode-vm to $target_path" >&2
+    return 1
+  fi
+  echo "[install] Installed opencode-vm to $target_path"
+
+  # Keep the standalone host launcher able to start the bundled Hub even after
+  # the script itself has been copied to ~/bin.
+  local bundled_hub
+  bundled_hub="$(dirname "$source_path")/hub"
+  if [[ -f "$bundled_hub/server.py" ]]; then
+    mkdir -p "$SHARE_ROOT/hub"
+    for asset in server.py policy.py catalog.py index.html styles.css app.js control.js; do
+      cp -p "$bundled_hub/$asset" "$SHARE_ROOT/hub/$asset"
     done
-    resolved_target="$(cd "$(dirname "$t")" && pwd -P)/$(basename "$t")"
+    echo "[install] Agent Connectivity Hub assets staged in $SHARE_ROOT/hub"
   fi
-
-  # Copy script to ~/bin/opencode-vm (skip if same file)
-  if [[ "$source_path" == "$resolved_target" ]]; then
-    echo "[install] Script already installed at $target_path. Skipping copy."
-  else
-    cp "$source_path" "$target_path"
-    echo "[install] Installed opencode-vm to $target_path"
-  fi
-
-  chmod +x "$target_path"
 
   # Check PATH and update shell profile if needed
   if echo ":$PATH:" | grep -q ":$target_dir:"; then
@@ -8025,7 +8062,7 @@ mcp_adapter_dev_valid() {
   [[ -f "$dir/package.json" && -f "$dir/package-lock.json" && -f "$dir/tsconfig.json" \
     && -f "$dir/src/main.ts" && -f "$dir/src/types.ts" && -f "$dir/src/http.ts" \
     && -f "$dir/src/opencode.ts" && -f "$dir/src/tools.ts" && -f "$dir/src/activity.ts" \
-    && -f "$dir/src/content.ts" && -f "$dir/src/diagnostics.ts" ]] || return 1
+    && -f "$dir/src/content.ts" && -f "$dir/src/diagnostics.ts" && -f "$dir/src/agent-control.ts" ]] || return 1
   [[ "$(jq -r '.version // empty' "$dir/package.json" 2>/dev/null)" == "$MCP_ADAPTER_VERSION" ]]
 }
 
@@ -8033,7 +8070,7 @@ mcp_adapter_release_valid() {
   local dir="$1"
   [[ -f "$dir/manifest.json" && -f "$dir/package.json" && -f "$dir/package-lock.json" \
     && -f "$dir/dist/main.js" && -f "$dir/dist/types.js" && -f "$dir/dist/http.js" \
-     && -f "$dir/dist/opencode.js" && -f "$dir/dist/tools.js" && -f "$dir/dist/taskboard.js" && -f "$dir/dist/activity.js" \
+      && -f "$dir/dist/opencode.js" && -f "$dir/dist/tools.js" && -f "$dir/dist/taskboard.js" && -f "$dir/dist/agent-control.js" && -f "$dir/dist/activity.js" \
     && -f "$dir/dist/content.js" && -f "$dir/dist/diagnostics.js" && -f "$dir/.archive-sha256" ]] || return 1
   [[ "$(<"$dir/.archive-sha256")" == "$MCP_ADAPTER_SHA256" ]] || return 1
   jq -e --arg version "$MCP_ADAPTER_VERSION" --arg mcp "$MCP_SDK_VERSION" \
@@ -10962,11 +10999,12 @@ EDITOR_JS
 # Kept free of single quotes: this is embedded in the single-quoted in-VM
 # script as a positional argument.
 read -r -d '' OCVM_WEB_REDIRECT_PY <<'PYSRC' || true
-import socket, sys, threading, select, ssl, base64, json, os, stat, html, re
+import socket, sys, threading, select, ssl, base64, json, os, stat, html, re, time
 
 LISTEN_PORT = int(sys.argv[1])
 TARGET_PORT = int(sys.argv[2])
 KEY = sys.argv[3]
+WEB_BASE_PORT = LISTEN_PORT - 1 if len(sys.argv) > 9 and sys.argv[9] == "ocvm-proxy-web-plain" else LISTEN_PORT
 # Optional TLS: opencode's web UI hashes attachments via crypto.subtle, which
 # browsers expose only in secure contexts. Over a LAN IP that is undefined and
 # attaching files fails (opencode issues 11452 / 12989). Terminating TLS here
@@ -11083,7 +11121,7 @@ LAUNCHER_APP_REGISTRY = (
     },
     {
         "id": "taskboard",
-        "label": "Projektmanagement",
+        "label": "Project Management",
         "icon": "board",
         "runtime_file": "taskboard/runtime.json",
         "runtime_location": "taskboard-state",
@@ -11092,6 +11130,18 @@ LAUNCHER_APP_REGISTRY = (
         "port_offset": 5,
         "scheme": "http",
         "health_path": "/api/projects",
+    },
+    {
+        "id": "agent-hub",
+        "label": "Agent Control",
+        "icon": "hub",
+        "runtime_file": "hub/runtime.json",
+        "port_field": "hubPort",
+        "port_min": 4180,
+        "port_max": 4199,
+        "scheme": "http",
+        "health_path": "/healthz",
+        "heartbeat_max_age": 3,
     },
 )
 
@@ -11108,7 +11158,8 @@ LAUNCHER_JS = r"""
     typeof app.label === "string" && app.label.length <= 48 &&
     (app.scheme === "http" || app.scheme === "https") &&
     Number.isInteger(app.port) && app.port > 0 && app.port <= 65535 &&
-    ["editor", "board", "terminal", "app"].includes(app.icon));
+    !app.host &&
+    ["editor", "board", "hub", "terminal", "app"].includes(app.icon));
 
   const root = host.attachShadow({ mode: "open" });
   const stylesheet = document.createElement("link");
@@ -11140,6 +11191,12 @@ LAUNCHER_JS = r"""
     } else if (kind === "board") {
       add("rect", { x: "5", y: "5", width: "22", height: "22", rx: "2", fill: "none", stroke: "currentColor", "stroke-width": "2" });
       add("path", { d: "M12.3 5v22M19.7 5v22M7.5 10h2.5M14 10h3M21 10h3M7.5 16h2.5M14 16h3M21 16h3", fill: "none", stroke: "currentColor", "stroke-width": "1.8", "stroke-linecap": "round" });
+    } else if (kind === "hub") {
+      add("circle", { cx: "16", cy: "16", r: "5", fill: "none", stroke: "currentColor", "stroke-width": "2" });
+      add("circle", { cx: "6", cy: "8", r: "2.5", fill: "none", stroke: "currentColor", "stroke-width": "2" });
+      add("circle", { cx: "26", cy: "8", r: "2.5", fill: "none", stroke: "currentColor", "stroke-width": "2" });
+      add("circle", { cx: "26", cy: "25", r: "2.5", fill: "none", stroke: "currentColor", "stroke-width": "2" });
+      add("path", { d: "m8 9 4 4M24 9l-4 4M24 23l-4-4", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round" });
     }
     return svg;
   }
@@ -11652,8 +11709,22 @@ def read_launcher_failure(path):
 
 def launcher_app_ready(app, runtime):
     port = runtime.get(app["port_field"])
-    if not isinstance(port, int) or isinstance(port, bool) or port != LISTEN_PORT + app["port_offset"]:
+    if not isinstance(port, int) or isinstance(port, bool):
         return False
+    if app.get("port_min") is not None:
+        valid_port = app["port_min"] <= port <= app["port_max"]
+    else:
+        valid_port = port == WEB_BASE_PORT + app.get("port_offset", 0)
+    if not valid_port:
+        return False
+    if app.get("heartbeat_max_age") is not None:
+        heartbeat = runtime.get("heartbeat")
+        current = time.time()
+        if (not isinstance(heartbeat, (int, float)) or isinstance(heartbeat, bool) or
+                current - heartbeat > app["heartbeat_max_age"] or heartbeat > current + 1 or
+                runtime.get("ready") is not True):
+            return False
+        return True
     sock = None
     try:
         sock = socket.create_connection(("127.0.0.1", port), timeout=0.5)
@@ -11688,7 +11759,7 @@ def launcher_apps():
                 if failure:
                     apps.append({
                         "id": app["id"], "label": app["label"], "icon": app["icon"],
-                        "scheme": app["scheme"], "port": app.get("fixed_port", LISTEN_PORT + app.get("port_offset", 0)),
+                        "scheme": app["scheme"], "port": WEB_BASE_PORT + app.get("port_offset", 0),
                         "ready": False, "error": failure.get("reason", "Taskboard nicht bereit."),
                         "log": failure.get("log", "VM-interner Taskboard-Logpfad nicht verfügbar."),
                     })
@@ -11994,6 +12065,170 @@ while True:
         continue
     threading.Thread(target=handle, args=(conn,), daemon=True).start()
 PYSRC
+
+agent_hub_source_dir() {
+  local candidate
+  for candidate in "$SCRIPT_DIR/hub" "$SHARE_ROOT/hub-assets/$HUB_ASSET_SHA256/hub" "$SHARE_ROOT/hub"; do
+    if [[ -f "$candidate/server.py" && -f "$candidate/policy.py" && -f "$candidate/catalog.py" &&
+          -f "$candidate/index.html" && -f "$candidate/styles.css" &&
+          -f "$candidate/app.js" && -f "$candidate/control.js" ]]; then
+      if [[ "$candidate" == "$SHARE_ROOT/hub" && "$(cat "$candidate/.ocvm-version" 2>/dev/null || true)" != "$OCVM_VERSION" ]]; then
+        continue
+      fi
+      if [[ "$candidate" == "$SHARE_ROOT/hub-assets/"* && "$(cat "${candidate%/hub}/.sha256" 2>/dev/null || true)" != "$HUB_ASSET_SHA256" ]]; then
+        continue
+      fi
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Standalone installs have only opencode-vm.sh. Download the release's exact
+# read-only Hub assets when no adjacent development tree is available.
+agent_hub_prepare_cache() {
+  local cache="$SHARE_ROOT/hub-assets/$HUB_ASSET_SHA256" stage archive expected
+  [[ ! -L "$SHARE_ROOT/hub-assets" && ! -L "$cache" ]] || return 1
+  mkdir -p "$SHARE_ROOT/hub-assets" || return 1
+  if [[ -f "$cache/.sha256" && "$(<"$cache/.sha256")" == "$HUB_ASSET_SHA256" ]]; then return 0; fi
+  [[ ! -e "$cache" ]] || { echo "[hub] Unrecognized cache contents; refusing to overwrite." >&2; return 1; }
+  stage="$(mktemp -d "$SHARE_ROOT/hub-assets/.stage.XXXXXX")" || return 1
+  archive="$stage/assets.tar"
+  expected="https://github.com/$OCVM_UPDATE_REPO/releases/download/$HUB_ASSET_TAG/$HUB_ASSET_FILENAME"
+  if ! curl -fsSL --proto '=https' --proto-redir '=https' --max-time 120 "$expected" -o "$archive" ||
+     [[ "$(shasum -a 256 "$archive" | cut -d' ' -f1)" != "$HUB_ASSET_SHA256" ]] ||
+     ! python3 - "$archive" <<'PY'
+import sys, tarfile
+expected = {"hub/" + name for name in ("server.py", "policy.py", "catalog.py", "index.html", "styles.css", "app.js", "control.js")}
+with tarfile.open(sys.argv[1]) as archive:
+    members = archive.getmembers()
+    assert {item.name for item in members} == expected
+    assert all(item.isfile() and item.size <= 131072 for item in members)
+PY
+  then
+    rm -rf "$stage"
+    echo "[hub] Verified release assets unavailable; project web session continues without the Hub." >&2
+    return 1
+  fi
+  tar -xf "$archive" -C "$stage" || { rm -rf "$stage"; return 1; }
+  rm -f "$archive"
+  printf '%s\n' "$HUB_ASSET_SHA256" > "$stage/.sha256"
+  mv "$stage" "$cache" || { rm -rf "$stage"; return 1; }
+}
+
+agent_hub_runtime_path() {
+  printf '%s/hub/runtime.json\n' "$1"
+}
+
+agent_hub_stop() {
+  local share="${1:-}" pid_file watcher_file pid watcher source command hash
+  [[ -n "$share" ]] || return 0
+  pid_file="$share/hub/server.pid"
+  watcher_file="$share/hub/watcher.pid"
+  if [[ -f "$watcher_file" ]]; then
+    watcher="$(cat "$watcher_file" 2>/dev/null || true)"
+    if [[ "$watcher" =~ ^[0-9]+$ ]]; then
+      kill "$watcher" 2>/dev/null || true
+    fi
+  fi
+  if [[ -f "$pid_file" ]]; then
+    pid="$(cat "$pid_file" 2>/dev/null || true)"
+    source="$(agent_hub_source_dir 2>/dev/null || true)"
+    hash="$(basename "$share")"
+    if [[ "$pid" =~ ^[0-9]+$ && -n "$source" ]]; then
+      command="$(ps -ww -p "$pid" -o command= 2>/dev/null || true)"
+      if [[ "$command" == *"$source/server.py"* && "$command" == *"--project-hash $hash"* ]]; then
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+      fi
+    fi
+  fi
+  rm -f "$pid_file" "$watcher_file" "$(agent_hub_runtime_path "$share")"
+}
+
+agent_hub_health() {
+  local port="$1" hash="$2"
+  curl -fsS --max-time 1 "http://127.0.0.1:$port/healthz" 2>/dev/null |
+    jq -e --arg hash "$hash" '.status == "ok" and .service == "agent-connectivity-hub" and
+       .readOnly == false and .projectHash == $hash' >/dev/null 2>&1
+}
+
+# Start the host-local Hub and publish a heartbeat-backed runtime descriptor for
+# the VM proxy. The descriptor is only present while /healthz is returning 200.
+agent_hub_start() {
+  local share="$1" project="$2" source pid watcher tmp waited runtime port hash
+  source="$(agent_hub_source_dir 2>/dev/null || true)"
+  if [[ -z "$source" ]] && agent_hub_prepare_cache; then
+    source="$(agent_hub_source_dir 2>/dev/null || true)"
+  fi
+  [[ -n "$source" ]] || {
+    echo "[hub] Hub assets are unavailable; launcher entry will stay hidden." >&2
+    return 1
+  }
+  agent_hub_stop "$share"
+  mkdir -p "$share/hub"
+  chmod 700 "$share/hub"
+  runtime="$(agent_hub_runtime_path "$share")"
+  rm -f "$runtime"
+  hash="$(proj_hash "$project")"
+  for port in $(seq "$AGENT_HUB_PORT" "$((AGENT_HUB_PORT + 19))"); do
+    # Another project's Hub may already own a fixed port; never reuse its
+    # health response as proof that this project's service started.
+    if ! python3 -c 'import socket,sys; s=socket.socket(); s.bind(("127.0.0.1",int(sys.argv[1]))); s.close()' "$port" 2>/dev/null; then
+      continue
+    fi
+    HUB_PROJECT="$project" OCVM_SHARE_ROOT="$SHARE_ROOT" \
+       python3 "$source/server.py" --host 0.0.0.0 --port "$port" --project-hash "$hash" \
+      >>"$share/hub/server.log" 2>&1 &
+    pid=$!
+    printf '%s\n' "$pid" > "$share/hub/server.pid"
+    chmod 600 "$share/hub/server.pid"
+    waited=0
+    while (( waited < 20 )); do
+      if agent_hub_health "$port" "$hash" && kill -0 "$pid" 2>/dev/null; then
+        break
+      fi
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+      waited=$((waited + 1))
+    done
+    if ! agent_hub_health "$port" "$hash" || ! kill -0 "$pid" 2>/dev/null; then
+      agent_hub_stop "$share"
+      continue
+    fi
+    (
+      trap 'rm -f "$runtime" "$share/hub/watcher.pid"; exit 0' EXIT HUP INT TERM
+      while kill -0 "$pid" 2>/dev/null; do
+        if agent_hub_health "$port" "$hash"; then
+          tmp="$(mktemp "$share/hub/runtime.XXXXXX")" || exit 1
+          jq -n --arg share "$share" --arg project "$hash" \
+            --argjson port "$port" --argjson heartbeat "$(date +%s)" \
+            '{schema:1,share:$share,projectHash:$project,hubPort:$port,ready:true,heartbeat:$heartbeat}' > "$tmp" || exit 1
+          chmod 600 "$tmp" && mv -f "$tmp" "$runtime" || exit 1
+        else
+          rm -f "$runtime"
+        fi
+        sleep 0.5
+      done
+    ) &
+    watcher=$!
+    printf '%s\n' "$watcher" > "$share/hub/watcher.pid"
+    chmod 600 "$share/hub/watcher.pid"
+    waited=0
+    while (( waited < 30 )); do
+      if [[ -f "$runtime" ]] && agent_hub_health "$port" "$hash"; then
+        echo "[hub] Agent Connectivity Hub ready on http://127.0.0.1:$port" >&2
+        return 0
+      fi
+      sleep 0.2
+      waited=$((waited + 1))
+    done
+    agent_hub_stop "$share"
+  done
+  echo "[hub] No project-bound Agent Connectivity Hub port was available in $AGENT_HUB_PORT..$((AGENT_HUB_PORT + 19))." >&2
+  return 1
+}
 
 # ---------------------------------------------------------------------------
 # In-VM web library
@@ -12412,7 +12647,12 @@ start_taskboard() {
     return 1
   fi
   if [ -z "${OC_TASKBOARD_BIN:-}" ]; then
-    local arch="$(uname -m)"; [ "$arch" = aarch64 ] || arch=amd64
+    local arch
+    case "$(uname -m)" in
+      aarch64|arm64) arch=arm64 ;;
+      x86_64|amd64) arch=amd64 ;;
+      *) taskboard_failure "Unsupported guest architecture."; return 1 ;;
+    esac
     OC_TASKBOARD_BIN="$HOME/.local/share/ocvm-taskboard/taskboard-0.6.0-$arch/taskboard"
   fi
   [ -x "$OC_TASKBOARD_BIN" ] || {
@@ -13720,8 +13960,10 @@ _attach_legacy_prompt() {
 
 _ATTACH_TUNNEL_VM=""
 _ATTACH_TUNNEL_BASE=""
+_ATTACH_HUB_SHARE=""
 _attach_tunnel_cleanup() {
   stop_mcp_host_watcher || true
+  agent_hub_stop "${_ATTACH_HUB_SHARE:-}" || true
   [[ -n "$_ATTACH_TUNNEL_VM" && -n "$_ATTACH_TUNNEL_BASE" ]] || return 0
   echo ""
   echo "[opencode-vm] Web session ended — closing LAN tunnels..."
@@ -13823,6 +14065,10 @@ attach_session() {
       ;;
     disable) sess_mcp_enabled=0 ;;
   esac
+  local sess_taskboard_enabled=0
+  if [[ ( "$sess_mode" == web || "$sess_mode" == tui-mcp ) && "${SESSION_TASKBOARD_MODE:-}" != disable ]]; then
+    sess_taskboard_enabled=1
+  fi
   if [[ "$sess_mcp_enabled" == "1" ]]; then
     [[ "$sess_mode" == web || "$sess_mode" == tui-mcp ]] || {
       echo "[mcp] The connector requires a server-backed session." >&2
@@ -14050,6 +14296,12 @@ attach_session() {
     local _att_sess_share
     _att_sess_share="$(session_share_dir "$proj")"
     start_materialize_daemon "$SESS_NAME" "$_att_sess_share" || true
+    _ATTACH_HUB_SHARE="$_att_sess_share"
+    if [[ "${SESSION_HUB_MODE:-}" != disable ]]; then
+      agent_hub_start "$_att_sess_share" "$proj" || true
+    else
+      agent_hub_stop "$_att_sess_share" || true
+    fi
   fi
 
   # Refresh the staged adapter only after the old gateway has stopped using it.
@@ -14117,20 +14369,21 @@ attach_session() {
     OC_A2A_DEFAULT_SECRET="${10:-opencode-vm}"
     OC_LAN_UP="${11:-1}"
     OC_OPENLIVE_PROJECT_HASH="${12:-}"
-    OC_OPENLIVE_SCRIPT_VERSION="${13:-unknown}"
-    OCVM_TASKBOARD_RUNTIME_DIR="$PROJ_DIR/.opencode-vm/taskboard"
-    export OCVM_TASKBOARD_RUNTIME_DIR
+     OC_OPENLIVE_SCRIPT_VERSION="${13:-unknown}"
+     OCVM_TASKBOARD_RUNTIME_DIR="$PROJ_DIR/.opencode-vm/taskboard"
+     export OCVM_TASKBOARD_RUNTIME_DIR
     OC_MCP_ENABLED="${14:-0}"
     OC_MCP_PORT="${15:-40960}"
      OC_MCP_GENERATION="${16:-}"
      OC_EDITOR_ENABLED="${17:-0}"
      OC_TASKBOARD_DB="${18:-}"
      OC_TASKBOARD_METADATA_FILE="${OC_TASKBOARD_DB%.db}.metadata.json"
-     OC_TASKBOARD_LEGACY_DB="${20:-}"
-     OC_TASKBOARD_LEGACY_EXPECTED="${21:-0}"
-     OC_TASKBOARD_ENABLED=0
-     if [ "$OC_MODE" = web ] || [ "$OC_MODE" = tui-mcp ]; then OC_TASKBOARD_ENABLED=1; fi
-     OC_LAUNCHER_ENABLED="${19:-1}"
+     OC_TASKBOARD_LEGACY_DB="${21:-}"
+     OC_TASKBOARD_LEGACY_EXPECTED="${22:-0}"
+      OC_TASKBOARD_ENABLED=0
+      if [ "$OC_MODE" = web ] || [ "$OC_MODE" = tui-mcp ]; then OC_TASKBOARD_ENABLED=1; fi
+      [ "${19:-1}" = "1" ] || OC_TASKBOARD_ENABLED=0
+      OC_LAUNCHER_ENABLED="${20:-1}"
 
     # Shared in-VM web library (materialized into the session share by
     # install_web_lib on the host, and mounted here at the same path). It owns
@@ -14412,7 +14665,7 @@ attach_session() {
 
     # Sync-back happens via the EXIT trap installed above (covers Ctrl+C as
     # well as normal exit).
-   ' "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$effective_base" "$host_lan_ip" "${OC_WEB_TUI:-false}" "$sess_tls" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up" "$(proj_hash "$proj")" "$OCVM_VERSION" "$sess_mcp_enabled" "$sess_mcp_port" "$attach_controller" "$sess_editor_enabled" "$proj/.opencode-vm/taskboard/taskboard.db" "${SESSION_LAUNCHER_ENABLED:-1}" "$(project_state_dir "$proj")/taskboard/taskboard.db" "$(test -f "$(project_state_dir "$proj")/taskboard/taskboard.db" && printf 1 || printf 0)" || {
+    ' "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$effective_base" "$host_lan_ip" "${OC_WEB_TUI:-false}" "$sess_tls" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up" "$(proj_hash "$proj")" "$OCVM_VERSION" "$sess_mcp_enabled" "$sess_mcp_port" "$attach_controller" "$sess_editor_enabled" "$proj/.opencode-vm/taskboard/taskboard.db" "$sess_taskboard_enabled" "${SESSION_LAUNCHER_ENABLED:-1}" "$(project_state_dir "$proj")/taskboard/taskboard.db" "$(test -f "$(project_state_dir "$proj")/taskboard/taskboard.db" && printf 1 || printf 0)" || {
     stop_mcp_host_watcher || true
     echo "[attach] Session command failed." >&2
     return 1
@@ -15256,8 +15509,12 @@ start_session() {
   local controller_id="${sess}-controller-$$"
   local effective_mcp_enabled=0 effective_mcp_port=""
   local effective_editor_disabled=0 effective_editor_enabled
+  local effective_taskboard_enabled=0
   [[ "${SESSION_EDITOR_MODE:-}" != disable ]] || effective_editor_disabled=1
   effective_editor_enabled="$(web_editor_enabled "$SESSION_MODE" "$effective_editor_disabled")"
+  if [[ ( "$SESSION_MODE" == web || "$SESSION_MODE" == tui-mcp ) && "${SESSION_TASKBOARD_MODE:-}" != disable ]]; then
+    effective_taskboard_enabled=1
+  fi
   if [[ ( "$SESSION_MODE" == web || "$SESSION_MODE" == tui-mcp ) && "${SESSION_MCP_MODE:-}" != disable ]]; then
     effective_mcp_enabled=1
     effective_mcp_port="$(mcp_reserve_host_port "$proj" "${SESSION_MCP_PORT:-}")" || return 1
@@ -15618,6 +15875,7 @@ start_session() {
   cleanup() {
     trap - EXIT HUP TERM
     stop_mcp_host_watcher || true
+    agent_hub_stop "$sess_share" || true
     echo "[cleanup] Starting cleanup... $(_ts)"
     if ! lifecycle_lock_acquire "$proj"; then
       echo "[cleanup] Could not obtain lifecycle ownership; preserving the session." >&2
@@ -15939,6 +16197,10 @@ start_session() {
     fi
   fi
 
+  if [[ "$SESSION_MODE" == "web" && "${SESSION_HUB_MODE:-}" != disable ]]; then
+    agent_hub_start "$sess_share" "$proj" || true
+  fi
+
   echo "[run] Launching OpenCode inside VM (project: $proj) $(_ts)"
 
   local host_lan_ip
@@ -16014,11 +16276,12 @@ start_session() {
      OC_EDITOR_ENABLED="${17:-0}"
      OC_TASKBOARD_DB="${18:-}"
      OC_TASKBOARD_METADATA_FILE="${OC_TASKBOARD_DB%.db}.metadata.json"
-     OC_TASKBOARD_LEGACY_DB="${20:-}"
-     OC_TASKBOARD_LEGACY_EXPECTED="${21:-0}"
-     OC_TASKBOARD_ENABLED=0
-     if [ "$OC_MODE" = web ] || [ "$OC_MODE" = tui-mcp ]; then OC_TASKBOARD_ENABLED=1; fi
-     OC_LAUNCHER_ENABLED="${19:-1}"
+     OC_TASKBOARD_LEGACY_DB="${21:-}"
+     OC_TASKBOARD_LEGACY_EXPECTED="${22:-0}"
+      OC_TASKBOARD_ENABLED=0
+      if [ "$OC_MODE" = web ] || [ "$OC_MODE" = tui-mcp ]; then OC_TASKBOARD_ENABLED=1; fi
+      [ "${19:-1}" = "1" ] || OC_TASKBOARD_ENABLED=0
+      OC_LAUNCHER_ENABLED="${20:-1}"
 
      # Shared in-VM web library (materialized into the session share by
     # install_web_lib on the host, and mounted here at the same path). It owns
@@ -16387,7 +16650,7 @@ EOF
 
     # Sync back happens via the EXIT trap installed above (covers both clean
     # exit and Ctrl+C-driven termination of the web server).
-   ' "$proj" "$sess_share" "$SESSION_MODE" "$effective_base" "${OC_WEB_TUI:-false}" "$host_lan_ip" "${SESSION_TLS:-0}" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up" "$(proj_hash "$proj")" "$OCVM_VERSION" "$effective_mcp_enabled" "${effective_mcp_port:-$DEFAULT_MCP_PORT}" "$controller_id" "$effective_editor_enabled" "$proj/.opencode-vm/taskboard/taskboard.db" "${SESSION_LAUNCHER_ENABLED:-1}" "$proj_state/taskboard/taskboard.db" "$(test -f "$proj_state/taskboard/taskboard.db" && printf 1 || printf 0)"; then
+    ' "$proj" "$sess_share" "$SESSION_MODE" "$effective_base" "${OC_WEB_TUI:-false}" "$host_lan_ip" "${SESSION_TLS:-0}" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up" "$(proj_hash "$proj")" "$OCVM_VERSION" "$effective_mcp_enabled" "${effective_mcp_port:-$DEFAULT_MCP_PORT}" "$controller_id" "$effective_editor_enabled" "$proj/.opencode-vm/taskboard/taskboard.db" "$effective_taskboard_enabled" "${SESSION_LAUNCHER_ENABLED:-1}" "$proj_state/taskboard/taskboard.db" "$(test -f "$proj_state/taskboard/taskboard.db" && printf 1 || printf 0)"; then
     if ! stop_mcp_host_watcher; then
       echo "[mcp] Host readiness did not complete successfully; session failed closed." >&2
       return 1
@@ -16713,8 +16976,9 @@ Usage:
                                            #   from ~/.opencode-vm/project-history/
                                            # --reconnect/--fresh/--cancel-if-exists:
                                            #   non-interactive override of the prompt
-  opencode-vm web [--port PORT] [--password PW|--no-auth] [--no-tls] [--tui]
-                   [--no-a2a|--require-a2a] [--mcp-port PORT|--no-mcp]
+   opencode-vm web [--port PORT] [--password PW|--no-auth] [--no-tls] [--tui]
+                    [--no-a2a|--require-a2a] [--mcp-port PORT|--no-mcp]
+                    [--no-hub] [--no-taskboard]
                    [--no-editor|--editor] [--no-launcher|--launcher]
                   [--keep-history] [--reconnect|--fresh|--cancel-if-exists]
                                            # start web server session (default port 4096)
@@ -16735,9 +16999,12 @@ Usage:
                                            #   Editor login uses the same password (no username);
                                             #   --no-auth also disables editor authentication.
                                             # Launcher: on by default in Web UI; includes
-                                            #   ready Editor and Projektmanagement entries.
+                                            #   ready Editor, Project Management and Agent Control entries.
                                             #   --no-launcher hides only the launcher for
                                             #   this run; --launcher explicitly enables it.
+                                            #   Hub and Taskboard start by default; --no-hub
+                                            #   or --no-taskboard suppresses only that service
+                                            #   for this invocation.
                                            # --password PW: HTTP Basic on all four
                                            #   public endpoints (also \$OCVM_WEB_PASSWORD).
                                            #   Persisted per session, so 'attach' keeps it.
@@ -16766,7 +17033,8 @@ Usage:
                                            # --tui: also start TUI in terminal (experimental)
                                            # --keep-history: load project-specific history
                                            #   (default starts with empty session list)
-  opencode-vm attach [--no-launcher|--launcher]
+   opencode-vm attach [--no-launcher|--launcher] [--no-hub|--hub]
+                    [--no-taskboard|--taskboard]
                                            # reconnect to the project's session VM;
                                            # launcher defaults on for web sessions
                                            # (auto-starts a stopped-but-kept VM)

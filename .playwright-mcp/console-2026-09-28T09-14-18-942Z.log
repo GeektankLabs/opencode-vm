@@ -1,0 +1,5 @@
+[      22ms] [ERROR] Failed to load module script: Expected a JavaScript-or-Wasm module script but the server responded with a MIME type of "text/html". Strict MIME type checking is enforced for module scripts per HTML spec. @ http://127.0.0.1:41047/assets/app.js:0
+[      30ms] TypeError: Cannot set property className of #<SVGElement> which has only a getter
+    at makeIcon (http://127.0.0.1:41047/__ocvm/launcher.js:25:19)
+    at http://127.0.0.1:41047/__ocvm/launcher.js:62:28
+    at http://127.0.0.1:41047/__ocvm/launcher.js:155:3

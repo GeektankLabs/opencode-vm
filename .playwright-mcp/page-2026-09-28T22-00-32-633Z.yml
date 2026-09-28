@@ -1,0 +1,160 @@
+- main [ref=f1e2]:
+  - generic [ref=f1e3]:
+    - generic [ref=f1e4]:
+      - paragraph [ref=f1e5]: OPENCODE VM / OPERATIONS
+      - heading "Agent Control Hub" [level=1] [ref=f1e6]
+      - paragraph [ref=f1e7]: Verbindungen, Modelle und projektbezogene Runtime-Profile.
+    - generic [ref=f1e8]:
+      - generic [ref=f1e9]: Zuletzt aktualisiert 00:00:32
+      - button "Aktualisieren" [ref=f1e10] [cursor=pointer]
+      - link "Doku" [ref=f1e11] [cursor=pointer]:
+        - /url: https://github.com/GeektankLabs/opencode-vm
+  - generic [ref=f1e12]:
+    - generic [ref=f1e13]:
+      - generic [ref=f1e14]:
+        - paragraph [ref=f1e15]: 01 / RUNTIME
+        - heading "Konfigurierte Verbindungen" [level=2] [ref=f1e16]
+      - generic [ref=f1e17]: 0 erkannt
+    - generic [ref=f1e18]: Keine konfigurierte Verbindung für dieses Projekt. Die verfügbaren Einrichtungsschritte stehen weiter unten.
+  - navigation "Bereichsnavigation" [ref=f1e20]:
+    - button "Übersicht" [ref=f1e21] [cursor=pointer]
+    - button "Skill & Client Integration" [ref=f1e22] [cursor=pointer]
+  - generic [ref=f1e23]:
+    - generic [ref=f1e24]:
+      - generic [ref=f1e26]:
+        - paragraph [ref=f1e27]: SIGNALS
+        - heading "Schnellübersicht" [level=2] [ref=f1e28]
+      - generic [ref=f1e30]:
+        - strong [ref=f1e31]: Keine projektbezogene Verbindung konfiguriert
+        - paragraph [ref=f1e32]: Die lokalen Registries und Session-Marker enthalten für dieses Projekt keine aktive Connector-Konfiguration.
+    - generic [ref=f1e33]:
+      - generic [ref=f1e34]:
+        - generic [ref=f1e35]:
+          - paragraph [ref=f1e36]: DIAGNOSTICS
+          - heading "Letzte Ereignisse" [level=2] [ref=f1e37]
+        - button "Alle Logs anzeigen" [ref=f1e38] [cursor=pointer]
+      - generic [ref=f1e39]: Keine sicheren Ereignisse aus den erlaubten Logquellen.
+  - region [ref=f1e41]:
+    - generic [ref=f1e42]:
+      - generic [ref=f1e43]:
+        - paragraph [ref=f1e44]: 02 / AGENT CONTROL
+        - heading "Modelle & Runtime-Profile" [level=2] [ref=f1e45]
+      - button "Katalog aktualisieren" [ref=f1e46] [cursor=pointer]
+    - status [ref=f1e47]: "Katalog: unavailable · Revision 0 · Profil-Capability: Supported: MCP; A2A unsupported; OpenLive unsupported."
+    - generic [ref=f1e48]:
+      - heading "Verbundene Provider & Modelle" [level=3] [ref=f1e49]
+      - paragraph [ref=f1e50]: Modellkatalog nicht verfügbar. Gespeicherte Profile bleiben unverändert.
+    - generic [ref=f1e51]:
+      - article [ref=f1e52]:
+        - heading "Deep · Architektur & schwierige Fehler" [level=3] [ref=f1e53]
+        - paragraph [ref=f1e54]: "Gespeichert: unconfigured"
+        - generic [ref=f1e55]:
+          - text: Provider
+          - combobox "Provider" [ref=f1e56]:
+            - option "— Provider wählen —" [selected]
+        - generic [ref=f1e57]:
+          - text: Modell
+          - combobox "Modell" [ref=f1e58]:
+            - option "— Modell wählen —" [selected]
+        - generic [ref=f1e59]:
+          - text: Variante / Effort
+          - combobox "Variante / Effort" [ref=f1e60]:
+            - option "— Variante wählen —" [selected]
+        - generic [ref=f1e61]:
+          - button "Profil speichern" [disabled] [ref=f1e62]
+          - button "Auswahl entfernen" [disabled] [ref=f1e63]
+      - article [ref=f1e64]:
+        - heading "Standard · Entwicklungsarbeit" [level=3] [ref=f1e65]
+        - paragraph [ref=f1e66]: "Gespeichert: unconfigured"
+        - generic [ref=f1e67]:
+          - text: Provider
+          - combobox "Provider" [ref=f1e68]:
+            - option "— Provider wählen —" [selected]
+        - generic [ref=f1e69]:
+          - text: Modell
+          - combobox "Modell" [ref=f1e70]:
+            - option "— Modell wählen —" [selected]
+        - generic [ref=f1e71]:
+          - text: Variante / Effort
+          - combobox "Variante / Effort" [ref=f1e72]:
+            - option "— Variante wählen —" [selected]
+        - generic [ref=f1e73]:
+          - button "Profil speichern" [disabled] [ref=f1e74]
+          - button "Auswahl entfernen" [disabled] [ref=f1e75]
+      - article [ref=f1e76]:
+        - heading "Execution · klare Ausführung" [level=3] [ref=f1e77]
+        - paragraph [ref=f1e78]: "Gespeichert: unconfigured"
+        - generic [ref=f1e79]:
+          - text: Provider
+          - combobox "Provider" [ref=f1e80]:
+            - option "— Provider wählen —" [selected]
+        - generic [ref=f1e81]:
+          - text: Modell
+          - combobox "Modell" [ref=f1e82]:
+            - option "— Modell wählen —" [selected]
+        - generic [ref=f1e83]:
+          - text: Variante / Effort
+          - combobox "Variante / Effort" [ref=f1e84]:
+            - option "— Variante wählen —" [selected]
+        - generic [ref=f1e85]:
+          - button "Profil speichern" [disabled] [ref=f1e86]
+          - button "Auswahl entfernen" [disabled] [ref=f1e87]
+  - generic [ref=f1e88]:
+    - article [ref=f1e89]:
+      - paragraph [ref=f1e90]: GET STARTED
+      - heading "Setup & Anleitungen" [level=2] [ref=f1e91]
+      - generic [ref=f1e92]:
+        - generic [ref=f1e93]:
+          - heading "Secure MCP Tunnel" [level=3] [ref=f1e94]
+          - list [ref=f1e95]:
+            - listitem [ref=f1e96]: OpenAI Tunnel und eingeschränkten Tunnel API-Key anlegen.
+            - listitem [ref=f1e97]: opencode-vm provider mcp new openai im Projektverzeichnis ausführen.
+            - listitem [ref=f1e98]: Mit opencode-vm web starten und provider mcp status openai prüfen.
+          - link "Dokumentation öffnen" [ref=f1e99] [cursor=pointer]:
+            - /url: https://github.com/GeektankLabs/opencode-vm/blob/main/docs/MCP-TUNNEL.md
+        - generic [ref=f1e100]:
+          - heading "A2A Agent Interface" [level=3] [ref=f1e101]
+          - list [ref=f1e102]:
+            - listitem [ref=f1e103]: Eine Web-Session mit opencode-vm web starten.
+            - listitem [ref=f1e104]: Agent Card und /health über den dokumentierten A2A-Port verifizieren.
+            - listitem [ref=f1e105]: Für Diagnose opencode-vm a2a status oder a2a check verwenden.
+          - link "Dokumentation öffnen" [ref=f1e106] [cursor=pointer]:
+            - /url: https://github.com/GeektankLabs/opencode-vm/blob/main/docs/A2A-INTERFACE.md
+        - generic [ref=f1e107]:
+          - heading "OpenLive ACP" [level=3] [ref=f1e108]
+          - list [ref=f1e109]:
+            - listitem [ref=f1e110]: OpenLive-Bridge mit opencode-vm openlive install einrichten.
+            - listitem [ref=f1e111]: Die Web-Session als gemeinsamer Runtime-Endpunkt bereitstellen.
+            - listitem [ref=f1e112]: Status und Diagnose mit opencode-vm openlive status prüfen.
+          - link "Dokumentation öffnen" [ref=f1e113] [cursor=pointer]:
+            - /url: https://github.com/GeektankLabs/opencode-vm/blob/main/PLAN_OPENLIVE.md
+    - article [ref=f1e114]:
+      - paragraph [ref=f1e115]: CLIENT PACKAGE
+      - heading "Skill & Client Integration" [level=2] [ref=f1e116]
+      - generic [ref=f1e117]:
+        - paragraph [ref=f1e118]:
+          - strong [ref=f1e119]: opencode-session-orchestrator
+          - text: Revision 2026-09-28-r11. Instruction-only Paket, getrennt von der MCP-Verbindung.
+        - generic [ref=f1e120]: "SHA-256: d0c31fcdb051fd5c27bd70af85395bb426a52b9b8e47ac09b3c1ca6e96702cc7"
+        - generic [ref=f1e121]:
+          - link "Latest herunterladen" [ref=f1e122] [cursor=pointer]:
+            - /url: https://github.com/GeektankLabs/opencode-vm/raw/refs/heads/main/integrations/chatgpt/opencode-session-orchestrator.zip
+          - link "Installation" [ref=f1e123] [cursor=pointer]:
+            - /url: https://github.com/GeektankLabs/opencode-vm/blob/main/docs/CHATGPT.md
+    - article [ref=f1e124]:
+      - paragraph [ref=f1e125]: BOUNDARIES
+      - heading "Hinweise & Voraussetzungen" [level=2] [ref=f1e126]
+      - list [ref=f1e127]:
+        - listitem [ref=f1e128]:
+          - strong [ref=f1e129]: Projektpräferenzen.
+          - text: Nur Profile sind hier änderbar; Credentials und Verbindungen bleiben im CLI.
+        - listitem [ref=f1e130]: Neue Arbeit darf ein verfügbares Profil in einer idle Session anwenden; reine Reads ändern keine Runtime.
+        - listitem [ref=f1e131]: OpenLive und A2A nutzen diese Profilfunktion noch nicht; MCP ist der erste unterstützte Transport.
+        - listitem [ref=f1e132]:
+          - text: Health ohne verlässlichen Laufzeitnachweis bleibt
+          - strong [ref=f1e133]: unknown/stale
+          - text: .
+  - generic [ref=f1e134]:
+    - text: Agent Control Hub · Projektpräferenzen ·
+    - link "Healthcheck" [ref=f1e135] [cursor=pointer]:
+      - /url: /healthz

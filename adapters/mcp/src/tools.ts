@@ -11,6 +11,7 @@ import type { RuntimeDescriptor } from "./types.js";
 import { ProjectBoardService } from "./taskboard.js";
 import { traceToolCall } from "./diagnostics.js";
 import { SUPPORTED_ATTACHMENT_TYPES } from "./attachments.js";
+import { PROFILE_NAMES, describePolicy, readPolicy, profileState } from "./agent-control.js";
 import {
   ACTIVITY_TYPES,
   ADAPTER_VERSION,
@@ -78,11 +79,24 @@ const taskId = z
   .min(1)
   .max(256)
   .regex(/^[^\s\x00-\x1f\x7f]+$/u);
-const taskInputBase = z.object({ project_id: taskId.optional() }).strict();
+const taskInputBase = z.object({ project_id: taskId.optional(), board_project_id: taskId.optional() }).strict();
+const boardProjectOutput = z.object({ board_project_id: taskId, name: z.string(), prefix: z.string(),
+  status: z.string(), is_default: z.boolean() }).strict();
+const getBoardProjectInput = z.object({ board_project_id: taskId }).strict();
+const createBoardProjectInput = z.object({ name: z.string().trim().min(1).max(160),
+  prefix: z.string().trim().toUpperCase().regex(/^[A-Z0-9]{1,5}$/u), make_default: z.boolean().optional() }).strict();
+const reclassifyTaskInput = z.object({ task_id: taskId, target_board_project_id: taskId,
+  expected_source_board_project_id: taskId, request_id: z.string().uuid() }).strict();
+const transferStatusInput = z.object({ request_id: z.string().uuid() }).strict();
+const transferStatusOutput = z.object({ request_id: z.string().uuid(), task_id: taskId,
+  state: z.enum(["prepared", "creating", "staged", "subtask_creating", "subtask_toggling", "deleting", "remapping",
+    "activating", "completed", "aborted", "unresolved"]), source_board_project_id: taskId,
+  target_board_project_id: taskId, previous_native_key: z.string(), current_native_key: z.string().optional() }).strict();
 const taskOutput = z
   .object({
     task_id: taskId,
     project_id: taskId,
+    board_project_id: taskId,
     scope: z.literal("project-local"),
     title: z.string(),
     description: z.string(),
@@ -97,10 +111,22 @@ const taskOutput = z
         .strict(),
     ),
     session_ids: z.array(z.string()),
+    links: z.array(z.object({
+      session_id: sessionId,
+      message_id: sessionId.optional(),
+      result: z.string().optional(),
+      artifact_refs: z.array(z.string()).optional(),
+    }).strict()).optional(),
   })
   .strict();
 const listTasksInput = taskInputBase
-  .extend({ status: z.string().min(1).max(64).optional() })
+  .extend({
+    status: z.string().min(1).max(64).optional(),
+    query: z.string().trim().min(1).max(200).optional(),
+    session_id: sessionId.optional(),
+    updated_since: z.string().datetime({ offset: true }).optional(),
+    include_terminal: z.boolean().optional(),
+  })
   .strict();
 const getTaskInput = z.object({ task_id: taskId }).strict();
 const createTaskInput = taskInputBase
@@ -221,6 +247,23 @@ const archiveSessionOutputSchema = z
     session_id: z.string(),
     state: z.literal("archived"),
     archived_at: z.number().int().positive(),
+  })
+  .strict();
+const renameSessionInputSchema = z
+  .object({
+    session_id: sessionId,
+    title: z
+      .string()
+      .min(1)
+      .max(160)
+      .regex(/^(?=.*\S)[^\x00-\x1f\x7f-\x9f]+$/u),
+  })
+  .strict();
+const renameSessionOutputSchema = z
+  .object({
+    session_id: z.string(),
+    title: z.string(),
+    state: z.literal("renamed"),
   })
   .strict();
 const receiptResolutionSchema = z
@@ -352,6 +395,20 @@ const runtimeOptionsOutput = z
     current: runtimeSchema.optional(),
   })
   .strict();
+const profileSelection = z.object({ provider_id: sessionId, model_id: sessionId, variant: sessionId }).strict();
+const profileStatus = z.enum(["available", "unconfigured", "provider_unavailable", "model_unavailable",
+  "variant_unavailable", "catalog_unavailable", "catalog_incomplete"]);
+const profileEntry = z.object({ selection: profileSelection.nullable(), status: profileStatus }).strict();
+const modelPolicyOutput = z.object({
+  project_id: z.string(), schema_version: z.literal(1), revision: z.number().int().nonnegative(),
+  updated_at: z.string().nullable(), catalog_status: z.enum(["complete", "incomplete", "unavailable"]),
+  profiles: z.object({ deep: profileEntry, standard: profileEntry, execution: profileEntry }).strict(),
+}).strict();
+const recommendedInput = z.object({ profile: z.enum(PROFILE_NAMES) }).strict();
+const recommendedOutput = z.object({
+  profile: z.enum(PROFILE_NAMES), policy_revision: z.number().int().nonnegative(), status: profileStatus,
+  runtime: profileSelection.optional(),
+}).strict();
 const runtimeUpdateOutput = z
   .object({
     session_id: z.string(),
@@ -731,18 +788,45 @@ export function createMcpServer(
   if (board) {
     const boardError =
       "Board changes are shared with the project Taskboard web app.";
+    server.registerTool("list_board_projects", {
+      title: "List Board Projects", description: "Read the Board Projects in this repository, including the confirmed default Inbox.",
+      inputSchema: z.object({}).strict(), outputSchema: z.object({ projects: z.array(boardProjectOutput) }).strict(),
+      annotations: readOnlyAnnotations,
+    }, safeHandler(async () => success({ projects: await board.listBoardProjects() }, "Returned Board Projects.")));
+    server.registerTool("get_board_project", {
+      title: "Get Board Project", description: "Read one Board Project without creating it.",
+      inputSchema: getBoardProjectInput, outputSchema: boardProjectOutput, annotations: readOnlyAnnotations,
+    }, safeHandler(async (input) => success(await board.getBoardProject(input.board_project_id), "Returned Board Project.")));
+    server.registerTool("create_board_project", {
+      title: "Create Board Project", description: "Create a user-confirmed Board Project or confirm the default Inbox (INBOX). Never called on reads.",
+      inputSchema: createBoardProjectInput, outputSchema: boardProjectOutput, annotations: writeAnnotations,
+    }, safeHandler(async (input) => success(await board.createBoardProject({ name: input.name,
+      prefix: input.prefix, makeDefault: input.make_default }), "Created Board Project.")));
+    server.registerTool("get_task_transfer_status", {
+      title: "Get Task Transfer Status", description: "Read the durable state of a known Inbox-to-workstream transfer request.",
+      inputSchema: transferStatusInput, outputSchema: transferStatusOutput, annotations: readOnlyAnnotations,
+    }, safeHandler(async (input) => success(await board.getTransferStatus(input.request_id), "Returned transfer state.")));
+    server.registerTool("reclassify_project_task", {
+      title: "Reclassify Project Task", description: "Move a confirmed Inbox Ticket to an existing Board Project using a durable request UUID. Replays use exactly the same fields; uncertain transfers fail closed.",
+      inputSchema: reclassifyTaskInput, outputSchema: transferStatusOutput, annotations: writeAnnotations,
+    }, safeHandler(async (input) => success(await board.reclassifyTask({ taskId: input.task_id,
+      targetBoardProjectId: input.target_board_project_id, expectedSourceBoardProjectId: input.expected_source_board_project_id,
+      requestId: input.request_id }), "Transferred project task.")));
     server.registerTool(
       "list_project_tasks",
       {
         title: "List Project Tasks",
-        description: `List board-neutral tasks in the current project. ${boardError}`,
+        description: `Read the complete project-local board, optionally matching title/description text or a linked session. A bounded scan returns TASK_SEARCH_INCOMPLETE rather than partial results. ${boardError}`,
         inputSchema: listTasksInput,
         outputSchema: z.object({ tasks: z.array(taskOutput) }).strict(),
         annotations: readOnlyAnnotations,
       },
       safeHandler(async (input) =>
         success(
-          { tasks: await board.listTasks(input.project_id, input.status) },
+          { tasks: await board.listTasks({ projectId: input.project_id, boardProjectId: input.board_project_id,
+            status: input.status,
+            query: input.query, sessionId: input.session_id, updatedSince: input.updated_since,
+            includeTerminal: input.include_terminal }) },
           "Returned project tasks.",
         ),
       ),
@@ -751,7 +835,7 @@ export function createMcpServer(
       "get_project_task",
       {
         title: "Get Project Task",
-        description: "Read one stable project task by task_id.",
+        description: "Read one stable project task by task_id, including its session/message/result/artifact links. Reads do not create taskboard projects or metadata.",
         inputSchema: getTaskInput,
         outputSchema: taskOutput,
         annotations: readOnlyAnnotations,
@@ -773,6 +857,7 @@ export function createMcpServer(
         success(
           await board.createTask({
             projectId: input.project_id,
+            boardProjectId: input.board_project_id,
             title: input.title,
             description: input.description,
             priority: input.priority,
@@ -848,7 +933,7 @@ export function createMcpServer(
       {
         title: "Link Task To Session",
         description:
-          "Associate a project task with an OpenCode session and optional result/artifact references.",
+          "Associate a project task with an exposed OpenCode work session and optional message/result/artifact references. Distinct messages of one session remain distinct links.",
         inputSchema: linkTaskInput,
         outputSchema: z
           .object({
@@ -867,8 +952,11 @@ export function createMcpServer(
           .strict(),
         annotations: writeAnnotations,
       },
-      safeHandler(async (input) =>
-        success(
+      safeHandler(async (input) => {
+        try { await gateway.getSessionDetails(input.session_id); }
+        catch (error) { return errorResult(error instanceof AdapterError ? error :
+          new AdapterError("INTERNAL_ERROR", "The MCP adapter could not verify the session.")); }
+        return success(
           await board.linkTask(input.task_id, {
             sessionId: input.session_id,
             messageId: input.message_id,
@@ -876,8 +964,8 @@ export function createMcpServer(
             artifactRefs: input.artifact_refs,
           }),
           "Linked task to session.",
-        ),
-      ),
+        );
+      }),
     );
     server.registerTool(
       "transfer_project_task",
@@ -1149,6 +1237,13 @@ export function createMcpServer(
         `Session ${session_id} archived. Use include_archived=true on ID-based stored-content reads.`,
       ),
   );
+  const renameSessionHandler = safeHandler(
+    async ({ session_id, title }: z.output<typeof renameSessionInputSchema>) =>
+      success(
+        await gateway.renameSession(session_id, title),
+        `Session ${session_id} renamed to "${title.trim()}".`,
+      ),
+  );
 
   const optionsHandler = safeHandler(
     async ({ session_id }: z.output<typeof runtimeOptionsInput>) =>
@@ -1210,6 +1305,34 @@ export function createMcpServer(
     },
     updateHandler,
   );
+  const modelPolicyHandler = safeHandler(async () => {
+    if (!runtime) throw new AdapterError("UNSUPPORTED_CONFIGURATION", "Project runtime is unavailable.");
+    const policy = await readPolicy(runtime);
+    const catalog = await gateway.getSessionRuntimeOptions().catch(() => undefined);
+    return success(describePolicy(runtime, policy, catalog), "Project runtime profile policy and validation.");
+  });
+  const recommendedHandler = safeHandler(async ({ profile }: z.output<typeof recommendedInput>) => {
+    if (!runtime) throw new AdapterError("UNSUPPORTED_CONFIGURATION", "Project runtime is unavailable.");
+    const policy = await readPolicy(runtime);
+    const catalog = await gateway.getSessionRuntimeOptions().catch(() => undefined);
+    const selection = policy.profiles[profile];
+    const status = profileState(selection, catalog);
+    return success({ profile, policy_revision: policy.revision, status,
+      ...(status === "available" && selection ? { runtime: selection } : {}) },
+      status === "available" ? "The configured runtime is currently listed." : "No runtime was selected; inspect the status before submitting work.");
+  });
+  server.registerTool(
+    "get_project_model_policy",
+    { title: "Get Project Model Policy", description: "Read transport-neutral deep, standard and execution project preferences with current catalog validation.",
+      inputSchema: z.object({}).strict(), outputSchema: modelPolicyOutput, annotations: readOnlyAnnotations },
+    modelPolicyHandler,
+  );
+  server.registerTool(
+    "get_recommended_runtime",
+    { title: "Get Recommended Runtime", description: "Resolve an exact configured runtime only when currently available. Does not switch any session.",
+      inputSchema: recommendedInput, outputSchema: recommendedOutput, annotations: readOnlyAnnotations },
+    recommendedHandler,
+  );
   server.registerTool(
     "get_project_activity",
     {
@@ -1263,6 +1386,24 @@ export function createMcpServer(
       annotations: { ...writeAnnotations, openWorldHint: false },
     },
     archiveSessionHandler,
+  );
+
+  server.registerTool(
+    "rename_session",
+    {
+      title: "Rename OpenCode Session",
+      description:
+        "Rename an existing idle root work session in this project by updating OpenCode's native session title. Session ID, history, messages, runtime and archive state are preserved. Archived or otherwise unexposed sessions return SESSION_NOT_FOUND; busy or pending-input sessions are refused. Inspect get_session if the result is RENAME_UNCERTAIN.",
+      inputSchema: renameSessionInputSchema,
+      outputSchema: renameSessionOutputSchema,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    renameSessionHandler,
   );
 
   server.registerTool(
@@ -1365,6 +1506,7 @@ export function createMcpServer(
     async (request, extra) => {
       const input = request.params.arguments ?? {};
       return traceToolCall(request.params.name, input, async () => {
+        try {
         switch (request.params.name) {
           case "get_session_progress":
             return validatedToolCall(
@@ -1416,6 +1558,10 @@ export function createMcpServer(
               input,
               updateHandler,
             );
+          case "get_project_model_policy":
+            return validatedToolCall(z.object({}).strict(), modelPolicyOutput, input, modelPolicyHandler);
+          case "get_recommended_runtime":
+            return validatedToolCall(recommendedInput, recommendedOutput, input, recommendedHandler);
           case "get_project_activity":
             return validatedToolCall(
               activityInput,
@@ -1443,6 +1589,13 @@ export function createMcpServer(
               archiveSessionOutputSchema,
               input,
               archiveSessionHandler,
+            );
+          case "rename_session":
+            return validatedToolCall(
+              renameSessionInputSchema,
+              renameSessionOutputSchema,
+              input,
+              renameSessionHandler,
             );
           case "list_sessions":
             return validatedToolCall(
@@ -1495,8 +1648,31 @@ export function createMcpServer(
               input,
               uploadAttachmentHandler,
             );
+          case "list_board_projects":
+            return validatedToolCall(z.object({}).strict(), z.object({ projects: z.array(boardProjectOutput) }).strict(),
+              input, async () => board ? success({ projects: await board.listBoardProjects() }, "Returned Board Projects.") :
+                errorResult(new AdapterError("TASKBOARD_UNAVAILABLE", "Taskboard is not enabled.")));
+          case "get_board_project":
+            return validatedToolCall(getBoardProjectInput, boardProjectOutput, input,
+              async (value) => board ? success(await board.getBoardProject(value.board_project_id), "Returned Board Project.") :
+                errorResult(new AdapterError("TASKBOARD_UNAVAILABLE", "Taskboard is not enabled.")));
+          case "create_board_project":
+            return validatedToolCall(createBoardProjectInput, boardProjectOutput, input,
+              async (value) => board ? success(await board.createBoardProject({ name: value.name,
+                prefix: value.prefix, makeDefault: value.make_default }), "Created Board Project.") :
+                errorResult(new AdapterError("TASKBOARD_UNAVAILABLE", "Taskboard is not enabled.")));
+          case "get_task_transfer_status":
+            return validatedToolCall(transferStatusInput, transferStatusOutput, input,
+              async (value) => board ? success(await board.getTransferStatus(value.request_id), "Returned transfer state.") :
+                errorResult(new AdapterError("TASKBOARD_UNAVAILABLE", "Taskboard is not enabled.")));
+          case "reclassify_project_task":
+            return validatedToolCall(reclassifyTaskInput, transferStatusOutput, input,
+              async (value) => board ? success(await board.reclassifyTask({ taskId: value.task_id,
+                targetBoardProjectId: value.target_board_project_id, expectedSourceBoardProjectId: value.expected_source_board_project_id,
+                requestId: value.request_id }), "Transferred project task.") :
+                errorResult(new AdapterError("TASKBOARD_UNAVAILABLE", "Taskboard is not enabled.")));
           case "list_project_tasks":
-            return validatedToolCall(
+            return await validatedToolCall(
               listTasksInput,
               z.object({ tasks: z.array(taskOutput) }).strict(),
               input,
@@ -1504,10 +1680,15 @@ export function createMcpServer(
                 board
                   ? success(
                       {
-                        tasks: await board.listTasks(
-                          value.project_id,
-                          value.status,
-                        ),
+                        tasks: await board.listTasks({
+                          projectId: value.project_id,
+                          boardProjectId: value.board_project_id,
+                          status: value.status,
+                          query: value.query,
+                          sessionId: value.session_id,
+                          updatedSince: value.updated_since,
+                          includeTerminal: value.include_terminal,
+                        }),
                       },
                       "Returned project tasks.",
                     )
@@ -1519,7 +1700,7 @@ export function createMcpServer(
                     ),
             );
           case "get_project_task":
-            return validatedToolCall(
+            return await validatedToolCall(
               getTaskInput,
               taskOutput,
               input,
@@ -1537,7 +1718,7 @@ export function createMcpServer(
                     ),
             );
           case "create_project_task":
-            return validatedToolCall(
+            return await validatedToolCall(
               createTaskInput,
               taskOutput,
               input,
@@ -1546,6 +1727,7 @@ export function createMcpServer(
                   ? success(
                       await board.createTask({
                         projectId: value.project_id,
+                        boardProjectId: value.board_project_id,
                         title: value.title,
                         description: value.description,
                         priority: value.priority,
@@ -1561,7 +1743,7 @@ export function createMcpServer(
                     ),
             );
           case "update_project_task":
-            return validatedToolCall(
+            return await validatedToolCall(
               updateTaskInput,
               taskOutput,
               input,
@@ -1584,7 +1766,7 @@ export function createMcpServer(
                     ),
             );
           case "move_project_task":
-            return validatedToolCall(
+            return await validatedToolCall(
               moveTaskInput,
               taskOutput,
               input,
@@ -1606,7 +1788,7 @@ export function createMcpServer(
                     ),
             );
           case "add_task_comment":
-            return validatedToolCall(
+            return await validatedToolCall(
               commentInput,
               z
                 .object({
@@ -1635,7 +1817,7 @@ export function createMcpServer(
                     ),
             );
           case "link_task_to_session":
-            return validatedToolCall(
+            return await validatedToolCall(
               linkTaskInput,
               z
                 .object({
@@ -1653,26 +1835,21 @@ export function createMcpServer(
                 })
                 .strict(),
               input,
-              async (value) =>
-                board
-                  ? success(
-                      await board.linkTask(value.task_id, {
-                        sessionId: value.session_id,
-                        messageId: value.message_id,
-                        result: value.result,
-                        artifactRefs: value.artifact_refs,
-                      }),
-                      "Linked task to session.",
-                    )
-                  : errorResult(
-                      new AdapterError(
-                        "TASKBOARD_UNAVAILABLE",
-                        "Taskboard is not enabled.",
-                      ),
-                    ),
+              async (value) => {
+                if (!board) return errorResult(new AdapterError("TASKBOARD_UNAVAILABLE", "Taskboard is not enabled."));
+                try { await gateway.getSessionDetails(value.session_id); }
+                catch (error) { return errorResult(error instanceof AdapterError ? error :
+                  new AdapterError("INTERNAL_ERROR", "The MCP adapter could not verify the session.")); }
+                return success(await board.linkTask(value.task_id, {
+                  sessionId: value.session_id,
+                  messageId: value.message_id,
+                  result: value.result,
+                  artifactRefs: value.artifact_refs,
+                }), "Linked task to session.");
+              },
             );
           case "transfer_project_task":
-            return validatedToolCall(
+            return await validatedToolCall(
               transferTaskInput,
               z
                 .object({
@@ -1705,6 +1882,10 @@ export function createMcpServer(
             return errorResult(
               new AdapterError("INVALID_ARGUMENT", "Tool name is invalid."),
             );
+        }
+        } catch (error) {
+          return errorResult(error instanceof AdapterError ? error :
+            new AdapterError("INTERNAL_ERROR", "The MCP adapter could not complete the request."));
         }
       });
     },

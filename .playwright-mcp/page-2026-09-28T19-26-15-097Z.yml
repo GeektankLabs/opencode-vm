@@ -1,0 +1,42 @@
+- generic [ref=f1e1]:
+  - generic [ref=f1e3]:
+    - banner [ref=f1e4]:
+      - generic [ref=f1e5]:
+        - button "Home" [ref=f1e7]
+        - generic [ref=f1e12]:
+          - generic [ref=f1e14]:
+            - link "New session" [ref=f1e15]:
+              - /url: /new-session?draftId=20b7c518-1363-413f-b8ff-55977256cecf
+            - button "Close tab" [ref=f1e21]
+          - generic [ref=f1e107]:
+            - link "New session" [ref=f1e108]:
+              - /url: /new-session?draftId=bf199a1e-b1c2-4b75-9e8f-48dabb54037f
+            - button "Close tab" [ref=f1e114]
+        - button "New session" [ref=f1e25]
+    - main [ref=f1e36]:
+      - generic [ref=f1e135]:
+        - generic [ref=f1e138]:
+          - generic [ref=f1e139]:
+            - textbox "Prompt" [ref=f1e140]
+            - generic: Ask anything, / for commands, @ for context...
+          - generic [ref=f1e141]:
+            - generic [ref=f1e142]:
+              - button "Add images and files" [ref=f1e144]
+              - button "GPT-5.6 Luna" [ref=f1e148] [cursor=pointer]
+              - button "Choose model variant" [ref=f1e156] [cursor=pointer]:
+                - generic [ref=f1e157]: default
+            - button "Send" [disabled] [ref=f1e161]
+        - generic [ref=f1e165]:
+          - button "o opencode-vm" [ref=f1e166]:
+            - generic [ref=f1e167]: o
+            - generic [ref=f1e169]: opencode-vm
+          - generic [ref=f1e173]: /
+          - generic [ref=f1e174]: main
+  - generic [active]:
+    - generic:
+      - menu "Project apps" [ref=f1e180]:
+        - menuitem "Projektmanagement" [disabled] [ref=f1e181]:
+          - generic [aria-hidden] [ref=f1e187]: "!"
+      - button "Project apps" [expanded] [ref=f1e98] [cursor=pointer]
+  - generic:
+    - region "Notifications alt+T"

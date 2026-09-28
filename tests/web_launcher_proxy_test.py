@@ -188,6 +188,17 @@ def http_request(port, path, *, method="GET", headers=None, body=None, timeout=3
         connection.close()
 
 
+def https_request(port, path, *, headers=None):
+    connection = http.client.HTTPSConnection("127.0.0.1", port, timeout=3,
+                                             context=ssl._create_unverified_context())
+    try:
+        connection.request("GET", path, headers={"Connection": "close", **(headers or {})})
+        response = connection.getresponse()
+        return response.status, dict(response.getheaders()), response.read()
+    finally:
+        connection.close()
+
+
 def free_port_block(size):
     for _ in range(100):
         probe = socket.socket()
@@ -414,6 +425,11 @@ class LauncherProxyTest(unittest.TestCase):
                              "taskboardPort": base + 5}
             board_file.write_text(json.dumps(board_runtime))
             board_file.chmod(0o600)
+            hub_dir = share / "hub"
+            hub_dir.mkdir(mode=0o700)
+            hub_file = hub_dir / "runtime.json"
+            hub_runtime = {"schema": 1, "share": str(share), "projectHash": project_hash,
+                           "hubPort": 4182, "ready": True, "heartbeat": time.time()}
 
             certificate = root / "cert.pem"
             private_key = root / "key.pem"
@@ -445,6 +461,7 @@ class LauncherProxyTest(unittest.TestCase):
                 "", "", "0", "", "", "ocvm-web-test", str(share), project_hash, "1", "bi-mcrepo", str(taskboard_state),
             ], stdout=subprocess.DEVNULL, stderr=proxy_log)
             other_proxy = None
+            plain_proxy = None
             try:
                 deadline = time.monotonic() + 4
                 while True:
@@ -482,10 +499,83 @@ class LauncherProxyTest(unittest.TestCase):
                 self.assertIsNotNone(markup.mount)
                 apps = json.loads(markup.mount["data-apps"])
                 self.assertEqual([app["id"] for app in apps], ["editor", "taskboard"])
+                self.assertEqual([app["label"] for app in apps], ["Editor", "Project Management"])
                 self.assertEqual(apps[0]["scheme"], "https")
                 self.assertEqual(apps[0]["port"], base + 4)
-                self.assertEqual(apps[1], {"id": "taskboard", "label": "Projektmanagement", "icon": "board",
-                                           "scheme": "http", "port": base + 5})
+                self.assertEqual(apps[1], {"id": "taskboard", "label": "Project Management", "icon": "board",
+                                            "scheme": "http", "port": base + 5})
+
+                hub_file.write_text(json.dumps(hub_runtime))
+                hub_file.chmod(0o600)
+                status, _, hub_body = http_request(base, PROJECT_PATH, headers=auth)
+                self.assertEqual(status, 200)
+                markup = LauncherMarkup()
+                markup.feed(hub_body.decode("utf-8"))
+                apps = json.loads(markup.mount["data-apps"])
+                self.assertEqual([app["id"] for app in apps], ["editor", "taskboard", "agent-hub"])
+                self.assertEqual([app["label"] for app in apps],
+                                 ["Editor", "Project Management", "Agent Control"])
+                self.assertEqual(apps[2]["port"], 4182)
+                self.assertNotIn("host", apps[2])
+                hub_file.write_text(json.dumps({**hub_runtime, "heartbeat": time.time() - 10}))
+                status, _, stale_hub = http_request(base, PROJECT_PATH, headers=auth)
+                markup = LauncherMarkup()
+                markup.feed(stale_hub.decode("utf-8"))
+                self.assertEqual([app["id"] for app in json.loads(markup.mount["data-apps"])], ["editor", "taskboard"])
+                hub_file.unlink()
+
+                # The plain web endpoint listens on P+1 but the app block is based on P.
+                hub_file.write_text(json.dumps({**hub_runtime, "heartbeat": time.time()}))
+                hub_file.chmod(0o600)
+                plain_proxy = subprocess.Popen([
+                    sys.executable, str(proxy_file), str(base + 1), str(backend.server_address[1]), key,
+                    "", "", "0", "", "", "ocvm-proxy-web-plain", str(share), project_hash, "1", "bi-mcrepo", str(taskboard_state),
+                ], stdout=subprocess.DEVNULL, stderr=proxy_log)
+                deadline = time.monotonic() + 4
+                while True:
+                    try:
+                        with socket.create_connection(("127.0.0.1", base + 1), timeout=.1):
+                            break
+                    except OSError:
+                        if plain_proxy.poll() is not None or time.monotonic() > deadline:
+                            self.fail("plain web proxy did not start")
+                        time.sleep(.02)
+                hub_file.write_text(json.dumps({**hub_runtime, "heartbeat": time.time()}))
+                status, _, plain_body = http_request(base + 1, PROJECT_PATH, headers=auth)
+                self.assertEqual(status, 200)
+                markup = LauncherMarkup()
+                markup.feed(plain_body.decode("utf-8"))
+                self.assertEqual([app["label"] for app in json.loads(markup.mount["data-apps"])],
+                                 ["Editor", "Project Management", "Agent Control"])
+                plain_proxy.terminate()
+                plain_proxy.wait(timeout=4)
+                plain_proxy = None
+                # The same registry and order must be served through HTTPS.
+                plain_proxy = subprocess.Popen([
+                    sys.executable, str(proxy_file), str(base + 1), str(backend.server_address[1]), key,
+                    str(certificate), str(private_key), "0", "", "", "ocvm-proxy-web-plain",
+                    str(share), project_hash, "1", "bi-mcrepo", str(taskboard_state),
+                ], stdout=subprocess.DEVNULL, stderr=proxy_log)
+                deadline = time.monotonic() + 4
+                while True:
+                    try:
+                        with socket.create_connection(("127.0.0.1", base + 1), timeout=.1):
+                            break
+                    except OSError:
+                        if plain_proxy.poll() is not None or time.monotonic() > deadline:
+                            self.fail("HTTPS proxy did not start")
+                        time.sleep(.02)
+                hub_file.write_text(json.dumps({**hub_runtime, "heartbeat": time.time()}))
+                status, _, tls_body = https_request(base + 1, PROJECT_PATH, headers=auth)
+                self.assertEqual(status, 200)
+                markup = LauncherMarkup()
+                markup.feed(tls_body.decode("utf-8"))
+                self.assertEqual([app["label"] for app in json.loads(markup.mount["data-apps"])],
+                                 ["Editor", "Project Management", "Agent Control"])
+                plain_proxy.terminate()
+                plain_proxy.wait(timeout=4)
+                plain_proxy = None
+                hub_file.unlink()
                 self.assertIn("/__ocvm/launcher.css", markup.resources)
                 self.assertIn("/__ocvm/launcher.js", markup.resources)
                 self.assertEqual(headers["Content-Length"], str(len(body)))
@@ -699,6 +789,9 @@ class LauncherProxyTest(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertEqual(fallback, HTML)
             finally:
+                if plain_proxy is not None:
+                    plain_proxy.terminate()
+                    plain_proxy.wait(timeout=4)
                 if other_proxy is not None:
                     other_proxy.terminate()
                     other_proxy.wait(timeout=4)

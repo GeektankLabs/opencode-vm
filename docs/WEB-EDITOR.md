@@ -54,13 +54,15 @@ element at the end of `body`; the launcher UI is isolated in its own Shadow DOM
 and does not change OpenCode-owned nodes. The seed page at `/` still initializes
 the project in localStorage and redirects to OpenCode as before.
 
-The app catalog contains **Editor** and **Projektmanagement** (the project-local
-Taskboard). Each appears only with a private, project-matching runtime descriptor
-and a successful local health check (`/healthz` on Editor HTTPS P+4,
-`/api/projects` on Taskboard HTTP P+5). Links open on the current host in new
-tabs with `noopener noreferrer`; no credential or project path is placed in the
-URL. The launcher remains available when neither app is ready and explains that
-no project apps are ready.
+The app catalog is ordered **Editor**, **Project Management** (the project-local
+Taskboard), and **Agent Control** (the project-bound Hub). Each
+appears only with a private project-matching runtime descriptor and its own
+readiness check: Editor HTTPS P+4 `/healthz`, Hub a fresh heartbeat backed by
+a host-local `/healthz` with the expected project hash on a free port in
+`4180..4199`, Taskboard HTTP P+5 `/api/projects`. All links use
+the browser's current trusted private/local host, including private overlays. Links open
+in new tabs with `noopener noreferrer`; no credential or project path is placed
+in the URL. The launcher remains available when no app is ready.
 
 App metadata is a Python tuple of records in the embedded proxy payload. Each
 record supplies an ID, label, allowlisted icon, private runtime descriptor, port
@@ -98,8 +100,9 @@ The `/__ocvm/launcher.js` and
 authenticated HTML rather than exposed through an unauthenticated JSON endpoint.
 
 The launcher is isolated in a Shadow DOM. Its host does not consume pointer
-events outside the button/menu; app links use the current browser hostname with
-only a validated scheme and port. Escape, outside click, arrow-key navigation,
+events outside the button/menu; app links use the current browser hostname.
+Both HTTPS P and plain HTTP P+1
+resolve Editor/Board ports against the same base P. Escape, outside click, arrow-key navigation,
 touch-sized targets, mobile safe areas, keyboard-open hiding, and reduced-motion
 preferences are covered by tests. It uses a restrained dark palette aligned with
 the editor's dark theme. OpenCode's own menus, keyboard shortcuts, routing and

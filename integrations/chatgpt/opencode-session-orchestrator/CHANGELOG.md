@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026-09-29-r12
+
+- Propose classification only for trackable outcomes; search existing Board Projects and tickets before offering a confirmed extension, ticket, workstream or Inbox setup.
+- Keep board writes user-confirmed, distinguish native Inbox-to-workstream reclassification from the unavailable global/local transfer, and recover uncertain transfers by the same request UUID.
+- Keep technical transfer staging and agent/session completion separate from business Done; add synthetic classification and recovery cases.
+
+## 2026-09-28-r11
+
+- Use transport-neutral project runtime profiles `deep`, `standard`, and `execution` for new authorized work when supported; explicit user choices take precedence.
+- Apply an available configured runtime to an idle session before sending and briefly disclose profile/model/variant. Pure reads never switch; unavailable mappings are not silently substituted.
+- Replace fixed clarification model/variant heuristics with project profile resolution and exact readback.
+
+## 2026-09-28-r10
+
+- Add capability-driven project-board lookup: exact task IDs, title/description search, task/session reverse lookup, search-before-create and explicit incomplete-scan reporting.
+- Keep board outcomes separate from session execution, read complete originals before business conclusions, and preserve multiple session/message references without assuming a review-role taxonomy.
+- Add a read-only remainder-synthesis preview that accounts for every known open obligation and marks gaps without applying task mutations or making completion claims.
+
 ## 2026-09-28-r9
 
 - Add a discovered-tool-only upload workflow for supported images and text/Markdown using session-bound, one-use attachment IDs; preserve normal `send_message` write/uncertain semantics.

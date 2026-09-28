@@ -97,6 +97,18 @@ class SkillPackageTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "fixed MCP dependency"):
             BUILDER.archive_bytes(root)
 
+    def test_semantic_profiles_preserve_read_only_and_user_override_rules(self):
+        source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
+        skill = (source / "SKILL.md").read_text()
+        clarification = (source / "references/clarification-sessions.md").read_text()
+        scenarios = (source / "references/regression-scenarios.md").read_text()
+        for required in ("get_recommended_runtime", "deep", "standard", "execution",
+                         "User-specified", "busy", "pending", "reread", "pure read"):
+            self.assertIn(required.lower(), skill.lower())
+        self.assertNotIn("gpt-6-luna", clarification)
+        self.assertNotIn("variant:xhigh", clarification)
+        self.assertIn("unavailable configured mapping", scenarios)
+
 
 if __name__ == "__main__":
     unittest.main()

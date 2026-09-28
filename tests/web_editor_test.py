@@ -65,11 +65,14 @@ class EditorTest(unittest.TestCase):
         shell(code + '\nparse_web_flags\n[ "$SESSION_LAUNCHER_ENABLED" = 1 ]\n'
               'parse_web_flags --no-launcher --editor\n[ "$SESSION_LAUNCHER_ENABLED" = 0 ]\n'
               'parse_web_flags --launcher\n[ "$SESSION_LAUNCHER_ENABLED" = 1 ]\n'
+              'parse_web_flags --no-hub --no-taskboard\n[ "$SESSION_HUB_MODE" = disable ]\n[ "$SESSION_TASKBOARD_MODE" = disable ]\n'
               'parse_attach_flags --no-launcher\n[ "$SESSION_LAUNCHER_ENABLED" = 0 ]\n'
               'parse_attach_flags\n[ "$SESSION_LAUNCHER_ENABLED" = 1 ]\n'
               'parse_attach_flags --launcher\n[ "$SESSION_LAUNCHER_ENABLED" = 1 ]')
         self.assertEqual(shell(code + '\nparse_attach_flags --unknown', check=False).returncode, 2)
-        self.assertEqual(SCRIPT.count('OC_LAUNCHER_ENABLED="${19:-1}"'), 2)
+        self.assertEqual(shell(code + '\nparse_web_flags --hub --no-hub', check=False).returncode, 2)
+        self.assertEqual(shell(code + '\nparse_web_flags --taskboard --no-taskboard', check=False).returncode, 2)
+        self.assertEqual(SCRIPT.count('OC_LAUNCHER_ENABLED="${20:-1}"'), 2)
         self.assertEqual(SCRIPT.count('"${SESSION_LAUNCHER_ENABLED:-1}" "$(project_state_dir'), 1)
         self.assertEqual(SCRIPT.count('"${SESSION_LAUNCHER_ENABLED:-1}" "$proj_state/taskboard/taskboard.db" "$(test -f'), 1)
 
@@ -207,13 +210,19 @@ ssh() { case " $* " in *" -f -N "*) printf '%s\n' "$@" > "$TEST_DIR/forward" ;; 
         redirector = payload("OCVM_WEB_REDIRECT_PY", "PYSRC")
         launcher = SCRIPT.split('LAUNCHER_JS = r"""\n', 1)[1].split('\n"""\n\nLAUNCHER_CSS', 1)[0]
         registry = SCRIPT.split("LAUNCHER_APP_REGISTRY = (", 1)[1].split("\n)", 1)[0]
-        self.assertEqual(registry.count('"id":'), 2)
+        self.assertEqual(registry.count('"id":'), 3)
         self.assertIn('"id": "editor"', registry)
         self.assertIn('"port_offset": 4', registry)
         self.assertIn('"id": "taskboard"', registry)
-        self.assertIn('"label": "Projektmanagement"', registry)
+        self.assertIn('"label": "Project Management"', registry)
         self.assertIn('"runtime_file": "taskboard/runtime.json"', registry)
         self.assertIn('"port_offset": 5', registry)
+        self.assertIn('"id": "agent-hub"', registry)
+        self.assertIn('"label": "Agent Control"', registry)
+        self.assertLess(registry.index('"id": "editor"'), registry.index('"id": "taskboard"'))
+        self.assertLess(registry.index('"id": "taskboard"'), registry.index('"id": "agent-hub"'))
+        self.assertIn('"port_min": 4180', registry)
+        self.assertIn('"port_max": 4199', registry)
         self.assertIn('for app in LAUNCHER_APP_REGISTRY', redirector)
         self.assertIn('"board"', launcher)
         self.assertIn('link.target = "_blank"', launcher)
@@ -260,6 +269,38 @@ start_taskboard
             self.assertTrue((Path(tmp) / '.opencode-vm/taskboard/taskboard.log').exists())
             self.assertEqual(descriptor.stat().st_mode & 0o777, 0o600)
             self.assertEqual(descriptor.parent.stat().st_mode & 0o777, 0o700)
+
+    def test_taskboard_start_uses_the_installer_arm64_directory_on_aarch64(self):
+        code = "\n".join(function(name) for name in
+                           ("taskboard_runtime_dir", "taskboard_failure", "taskboard_prepare_runtime",
+                            "stop_taskboard", "start_taskboard")) + '''
+taskboard_state_guard() { :; }
+uname() { printf 'aarch64\n'; }
+systemctl() {
+  if [ "$1" = is-active ]; then return 0; fi
+  printf '%s\n' not-found
+}
+sudo() { printf '%s\n' "$*" > "$PROJ_DIR/systemd-arguments"; }
+curl() { return 0; }
+ss() { return 0; }
+HOME="$1/home"
+mkdir -p "$HOME/.local/share/ocvm-taskboard/taskboard-0.6.0-arm64"
+touch "$HOME/.local/share/ocvm-taskboard/taskboard-0.6.0-arm64/taskboard"
+chmod +x "$HOME/.local/share/ocvm-taskboard/taskboard-0.6.0-arm64/taskboard"
+SESS_SHARE="$1/share"
+PROJ_DIR="$1"
+OCVM_TASKBOARD_RUNTIME_DIR="$1/.opencode-vm/taskboard"
+OC_TASKBOARD_DB="$1/data/taskboard.db"
+OC_TASKBOARD_LOG_WRITER_PY=fixture
+OC_OPENLIVE_PROJECT_HASH=project-hash
+OC_TASKBOARD_ENABLED=1
+OC_PORT=4096
+start_taskboard
+[ "$OC_TASKBOARD_BIN" = "$HOME/.local/share/ocvm-taskboard/taskboard-0.6.0-arm64/taskboard" ]
+'''
+        with tempfile.TemporaryDirectory() as temporary:
+            shell(code, temporary)
+            self.assertIn("taskboard-0.6.0-arm64/taskboard", (Path(temporary) / "systemd-arguments").read_text())
 
     def test_taskboard_runtime_is_project_local_and_editor_exposes_the_path(self):
         self.assertIn('OCVM_TASKBOARD_RUNTIME_DIR="$PROJ_DIR/.opencode-vm/taskboard"', SCRIPT)

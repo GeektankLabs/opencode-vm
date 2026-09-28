@@ -1,0 +1,39 @@
+- generic [ref=f3e3]:
+  - complementary [ref=f3e4]:
+    - generic [ref=f3e5]: Taskboard
+    - navigation [ref=f3e9]:
+      - link "Board" [ref=f3e10] [cursor=pointer]:
+        - /url: /
+      - link "Projects" [ref=f3e16] [cursor=pointer]:
+        - /url: /projects
+      - link "Teams" [ref=f3e19] [cursor=pointer]:
+        - /url: /teams
+      - link "Tickets" [ref=f3e25] [cursor=pointer]:
+        - /url: /tickets
+    - button "Terminal" [ref=f3e29]
+    - paragraph [ref=f3e34]: v0.6.0
+  - main [ref=f3e36]:
+    - generic [ref=f3e37]:
+      - generic [ref=f3e38]:
+        - heading "Board" [level=1] [ref=f3e39]
+        - combobox [ref=f3e40]:
+          - option "All Projects" [selected]
+      - generic [ref=f3e42]:
+        - generic [ref=f3e43]:
+          - generic [ref=f3e44]:
+            - heading "Todo" [level=3] [ref=f3e46]
+            - generic [ref=f3e47]: "0"
+            - button [ref=f3e48]
+          - generic [ref=f3e50]: Drop tickets here
+        - generic [ref=f3e52]:
+          - generic [ref=f3e53]:
+            - heading "In Progress" [level=3] [ref=f3e55]
+            - generic [ref=f3e56]: "0"
+            - button [ref=f3e57]
+          - generic [ref=f3e59]: Drop tickets here
+        - generic [ref=f3e61]:
+          - generic [ref=f3e62]:
+            - heading "Done" [level=3] [ref=f3e64]
+            - generic [ref=f3e65]: "0"
+            - button [ref=f3e66]
+          - generic [ref=f3e68]: Drop tickets here

@@ -12,6 +12,8 @@ on:
       - adapters/mcp/**
       - scripts/build-openlive-adapter.sh
       - scripts/build-mcp-adapter.sh
+      - scripts/build-agent-hub.sh
+      - hub/**
       - .github/workflows/release.yml
 
 permissions:
@@ -32,6 +34,7 @@ jobs:
     outputs:
       openlive_asset: ${{ steps.metadata.outputs.openlive_asset }}
       mcp_asset: ${{ steps.metadata.outputs.mcp_asset }}
+      hub_asset: ${{ steps.metadata.outputs.hub_asset }}
       release_tag: ${{ steps.metadata.outputs.release_tag }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -53,6 +56,8 @@ jobs:
           mcp_version="$(awk -F'\"' '/^MCP_ADAPTER_VERSION=/ {print $2; exit}' opencode-vm.sh)"
           mcp_tag="$(awk -F'\"' '/^MCP_ADAPTER_TAG=/ {print $2; exit}' opencode-vm.sh)"
           mcp_asset="$(awk -F'\"' '/^MCP_ADAPTER_FILENAME=/ {print $2; exit}' opencode-vm.sh)"
+          hub_tag="$(awk -F'\"' '/^HUB_ASSET_TAG=/ {print $2; exit}' opencode-vm.sh)"
+          hub_asset="$(awk -F'\"' '/^HUB_ASSET_FILENAME=/ {print $2; exit}' opencode-vm.sh)"
           release_tag="v$script_version"
           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
             assert_equal "Pushed tag must match OCVM_VERSION" "$GITHUB_REF_NAME" "$release_tag"
@@ -65,6 +70,8 @@ jobs:
             exit 1
           fi
           assert_equal "MCP_ADAPTER_TAG must match OCVM_VERSION" "$mcp_tag" "$release_tag"
+          assert_equal "HUB_ASSET_TAG must match OCVM_VERSION" "$hub_tag" "$release_tag"
+          assert_equal "HUB_ASSET_FILENAME" "$hub_asset" "opencode-vm-hub-1.tar"
           assert_equal "MCP_ADAPTER_VERSION must match package.json" "$mcp_version" "$(jq -r '.version' adapters/mcp/package.json)"
           assert_equal "MCP_ADAPTER_FILENAME" "$mcp_asset" "opencode-vm-mcp-adapter-$mcp_version.tar"
           if ! grep -qF "export const ADAPTER_VERSION = \"$mcp_version\";" adapters/mcp/src/types.ts; then
@@ -73,7 +80,7 @@ jobs:
           fi
           assert_equal "MCP_SDK_VERSION" "$(awk -F'\"' '/^MCP_SDK_VERSION=/ {print $2; exit}' opencode-vm.sh)" "$(jq -r '.dependencies["@modelcontextprotocol/sdk"]' adapters/mcp/package.json)"
           assert_equal "MCP_OPENCODE_SDK_VERSION" "$(awk -F'\"' '/^MCP_OPENCODE_SDK_VERSION=/ {print $2; exit}' opencode-vm.sh)" "$(jq -r '.dependencies["@opencode-ai/sdk"]' adapters/mcp/package.json)"
-          printf 'openlive_asset=%s\nmcp_asset=%s\nrelease_tag=%s\n' "$openlive_asset" "$mcp_asset" "$release_tag" >> "$GITHUB_OUTPUT"
+          printf 'openlive_asset=%s\nmcp_asset=%s\nhub_asset=%s\nrelease_tag=%s\n' "$openlive_asset" "$mcp_asset" "$hub_asset" "$release_tag" >> "$GITHUB_OUTPUT"
 
   release:
     needs: [metadata, host-shell]
@@ -84,6 +91,7 @@ jobs:
     env:
       OPENLIVE_ASSET: ${{ needs.metadata.outputs.openlive_asset }}
       MCP_ASSET: ${{ needs.metadata.outputs.mcp_asset }}
+      HUB_ASSET: ${{ needs.metadata.outputs.hub_asset }}
       OPENLIVE_RELEASE_TAG: ${{ needs.metadata.outputs.release_tag }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -101,31 +109,33 @@ jobs:
               changed_files="$(gh api \
                 "repos/$GITHUB_REPOSITORY/compare/$OPENLIVE_RELEASE_TAG...$GITHUB_SHA" \
                 --paginate --jq '.files[].filename')"
-              if grep -Eq '^(opencode-vm\.sh|scripts/build-(openlive|mcp)-adapter\.sh|adapters/(openlive-acp|mcp)/)' \
+              if grep -Eq '^(opencode-vm\.sh|scripts/build-(openlive|mcp)-adapter\.sh|scripts/build-agent-hub\.sh|hub/|adapters/(openlive-acp|mcp)/)' \
                 <<<"$changed_files"; then
                 echo "Release inputs changed without incrementing OCVM_VERSION." >&2
                 exit 1
               fi
             fi
-            if ! jq -e --arg script "opencode-vm.sh" --arg openlive "$OPENLIVE_ASSET" --arg mcp "$MCP_ASSET" '
+            if ! jq -e --arg script "opencode-vm.sh" --arg openlive "$OPENLIVE_ASSET" --arg mcp "$MCP_ASSET" --arg hub "$HUB_ASSET" '
               .draft == false and .prerelease == false and
               ([.assets[].name] | index($script) != null and
-               index($openlive) != null and index($mcp) != null and index("SHA256SUMS") != null)
-            ' <<<"$release" >/dev/null; then
+               index($openlive) != null and index($mcp) != null and index($hub) != null and index("SHA256SUMS") != null)
+              ' <<<"$release" >/dev/null; then
               echo "Release $OPENLIVE_RELEASE_TAG exists but is incomplete or inconsistent." >&2
               exit 1
             fi
             mkdir "$state_dir/assets"
             gh release download "$OPENLIVE_RELEASE_TAG" --dir "$state_dir/assets" \
-              --pattern opencode-vm.sh --pattern "$OPENLIVE_ASSET" --pattern "$MCP_ASSET" --pattern SHA256SUMS
+              --pattern opencode-vm.sh --pattern "$OPENLIVE_ASSET" --pattern "$MCP_ASSET" --pattern "$HUB_ASSET" --pattern SHA256SUMS
             gh api --method GET "repos/$GITHUB_REPOSITORY/contents/opencode-vm.sh" \
               -f ref="$OPENLIVE_RELEASE_TAG" --jq .content | base64 --decode > "$state_dir/tag-opencode-vm.sh"
             expected_sha="$(awk -F'\"' '/^OPENLIVE_ADAPTER_SHA256=/ {print $2; exit}' opencode-vm.sh)"
             expected_mcp_sha="$(awk -F'\"' '/^MCP_ADAPTER_SHA256=/ {print $2; exit}' opencode-vm.sh)"
+            expected_hub_sha="$(awk -F'\"' '/^HUB_ASSET_SHA256=/ {print $2; exit}' opencode-vm.sh)"
             if ! cmp "$state_dir/assets/opencode-vm.sh" "$state_dir/tag-opencode-vm.sh" ||
               ! cmp "$state_dir/assets/opencode-vm.sh" opencode-vm.sh ||
               ! grep -qxF "$expected_sha  $OPENLIVE_ASSET" "$state_dir/assets/SHA256SUMS" ||
               ! grep -qxF "$expected_mcp_sha  $MCP_ASSET" "$state_dir/assets/SHA256SUMS" ||
+              ! grep -qxF "$expected_hub_sha  $HUB_ASSET" "$state_dir/assets/SHA256SUMS" ||
               ! (cd "$state_dir/assets" && sha256sum -c SHA256SUMS); then
               echo "Release $OPENLIVE_RELEASE_TAG exists but its tag or assets are inconsistent." >&2
               exit 1
@@ -179,12 +189,15 @@ jobs:
         run: |
           python3 tests/release_metadata_test.py
           python3 tests/release_state_test.py
+          python3 -B tests/agent_control_test.py
           python3 -B tests/web_editor_test.py
           python3 -B tests/web_launcher_proxy_test.py
           node --test tests/web_editor_extension_test.cjs
           node --test tests/web_launcher_dom_test.cjs
-          bash -n opencode-vm.sh tests/mcp_adapter_test.sh tests/openlive_test.sh tests/besprechung_test.sh scripts/build-mcp-adapter.sh scripts/build-openlive-adapter.sh
-          shellcheck --severity=error opencode-vm.sh tests/mcp_adapter_test.sh tests/openlive_test.sh tests/besprechung_test.sh scripts/build-mcp-adapter.sh scripts/build-openlive-adapter.sh
+          bash -n opencode-vm.sh tests/install_test.sh tests/hub_release_test.sh tests/mcp_adapter_test.sh tests/openlive_test.sh tests/besprechung_test.sh scripts/build-agent-hub.sh scripts/build-mcp-adapter.sh scripts/build-openlive-adapter.sh
+          shellcheck --severity=error opencode-vm.sh tests/install_test.sh tests/hub_release_test.sh tests/mcp_adapter_test.sh tests/openlive_test.sh tests/besprechung_test.sh scripts/build-agent-hub.sh scripts/build-mcp-adapter.sh scripts/build-openlive-adapter.sh
+          bash tests/install_test.sh
+          bash tests/hub_release_test.sh
           bash tests/besprechung_test.sh
           bash tests/mcp_lock_test.sh
           bash tests/mcp_adapter_test.sh
@@ -197,15 +210,21 @@ jobs:
           scripts/build-openlive-adapter.sh "release-b/$OPENLIVE_ASSET"
           scripts/build-mcp-adapter.sh "release-a/$MCP_ASSET"
           scripts/build-mcp-adapter.sh "release-b/$MCP_ASSET"
+          scripts/build-agent-hub.sh "release-a/$HUB_ASSET"
+          scripts/build-agent-hub.sh "release-b/$HUB_ASSET"
           cmp "release-a/$OPENLIVE_ASSET" "release-b/$OPENLIVE_ASSET"
           cmp "release-a/$MCP_ASSET" "release-b/$MCP_ASSET"
+          cmp "release-a/$HUB_ASSET" "release-b/$HUB_ASSET"
           actual="$(sha256sum "release-a/$OPENLIVE_ASSET" | awk '{print $1}')"
           expected="$(awk -F'\"' '/^OPENLIVE_ADAPTER_SHA256=/ {print $2; exit}' opencode-vm.sh)"
           mcp_actual="$(sha256sum "release-a/$MCP_ASSET" | awk '{print $1}')"
           mcp_expected="$(awk -F'\"' '/^MCP_ADAPTER_SHA256=/ {print $2; exit}' opencode-vm.sh)"
+          hub_actual="$(sha256sum "release-a/$HUB_ASSET" | awk '{print $1}')"
+          hub_expected="$(awk -F'\"' '/^HUB_ASSET_SHA256=/ {print $2; exit}' opencode-vm.sh)"
           test "$actual" = "$expected"
           test "$mcp_actual" = "$mcp_expected"
-          printf '%s  %s\n%s  %s\n' "$actual" "$OPENLIVE_ASSET" "$mcp_actual" "$MCP_ASSET" > release-a/SHA256SUMS
+          test "$hub_actual" = "$hub_expected"
+          printf '%s  %s\n%s  %s\n%s  %s\n' "$actual" "$OPENLIVE_ASSET" "$mcp_actual" "$MCP_ASSET" "$hub_actual" "$HUB_ASSET" > release-a/SHA256SUMS
           mkdir release-smoke
           tar -xf "release-a/$OPENLIVE_ASSET" -C release-smoke
           root="release-smoke/${OPENLIVE_ASSET%.tar}"
@@ -246,6 +265,13 @@ jobs:
             exit 1
           fi
           grep -q 'Missing required MCP adapter environment: OCVM_MCP_RUNTIME' <<<"$output"
+          mkdir release-hub-smoke
+          tar -xf "release-a/$HUB_ASSET" -C release-hub-smoke
+          test -f release-hub-smoke/hub/server.py
+          test -f release-hub-smoke/hub/policy.py
+          test -f release-hub-smoke/hub/catalog.py
+          test -f release-hub-smoke/hub/control.js
+          test ! -e release-hub-smoke/hub/__pycache__
       - name: Publish release
         if: steps.state.outputs.release_needed == 'true'
         run: |
@@ -268,6 +294,7 @@ jobs:
             opencode-vm.sh \
             "release-a/$OPENLIVE_ASSET" \
             "release-a/$MCP_ASSET" \
+            "release-a/$HUB_ASSET" \
             release-a/SHA256SUMS \
             --verify-tag --generate-notes --title "opencode-vm $OPENLIVE_RELEASE_TAG"
         env:

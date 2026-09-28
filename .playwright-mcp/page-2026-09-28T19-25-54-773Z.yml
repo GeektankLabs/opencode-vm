@@ -1,0 +1,49 @@
+- generic [active] [ref=f1e1]:
+  - generic [ref=f1e3]:
+    - banner [ref=f1e4]:
+      - generic [ref=f1e5]:
+        - button "Home" [ref=f1e7]
+        - generic [ref=f1e14]:
+          - link "New session" [ref=f1e15]:
+            - /url: /new-session?draftId=20b7c518-1363-413f-b8ff-55977256cecf
+          - button "Close tab" [ref=f1e21]
+        - button "New session" [ref=f1e25]
+        - button "Toggle review" [ref=f1e33]
+    - main [ref=f1e36]:
+      - generic [ref=f1e37]:
+        - generic [ref=f1e39]:
+          - button "Home" [ref=f1e41]
+          - generic [ref=f1e48]:
+            - link "New session" [ref=f1e49]:
+              - /url: /new-session?draftId=20b7c518-1363-413f-b8ff-55977256cecf
+            - button "Close tab" [ref=f1e55]
+          - button "New session" [ref=f1e59]
+        - generic [ref=f1e64]:
+          - navigation "Projects and sessions" [ref=f1e65]:
+            - generic [ref=f1e67]:
+              - generic [ref=f1e68]:
+                - generic [ref=f1e70]:
+                  - button "opencode-vm" [ref=f1e72]:
+                    - generic [ref=f1e73]: o
+                  - button "Open project" [ref=f1e78]
+                - generic [ref=f1e82]:
+                  - button "Settings" [ref=f1e84]
+                  - button "Help" [ref=f1e89]
+              - generic [aria-hidden]:
+                - generic:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic: opencode-vm
+                        - generic: /Users/admin/Documents/github/opencode-vm
+                      - button
+                  - generic:
+                    - generic:
+                      - button: New session
+          - main [ref=f1e94]
+  - button "Project apps" [ref=f1e98] [cursor=pointer]
+  - generic:
+    - region "Notifications alt+T"
+  - generic:
+    - region "Notifications (alt+T)":
+      - list

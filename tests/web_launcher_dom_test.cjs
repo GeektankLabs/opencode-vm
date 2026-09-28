@@ -99,7 +99,7 @@ Node.prototype.attachShadow = function () {
 test("launcher opens as an accessible menu and builds a safe new-tab editor URL", () => {
   const ui = fixture([
     { id: "editor", label: "Editor", icon: "editor", scheme: "https", port: 4100 },
-    { id: "taskboard", label: "Taskboard", icon: "board", scheme: "http", port: 4101 },
+    { id: "taskboard", label: "Project Management", icon: "board", scheme: "http", port: 4101 },
   ]);
   assert.equal(ui.trigger.getAttribute("aria-expanded"), "false");
   assert.equal(ui.menu.hidden, true);
@@ -126,7 +126,7 @@ test("launcher opens as an accessible menu and builds a safe new-tab editor URL"
 test("brand, editor, and board entries use distinct compact SVG icons", () => {
   const ui = fixture([
     { id: "editor", label: "Editor", icon: "editor", scheme: "https", port: 4100 },
-    { id: "taskboard", label: "Taskboard", icon: "board", scheme: "http", port: 4101 },
+    { id: "taskboard", label: "Project Management", icon: "board", scheme: "http", port: 4101 },
   ]);
   const triggerIcon = ui.trigger.children[0].children[0];
   assert.equal(triggerIcon.tagName, "svg");
@@ -134,6 +134,56 @@ test("brand, editor, and board entries use distinct compact SVG icons", () => {
   assert.equal(ui.links[0].children[0].children[0].children[0].tagName, "path");
   assert.equal(ui.links[1].children[0].children[0].children[0].tagName, "rect");
   assert.match(css, /\.icon-svg/);
+});
+
+test("agent control hub opens the current private browser host in a new tab", () => {
+  const ui = fixture([{ id: "agent-hub", label: "Agent Control", icon: "hub", scheme: "http", port: 4182 }]);
+  ui.trigger.dispatch("click");
+  assert.equal(ui.links.length, 1);
+  assert.equal(ui.links[0].children[1].textContent, "Agent Control");
+  assert.equal(ui.links[0].href, "http://192.0.2.12:4182/");
+  assert.equal(ui.links[0].target, "_blank");
+  assert.equal(ui.links[0].rel, "noopener noreferrer");
+  assert.equal(ui.links[0].children[0].children[0].children[0].tagName, "circle");
+});
+
+test("launcher rejects untrusted hostname overrides", () => {
+  const ui = fixture([
+    { id: "agent-hub", label: "Hub", icon: "hub", scheme: "http", port: 4182, host: "example.org" },
+    { id: "editor", label: "Editor", icon: "editor", scheme: "https", port: 4100, host: "127.0.0.1" },
+  ]);
+  assert.equal(ui.links.length, 0);
+});
+
+test("apps appear in Editor, Project Management, Agent Control order", () => {
+  const ui = fixture([
+    { id: "editor", label: "Editor", icon: "editor", scheme: "https", port: 4100 },
+    { id: "taskboard", label: "Project Management", icon: "board", scheme: "http", port: 4101 },
+    { id: "agent-hub", label: "Agent Control", icon: "hub", scheme: "http", port: 4182 },
+  ]);
+  ui.trigger.dispatch("click");
+  assert.equal(ui.links.length, 3);
+  assert.deepEqual(ui.links.map(link => link.children[1].textContent),
+    ["Editor", "Project Management", "Agent Control"]);
+  assert.equal(ui.links[1].href, "http://192.0.2.12:4101/");
+  assert.equal(ui.links[1].target, "_blank");
+  assert.equal(ui.links[1].rel, "noopener noreferrer");
+  assert.equal(ui.links[1].children[0].children[0].children[0].tagName, "rect");
+  assert.equal(ui.links[2].href, "http://192.0.2.12:4182/");
+});
+
+test("an unavailable Project Management entry keeps its place above Agent Control", () => {
+  const ui = fixture([
+    { id: "editor", label: "Editor", icon: "editor", scheme: "https", port: 4100 },
+    { id: "taskboard", label: "Project Management", icon: "board", scheme: "http", port: 4101, ready: false },
+    { id: "agent-hub", label: "Agent Control", icon: "hub", scheme: "http", port: 4182 },
+  ]);
+  ui.trigger.dispatch("click");
+  assert.equal(ui.links[0].children[1].textContent, "Editor");
+  assert.equal(ui.links[1].children[1].textContent, "Project Management");
+  assert.equal(ui.links[2].children[1].textContent, "Agent Control");
+  assert.equal(ui.links[1].getAttribute("aria-disabled"), "true");
+  assert.equal(ui.links[2].href, "http://192.0.2.12:4182/");
 });
 
 test("outside click closes, internal click stays open, and mobile keyboard hides the launcher", () => {

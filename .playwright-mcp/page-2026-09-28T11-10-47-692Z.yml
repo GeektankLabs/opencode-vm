@@ -1,0 +1,43 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e3]:
+    - banner [ref=e4]:
+      - generic [ref=e5]:
+        - button "Home" [pressed] [ref=e7]
+        - generic [ref=e14]:
+          - link "New session" [ref=e15]:
+            - /url: /new-session?draftId=31991f8e-de59-4cb7-a9f0-ff4082eda3ab
+          - button "Close tab" [ref=e21]
+        - button "New session" [ref=e25]
+    - main [ref=e28]:
+      - region "scrollable content" [ref=e31]:
+        - generic [ref=e32]:
+          - complementary "Projects" [ref=e33]:
+            - generic [ref=e34]:
+              - generic [ref=e35]: Projects
+              - button "Add project" [ref=e37]
+            - region "scrollable content" [ref=e41]:
+              - button [ref=e44]:
+                - button "p project" [ref=e45]:
+                  - generic [ref=e46]: p
+                  - generic [ref=e48]: project
+                - generic [ref=e49]:
+                  - button "More options" [ref=e50]
+                  - button "New session" [ref=e53]
+            - generic [ref=e56]:
+              - button "Settings" [ref=e57]
+              - button "Help" [ref=e61]
+          - region "Recent sessions" [ref=e65]:
+            - textbox "Search sessions" [ref=e72]
+            - generic [ref=e74]:
+              - generic [ref=e75]: Nothing here yet
+              - paragraph [ref=e76]: Create a session to get started
+              - button "New session" [ref=e77] [cursor=pointer]
+    - generic "Introducing Tabs. Organize your work and active sessions with tabs" [ref=e80]:
+      - button "Dismiss Tabs information" [ref=e81]
+      - button [ref=e84] [cursor=pointer]:
+        - generic [ref=e86]:
+          - paragraph [ref=e87]: Introducing Tabs
+          - paragraph [ref=e88]: Organize your work and active sessions with tabs
+  - generic:
+    - region "Notifications alt+T"
+  - status [ref=e89]

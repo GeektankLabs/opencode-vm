@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only Agent Connectivity Hub service for opencode-vm.
+"""Project-scoped Agent Control Hub for opencode-vm.
 
 The service intentionally uses only the Python standard library. It reads a
 small allowlist of host/session files and never returns credentials or raw
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -20,8 +21,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.error import URLError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+try:
+    from .policy import PolicyStore, PolicyError, PolicyConflict, PROFILES, check_selection, validate_selection
+    from .catalog import read_catalog
+except ImportError:  # Executed directly as hub/server.py by the host launcher.
+    from policy import PolicyStore, PolicyError, PolicyConflict, PROFILES, check_selection, validate_selection
+    from catalog import read_catalog
 
 
 ROOT = Path(__file__).resolve().parent
@@ -39,6 +48,10 @@ SECRET_PATTERNS = [
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def project_hash() -> str:
+    return hashlib.md5(os.fsencode(PROJECT)).hexdigest()
 
 
 def safe_id(value: str, length: int = 12) -> str:
@@ -220,16 +233,63 @@ def build_model() -> dict[str, Any]:
         {"id": "secure-mcp-tunnel", "title": "Secure MCP Tunnel", "when": "not configured or inactive", "steps": ["OpenAI Tunnel und eingeschränkten Tunnel API-Key anlegen.", "opencode-vm provider mcp new openai im Projektverzeichnis ausführen.", "Mit opencode-vm web starten und provider mcp status openai prüfen."], "docs": "docs/MCP-TUNNEL.md"},
         {"id": "a2a", "title": "A2A Agent Interface", "when": "web session required", "steps": ["Eine Web-Session mit opencode-vm web starten.", "Agent Card und /health über den dokumentierten A2A-Port verifizieren.", "Für Diagnose opencode-vm a2a status oder a2a check verwenden."], "docs": "docs/A2A-INTERFACE.md"},
         {"id": "openlive", "title": "OpenLive ACP", "when": "bridge installed separately", "steps": ["OpenLive-Bridge mit opencode-vm openlive install einrichten.", "Die Web-Session als gemeinsamer Runtime-Endpunkt bereitstellen.", "Status und Diagnose mit opencode-vm openlive status prüfen."], "docs": "PLAN_OPENLIVE.md"},
-    ], "security": {"readOnly": True, "secretsExposed": False, "allowedLogSources": sorted({source for _, source in log_paths}), "configuredIntegrationIds": sorted(configured_ids)}}
+    ], "security": {"connectionsReadOnly": True, "policyWritable": True, "secretsExposed": False, "allowedLogSources": sorted({source for _, source in log_paths}), "configuredIntegrationIds": sorted(configured_ids)}}
+
+
+def control_snapshot():
+    policy = PolicyStore(PROJECT).read()
+    catalog = read_catalog(SHARE_ROOT, tracked_sessions(), project_hash())
+    return {"policy": policy, "catalog": catalog, "validation": {
+        name: check_selection(policy["profiles"][name], catalog) for name in PROFILES
+    }, "capabilities": {"mcp": "supported", "a2a": "unsupported", "openlive": "unsupported"},
+        "catalogStatus": "unavailable" if catalog is None else "incomplete" if catalog["truncated"] else "complete"}
+
+
+def private_peer(address):
+    try:
+        peer = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    return peer.is_loopback or any(peer in block for block in (
+        ipaddress.ip_network("10.0.0.0/8"), ipaddress.ip_network("172.16.0.0/12"),
+        ipaddress.ip_network("192.168.0.0/16"), ipaddress.ip_network("100.64.0.0/10"),
+        ipaddress.ip_network("169.254.0.0/16"), ipaddress.ip_network("fc00::/7"),
+        ipaddress.ip_network("fe80::/10")) if peer.version == block.version)
 
 
 class Handler(BaseHTTPRequestHandler):
+    def allowed(self, write=False):
+        if not private_peer(self.client_address[0]):
+            self.send_error(403)
+            return False
+        if write:
+            host = self.headers.get("Host", "")
+            origin = self.headers.get("Origin", "")
+            try:
+                name = urlsplit("http://" + host).hostname
+            except ValueError:
+                name = None
+            if (not host or not origin or origin != "http://" + host
+                    or "/" in host or "@" in host or " " in host
+                    or (name != "localhost" and not private_peer(name or ""))):
+                self.send_error(403)
+                return False
+        return True
+
     def do_GET(self) -> None:  # noqa: N802
+        if not self.allowed():
+            return
         path = self.path.split("?", 1)[0]
         if path in {"/api/read-model", "/api/status"}:
             self.send_json(200, build_model())
         elif path == "/healthz":
-            self.send_json(200, {"status": "ok", "service": "agent-connectivity-hub", "readOnly": True})
+            self.send_json(200, {"status": "ok", "service": "agent-connectivity-hub", "readOnly": False,
+                                  "projectHash": project_hash()})
+        elif path == "/api/control":
+            try:
+                self.send_json(200, control_snapshot())
+            except PolicyError:
+                self.send_json(409, {"error": "Unsupported or invalid project policy."})
         elif path == "/favicon.ico":
             self.send_response(204)
             self.end_headers()
@@ -248,6 +308,40 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
 
+    def do_PUT(self) -> None:  # noqa: N802
+        if not self.allowed(write=True):
+            return
+        match = re.fullmatch(r"/api/control/profiles/(deep|standard|execution)", self.path)
+        if not match:
+            self.send_error(404)
+            return
+        if self.headers.get("Content-Type", "").split(";", 1)[0].lower() != "application/json":
+            self.send_error(415)
+            return
+        length = self.headers.get("Content-Length", "")
+        if not length.isdecimal() or not 0 < int(length) <= 4096:
+            self.send_error(413)
+            return
+        try:
+            payload = json.loads(self.rfile.read(int(length)))
+            if not isinstance(payload, dict) or set(payload) != {"revision", "selection"}:
+                raise PolicyError("Invalid request.")
+            selection = validate_selection(payload["selection"])
+            if selection is not None:
+                catalog = read_catalog(SHARE_ROOT, tracked_sessions(), project_hash())
+                if catalog is None or catalog["truncated"]:
+                    self.send_json(503, {"error": "Complete runtime catalog unavailable; policy unchanged."})
+                    return
+                if check_selection(selection, catalog) != "available":
+                    self.send_json(422, {"error": "Selection is unavailable; policy unchanged."})
+                    return
+            updated = PolicyStore(PROJECT).update(match.group(1), selection, payload["revision"])
+            self.send_json(200, {"policy": updated})
+        except PolicyConflict:
+            self.send_json(409, {"error": "Policy changed; reload before saving."})
+        except (PolicyError, ValueError, UnicodeError):
+            self.send_json(400, {"error": "Invalid or unsupported policy request."})
+
     def send_json(self, code: int, payload: Any) -> None:
         data = json.dumps(payload, ensure_ascii=True).encode("utf-8")
         self.send_response(code)
@@ -263,9 +357,12 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=4180)
+    parser.add_argument("--project-hash", help="Verify the fixed project identity before accepting requests")
     args = parser.parse_args()
+    if args.project_hash and args.project_hash != project_hash():
+        parser.error("Hub project identity does not match the configured project")
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"Agent Connectivity Hub: http://{args.host}:{args.port}", flush=True)
     try:

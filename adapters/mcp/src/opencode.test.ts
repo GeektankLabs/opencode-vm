@@ -83,7 +83,9 @@ type FakeState = {
   createCalls: Array<Record<string, unknown>>;
   runtimeCalls: Array<Record<string, unknown>>;
   archiveCalls: Array<Record<string, unknown>>;
+  renameCalls: Array<Record<string, unknown>>;
   archive?: (parameters: Record<string, unknown>) => Promise<unknown>;
+  rename?: (parameters: Record<string, unknown>) => Promise<unknown>;
   create?: (
     parameters: Record<string, unknown>,
     options: { signal: AbortSignal },
@@ -201,13 +203,19 @@ function fakeClient(state: FakeState) {
     },
     session: {
       async update(parameters: Record<string, unknown>) {
-        state.archiveCalls.push(parameters);
-        if (state.archive) return state.archive(parameters);
         const found = state.sessions.find(
           (item) => item.id === parameters.sessionID,
         );
         if (!found)
           throw Object.assign(new Error("not found"), { status: 404 });
+        if (typeof parameters.title === "string") {
+          state.renameCalls.push(parameters);
+          if (state.rename) return state.rename(parameters);
+          found.title = parameters.title;
+          return { data: found };
+        }
+        state.archiveCalls.push(parameters);
+        if (state.archive) return state.archive(parameters);
         found.time = {
           ...found.time,
           archived: (parameters.time as { archived: number }).archived,
@@ -364,6 +372,7 @@ function baseState(sessions = [session("ses_work")]): FakeState {
     createCalls: [],
     runtimeCalls: [],
     archiveCalls: [],
+    renameCalls: [],
   };
 }
 
@@ -1629,6 +1638,111 @@ test("creation binds runtime defaults and a root project session without sending
   });
 });
 
+test("renaming uses OpenCode's native title field and preserves session identity, runtime, and history", async () => {
+  const state = baseState();
+  const original = session("ses_work");
+  state.messages = [stored("user", "question"), stored("answer", "answer", "user")];
+  const originalModel = { ...original.model! };
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+
+  const renamed = await gateway.renameSession("ses_work", "  Renamed work  ");
+  assert.deepEqual(renamed, {
+    session_id: "ses_work",
+    title: "Renamed work",
+    state: "renamed",
+  });
+  assert.deepEqual(state.renameCalls, [
+    { sessionID: "ses_work", directory: project, title: "Renamed work" },
+  ]);
+  assert.equal(state.sessions[0]?.id, "ses_work");
+  assert.equal(state.sessions[0]?.title, "Renamed work");
+  assert.equal(state.sessions[0]?.agent, "build");
+  assert.deepEqual(state.sessions[0]?.model, originalModel);
+  assert.equal(state.messages.length, 2);
+  assert.equal((await gateway.getSessionDetails("ses_work")).title, "Renamed work");
+  assert.equal((await gateway.listSessions()).sessions[0]?.title, "Renamed work");
+  assert.equal(state.archiveCalls.length, 0);
+  assert.equal(state.promptCalls.length, 0);
+  assert.equal(state.runtimeCalls.length, 0);
+});
+
+test("rename validates titles and IDs, distinguishes unknown sessions, and refuses busy or pending sessions", async () => {
+  const state = baseState();
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  for (const title of ["", "   ", "x".repeat(161), "bad\nname", "bad\u0085name"])
+    await assert.rejects(gateway.renameSession("ses_work", title), {
+      code: "INVALID_ARGUMENT",
+    });
+  await assert.rejects(gateway.renameSession("bad id", "Valid title"), {
+    code: "INVALID_ARGUMENT",
+  });
+  assert.equal(state.renameCalls.length, 0);
+
+  await assert.rejects(gateway.renameSession("ses_missing", "Valid title"), {
+    code: "SESSION_NOT_FOUND",
+  });
+  assert.equal(state.renameCalls.length, 0);
+
+  state.statuses.ses_work = { type: "busy" };
+  await assert.rejects(gateway.renameSession("ses_work", "Busy rename"), {
+    code: "SESSION_BUSY",
+    reason: "backend_active",
+  });
+  state.statuses.ses_work = { type: "idle" };
+  state.questions.push({ sessionID: "ses_work" });
+  await assert.rejects(gateway.renameSession("ses_work", "Pending rename"), {
+    code: "INPUT_REQUIRED",
+    reason: "pending_input",
+  });
+  assert.equal(state.renameCalls.length, 0);
+});
+
+test("rename shares the per-session MCP write lock with concurrent operations", async () => {
+  const state = baseState();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  state.rename = async (parameters) => {
+    await gate;
+    state.sessions[0]!.title = parameters.title as string;
+    return { data: state.sessions[0] };
+  };
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  const first = gateway.renameSession("ses_work", "First title");
+  while (!state.renameCalls.length)
+    await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(
+    (await gateway.getSessionDetails("ses_work")).admission?.write_in_progress,
+    true,
+  );
+  await assert.rejects(gateway.renameSession("ses_work", "Second title"), {
+    code: "SESSION_BUSY",
+    reason: "write_in_progress",
+  });
+  release();
+  await first;
+  assert.equal(state.renameCalls.length, 1);
+  assert.equal((await gateway.getSessionDetails("ses_work")).title, "First title");
+});
+
+test("an unverified native title update is reported as uncertain without retry", async () => {
+  const state = baseState();
+  state.rename = async (parameters) => {
+    state.sessions[0]!.title = parameters.title as string;
+    throw new Error("simulated lost response");
+  };
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  await assert.rejects(gateway.renameSession("ses_work", "Possibly applied"), {
+    code: "RENAME_UNCERTAIN",
+  });
+  assert.equal(state.renameCalls.length, 1);
+  assert.equal(
+    (await gateway.getSessionDetails("ses_work")).title,
+    "Possibly applied",
+  );
+});
+
 test("archiving keeps history opt-in readable by ID but excludes normal reads and all writes", async () => {
   const state = baseState();
   state.messages = [
@@ -1655,8 +1769,11 @@ test("archiving keeps history opt-in readable by ID but excludes normal reads an
     () => gateway.getTaskResult("ses_work", "user"),
     () => gateway.sendMessage("ses_work", "new work"),
     () => gateway.archiveSession("ses_work"),
+    () => gateway.renameSession("ses_work", "Archived rename"),
   ])
     await assert.rejects(read(), { code: "SESSION_NOT_FOUND" });
+  assert.equal(state.renameCalls.length, 0);
+  assert.equal((await gateway.getSessionDetails("ses_work", true)).title, "ses_work");
   assert.equal(
     (await gateway.getSessionDetails("ses_work", true)).archived_at,
     archived.archived_at,

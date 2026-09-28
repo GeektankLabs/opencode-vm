@@ -1,0 +1,23 @@
+- generic [ref=e1]:
+  - generic [ref=e3]:
+    - banner [ref=e4]:
+      - generic [ref=e5]:
+        - button "Home" [ref=e7]
+        - generic [ref=e14]:
+          - link "New session" [ref=e15]:
+            - /url: /new-session?draftId=20b7c518-1363-413f-b8ff-55977256cecf
+          - button "Close tab" [ref=e21]
+        - button "New session" [ref=e25]
+    - main [ref=e28]:
+      - generic [ref=e47]:
+        - generic [ref=e50]:
+          - generic [ref=e51]:
+            - textbox "Prompt" [active] [ref=e52]
+            - generic: Ask anything, / for commands, @ for context...
+          - generic [ref=e53]:
+            - button "Add images and files" [ref=e56]
+            - button "Send" [disabled] [ref=e59]
+        - button "New project" [ref=e63]
+  - button "Project apps" [ref=e73]
+  - generic:
+    - region "Notifications alt+T"

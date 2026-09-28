@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import http from "node:http";
+import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -16,6 +19,7 @@ import type {
   ListSessionsResult,
   CreateSessionResult,
   ArchiveSessionResult,
+  RenameSessionResult,
   RuntimeDescriptor,
   SendMessageResult,
   SessionDetailsResult,
@@ -30,6 +34,32 @@ import type {
 } from "./types.js";
 
 const token = "test-token-" + "x".repeat(43);
+
+test("profile MCP reads resolve an exact configured runtime without mutating the session", async () => {
+  const project = await mkdtemp(join(tmpdir(), "ocvm-policy-wire-"));
+  await mkdir(join(project, ".opencode-vm"));
+  await writeFile(join(project, ".opencode-vm", "agent-control.json"), JSON.stringify({
+    schemaVersion: 1, revision: 1, updatedAt: "2026-09-28T18:00:00Z",
+    profiles: { deep: { provider_id: "provider", model_id: "model", variant: "high" }, standard: null, execution: null },
+  }));
+  const gateway = new FakeGateway();
+  const adapter = new McpHttpServer({ ...runtime(), project }, token, gateway);
+  const port = await adapter.start();
+  const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`),
+    { requestInit: { headers: { "X-OCVM-MCP-Token": token } } });
+  const client = new Client({ name: "policy-wire", version: "1.0.0" });
+  try {
+    await client.connect(transport);
+    const policy = await client.callTool({ name: "get_project_model_policy", arguments: {} });
+    assert.equal((policy.structuredContent as { profiles: { deep: { status: string } } }).profiles.deep.status, "available");
+    const result = await client.callTool({ name: "get_recommended_runtime", arguments: { profile: "deep" } });
+    assert.deepEqual((result.structuredContent as { runtime: object }).runtime,
+      { provider_id: "provider", model_id: "model", variant: "high" });
+    assert.deepEqual(gateway.updateCalls, []);
+  } finally {
+    await client.close(); await adapter.close(); await rm(project, { recursive: true, force: true });
+  }
+});
 
 function runtime(): RuntimeDescriptor {
   return {
@@ -47,6 +77,7 @@ function runtime(): RuntimeDescriptor {
 }
 
 class FakeGateway implements SessionGateway {
+  updateCalls: Array<{ id: string; patch: RuntimePatch }> = [];
   async getSessionProgress(sessionId: string): Promise<SessionProgressResult> {
     return {
       session_id: sessionId,
@@ -110,6 +141,7 @@ class FakeGateway implements SessionGateway {
     id: string,
     patch: RuntimePatch,
   ): Promise<RuntimeUpdateResult> {
+    this.updateCalls.push({ id, patch });
     const previous = {
       agent: "plan",
       provider_id: "provider",
@@ -140,6 +172,7 @@ class FakeGateway implements SessionGateway {
   listBarrier: Promise<void> | undefined;
   createCalls: Array<string | undefined> = [];
   archiveCalls: string[] = [];
+  renameCalls: Array<{ session_id: string; title: string }> = [];
   uploadCalls: Array<{
     session_id: string;
     filename: string;
@@ -156,6 +189,14 @@ class FakeGateway implements SessionGateway {
   async archiveSession(sessionId: string): Promise<ArchiveSessionResult> {
     this.archiveCalls.push(sessionId);
     return { session_id: sessionId, state: "archived", archived_at: 3 };
+  }
+
+  async renameSession(
+    sessionId: string,
+    title: string,
+  ): Promise<RenameSessionResult> {
+    this.renameCalls.push({ session_id: sessionId, title });
+    return { session_id: sessionId, title: title.trim(), state: "renamed" };
   }
 
   async createSession(title?: string): Promise<CreateSessionResult> {
@@ -183,7 +224,7 @@ class FakeGateway implements SessionGateway {
     };
   }
 
-  async getSessionDetails(): Promise<SessionDetailsResult> {
+  async getSessionDetails(_sessionId: string): Promise<SessionDetailsResult> {
     throw new Error("backend-secret-must-not-leak");
   }
 
@@ -292,7 +333,7 @@ class FakeGateway implements SessionGateway {
   }
 }
 
-test("official MCP client discovers seventeen stateless HTTP tools and invokes archive by ID", async () => {
+test("official MCP client discovers twenty stateless HTTP tools and invokes session tools by ID", async () => {
   const gateway = new FakeGateway();
   const server = new McpHttpServer(runtime(), token, gateway);
   const port = await server.start();
@@ -309,6 +350,8 @@ test("official MCP client discovers seventeen stateless HTTP tools and invokes a
       "create_session",
       "get_message",
       "get_project_activity",
+      "get_project_model_policy",
+      "get_recommended_runtime",
       "get_session",
       "get_session_history",
       "get_session_progress",
@@ -317,6 +360,7 @@ test("official MCP client discovers seventeen stateless HTTP tools and invokes a
       "get_task_result",
       "list_sessions",
       "read_message_content",
+      "rename_session",
       "send_message",
       "supersede_unresolved_submission",
       "update_session_runtime",
@@ -325,6 +369,13 @@ test("official MCP client discovers seventeen stateless HTTP tools and invokes a
     ]);
     const listTool = listed.tools.find((tool) => tool.name === "list_sessions");
     const sendTool = listed.tools.find((tool) => tool.name === "send_message");
+    assert.equal(listed.tools.find((tool) => tool.name === "get_project_model_policy")?.annotations?.readOnlyHint, true);
+    assert.equal(listed.tools.find((tool) => tool.name === "get_recommended_runtime")?.annotations?.readOnlyHint, true);
+    const policy = await client.callTool({ name: "get_project_model_policy", arguments: {} });
+    assert.equal((policy.structuredContent as { revision: number }).revision, 0);
+    const recommendation = await client.callTool({ name: "get_recommended_runtime", arguments: { profile: "deep" } });
+    assert.equal((recommendation.structuredContent as { status: string }).status, "unconfigured");
+    assert.equal((recommendation.structuredContent as Record<string, unknown> | undefined)?.runtime, undefined);
     assert.equal(listTool?.annotations?.readOnlyHint, true);
     assert.equal(sendTool?.annotations?.destructiveHint, true);
     assert.equal(sendTool?.annotations?.idempotentHint, false);
@@ -344,6 +395,12 @@ test("official MCP client discovers seventeen stateless HTTP tools and invokes a
       (tool) => tool.name === "archive_session",
     );
     assert.equal(archiveTool?.annotations?.destructiveHint, true);
+    const renameTool = listed.tools.find(
+      (tool) => tool.name === "rename_session",
+    );
+    assert.equal(renameTool?.annotations?.readOnlyHint, false);
+    assert.equal(renameTool?.annotations?.destructiveHint, false);
+    assert.equal(renameTool?.annotations?.idempotentHint, true);
     const created = await client.callTool({
       name: "create_session",
       arguments: { title: "  New work  " },
@@ -362,6 +419,17 @@ test("official MCP client discovers seventeen stateless HTTP tools and invokes a
       "archived",
     );
     assert.deepEqual(gateway.archiveCalls, ["ses"]);
+    const renamed = await client.callTool({
+      name: "rename_session",
+      arguments: { session_id: "ses", title: "  New title  " },
+    });
+    assert.equal(
+      (renamed.structuredContent as Record<string, unknown>)?.title,
+      "New title",
+    );
+    assert.deepEqual(gateway.renameCalls, [
+      { session_id: "ses", title: "  New title  " },
+    ]);
     for (const request of [
       { name: "get_session_runtime_options", arguments: {} },
       { name: "get_session_progress", arguments: { session_id: "ses" } },
@@ -564,6 +632,13 @@ test("official MCP client discovers seventeen stateless HTTP tools and invokes a
         arguments: { session_id: "ses", delete: true },
       },
       { name: "archive_session", arguments: { session_id: "bad id" } },
+      { name: "rename_session", arguments: { session_id: "bad id", title: "Valid" } },
+      { name: "rename_session", arguments: { session_id: "ses", title: "" } },
+      { name: "rename_session", arguments: { session_id: "ses", title: "   " } },
+      { name: "rename_session", arguments: { session_id: "ses", title: "x".repeat(161) } },
+      { name: "rename_session", arguments: { session_id: "ses", title: "bad\nname" } },
+      { name: "rename_session", arguments: { session_id: "ses", title: "bad\u0085name" } },
+      { name: "rename_session", arguments: { session_id: "ses", title: "Valid", unknown: true } },
       {
         name: "get_message",
         arguments: {
@@ -638,6 +713,82 @@ test("official MCP client discovers seventeen stateless HTTP tools and invokes a
   } finally {
     await client.close().catch(() => undefined);
     await server.close();
+  }
+});
+
+test("MCP board search, reverse lookup, complete links and overflow use the public schemas", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ocvm-board-wire-"));
+  let rows = [{ id: "backend-1", projectId: "backend-project", title: "Review work", description: "Searchable body",
+    status: "todo", priority: "medium" }];
+  const backend = http.createServer((request, response) => {
+    response.setHeader("content-type", "application/json");
+    if (request.url === "/api/projects") response.end(JSON.stringify([{ id: "backend-project", prefix: "OCHASH", name: "project", status: "active" }]));
+    else if (request.url === "/api/tickets" || request.url?.startsWith("/api/tickets?")) response.end(JSON.stringify(rows));
+    else if (request.url === "/api/tickets/backend-1") response.end(JSON.stringify(rows[0]));
+    else { response.statusCode = 404; response.end(JSON.stringify({ error: "not found" })); }
+  });
+  await new Promise<void>((resolve) => backend.listen(0, "127.0.0.1", resolve));
+  const backendPort = (backend.address() as { port: number }).port;
+  class BoardGateway extends FakeGateway {
+    override async getSessionDetails(id: string): Promise<SessionDetailsResult> {
+      if (id !== "ses") throw new AdapterError("SESSION_NOT_FOUND", "Session was not found.");
+      return { id, title: "Work", created: 1, updated: 2, activity: "idle",
+        pending_input: { permissions: 0, questions: 0 } };
+    }
+  }
+  const descriptor = { ...runtime(), projectHash: "hash", taskboardUrl: `http://127.0.0.1:${backendPort}`,
+    taskboardMetadataFile: join(directory, "board.json") };
+  const server = new McpHttpServer(descriptor, token, new BoardGateway());
+  const port = await server.start();
+  const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`),
+    { requestInit: { headers: { "X-OCVM-MCP-Token": token } } });
+  const client = new Client({ name: "board-wire-test", version: "1.0.0" });
+  try {
+    await client.connect(transport);
+    const catalog = await client.listTools();
+    assert.equal(catalog.tools.filter((tool) => tool.name.endsWith("_project_task") ||
+      ["list_project_tasks", "add_task_comment", "link_task_to_session", "list_board_projects",
+        "get_board_project", "create_board_project", "get_task_transfer_status"].includes(tool.name)).length, 13);
+    assert.equal(catalog.tools.find((tool) => tool.name === "list_project_tasks")?.annotations?.readOnlyHint, true);
+    assert.equal(catalog.tools.find((tool) => tool.name === "reclassify_project_task")?.annotations?.readOnlyHint, false);
+    const projects = await client.callTool({ name: "list_board_projects", arguments: {} });
+    assert.equal(projects.isError, undefined);
+    assert.equal((projects.structuredContent as { projects: Array<{ board_project_id: string; is_default: boolean }> })
+      .projects[0]?.board_project_id, "project_hash");
+    const knownBoard = await client.callTool({ name: "get_board_project", arguments: { board_project_id: "project_hash" } });
+    assert.equal((knownBoard.structuredContent as { is_default: boolean }).is_default, true);
+    const found = await client.callTool({ name: "list_project_tasks", arguments: { query: "searchable" } });
+    assert.equal(found.isError, undefined);
+    const tasks = (found.structuredContent as { tasks: Array<{ task_id: string }> }).tasks;
+    assert.equal(tasks.length, 1);
+    const id = tasks[0]!.task_id;
+    assert.equal((found.structuredContent as { tasks: Array<{ board_project_id: string }> }).tasks[0]?.board_project_id,
+      "project_hash");
+    const foreign = await client.callTool({ name: "link_task_to_session", arguments: { task_id: id, session_id: "foreign" } });
+    assert.equal(foreign.isError, true);
+    assert.equal((foreign._meta as Record<string, any>)["opencode-vm/error"].code, "SESSION_NOT_FOUND");
+    for (const [message, result] of [["msg_one", "First"], ["msg_two", "Second"]]) {
+      const linked = await client.callTool({ name: "link_task_to_session", arguments: {
+        task_id: id, session_id: "ses", message_id: message, result, artifact_refs: [`artifact:${message}`],
+      } });
+      assert.equal(linked.isError, undefined);
+    }
+    const linkedTask = await client.callTool({ name: "get_project_task", arguments: { task_id: id } });
+    assert.deepEqual((linkedTask.structuredContent as { links: Array<{ message_id: string }> }).links.map((link) => link.message_id),
+      ["msg_one", "msg_two"]);
+    const reversed = await client.callTool({ name: "list_project_tasks", arguments: { session_id: "ses" } });
+    assert.deepEqual((reversed.structuredContent as { tasks: Array<{ task_id: string }> }).tasks.map((task) => task.task_id), [id]);
+    rows = Array.from({ length: 501 }, (_, index) => ({ id: `id-${index}`, projectId: "backend-project",
+      title: "Other", description: "", status: "todo", priority: "medium" }));
+    const overflow = await client.callTool({ name: "list_project_tasks", arguments: { query: "absent" } });
+    assert.equal(overflow.isError, true);
+    assert.equal((overflow._meta as Record<string, any>)["opencode-vm/error"].code, "TASK_SEARCH_INCOMPLETE");
+    assert.equal(overflow.structuredContent, undefined);
+  } finally {
+    await client.close().catch(() => undefined);
+    await server.close();
+    await new Promise<void>((resolve) => backend.close(() => resolve()));
+    await rm(directory, { recursive: true, force: true });
   }
 });
 

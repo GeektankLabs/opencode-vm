@@ -2,7 +2,7 @@
 
 This document defines the incoming MCP interface exposed by `opencode-vm web` sessions (enabled by default since 0.5.61) and by terminal `start` sessions with a project-specific OpenAI MCP assignment (since 0.5.62). It describes the server side that external MCP clients use. It is separate from `opencode-vm mcps`, which configures MCP servers that OpenCode consumes as tools.
 
-The implemented adapter is version **0.1.12**, uses `@modelcontextprotocol/sdk` **1.30.1** and `@opencode-ai/sdk` **1.18.21**, and was tested with MCP protocol revision **2025-11-25**. It uses stateless Streamable HTTP with JSON responses. The adapter does not perform semantic duplicate/task detection for normal conversation continuation. An old unresolved receipt remains available as per-request status, but does not block a new prompt when backend activity and pending input permit it. Only current backend activity, pending input, an in-flight MCP write, or an exact immediate retry of an uncertain transport request can reject `send_message`. See [admission diagnostics](../PLAN_MCP_ADMISSION.md).
+The implemented adapter is version **0.1.14**, uses `@modelcontextprotocol/sdk` **1.30.1** and `@opencode-ai/sdk` **1.18.21**, and was tested with MCP protocol revision **2025-11-25**. It uses stateless Streamable HTTP with JSON responses. The adapter does not perform semantic duplicate/task detection for normal conversation continuation. An old unresolved receipt remains available as per-request status, but does not block a new prompt when backend activity and pending input permit it. Only current backend activity, pending input, an in-flight MCP write, or an exact immediate retry of an uncertain transport request can reject `send_message`. See [admission diagnostics](../PLAN_MCP_ADMISSION.md).
 
 ## 1. Runtime model
 
@@ -164,6 +164,24 @@ Creation binds usable defaults because OpenCode's bare session-create API does n
 The adapter calls the scoped create endpoint once, then verifies the returned session through the same project/root/manager checks as other tools and checks its persisted agent/model. It does not override the project's permission rules. Creation/default lookup failures before submission use normal backend errors. A timeout, connection failure or unverifiable result after submission returns **`CREATION_UNCERTAIN`**: the session may already exist. Inspect `list_sessions` or Web UI before manually deciding what to do; **never retry automatically**. The adapter does not delete or replay uncertain creations.
 
 The 0.1.2 review additionally validates the default variant and native model disabling. OpenCode bridges custom providers lazily into its v2 catalog: connected legacy catalog entries remain usable before that bridge exists, while an existing native entry's enabled flag and variants take precedence.
+
+### `rename_session`
+
+Added in adapter 0.1.14 / opencode-vm 0.5.96. Write-capable, non-destructive and idempotent: repeating the same title is valid. It updates the title on the existing OpenCode session; there is no adapter-side alias or parallel title store.
+
+```json
+{"session_id":"ses_...","title":"Reviewed session name"}
+```
+
+`session_id` follows the normal session-ID validation. `title` must contain 1–160 characters, cannot be empty/whitespace-only, and cannot contain control characters; leading and trailing whitespace is trimmed before saving.
+
+Successful result:
+
+```json
+{"session_id":"ses_...","title":"Reviewed session name","state":"renamed"}
+```
+
+The adapter calls OpenCode's native `PATCH /session/{sessionID}` `session.update` operation with only `title`, then reads the session back by ID and verifies the exact title. The same MCP per-session write lock as other session writes is used. Active sessions return `SESSION_BUSY`; pending permissions/questions return `INPUT_REQUIRED`. Archived, unknown and otherwise unexposed IDs return `SESSION_NOT_FOUND`; archived sessions are not renameable through MCP. If the native update may have applied but its title cannot be verified, the adapter returns `RENAME_UNCERTAIN`; inspect `get_session` before deciding whether to try again. Other OpenCode clients do not share the adapter lock, so there is no cross-client compare-and-swap. Renaming does not change the session ID, messages/history, runtime or archive state.
 
 ### `archive_session`
 
@@ -561,6 +579,12 @@ Read-only. Input is `{}` or `{"session_id":"ses_..."}`. Returns live visible pri
 
 `current` is included for a requested session. Unexposed session IDs fail as usual. Models use the live connected catalog plus native v2 enabled/variant metadata where available; absent native entries can be lazy custom-provider bridges. Raw provider credentials, endpoint URLs, agent prompts and variant request bodies are not returned. The default variant is represented by `default`. Output is capped at 2,000 model entries with `truncated`; internal update validation still uses the full catalog. Catalog pagination is a follow-up item.
 
+### Project runtime profiles (read-only)
+
+`get_project_model_policy({})` reads `<project>/.opencode-vm/agent-control.json` and returns `project_id`, `schema_version`, `revision`, `updated_at`, `catalog_status` (`complete|incomplete|unavailable`) and `profiles.deep|standard|execution`. Each profile has `selection` (`null` or `{provider_id,model_id,variant}`) and `status` (`available|unconfigured|provider_unavailable|model_unavailable|variant_unavailable|catalog_unavailable|catalog_incomplete`). Missing policy is virtual revision 0 with all profiles unconfigured; invalid/future schemas fail closed. Mappings are never replaced when availability changes.
+
+`get_recommended_runtime({"profile":"deep"})` returns `{profile,policy_revision,status}` plus `runtime:{provider_id,model_id,variant}` **only** when the exact stored tuple is listed by a complete current catalog. Both calls are project-scoped and do not create sessions or change runtimes. The policy is transport-neutral; MCP is its first supported external-agent transport, A2A/OpenLive do not yet expose the profile capability. The existing `update_session_runtime` applies an available recommendation only to an idle session before a new authorized task; explicit user settings take precedence.
+
 ### `update_session_runtime`
 
 Write-capable, non-idempotent. Input requires `session_id` and at least one of `agent`, `provider_id`, `model_id`, `variant`:
@@ -580,7 +604,7 @@ Omitted fields keep their effective current values. Every resulting combination 
 }
 ```
 
-Busy/retrying sessions and concurrent writes are refused with `SESSION_BUSY`. Idle sessions with unverified old receipts use `SUBMISSION_UNRESOLVED` after bounded reconciliation. Pending questions/permissions return `INPUT_REQUIRED`. Runtime updates and MCP submissions share the same per-session write lock and admission preflight. The adapter checks idle immediately before changes and between the backend's separate agent/model switches, then verifies the stored settings; subsequent `get_session` and `send_message` use those values.
+Busy/retrying sessions and concurrent writes are refused with `SESSION_BUSY`. A historical unresolved receipt alone does not block a technically idle session. Pending questions/permissions return `INPUT_REQUIRED`. Runtime updates and MCP submissions share the same per-session write lock and admission preflight. The adapter checks idle immediately before changes and between the backend's separate agent/model switches, then verifies the stored settings; subsequent `get_session` and `send_message` use those values.
 
 OpenCode does not expose an atomic multi-field switch or cross-client compare-and-swap here. Web UI/TUI/other-client writes can race; a failed/uncertain write may leave a partial update and reports `RUNTIME_UPDATE_FAILED`, without rollback or retry. Inspect `get_session` before continuing. Older empty sessions without any reusable agent/model metadata report `UNSUPPORTED_CONFIGURATION`; initialize them in first-party UI or use `create_session`.
 
@@ -659,7 +683,33 @@ All activity reads and waits now return `filter_key`, a stable opaque key for th
 
 Same filters/output as ordinary `get_project_activity`, with required `after_cursor`, optional `timeout_ms` (1–15000, default 10000), and an additional `timeout` boolean. `tail` is not accepted on waits. Returns immediately if matching events are already present; otherwise waits briefly for journal changes. Normal backend visibility validation adds its usual request deadline to the waiting budget. On timeout, the empty response still has `next_cursor` and `filter_key`; retain it only for that filter. This is a bounded active wait, not delivery/push to an inactive ChatGPT conversation.
 
+### Optional project-local Taskboard tools (adapter 0.1.16)
+
+When the runtime descriptor includes the Taskboard URL and metadata file, thirteen additional board-neutral tools are discoverable. They operate on the current repository's taskboard, separate from OpenCode execution tasks. Taskboard service unavailability returns `TASKBOARD_UNAVAILABLE`; `transfer_project_task` remains a deliberate `TASK_SCOPE_UNAVAILABLE` global/local boundary. The dedicated MCP token applies to these MCP calls; it does not authenticate the separate Taskboard HTTP/UI port.
+
+| Tool | Input | Result / behavior |
+|---|---|---|
+| `list_board_projects` / `get_board_project` | Empty object / `board_project_id` | Read native Board Projects with name, prefix, status and default role. Reads do not create Inbox. |
+| `create_board_project` | `name`, unique 1–5-character `prefix`, optional `make_default:true` only for `Inbox`/`INBOX` | Explicitly confirmed creation. Existing canonical defaults retain their identity; collisions require an operator decision. |
+| `list_project_tasks` | Optional `board_project_id` (legacy alias `project_id`), `status`, `query` (1–200 chars), `session_id`, `updated_since` (ISO datetime with offset), `include_terminal` (default true) | Complete repository-local match set across Board Projects by default, optionally filtered to one. Case-insensitive title/description and session reverse lookup. No search cursor or semantic similarity. |
+| `get_project_task` | `task_id` | Exact stable ID lookup, including `comments`, unique `session_ids` and full optional `links` (`session_id`, optional `message_id`, `result`, `artifact_refs`). UI-created tickets resolve without writing metadata during reads. |
+| `create_project_task` | Optional `board_project_id` (legacy alias `project_id`); required `title`, optional `description`, `priority`, `status` | Creates one ticket in that Board Project, or the already configured default. No implicit Project creation; absent default returns `BOARD_PROJECT_SETUP_REQUIRED`. Tasks expose both `project_id` and `board_project_id`. |
+| `update_project_task` / `move_project_task` | `task_id` plus existing patch fields or `status`/optional `position` | Upstream v0.6.0 writes; there is **no** shared UI/MCP revision or compare-and-swap in this phase. |
+| `add_task_comment` | `task_id`, `body` | Stores an adapter-side comment; upstream UI does not show it. |
+| `link_task_to_session` | `task_id`, exposed `session_id`, optional `message_id`, `result`, `artifact_refs` | Returns all links. Distinct messages in one session remain separate; a repeat can enrich a compatible link and union artifact refs. A conflicting nonempty result is retained as a separate link rather than overwriting the old result, including links without a message ID. The session is verified as exposed in the current project; message/result/artifact strings are references, **not** independently verified completion evidence. |
+| `reclassify_project_task` | `task_id`, `target_board_project_id`, `expected_source_board_project_id`, UUID `request_id` | Move a confirmed default/Inbox task to an existing active workstream. The identical request can be resumed. Returns old/new native display keys and stable task ID only after complete readback. |
+| `get_task_transfer_status` | UUID `request_id` | Read the journal state and audit keys. `unresolved` is not success; inspect the original request before another write. |
+| `transfer_project_task` | `task_id`, `target_scope` | Always fails closed: only project-local scope exists. |
+
+Task IDs are deterministic UUID-shaped `task_...` values derived from repository identity and native ticket ID. New Board Project IDs are repo-bound `board_project_...` identifiers; `project_<repo hash>` remains the default/legacy ID. Project/task reads do not write. Schema-2 sidecar stores projects, tasks, comments, links and the transfer journal; schema-1 is read compatibly and upgraded only on writes. Corrupt/unknown metadata fails closed. Writes reload under the process-shared lock and publish atomically. This is not a shared UI/MCP compare-and-swap.
+
+Reclassification uses supported upstream HTTP routes, not an in-place `projectId` edit. A durable journal records each non-idempotent step, and a visibly `[transfer-pending]` destination in the native **Done** column may briefly coexist with the original active task. After verified source deletion, the stable public ID and unchanged comments/links point to the new native ULID; only after restoring and verifying the original business status does the request complete. Native keys, ULIDs, timestamps and subtask IDs change; old native URLs do not redirect. Native dependency edges are rejected. Pending task reads/writes fail with `TASK_TRANSFER_UNRESOLVED` rather than expose the staged ticket as a second regular task; the journal remains readable by request UUID. Uncertain deletes require explicit reconciliation and must not be blindly retried. UI edits cannot be serialized by this sidecar lock.
+
+Upstream v0.6.0 supplies only an unpaginated `/api/tickets` response and ignores a `query` URL parameter. The adapter reads the **entire** project/status-specific response (up to **1 MiB** and **500** scanned tasks), then filters locally. At most **50** returned tasks and **40,000 UTF-8 bytes** of task JSON are returned in one result. Exceeding any scan/result bound returns `TASK_SEARCH_INCOMPLETE` as an MCP tool error, **not** an empty list, partial success, or continuation cursor. Narrowing by backend `status` may make a later *different* search fit; changing only the local query does not reduce the upstream scan size. An exact `task_id` for an as-yet-unmapped UI ticket can likewise require a bounded scan; an overflow does not establish absence. `updated_at` is a last-edit timestamp, not a reliable work-start or cycle-time measure. No automatic PLAN synchronization, task creation on `send_message`, or automatic Done transition exists.
+
 ## 5. Submission and recovery semantics
+
+**Current adapter 0.1.16:** normal `send_message` admission does not treat an old unresolved receipt as a session lock; it checks current backend activity, pending input, the in-flight write lock and exact immediate uncertain-request retries. The historical guard-reconciliation description below records the older 0.1.6–0.1.11 behavior and applies only where an actual legacy/explicit override workflow still uses it. See [PLAN_MCP_ADMISSION.md](../PLAN_MCP_ADMISSION.md) for the current correction.
 
 Before admission, `send_message` requires an exposed, idle session with no pending permission or question. It calls OpenCode's asynchronous prompt endpoint once with a generated message ID and a 15-second admission deadline.
 
@@ -720,6 +770,16 @@ Tool failures return `isError: true` and sanitized text. Machine-readable error 
 | `READ_REFERENCE_EXPIRED` | Content/search reference belongs to another adapter lifetime; reacquire with stable IDs. |
 | `SEARCH_CHANGED` | Observed result-search boundary changed; restart the search without a cursor. |
 | `RESPONSE_BUDGET_EXCEEDED` | Required read metadata/result does not fit; reduce the page limit. No partial JSON is returned. |
+| `TASK_NOT_FOUND` | Stable task ID does not resolve to an exposed ticket. |
+| `TASKBOARD_UNAVAILABLE` | The configured Taskboard service did not respond. |
+| `TASKBOARD_ERROR` | The Taskboard returned an error or an incompatible response. |
+| `TASKBOARD_METADATA_ERROR` | Sidecar or its private lock cannot be loaded/updated safely. Corrupt or unknown schema is not reset; inspect the stored file. |
+| `TASK_SEARCH_INCOMPLETE` | Entire task scan, match set, or detailed link response exceeds the explicit bound. No complete result was returned; never infer zero matches. |
+| `BOARD_PROJECT_NOT_FOUND` / `BOARD_PROJECT_CONFLICT` | Unknown selector or conflicting default/prefix/selection. |
+| `BOARD_PROJECT_SETUP_REQUIRED` | No default is configured; confirm Inbox setup before a default ticket. |
+| `TASK_TRANSFER_UNSUPPORTED` | Native dependencies, status or fields cannot be faithfully copied through the supported routes. |
+| `TASK_TRANSFER_UNRESOLVED` / `TASK_TRANSFER_CONFLICT` | Transfer or identity needs reconciliation; inspect the original request ID. |
+| `TASK_SCOPE_UNAVAILABLE` | Only the configured project-local taskboard scope exists; transfer is not enabled. |
 
 HTTP authentication and request-boundary failures use HTTP status codes rather than these tool codes.
 
@@ -769,4 +829,4 @@ The endpoint is bound only to guest `127.0.0.1` and is verified through host `12
 
 This interface can create empty root work sessions, change idle-session runtime settings, continue exposed sessions (including bounded, explicit file attachments) and read project activity. It does not delete, fork, or interrupt sessions; answer permissions/questions; expose a shell directly; or discover other projects.
 
-Automated package, fake-backend, disposable real-OpenCode and local tunnel-control-plane tests cover seventeen core tools, including scoped archive and opted-in archived reading, metadata-only progress, tail-to-forward continuation, complete original-text reconstruction, deep result searches, revision/reference handling, attachment upload/model capability checks, actual provider image input, guard-bound operator override/replay and audit receipts, creation without a model call, runtime changes and validation, independent session completions, bounded waits, journal restart recovery, pending input and no automatic resend on uncertainty. Real macOS/Lima and actual ChatGPT text/Voice acceptance still require target-host acceptance. A client must be able to submit file bytes to `upload_attachment` as Base64; a client that only exposes its local file in conversation context cannot use this upload flow. After upgrading, reconnect the project runtime and refresh the external client's tool catalog; ChatGPT custom apps may require a tool refresh or republishing to expose new tools. See the exact tested combinations and external acceptance procedures in [PLAN_MCP_READING.md](../PLAN_MCP_READING.md) and [PLAN_MCP_PROGRESS.md](../PLAN_MCP_PROGRESS.md).
+Automated package, fake-backend, disposable real-OpenCode and local tunnel-control-plane tests cover twenty core tools, including project model policy reads and exact runtime recommendations, native title rename/readback and validation, scoped archive and opted-in archived reading, metadata-only progress, tail-to-forward continuation, complete original-text reconstruction, deep result searches, revision/reference handling, attachment upload/model capability checks, actual provider image input, guard-bound operator override/replay and audit receipts, creation without a model call, runtime changes and validation, independent session completions, bounded waits, journal restart recovery, pending input and no automatic resend on uncertainty. Real macOS/Lima and actual ChatGPT text/Voice acceptance still require target-host acceptance. A client must be able to submit file bytes to `upload_attachment` as Base64; a client that only exposes its local file in conversation context cannot use this upload flow. After upgrading, reconnect the project runtime and refresh the external client's tool catalog; ChatGPT custom apps may require a tool refresh or republishing to expose new tools. See the exact tested combinations and external acceptance procedures in [PLAN_MCP_READING.md](../PLAN_MCP_READING.md) and [PLAN_MCP_PROGRESS.md](../PLAN_MCP_PROGRESS.md).

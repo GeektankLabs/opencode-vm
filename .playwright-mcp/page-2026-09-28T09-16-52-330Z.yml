@@ -1,0 +1,8 @@
+- generic [ref=f1e1]:
+  - main [ref=f1e2]: Workspace
+  - generic [active]:
+    - generic:
+      - menu "Project apps" [ref=f1e11]:
+        - menuitem "Editor" [ref=f1e12] [cursor=pointer]:
+          - generic [aria-hidden] [ref=f1e18]: ↗
+      - button "Project apps" [expanded] [ref=f1e3] [cursor=pointer]

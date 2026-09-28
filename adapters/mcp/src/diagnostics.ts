@@ -6,6 +6,7 @@ const tools = new Set([
   "list_sessions",
   "create_session",
   "archive_session",
+  "rename_session",
   "get_session",
   "get_session_status",
   "get_session_history",
@@ -20,6 +21,14 @@ const tools = new Set([
   "get_message",
   "read_message_content",
   "get_session_progress",
+  "list_project_tasks",
+  "get_project_task",
+  "create_project_task",
+  "update_project_task",
+  "move_project_task",
+  "add_task_comment",
+  "link_task_to_session",
+  "transfer_project_task",
 ]);
 
 /** Local operator diagnostics only. Never serialize a request/result body. */

@@ -72,6 +72,11 @@ test("generated OpenCode client uses the expected scoped routes and 204 admissio
       });
     if (path === "/session" && request.method === "POST")
       return json(response, { id: "ses_wire" });
+    if (path === "/session/ses_wire" && request.method === "PATCH") {
+      if (typeof (body as { title?: unknown } | undefined)?.title === "string")
+        exposed.title = (body as { title: string }).title;
+      return json(response, exposed);
+    }
     if (path === "/project/current") {
       return json(response, {
         id: "project-id",
@@ -151,7 +156,18 @@ test("generated OpenCode client uses the expected scoped routes and 204 admissio
     await gateway.compatibilityCheck();
     const created = await gateway.createSession("Wire session");
     assert.equal(created.session_id, "ses_wire");
+    const renamed = await gateway.renameSession("ses_wire", "Renamed wire session");
+    assert.deepEqual(renamed, {
+      session_id: "ses_wire",
+      title: "Renamed wire session",
+      state: "renamed",
+    });
+    assert.equal(
+      (await gateway.getSessionDetails("ses_wire")).title,
+      "Renamed wire session",
+    );
     assert.equal((await gateway.listSessions()).sessions[0]?.id, "ses_wire");
+    assert.equal((await gateway.listSessions()).sessions[0]?.title, "Renamed wire session");
     assert.equal(
       (await gateway.getSessionHistory("ses_wire")).messages[0]?.text,
       "existing",
@@ -177,6 +193,19 @@ test("generated OpenCode client uses the expected scoped routes and 204 admissio
       agent: "build",
       model: { providerID: "provider", id: "model", variant: "high" },
     });
+    const titleUpdate = requests.find(
+      (request) =>
+        request.method === "PATCH" &&
+        new URL(request.url, "http://127.0.0.1").pathname ===
+          "/session/ses_wire",
+    );
+    assert.deepEqual(titleUpdate?.body, { title: "Renamed wire session" });
+    assert.equal(
+      new URL(titleUpdate!.url, "http://127.0.0.1").searchParams.get(
+        "directory",
+      ),
+      project,
+    );
     assert.ok(requests.length > 8);
     assert.ok(
       requests.every(

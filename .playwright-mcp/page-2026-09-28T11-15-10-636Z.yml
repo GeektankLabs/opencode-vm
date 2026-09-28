@@ -1,0 +1,42 @@
+- generic [ref=f1e1]:
+  - generic [ref=f1e3]:
+    - banner [ref=f1e4]:
+      - generic [ref=f1e5]:
+        - button "Home" [ref=f1e7]
+        - generic [ref=f1e14]:
+          - link "New session" [ref=f1e15]:
+            - /url: /new-session?draftId=aa4f4e35-aba8-4047-8bcd-65bc6ddabaaa
+          - button "Close tab" [ref=f1e21]
+        - button "New session" [ref=f1e25]
+    - main [ref=f1e28]:
+      - generic [ref=f1e32]:
+        - generic [ref=f1e47]:
+          - generic [ref=f1e50]:
+            - generic [ref=f1e51]:
+              - textbox "Prompt" [active] [ref=f1e52]
+              - generic: Ask anything, / for commands, @ for context...
+            - generic [ref=f1e53]:
+              - generic [ref=f1e54]:
+                - button "Add images and files" [ref=f1e56]
+                - button "Choose agent" [ref=f1e60] [cursor=pointer]:
+                  - generic [ref=f1e61]: build
+                - button "Big Pickle" [ref=f1e66] [cursor=pointer]
+              - button "Send" [disabled] [ref=f1e73]
+          - generic [ref=f1e77]:
+            - button "p project" [ref=f1e78]:
+              - generic [ref=f1e79]: p
+              - generic [ref=f1e81]: project
+            - generic [ref=f1e85]: /
+            - generic [ref=f1e86]: No Git
+        - generic [ref=f1e92]:
+          - button "Connect to 75+ providers to use other models, including Claude, GPT, Gemini, etc" [ref=f1e93]
+          - button "Dismiss" [ref=f1e99]
+    - generic "Introducing Tabs. Organize your work and active sessions with tabs" [ref=f1e102]:
+      - button "Dismiss Tabs information" [ref=f1e103]
+      - button [ref=f1e106] [cursor=pointer]:
+        - generic [ref=f1e108]:
+          - paragraph [ref=f1e109]: Introducing Tabs
+          - paragraph [ref=f1e110]: Organize your work and active sessions with tabs
+  - button "Project apps" [ref=f1e111] [cursor=pointer]
+  - generic:
+    - region "Notifications alt+T"

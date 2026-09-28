@@ -2,6 +2,20 @@
 
 These are review cases for the instructions, not permission to submit live tasks. They are synthetic behavioral checks; packaging validation does not establish model behavior or backend correctness.
 
+## Board classification and recovery
+
+| Scenario | Required behavior |
+|---|---|
+| User explores a hypothetical option | No board create or proposal; ordinary read/discussion only. |
+| New finding belongs to an existing ticket | Search first; propose a concrete description extension and message link, re-read before the confirmed write; do not duplicate or silently overwrite. |
+| Independent workstream with multiple outcomes | Propose one Board Project and specific initial tickets, then create only the confirmed package; no per-item reapproval. |
+| Small persistent task, empty board | Propose Inbox/INBOX setup plus ticket; a declined offer has zero writes and is not repeatedly suggested. |
+| Existing default has another prefix or INBOX is taken | Preserve old identity and links; ask about the real conflict rather than renaming or choosing a prefix silently. |
+| Explicit request to reclassify a known Inbox task | Use the selected target and one UUID with `reclassify_project_task`, never the global/local transfer. On uncertainty read the journal state and reuse the exact UUID/fields; never interpret `transfer-pending` in Done as business completion. |
+| Agent session finishes, while business verification is open | Keep the ticket open; offer a status change only after reading evidence and the user's decision. |
+| Synthesis preview spans two Board Projects | Read the complete bounded board, preserve each source obligation, perform no creates/updates/moves/links. |
+| No project-board tool or incomplete scan | Explain coverage; do not infer no matches or invent a tool/ID. |
+
 ## Connector WRITE vs remote task scope (A–E)
 
 | Case | Required behavior |
@@ -48,8 +62,8 @@ These cases review instructions only; they do not authorize or perform live uplo
 | Exact task is already completed on first check | Retrieve it; do not insist on observing running first. |
 | Send is pending while a host approval is requested | Preserve the original call rather than sending again. |
 | `SESSION_BUSY` accompanies idle | Describe and inspect the exact conflict; do not bypass or invent a successful resend. |
-| `SUBMISSION_UNRESOLVED` names an older receipt while backend is idle | Explain that the new request was rejected; inspect the old task and do not infer terminal completion from idle. |
-| An idle unresolved receipt has no later terminal evidence and no override tool is exposed | Keep the normal guard; do not retry, abort or move the same task to another session. |
+| A connector actually returns `SUBMISSION_UNRESOLVED` naming an older receipt | Explain that the new request was rejected; inspect the old task and do not infer terminal completion from idle. |
+| Current opencode-vm 0.1.12 has an old unresolved receipt, but the session is technically idle | An ordinary authorized follow-up may proceed without a semantic guard override. Retain uncertainty about the older request separately. |
 | `supersede_unresolved_submission` is available but fresh approval for the exact current `guarded_message_id` was not given | Explain the receipt/risk and do not invoke the override, even if the original task was already authorized. |
 | User explicitly approves superseding the exact current guard | Invoke the combined override-and-send operation once with a new UUID and the approved message; verify its returned new `message_id`, and do not send the same message again. |
 | Override request is uncertain or repeated | Inspect/reuse the same request UUID and exact fields; never generate a new key or duplicate the prompt. |
@@ -133,15 +147,31 @@ No live sends are authorized by this file.
 
 ## Clarification and archive cases
 
+Profile behavior review: a pure status/result read performs no runtime change; a new architecture task uses `deep`, ordinary implementation `standard`, and an authorized known-plan test `execution` when the selected connector supports profile reads. Explicit user provider/model/variant or profile overrides project classification. An idle session with a different available runtime is switched once and read back before the single authorized send; a matching runtime is left untouched. A busy session or pending input is never switched. An unavailable configured mapping, incomplete catalog, failed or uncertain update halts submission without silent substitution. A connection without policy tools reports the capability as unsupported and uses its existing supported runtime behavior, not an invented project choice.
+
 | Case | Required behavior |
 |---|---|
 | Main session is busy with another job; user asks to clarify one plan-file detail | Offer or create a new `[KLÄRUNG]` session, with the original title/ID in a focused handoff; never send the same blocked job twice. |
 | A detail suggests a useful but unrequested investigation | Proactively offer it once during the interaction; no unsolicited background session creation. |
-| Catalog offers `gpt-6-luna` and newer Luna with `xhigh` | Choose the newest Luna from the live catalog; set and verify `openai`/model/`xhigh` before sending. |
-| Newest Luna lacks `xhigh` or order/capability is uncertain | Stop before sending; do not silently use an older Luna or another variant. |
+| Project clarification profile is configured and available | Select its exact provider/model/variant and verify after an idle runtime switch before sending. |
+| Configured profile variant disappears or catalog is incomplete | Stop before sending; do not substitute another model or variant. |
 | Creation or runtime update returns an uncertain result | Inspect exact session/settings; do not retry creation or send the task blindly. |
 | Clarification yields a design question | Stop expanding the clarification; ask whether to wait for the main workstream or create a named concept branch linking both source sessions. |
 | Clarification is terminal while main workstream remains busy | Read the full answer, keep handback pending and visible; no claimed delivery into the main session. |
 | Clarification is done but archive is not requested or unavailable | Mark `CLOSED` only after proper return; never claim server archive. |
 | User requests archive after return | Archive once if available, verify result and preserve IDs; archived content remains available by explicit opted-in reads. |
 | MCP/skill improvement is noticed while doing subject work | Record a future change request, not an automatic product edit; prepare a programmer brief only when requested. |
+
+## Project-board and remainder-preview cases
+
+| Case | Required behavior |
+|---|---|
+| The user supplies a stable board `task_id` | Read that task directly; do not search by guessed title or create another. |
+| A follow-up is the same outcome as an existing card | Search first and reuse the card; do not create a card per agent step, review or continuation. |
+| Search reports `TASK_SEARCH_INCOMPLETE` | State that existence/absence is unknown; no "nothing found" or new duplicate based on that attempt. |
+| Session ID is known but task ID is not | Use supported `list_project_tasks(session_id=...)`; keep connector/project identity attached. |
+| One card has several sessions or two messages from one session | Keep all provided links distinct; a completed message does not automatically mean the card is Done. |
+| A card has `updated_at` but no start timestamp | Do not calculate work-item age or cycle time from the last edit. |
+| User asks what remains from seven fragmented cards | Read the relevant originals, map each known open obligation to a proposed successor, and show unknown/partial coverage; perform no task mutation for the preview. |
+| A result or search page is missing during synthesis | Do not assert exhaustive coverage, completion, or safe dropping of work. |
+| Board tools are absent on the selected connection | Continue ordinary session orchestration; explain that board lookup and deduplication were not verified. |

@@ -60,6 +60,15 @@ class ReleaseMetadataTest(unittest.TestCase):
                 result, output = self.run_metadata(ref_type=ref_type, ref_name=ref_name)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn(f"release_tag=v{VERSION}\n", output)
+                self.assertIn("hub_asset=opencode-vm-hub-1.tar\n", output)
+
+    def test_stale_hub_asset_tag_is_rejected(self):
+        result, output = self.run_metadata({
+            "opencode-vm.sh": [(f'HUB_ASSET_TAG="v{VERSION}"', 'HUB_ASSET_TAG="v0.0.0"')],
+        })
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("HUB_ASSET_TAG must match OCVM_VERSION", result.stderr)
+        self.assertEqual(output, "")
 
     def test_stale_adapter_tag_explains_mismatch(self):
         result, output = self.run_metadata({
@@ -88,7 +97,7 @@ class ReleaseMetadataTest(unittest.TestCase):
 
         result, output = self.run_metadata({
             "adapters/mcp/src/types.ts": [
-                ('export const ADAPTER_VERSION = "0.1.12";',
+                ('export const ADAPTER_VERSION = "0.1.16";',
                  'export const ADAPTER_VERSION = "0.0.0";')
             ],
         })

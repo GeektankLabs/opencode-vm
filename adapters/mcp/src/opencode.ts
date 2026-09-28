@@ -52,6 +52,7 @@ import type {
   ToolObservation,
   AdmissionState,
   ArchiveSessionResult,
+  RenameSessionResult,
   SubmissionGuardOverrideInput,
   SubmissionGuardOverrideResult,
   SubmissionGuardSnapshot,
@@ -124,6 +125,10 @@ export interface SessionGateway {
     includeArchived?: boolean,
   ): Promise<TaskResult>;
   archiveSession(sessionId: string): Promise<ArchiveSessionResult>;
+  renameSession(
+    sessionId: string,
+    title: string,
+  ): Promise<RenameSessionResult>;
   getSessionRuntimeOptions(sessionId?: string): Promise<RuntimeOptions>;
   updateSessionRuntime(
     sessionId: string,
@@ -499,6 +504,71 @@ export class OpenCodeGateway implements SessionGateway {
         throw new AdapterError(
           "ARCHIVE_UNCERTAIN",
           "Archive could not be confirmed. Inspect the session before another attempt; do not retry automatically.",
+        );
+      }
+    } finally {
+      this.submissionLocks.delete(sessionId);
+    }
+  }
+
+  async renameSession(
+    sessionId: string,
+    title: string,
+  ): Promise<RenameSessionResult> {
+    if (
+      typeof sessionId !== "string" ||
+      !sessionId ||
+      sessionId.length > 256 ||
+      /[\s\x00-\x1f\x7f]/u.test(sessionId) ||
+      typeof title !== "string" ||
+      title.length < 1 ||
+      title.length > 160 ||
+      /[\x00-\x1f\x7f-\x9f]/u.test(title) ||
+      !title.trim()
+    ) {
+      throw new AdapterError(
+        "INVALID_ARGUMENT",
+        "session_id must be valid and title must contain 1 to 160 characters without control characters.",
+      );
+    }
+    const name = title.trim();
+    if (this.submissionLocks.has(sessionId))
+      throw new AdapterError(
+        "SESSION_BUSY",
+        "The session has an MCP write in progress.",
+        undefined,
+        "write_in_progress",
+      );
+    this.submissionLocks.add(sessionId);
+    this.collecting.delete(sessionId);
+    try {
+      // External OpenCode clients do not share the adapter's per-session lock,
+      // so check exposure and backend idleness immediately before the update.
+      await this.requireExposedSession(sessionId);
+      await this.requireIdle(sessionId);
+      try {
+        const response = await this.client.session.update(
+          {
+            sessionID: sessionId,
+            directory: this.runtime.project,
+            title: name,
+          },
+          { signal: this.deadline(), throwOnError: false },
+        );
+        if (response.response?.status === 404) throw sessionNotFound();
+        if (response.response && !response.response.ok)
+          throw new Error("OpenCode rejected the title update.");
+        const verified = await this.requireExposedSession(sessionId);
+        if (verified.title !== name)
+          throw new Error("Renamed title was not persisted.");
+        return { session_id: sessionId, title: verified.title, state: "renamed" };
+      } catch (error) {
+        if (error instanceof AdapterError && error.code === "SESSION_NOT_FOUND")
+          throw error;
+        if (httpStatus(error) === 404) throw sessionNotFound();
+        throw new AdapterError(
+          "RENAME_UNCERTAIN",
+          "The title update could not be confirmed. Inspect get_session before deciding whether to retry.",
         );
       }
     } finally {

@@ -343,6 +343,18 @@ try {
     }),
   );
   assert.ok(listed.sessions.some((item) => item.id === sessionId));
+  const renamedTitle = "MCP integration renamed session";
+  const renamed = structured(
+    await mcpClient.callTool({
+      name: "rename_session",
+      arguments: { session_id: sessionId, title: renamedTitle },
+    }),
+  );
+  assert.deepEqual(renamed, {
+    session_id: sessionId,
+    title: renamedTitle,
+    state: "renamed",
+  });
   const details = structured(
     await mcpClient.callTool({
       name: "get_session",
@@ -350,6 +362,21 @@ try {
     }),
   );
   assert.equal(details.id, sessionId);
+  assert.equal(details.title, renamedTitle);
+  assert.equal(
+    structured(
+      await mcpClient.callTool({ name: "list_sessions", arguments: {} }),
+    ).sessions.find((item) => item.id === sessionId)?.title,
+    renamedTitle,
+  );
+  const missingRename = await mcpClient.callTool({
+    name: "rename_session",
+    arguments: { session_id: "ses_missing_integration_fixture", title: "Missing" },
+  });
+  assert.equal(
+    missingRename._meta["opencode-vm/error"].code,
+    "SESSION_NOT_FOUND",
+  );
 
   const options = structured(
     await mcpClient.callTool({
@@ -1266,6 +1293,14 @@ try {
     }),
   );
   assert.equal(archiveResult.state, "archived");
+  const archivedRename = await mcpClient.callTool({
+    name: "rename_session",
+    arguments: { session_id: reportSession, title: "Must stay archived" },
+  });
+  assert.equal(
+    archivedRename._meta["opencode-vm/error"].code,
+    "SESSION_NOT_FOUND",
+  );
   assert.equal(
     (await backend.v2.session.get({ sessionID: reportSession })).data?.data
       ?.time.archived,

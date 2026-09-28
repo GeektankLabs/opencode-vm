@@ -1,7 +1,7 @@
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { dirname, isAbsolute } from "node:path";
 
-export const ADAPTER_VERSION = "0.1.12";
+export const ADAPTER_VERSION = "0.1.16";
 export const MCP_TRANSPORT = "streamable-http-stateless";
 
 export type RuntimeDescriptor = {
@@ -380,6 +380,12 @@ export type ArchiveSessionResult = {
   archived_at: number;
 };
 
+export type RenameSessionResult = {
+  session_id: string;
+  title: string;
+  state: "renamed";
+};
+
 export const ADAPTER_ERROR_CODES = [
   "INVALID_ARGUMENT",
   "SESSION_NOT_FOUND",
@@ -392,6 +398,7 @@ export const ADAPTER_ERROR_CODES = [
   "SUBMISSION_GUARD_CONFLICT",
   "CREATION_UNCERTAIN",
   "ARCHIVE_UNCERTAIN",
+  "RENAME_UNCERTAIN",
   "INVALID_AGENT",
   "INVALID_PROVIDER",
   "INVALID_MODEL",
@@ -416,7 +423,15 @@ export const ADAPTER_ERROR_CODES = [
   "TASK_NOT_FOUND",
   "TASKBOARD_UNAVAILABLE",
   "TASKBOARD_ERROR",
+  "TASKBOARD_METADATA_ERROR",
+  "TASK_SEARCH_INCOMPLETE",
   "TASK_SCOPE_UNAVAILABLE",
+  "BOARD_PROJECT_NOT_FOUND",
+  "BOARD_PROJECT_CONFLICT",
+  "BOARD_PROJECT_SETUP_REQUIRED",
+  "TASK_TRANSFER_UNSUPPORTED",
+  "TASK_TRANSFER_UNRESOLVED",
+  "TASK_TRANSFER_CONFLICT",
 ] as const;
 
 export type AdapterErrorCode = (typeof ADAPTER_ERROR_CODES)[number];

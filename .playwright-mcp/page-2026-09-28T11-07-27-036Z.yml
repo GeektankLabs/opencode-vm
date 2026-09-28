@@ -1,0 +1,33 @@
+- generic [ref=f4e1]:
+  - generic [ref=f4e3]:
+    - banner [ref=f4e4]:
+      - generic [ref=f4e5]:
+        - button "Home" [ref=f4e7]
+        - generic [ref=f4e14]:
+          - link "New session" [ref=f4e15]:
+            - /url: /new-session?draftId=31991f8e-de59-4cb7-a9f0-ff4082eda3ab
+          - button "Close tab" [ref=f4e21]
+        - button "New session" [ref=f4e25]
+    - main [ref=f4e28]:
+      - generic [ref=f4e47]:
+        - generic [ref=f4e50]:
+          - generic [ref=f4e51]:
+            - textbox "Prompt" [active] [ref=f4e52]
+            - generic: Ask anything, / for commands, @ for context...
+          - generic [ref=f4e53]:
+            - button "Add images and files" [ref=f4e56]
+            - button "Send" [disabled] [ref=f4e59]
+        - generic [ref=f4e63]:
+          - button "p project" [ref=f4e64]:
+            - generic [ref=f4e65]: p
+            - generic [ref=f4e67]: project
+          - generic [ref=f4e71]: /
+          - generic [ref=f4e72]: No Git
+    - generic "Introducing Tabs. Organize your work and active sessions with tabs" [ref=f4e78]:
+      - button "Dismiss Tabs information" [ref=f4e79]
+      - button [ref=f4e82] [cursor=pointer]:
+        - generic [ref=f4e84]:
+          - paragraph [ref=f4e85]: Introducing Tabs
+          - paragraph [ref=f4e86]: Organize your work and active sessions with tabs
+  - generic:
+    - region "Notifications alt+T"
