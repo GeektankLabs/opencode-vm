@@ -34,7 +34,7 @@ OPENLIVE_PREVIOUS_COMMAND="$OPENLIVE_DIR/previous-command"
 OPENLIVE_AUTH_MARKER="__opencode_vm_openlive__"
 OPENLIVE_LOCK_PATH=""
 OPENLIVE_ADAPTER_VERSION="0.1.6"
-OPENLIVE_ADAPTER_TAG="v0.6.0"
+OPENLIVE_ADAPTER_TAG="v0.6.1"
 OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.6.tar"
 OPENLIVE_ADAPTER_SHA256="06f461873b8b299de98220aa577824eb9807672b26cb069541acebcdd2d973b9"
 OPENLIVE_ACP_SDK_VERSION="1.2.1"
@@ -45,14 +45,14 @@ OPENLIVE_MANAGER_PROMPT="You manage an OpenLive voice call. The voice_sessions t
 MCP_CONNECTOR_DIR="$SHARE_ROOT/mcp-connector"
 MCP_ADAPTER_CACHE_ROOT="$MCP_CONNECTOR_DIR/adapters"
 MCP_ADAPTER_VERSION="0.1.16"
-MCP_ADAPTER_TAG="v0.6.0"
+MCP_ADAPTER_TAG="v0.6.1"
 MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.16.tar"
 MCP_ADAPTER_SHA256="a92c88fd1e418b3cb2b9becd4a9445e8d62a0a9c46abe96765867f38cf66cbe5"
 MCP_SDK_VERSION="1.30.1"
 MCP_OPENCODE_SDK_VERSION="1.18.21"
 MCP_TESTED_PROTOCOL_VERSION="2025-11-25"
 MCP_TUNNEL_DIR="$SHARE_ROOT/mcp-tunnel/openai"
-HUB_ASSET_TAG="v0.6.0"
+HUB_ASSET_TAG="v0.6.1"
 HUB_ASSET_FILENAME="opencode-vm-hub-1.tar"
 HUB_ASSET_SHA256="1c20384f46c0b3553996933e7a1bbc92d610ff0bcb8b98f7d74357491a7f3957"
 
@@ -61,7 +61,8 @@ HUB_ASSET_SHA256="1c20384f46c0b3553996933e7a1bbc92d610ff0bcb8b98f7d74357491a7f39
 # project-state dir, applied at clone time. Keeping the override off the base VM
 # means one heavyweight project can't inflate every other project's session VM.
 # provision_base() uses these same constants, so the base VM and the "default"
-# column of 'opencode-vm ram|cpu show' can never drift apart.
+# column of 'opencode-vm config show' can never drift apart. Disk inherits
+# the base VM's actual template size instead of a separate hard-coded value.
 DEFAULT_VM_MEMORY_GIB=8
 MIN_VM_MEMORY_GIB=2
 DEFAULT_VM_CPUS=6
@@ -166,7 +167,7 @@ TASKBOARD_ARM64_SHA256="3749fb985f544fdb6788ba1dff69761e599ff82b3fe86d39ca54307c
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.6.0"
+OCVM_VERSION="0.6.1"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -4106,7 +4107,7 @@ ocvm_notify_if_new_version_available() {
 }
 
 # ---------------------------------------------------------------------------
-# Per-project VM sizing (RAM + CPUs)
+# Per-project VM sizing (RAM + CPUs + disk)
 #
 # The base VM is provisioned once at DEFAULT_VM_MEMORY_GIB / DEFAULT_VM_CPUS and
 # shared by every project. A project that needs a different size records it in
@@ -4161,6 +4162,15 @@ _vm_instance_cpus() {
   echo "$n"
 }
 
+# Lima reports disk capacity in bytes. Round up: a fractional GiB must never
+# be mistaken for a smaller disk when checking whether a request would shrink.
+_vm_instance_disk_gib() {
+  local bytes
+  bytes="$(limactl list "$1" --format '{{.Disk}}' 2>/dev/null | head -1)"
+  [[ "$bytes" =~ ^[0-9]+$ ]] && (( bytes > 0 )) || return 1
+  echo $(( (bytes + 1073741823) / 1073741824 ))
+}
+
 # Load the project's overrides into VM_MEMORY_GIB / VM_CPUS. Empty means "no
 # override — inherit the base VM's size". A stored value that no longer
 # validates (hand-edited, or the machine shrank) is reported and dropped rather
@@ -4169,6 +4179,7 @@ _vm_instance_cpus() {
 vmcfg_load() {
   VM_MEMORY_GIB=""
   VM_CPUS=""
+  VM_DISK_GIB=""
   local f
   f="$(project_vm_env "$1")"
   [[ -f "$f" ]] || return 0
@@ -4184,6 +4195,10 @@ vmcfg_load() {
     echo "[vmsize]       falling back to the default (${DEFAULT_VM_CPUS} CPUs). Fix with 'opencode-vm cpu <N>'." >&2
     VM_CPUS=""
   fi
+  if [[ -n "${VM_DISK_GIB:-}" ]] && ! _vm_size_valid "$VM_DISK_GIB" 1 0; then
+    echo "[vmsize] WARN: ignoring invalid VM_DISK_GIB='$VM_DISK_GIB' in $f" >&2
+    VM_DISK_GIB=""
+  fi
 }
 
 # Persist the current VM_MEMORY_GIB / VM_CPUS globals for project $1. With both
@@ -4191,7 +4206,7 @@ vmcfg_load() {
 vmcfg_save() {
   local proj="$1" f
   f="$(project_vm_env "$proj")"
-  if [[ -z "${VM_MEMORY_GIB:-}" && -z "${VM_CPUS:-}" ]]; then
+  if [[ -z "${VM_MEMORY_GIB:-}" && -z "${VM_CPUS:-}" && -z "${VM_DISK_GIB:-}" ]]; then
     rm -f "$f"
     return 0
   fi
@@ -4200,12 +4215,15 @@ vmcfg_save() {
     echo "# opencode-vm per-project VM sizing"
     echo "# Project: $proj"
     echo "# Applied when this project's session VM is cloned from the base VM."
-    echo "# Manage with: opencode-vm ram <GiB> | opencode-vm cpu <N> | ... default"
+    echo "# Manage with: opencode-vm config {ram|cpu|disk} <value|default>"
     if [[ -n "${VM_MEMORY_GIB:-}" ]]; then
       echo "VM_MEMORY_GIB=\"$VM_MEMORY_GIB\""
     fi
     if [[ -n "${VM_CPUS:-}" ]]; then
       echo "VM_CPUS=\"$VM_CPUS\""
+    fi
+    if [[ -n "${VM_DISK_GIB:-}" ]]; then
+      echo "VM_DISK_GIB=\"$VM_DISK_GIB\""
     fi
   } > "$f"
 }
@@ -4221,9 +4239,12 @@ vmcfg_print_override_notice() {
   if [[ -n "${VM_CPUS:-}" ]]; then
     what="${what:+$what, }${VM_CPUS} CPUs"
   fi
+  if [[ -n "${VM_DISK_GIB:-}" ]]; then
+    what="${what:+$what, }${VM_DISK_GIB} GiB disk"
+  fi
   [[ -n "$what" ]] || return 0
-  echo "$prefix Sizing override for this project: ${what} (defaults: ${DEFAULT_VM_MEMORY_GIB} GiB, ${DEFAULT_VM_CPUS} CPUs)"
-  echo "$prefix   change: 'opencode-vm ram <GiB>' / 'opencode-vm cpu <N>'   reset: append 'default'"
+  echo "$prefix Sizing override for this project: ${what} (RAM/CPU defaults: ${DEFAULT_VM_MEMORY_GIB} GiB, ${DEFAULT_VM_CPUS} CPUs; disk inherits base VM)"
+  echo "$prefix   change/reset: 'opencode-vm config {ram|cpu|disk} <value|default>'"
 }
 
 # Shared status table for 'ram show' and 'cpu show'. Always prints both
@@ -4234,7 +4255,7 @@ vmcfg_show() {
   local proj="$1"
   vmcfg_load "$proj"
 
-  local host_mem host_cpu host_mem_s host_cpu_s proj_mem_s proj_cpu_s
+  local host_mem host_cpu host_mem_s host_cpu_s proj_mem_s proj_cpu_s base_disk proj_disk_s base_disk_s
   host_mem="$(_host_mem_gib)"
   host_cpu="$(_host_cpus)"
   if (( host_mem > 0 )); then host_mem_s="${host_mem} GiB"; else host_mem_s="unknown"; fi
@@ -4250,6 +4271,12 @@ vmcfg_show() {
   else
     proj_cpu_s="${DEFAULT_VM_CPUS}"
   fi
+  base_disk="$(_vm_instance_disk_gib "$BASE_NAME" 2>/dev/null || true)"
+  base_disk_s="${base_disk:-unknown}"
+  [[ -z "$base_disk" ]] || base_disk_s+=" GiB"
+  proj_disk_s="${VM_DISK_GIB:-${base_disk:-unknown}}"
+  [[ "$proj_disk_s" == unknown ]] || proj_disk_s+=" GiB"
+  [[ -z "${VM_DISK_GIB:-}" ]] || proj_disk_s+=" (set)"
 
   echo "Project:  $proj"
   echo "Setting:  $(project_vm_env "$proj")"
@@ -4257,31 +4284,44 @@ vmcfg_show() {
   printf "  %-10s %-16s %-10s %s\n" "Resource" "This project" "Default" "Host total"
   printf "  %-10s %-16s %-10s %s\n" "RAM" "$proj_mem_s" "${DEFAULT_VM_MEMORY_GIB} GiB" "$host_mem_s"
   printf "  %-10s %-16s %-10s %s\n" "CPUs" "$proj_cpu_s" "$DEFAULT_VM_CPUS" "$host_cpu_s"
+  printf "  %-10s %-16s %-10s %s\n" "Disk" "$proj_disk_s" "$base_disk_s" "—"
   echo
 
   # Report the live VM too: the settings only reach a session VM when that VM is
   # created or resumed, so a stale running VM would otherwise contradict the table.
-  local senv sess_mem sess_cpu
+  local senv sess_mem sess_cpu sess_disk sess_disk_s
   senv="$(session_env "$proj")"
   if [[ -f "$senv" ]]; then
     # shellcheck disable=SC1090
     source "$senv"
     sess_mem="$(_vm_instance_mem_gib "$SESS_NAME")"
     sess_cpu="$(_vm_instance_cpus "$SESS_NAME")"
+    sess_disk="$(_vm_instance_disk_gib "$SESS_NAME" 2>/dev/null || true)"
+    sess_disk_s="${sess_disk:-unknown}"
+    [[ -z "$sess_disk" ]] || sess_disk_s+=" GiB"
     if [[ -n "$sess_mem" || -n "$sess_cpu" ]]; then
-      echo "  Session VM $SESS_NAME: ${sess_mem:-?} GiB, ${sess_cpu:-?} CPUs"
+      echo "  Session VM $SESS_NAME: ${sess_mem:-?} GiB RAM, ${sess_cpu:-?} CPUs, ${sess_disk_s} disk"
       if [[ "${sess_mem:-}" != "${VM_MEMORY_GIB:-$DEFAULT_VM_MEMORY_GIB}" || "${sess_cpu:-}" != "${VM_CPUS:-$DEFAULT_VM_CPUS}" ]]; then
-        echo "    -> differs from the table above; applied on the next VM start."
+        echo "    -> RAM/CPU differ; applied on the next VM start."
       fi
       echo
     fi
   fi
+  if [[ -n "${VM_DISK_GIB:-}" && -n "${sess_disk:-}" && "$sess_disk" -lt "$VM_DISK_GIB" ]]; then
+    if is_vm_running "$SESS_NAME"; then
+      echo "  Disk pending: ${sess_disk} -> ${VM_DISK_GIB} GiB (stop the VM, then start/attach to grow)."
+    else
+      echo "  Disk pending: ${sess_disk} -> ${VM_DISK_GIB} GiB (start/attach the stopped VM to grow)."
+    fi
+  elif [[ -n "${sess_disk:-}" && -z "${VM_DISK_GIB:-}" && -n "$base_disk" && "$sess_disk" -gt "$base_disk" ]]; then
+    echo "  Existing disk remains ${sess_disk} GiB; default ${base_disk} GiB applies only to new VMs."
+  fi
 
-  echo "Set:    opencode-vm ram <GiB>        opencode-vm cpu <N>"
-  echo "Reset:  opencode-vm ram default      opencode-vm cpu default"
+  echo "Set:    opencode-vm config {ram|cpu|disk} <value>"
+  echo "Reset:  opencode-vm config {ram|cpu|disk} default"
 }
 
-# Shared implementation behind 'ram' and 'cpu'. $1 is the resource key; the rest
+# Shared implementation behind 'ram', 'cpu' and 'disk'. $1 is the resource key; the rest
 # are the user's arguments.
 _vmcfg_resource_cmd() {
   local res="$1"; shift
@@ -4302,6 +4342,10 @@ _vmcfg_resource_cmd() {
       var=VM_CPUS; def="$DEFAULT_VM_CPUS"; min="$MIN_VM_CPUS"
       host="$(_host_cpus)"; unit="CPUs"; noun="CPUs"; cmd="cpu"
       ;;
+    disk)
+      var=VM_DISK_GIB; def="$(_vm_instance_disk_gib "$BASE_NAME" 2>/dev/null || true)"
+      min=1; host=0; unit="GiB"; noun="disk"; cmd="disk"
+      ;;
     *)
       echo "[vmsize] Internal error: unknown resource '$res'" >&2
       return 1
@@ -4317,12 +4361,21 @@ _vmcfg_resource_cmd() {
       vmcfg_load "$proj"
       local cur="${!var}"
       if [[ -z "$cur" ]]; then
-        echo "[$cmd] No ${noun} override set for this project — already at the default (${def} ${unit})."
+        if [[ "$res" == disk ]]; then
+          echo "[disk] No disk override set; new VMs inherit the base VM disk. Existing larger disks are never shrunk."
+        else
+          echo "[$cmd] No ${noun} override set for this project — already at the default (${def} ${unit})."
+        fi
         return 0
       fi
       printf -v "$var" '%s' ""
       vmcfg_save "$proj"
-      echo "[$cmd] ${noun} override removed (was ${cur} ${unit}) — back to the default ${def} ${unit}."
+      if [[ "$res" == disk ]]; then
+        echo "[disk] Disk override removed (was ${cur} GiB); new VMs inherit the base VM disk (${def:-unknown} GiB)."
+        echo "[disk] Existing VM disks are never shrunk; this changes only future new clones."
+      else
+        echo "[$cmd] ${noun} override removed (was ${cur} ${unit}) — back to the default ${def} ${unit}."
+      fi
       _vmcfg_report_pending_restart "$proj"
       ;;
 
@@ -4340,6 +4393,8 @@ _vmcfg_resource_cmd() {
         if (( sub < min )); then
           if [[ "$res" == "ram" ]]; then
             echo "[$cmd] ${sub} ${unit} is below the ${min} ${unit} minimum — the VM needs headroom for Docker and the agent." >&2
+          elif [[ "$res" == disk ]]; then
+            echo "[disk] Disk must be at least 1 GiB." >&2
           else
             echo "[$cmd] ${sub} is below the ${min} CPU minimum." >&2
           fi
@@ -4349,13 +4404,43 @@ _vmcfg_resource_cmd() {
         return 2
       fi
       # Not an error — the host still has to run macOS — but worth flagging.
-      if (( host > 0 && sub * 4 > host * 3 )); then
+      if [[ "$res" != disk ]] && (( host > 0 && sub * 4 > host * 3 )); then
         echo "[$cmd] NOTE: ${sub} ${unit} is over 75% of the host's ${host} ${unit} — leave room for macOS." >&2
       fi
       vmcfg_load "$proj"
+      if [[ "$res" == disk ]]; then
+        local senv existing_disk base_disk instances
+        senv="$(session_env "$proj")"
+        if [[ -f "$senv" ]]; then
+          # shellcheck disable=SC1090
+          source "$senv"
+          if ! instances="$(limactl list -q 2>/dev/null)"; then
+            echo "[disk] Cannot list Lima VMs to check '$SESS_NAME'; configuration unchanged." >&2
+            return 1
+          fi
+          if grep -Fxq "$SESS_NAME" <<< "$instances"; then
+            existing_disk="$(_vm_instance_disk_gib "$SESS_NAME" 2>/dev/null || true)"
+            if [[ -z "$existing_disk" ]]; then
+              echo "[disk] Cannot read the current disk size of '$SESS_NAME'; configuration unchanged." >&2
+              return 1
+            fi
+            if (( sub < existing_disk )); then
+              echo "[disk] Refusing ${sub} GiB: VM '$SESS_NAME' already has ${existing_disk} GiB. Shrinking is not supported; configuration unchanged." >&2
+              return 2
+            fi
+          fi
+        fi
+        # A future VM is cloned from the base disk. Lima cannot shrink that
+        # disk while cloning, even when a smaller kept instance exists.
+        base_disk="$(_vm_instance_disk_gib "$BASE_NAME" 2>/dev/null || true)"
+        if [[ -n "$base_disk" ]] && (( sub < base_disk )); then
+          echo "[disk] Refusing ${sub} GiB: the base VM disk is ${base_disk} GiB; configuration unchanged." >&2
+          return 2
+        fi
+      fi
       printf -v "$var" '%s' "$sub"
       vmcfg_save "$proj"
-      echo "[$cmd] This project's session VM will use ${sub} ${unit} (default: ${def} ${unit})."
+      echo "[$cmd] This project's session VM will use ${sub} ${unit} (default: ${def:-base VM} ${unit})."
       echo "[$cmd]   stored in: $(project_vm_env "$proj")"
       echo "[$cmd]   reset with: opencode-vm ${cmd} default"
       _vmcfg_report_pending_restart "$proj"
@@ -4371,17 +4456,61 @@ cpu_cmd() {
   _vmcfg_resource_cmd cpu "$@"
 }
 
+# Existing provider/MCP dialogs use numbered choices and read from stdin; keep
+# the same convention here. Complete subcommands never ask a question.
+config_cmd() {
+  local resource="${1:-}" value="${2:-}" choice
+  if [[ -z "$resource" ]]; then
+    [[ -t 0 ]] || { echo "[config] Usage: opencode-vm config {show|ram|cpu|disk} [<value>|default]" >&2; return 2; }
+    vmcfg_show "$(pwd)"
+    echo "[config] Choose a resource:"
+    echo "  1) RAM    2) CPU    3) Disk    4) show    q) Cancel"
+    while true; do
+      read -r -p "Config [1-4/ram/cpu/disk/show/q]: " choice || return 3
+      case "$choice" in
+        1|ram) resource=ram; break ;;
+        2|cpu) resource=cpu; break ;;
+        3|disk) resource=disk; break ;;
+        4|show) resource=show; break ;;
+        q|Q|0) echo "[config] Cancelled."; return 0 ;;
+        *) echo "[config] Choose RAM, CPU, Disk, show or q." >&2 ;;
+      esac
+    done
+  fi
+  case "$resource" in
+    show) [[ $# -le 1 ]] || { echo "[config] show takes no value." >&2; return 2; }; need limactl; vmcfg_show "$(pwd)"; return ;;
+    -h|--help|help) echo "Usage: opencode-vm config {show|ram|cpu|disk} [<value>|default]"; return ;;
+    ram|cpu|disk) ;;
+    *) echo "[config] Unknown resource '$resource'. Use show, ram, cpu or disk." >&2; return 2 ;;
+  esac
+  [[ $# -le 2 ]] || { echo "[config] Too many arguments." >&2; return 2; }
+  if [[ -z "$value" ]]; then
+    [[ -t 0 ]] || { echo "[config] Usage: opencode-vm config $resource <value|default>" >&2; return 2; }
+    vmcfg_show "$(pwd)"
+    echo "[config] $resource: enter a whole number (GiB for RAM/Disk, count for CPU) or 'default'."
+    if [[ "$resource" == disk ]]; then
+      echo "[config] Disk grows on the next stopped-VM start; default never shrinks an existing disk."
+    else
+      echo "[config] RAM/CPU changes take effect on clone or stopped-VM start."
+    fi
+    read -r -p "New $resource value [number/default, q to cancel]: " value || return 3
+    [[ "$value" != q && "$value" != Q ]] || { echo "[config] Cancelled."; return 0; }
+  fi
+  _vmcfg_resource_cmd "$resource" "$value"
+}
+
 # After a setting change, say whether an existing session VM still runs at the
 # old size and what it takes to pick the new one up. Expects VM_MEMORY_GIB /
-# VM_CPUS to already hold the new values.
+# VM_CPUS / VM_DISK_GIB to already hold the new values.
 _vmcfg_report_pending_restart() {
-  local proj="$1" senv sess_mem sess_cpu want_mem want_cpu drift=""
+  local proj="$1" senv sess_mem sess_cpu sess_disk want_mem want_cpu drift=""
   senv="$(session_env "$proj")"
   [[ -f "$senv" ]] || return 0
   # shellcheck disable=SC1090
   source "$senv"
   sess_mem="$(_vm_instance_mem_gib "$SESS_NAME")"
   sess_cpu="$(_vm_instance_cpus "$SESS_NAME")"
+  sess_disk="$(_vm_instance_disk_gib "$SESS_NAME" 2>/dev/null || true)"
   want_mem="$(_effective_vm_mem_gib)"
   want_cpu="$(_effective_vm_cpus)"
   if [[ -n "$sess_mem" && "$sess_mem" != "$want_mem" ]]; then
@@ -4389,6 +4518,9 @@ _vmcfg_report_pending_restart() {
   fi
   if [[ -n "$sess_cpu" && "$sess_cpu" != "$want_cpu" ]]; then
     drift="${drift:+$drift, }${sess_cpu} -> ${want_cpu} CPUs"
+  fi
+  if [[ -n "${VM_DISK_GIB:-}" && -n "$sess_disk" ]] && (( sess_disk < VM_DISK_GIB )); then
+    drift="${drift:+$drift, }disk ${sess_disk} -> ${VM_DISK_GIB} GiB"
   fi
   [[ -n "$drift" ]] || return 0
   if is_vm_running "$SESS_NAME"; then
@@ -4428,17 +4560,28 @@ _effective_vm_cpus() {
 # lines of the instance's lima.yaml. Non-fatal: a failed resize keeps the old
 # size rather than blocking the session.
 _apply_vm_sizing_to_stopped() {
-  local vm="$1" prefix="${2:-[start]}" want_mem want_cpu cur_mem cur_cpu what=""
+  local vm="$1" prefix="${2:-[start]}" want_mem want_cpu cur_mem cur_cpu cur_disk what=""
+  local -a edit_args
+  edit_args=()
   want_mem="$(_effective_vm_mem_gib)"
   want_cpu="$(_effective_vm_cpus)"
   cur_mem="$(_vm_instance_mem_gib "$vm")"
   cur_cpu="$(_vm_instance_cpus "$vm")"
+  if [[ -n "${VM_DISK_GIB:-}" ]]; then
+    cur_disk="$(_vm_instance_disk_gib "$vm" 2>/dev/null || true)"
+    if [[ -z "$cur_disk" ]]; then
+      echo "$prefix WARN: cannot read disk size of '$vm'; refusing disk edit." >&2
+    elif (( VM_DISK_GIB > cur_disk )); then
+      edit_args+=( --disk "$VM_DISK_GIB" )
+      what="${what:+$what, }disk ${cur_disk} -> ${VM_DISK_GIB} GiB"
+    elif (( VM_DISK_GIB < cur_disk )); then
+      echo "$prefix WARN: configured disk ${VM_DISK_GIB} GiB is below existing ${cur_disk} GiB; disk will not shrink." >&2
+    fi
+  fi
 
-  local -a edit_args
-  edit_args=()
   if [[ -n "$cur_mem" && -n "$want_mem" && "$cur_mem" != "$want_mem" ]]; then
     edit_args+=( --memory "$want_mem" )
-    what="RAM ${cur_mem} -> ${want_mem} GiB"
+    what="${what:+$what, }RAM ${cur_mem} -> ${want_mem} GiB"
   fi
   if [[ -n "$cur_cpu" && -n "$want_cpu" && "$cur_cpu" != "$want_cpu" ]]; then
     edit_args+=( --cpus "$want_cpu" )
@@ -4457,20 +4600,41 @@ _apply_vm_sizing_to_stopped() {
 
 # A running VM can't be resized; say so instead of silently ignoring the settings.
 _warn_vm_sizing_mismatch() {
-  local vm="$1" want_mem want_cpu cur_mem cur_cpu what=""
+  local vm="$1" want_mem want_cpu cur_mem cur_cpu cur_disk what=""
   want_mem="$(_effective_vm_mem_gib)"
   want_cpu="$(_effective_vm_cpus)"
   cur_mem="$(_vm_instance_mem_gib "$vm")"
   cur_cpu="$(_vm_instance_cpus "$vm")"
+  cur_disk="$(_vm_instance_disk_gib "$vm" 2>/dev/null || true)"
   if [[ -n "$cur_mem" && -n "$want_mem" && "$cur_mem" != "$want_mem" ]]; then
     what="${cur_mem} GiB (want ${want_mem})"
   fi
   if [[ -n "$cur_cpu" && -n "$want_cpu" && "$cur_cpu" != "$want_cpu" ]]; then
     what="${what:+$what, }${cur_cpu} CPUs (want ${want_cpu})"
   fi
+  if [[ -n "${VM_DISK_GIB:-}" && -n "$cur_disk" ]] && (( cur_disk < VM_DISK_GIB )); then
+    what="${what:+$what, }disk ${cur_disk} GiB (want ${VM_DISK_GIB}, pending)"
+  fi
   [[ -n "$what" ]] || return 0
   echo "[start] NOTE: running session VM '$vm' has $what."
   echo "[start]       Exit the session, then 'opencode-vm start' applies the settings."
+}
+
+# Extend start_session's local clone_args array with independently configured
+# overrides. No global Lima defaults or base VM configuration is changed.
+vmcfg_add_clone_overrides() {
+  if [[ -n "${VM_MEMORY_GIB:-}" ]]; then
+    clone_args+=( --memory "$VM_MEMORY_GIB" )
+    echo "[run] Session VM RAM: ${VM_MEMORY_GIB} GiB (project override)"
+  fi
+  if [[ -n "${VM_CPUS:-}" ]]; then
+    clone_args+=( --cpus "$VM_CPUS" )
+    echo "[run] Session VM CPUs: ${VM_CPUS} (project override)"
+  fi
+  if [[ -n "${VM_DISK_GIB:-}" ]]; then
+    clone_args+=( --disk "$VM_DISK_GIB" )
+    echo "[run] Session VM disk: ${VM_DISK_GIB} GiB (project override)"
+  fi
 }
 
 ports_cmd() {
@@ -15848,21 +16012,14 @@ start_session() {
   fi
 
   # Build the clone args incrementally: the optional Desktop share and the
-  # per-project RAM/CPU overrides are independent, and spelling out every
+  # per-project sizing overrides are independent, and spelling out every
   # combination as its own limactl line does not scale.
   local -a clone_args
   clone_args=( --mount-only "${mount_proj}:w" --mount-only "${sess_share}:w" --mount-only "${proj_state}:w" )
   if [[ -n "$share_mount" ]]; then
     clone_args+=( --mount-only "${share_dir}:w" )
   fi
-  if [[ -n "${VM_MEMORY_GIB:-}" ]]; then
-    clone_args+=( --memory "$VM_MEMORY_GIB" )
-    echo "[run] Session VM RAM: ${VM_MEMORY_GIB} GiB (project override)"
-  fi
-  if [[ -n "${VM_CPUS:-}" ]]; then
-    clone_args+=( --cpus "$VM_CPUS" )
-    echo "[run] Session VM CPUs: ${VM_CPUS} (project override)"
-  fi
+  vmcfg_add_clone_overrides
   run_with_spinner "[run] Cloning session VM: $sess..." limactl clone "$BASE_NAME" "$sess" \
     "${clone_args[@]}" --tty=false --start
   rm -f "$lockfile"
@@ -16858,6 +17015,10 @@ case "$cmd" in
     ports_cmd "$@"
     ;;
 
+  config)
+    config_cmd "$@"
+    ;;
+
   ram)
     ram_cmd "$@"
     ;;
@@ -17084,11 +17245,13 @@ Usage:
                                            #                'off' disables AND wipes stored credentials.
   opencode-vm ram [show|<GiB>|default]     # per-project session VM RAM (run inside the project)
   opencode-vm cpu [show|<N>|default]       # per-project session VM CPU count
-                                           # defaults: 8 GiB / 6 CPUs, inherited from the base VM.
-                                           # An override is remembered for this project and
-                                           # re-applied on every 'start'. 'show' prints both
-                                           # resources next to the host's totals;
-                                           # '<cmd> default' clears that override.
+                                           # legacy aliases for 'config ram|cpu'
+  opencode-vm config                        # interactive project sizing menu
+  opencode-vm config show                   # RAM, CPU, disk: configured/default/current/pending
+  opencode-vm config ram <GiB|default>      # RAM default 8 GiB
+  opencode-vm config cpu <N|default>        # CPU default 6
+  opencode-vm config disk <GiB|default>     # disk default inherited from base VM;
+                                           # existing disks grow only on stopped-VM resume
   opencode-vm ports show                   # show current firewall policy
   opencode-vm ports reload                 # re-push policy.env to running sessions
   opencode-vm ports host {show|add|rm|set} [PORT...]

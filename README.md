@@ -514,20 +514,23 @@ This reports, among other things:
 - recent/favorite provider+model selections (from `model.json`),
 - provider usage markers found in `opencode.db` message metadata.
 
-## Per-Project VM Sizing (RAM + CPUs)
+## Per-Project VM Sizing (RAM, CPU and Disk)
 
-Every session VM is a clone of the shared base VM and inherits its **8 GiB / 6 CPUs**. A project that needs more (large builds, heavy test suites, local models) can carry its own size:
+Every session VM is a clone of the shared base VM and inherits its **8 GiB / 6 CPUs** and the base VM's disk size. A project that needs more (large builds, heavy test suites, local models) can carry its own size:
 
 ```bash
 cd /path/to/heavy-project
-opencode-vm ram 32        # remembered for this project
-opencode-vm cpu 12        # likewise
-opencode-vm ram show      # full picture (both commands print the same table)
-opencode-vm ram default   # drop just the RAM override
-opencode-vm cpu default   # drop just the CPU override
+opencode-vm config        # guided menu (requires an interactive terminal)
+opencode-vm config show   # RAM, CPU, disk: configured/default/current/pending
+opencode-vm config ram 32 # remembered for this project
+opencode-vm config cpu 12
+opencode-vm config disk 150
+opencode-vm config disk   # prompt for disk size or 'default'
+opencode-vm config ram default  # clear only the RAM override
+opencode-vm config disk default # clear only the disk override
 ```
 
-`show` always reports both resources next to what the machine actually has:
+`show` reports all three resources, the base VM's actual disk size when available, and any kept VM's current disk size:
 
 ```
 Project:  /path/to/heavy-project
@@ -536,29 +539,32 @@ Setting:  /Users/you/.opencode-vm/project-state/a4488b22.../vm.env
   Resource   This project     Default    Host total
   RAM        32 GiB (set)     8 GiB      128 GiB
   CPUs       12 (set)         6          18
+  Disk       150 GiB (set)    100 GiB    —
 
-  Session VM oc-20260722-235140: 8 GiB, 6 CPUs
-    -> differs from the table above; applied on the next VM start.
+  Session VM oc-20260722-235140: 8 GiB RAM, 6 CPUs, 100 GiB disk
+    -> RAM/CPU differ; applied on the next VM start.
+  Disk pending: 100 -> 150 GiB (stop the VM, then start/attach to grow).
 
-Set:    opencode-vm ram <GiB>        opencode-vm cpu <N>
-Reset:  opencode-vm ram default      opencode-vm cpu default
+Set:    opencode-vm config {ram|cpu|disk} <value>
+Reset:  opencode-vm config {ram|cpu|disk} default
 ```
 
 How it behaves:
 
 - The settings are **per project**, keyed by project path, and stored on the host at `~/.opencode-vm/project-state/<hash>/vm.env` — not in your repo, so they never reach the VM's mount and never show up in `git status`.
-- They are applied when the session VM is **cloned**, and re-applied when a kept VM is **resumed** (`start` / `attach`), so they survive across sessions without an `init`.
+- Overrides are applied when the session VM is **cloned**. On resume (`start` / `attach`), RAM/CPU are re-applied and disk is only grown when the configured target exceeds the current disk. Lima edits the stopped VM before starting it; Cloud-Init grows the guest partition/filesystem on boot.
 - The **base VM is never modified**. One heavyweight project cannot inflate every other project's VM.
 - Every `start` prints a reminder while an override is active, together with how to change or clear it:
 
   ```
-  [run] Sizing override for this project: 32 GiB RAM, 12 CPUs (defaults: 8 GiB, 6 CPUs)
-  [run]   change: 'opencode-vm ram <GiB>' / 'opencode-vm cpu <N>'   reset: append 'default'
+   [run] Sizing override for this project: 32 GiB RAM, 12 CPUs, 150 GiB disk (RAM/CPU defaults: 8 GiB, 6 CPUs; disk inherits base VM)
+   [run]   change/reset: 'opencode-vm config {ram|cpu|disk} <value|default>'
   ```
 
-- RAM and CPUs are independent: clearing one leaves the other in place.
-- A **running** VM cannot be resized. Change the setting, exit the session, and the next `start` applies it — the commands tell you when that is the case.
-- Accepted ranges: RAM from 2 GiB, CPUs from 1, each capped at what the host physically has. Anything above 75% of the host total is flagged as a warning but allowed.
+- Each resource is independent: clearing one leaves the others in place. Existing `opencode-vm ram` / `opencode-vm cpu` (and `cpus`) commands remain valid aliases with their previous `show` / `default` behavior.
+- A **running** VM is never stopped to resize it. A larger disk target is stored and shown as pending until the VM is stopped and then resumed with `start` / `attach`. Disk changes do not affect the running VM immediately.
+- Before a numeric disk change for an existing VM, the current Lima disk size must be readable. Requests **below** the current size fail without saving or modifying Lima; equal sizes are safe. `config disk default` removes the override but **never shrinks an existing disk**: only future new clones inherit the base VM disk size.
+- Accepted ranges: RAM from 2 GiB, CPUs from 1, each capped at what the host physically has. Disk accepts whole GiB from 1 upward and is increase-only for existing VMs. Anything above 75% of the host RAM/CPU total is flagged as a warning but allowed.
 
 ## Provider Commands
 
