@@ -54,7 +54,7 @@ MCP_TESTED_PROTOCOL_VERSION="2025-11-25"
 MCP_TUNNEL_DIR="$SHARE_ROOT/mcp-tunnel/openai"
 HUB_ASSET_TAG="v0.6.3"
 HUB_ASSET_FILENAME="opencode-vm-hub-1.tar"
-HUB_ASSET_SHA256="1c20384f46c0b3553996933e7a1bbc92d610ff0bcb8b98f7d74357491a7f3957"
+HUB_ASSET_SHA256="23dde41176e821ddbb433c243565404ed145e61b5183cc9fc307b7d1ebe79ffd"
 
 # Per-project VM sizing. The shared base VM is always provisioned at these
 # values; a project that needs more (or less) stores an override in its own
