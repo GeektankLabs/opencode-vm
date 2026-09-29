@@ -52,6 +52,17 @@ class HubReadModelTest(unittest.TestCase):
         self.assertFalse(any(item["id"] == "secure-mcp-tunnel" for item in model["integrations"]))
         self.assertTrue(model["setupGuides"])
 
+    def test_lm_studio_guide_uses_native_provider_and_default_forward(self):
+        model = server.build_model()
+        guide = next(item for item in model["setupGuides"] if item["id"] == "lm-studio")
+        text = " ".join(guide["steps"])
+        self.assertIn("bereits erlaubt", text)
+        self.assertIn("opencode-vm ports host add 1234", text)
+        self.assertIn("native", text)
+        self.assertIn("localhost:1234", text)
+        self.assertIn("alle VMs", text)
+        self.assertEqual(guide["docs"], "README.md#network-policy-commands")
+
 
 if __name__ == "__main__":
     unittest.main()
