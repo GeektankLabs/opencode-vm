@@ -736,7 +736,7 @@ test("MCP board search, reverse lookup, complete links and overflow use the publ
         pending_input: { permissions: 0, questions: 0 } };
     }
   }
-  const descriptor = { ...runtime(), projectHash: "hash", taskboardUrl: `http://127.0.0.1:${backendPort}`,
+  const descriptor = { ...runtime(), project: directory, projectHash: "hash", taskboardUrl: `http://127.0.0.1:${backendPort}`,
     taskboardMetadataFile: join(directory, "board.json") };
   const server = new McpHttpServer(descriptor, token, new BoardGateway());
   const port = await server.start();
@@ -748,8 +748,12 @@ test("MCP board search, reverse lookup, complete links and overflow use the publ
     const catalog = await client.listTools();
     assert.equal(catalog.tools.filter((tool) => tool.name.endsWith("_project_task") ||
       ["list_project_tasks", "add_task_comment", "link_task_to_session", "list_board_projects",
-        "get_board_project", "create_board_project", "get_task_transfer_status"].includes(tool.name)).length, 13);
+        "get_board_project", "create_board_project", "get_task_transfer_status",
+        "register_task_document", "get_task_documents", "read_task_document"].includes(tool.name)).length, 16);
     assert.equal(catalog.tools.find((tool) => tool.name === "list_project_tasks")?.annotations?.readOnlyHint, true);
+    assert.equal(catalog.tools.find((tool) => tool.name === "get_task_documents")?.annotations?.readOnlyHint, true);
+    assert.equal(catalog.tools.find((tool) => tool.name === "read_task_document")?.annotations?.readOnlyHint, true);
+    assert.equal(catalog.tools.find((tool) => tool.name === "register_task_document")?.annotations?.readOnlyHint, false);
     assert.equal(catalog.tools.find((tool) => tool.name === "reclassify_project_task")?.annotations?.readOnlyHint, false);
     const projects = await client.callTool({ name: "list_board_projects", arguments: {} });
     assert.equal(projects.isError, undefined);
@@ -762,6 +766,34 @@ test("MCP board search, reverse lookup, complete links and overflow use the publ
     const tasks = (found.structuredContent as { tasks: Array<{ task_id: string }> }).tasks;
     assert.equal(tasks.length, 1);
     const id = tasks[0]!.task_id;
+    const contextPath = `.opencode/tasks/task-${id}.compact.md`;
+    await mkdir(join(directory, ".opencode/tasks"), { recursive: true });
+    await writeFile(join(directory, contextPath), `Task-ID: ${id}\nStatus: ready\n`);
+    const registered = await client.callTool({ name: "register_task_document", arguments: {
+      task_id: id, role: "compact_context", path: contextPath,
+    } });
+    assert.equal(registered.isError, undefined);
+    const refs = await client.callTool({ name: "get_task_documents", arguments: { task_id: id } });
+    assert.deepEqual((refs.structuredContent as { documents: Array<{ role: string; path: string }> }).documents
+      .map((ref) => [ref.role, ref.path]), [["compact_context", contextPath]]);
+    const read = await client.callTool({ name: "read_task_document", arguments: {
+      task_id: id, role: "compact_context", max_bytes: 10,
+    } });
+    assert.equal(read.isError, undefined);
+    const first = read.structuredContent as { text: string; revision: string; range: { end: number }; has_more: boolean };
+    assert.equal(first.has_more, true);
+    const second = await client.callTool({ name: "read_task_document", arguments: {
+      task_id: id, role: "compact_context", offset: first.range.end, revision: first.revision,
+    } });
+    assert.equal(first.text + (second.structuredContent as { text: string }).text, `Task-ID: ${id}\nStatus: ready\n`);
+    for (const [arguments_, code] of [
+      [{ task_id: id, role: "other" }, "INVALID_ARGUMENT"],
+      [{ task_id: id, role: "compact_context", path: "../../private" }, "TASK_DOCUMENT_PATH_INVALID"],
+    ] as const) {
+      const invalid = await client.callTool({ name: "read_task_document", arguments: arguments_ });
+      assert.equal(invalid.isError, true);
+      assert.equal((invalid._meta as Record<string, any>)["opencode-vm/error"].code, code);
+    }
     assert.equal((found.structuredContent as { tasks: Array<{ board_project_id: string }> }).tasks[0]?.board_project_id,
       "project_hash");
     const foreign = await client.callTool({ name: "link_task_to_session", arguments: { task_id: id, session_id: "foreign" } });

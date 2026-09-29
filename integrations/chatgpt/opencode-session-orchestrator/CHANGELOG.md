@@ -1,5 +1,43 @@
 # Changelog
 
+## 2026-09-29-r19
+
+- For confirmed `todo` -> `in_progress` work, keep the Board task `todo` while the executing agent creates/reuses and identifies both task files; register/read back semantic `compact_context` and `concept_plan` references before the Board move. Reuse documents after an uncertain or failed move.
+- Prefer discovered `get_task_documents`/`read_task_document` for independent checkpoint QA and token-light Executive reads: context first, main/index plan only for conceptual depth, relevant registered details on demand. Verify executed work from original session results. Restart changed file reads by revision; incomplete pages never establish a full QA pass.
+- Preserve r18 size and staged prompt policy and retain the exact-text agent-mediated fallback for connectors without task-document reads.
+
+## 2026-09-29-r18
+
+- Add approximate task-file size policy: Compact Context targets ~5k tokens, warns at ~7.5k and condenses by ~10k while remaining one file; Concept Plan main file targets ~20k, warns at ~30k and splits task-ID-named detail documents by ~40k while remaining the canonical index. No tokenizer dependency or duplicated plan/context content.
+- Stage the executing agent's maintenance instructions: full roles and thresholds once on initialization/new work context, fuller policy/quality refresh at authorized QA checkpoints, and a single short path-bearing reminder for ordinary substantive work. Tiny/read-only mini-work omits the maintenance reminder; pure status/result reads submit no prompt. Preserve read-only scope for substantive investigations.
+- Extend regression scenarios for thresholds, one-file context, split-plan index, all three handoff tiers and no-reminder reads.
+
+## 2026-09-29-r17
+
+- Align both task files: plan-backed work carries the plan path and, when established, the context path, including routine tests and same-session follow-ups; update the plan only for substantive conceptual findings. The board governs outcome/scope, the plan settled design within scope, the context current state and session results observed evidence.
+- Clarify the confirmed `todo` -> `in_progress` initialization: reuse and reconcile matching files, never overwrite a different task's file, use only known IDs in the initial context, and report uncertain/missing initialization as pending. Already-running tasks require explicit backfill rather than a fictitious transition.
+- Unify early and milestone quality checks for both files; incomplete agent-supplied plan text cannot pass a full-file check. Clarifications respect their actual read/write scope, and plan closure edits require authorized file writes.
+
+## 2026-09-29-r16
+
+- Introduce the optional persistent **task concept plan** alongside the compact context: a longer, authoritative concept/architecture/decision/test document at `planning/task-concepts/<task_id>-concept-plan.md`, distinct from the board description, compact context and session history.
+- Require every task-related handoff with conceptual relevance to include the plan path alongside the compact context and tell the executing agent to write substantive conceptual findings (architecture, decisions, alternatives, interfaces, risks, implementation/test shifts) back into the plan, not only the context. The plan is canonical for stable decisions; the context cites it without duplicating rationale.
+- Mandate initialization on `todo` -> `in_progress`: in the same authorized write-capable work request, assign both files (or reuse existing ones with matching `Task-ID`); transfer relevant concept starting state from the ticket description into the plan; initialize the compact context minimally. A board read alone must not create either file. Existing tasks without a concept plan remain backward compatible until that transition triggers initialization.
+- Add introductory orchestrator quality checks: early after `todo` -> `in_progress`, after long/large iterations or several substantive follow-ups, after conceptually significant findings and before major handoffs; use the same agent-mediated exact-text mechanism as for the compact context when no direct project-file read exists, and route specific defects back to the executing agent without becoming the routine editor or creating an unsolicited QA task.
+
+## 2026-09-29-r15
+
+- Make the executing agent's read-first and compact-update duty an explicit part of **every** context-backed task handoff; distinguish read-only instructions and unknown file existence after a new chat.
+- Require introductory orchestrator quality checks after the first substantive work and after long/large or several substantial follow-ups. Check actual context text against the board and original results for identity, freshness, continuation value and compactness; when no project-file read exists, request exact text in an authorized checkpoint result and mark missing evidence pending.
+- Route specific stale/missing-context corrections back to the executing agent in the next authorized follow-up, without moving ongoing maintenance to the orchestrator or generating an unsolicited repair task.
+
+## 2026-09-29-r14
+
+- Introduce the optional persistent **task compact context**: one small task-`task_id`-bounded Markdown file (default `.opencode/tasks/task-<task_id>.compact.md`) as long-lived working memory for multi-iteration board tasks, distinct from the board description, session/result history and scope/auth sources.
+- Every task-related handoff for a context-keeping task now references the file by path, requires reading it before work and mandates a compact update after substantial iterations; handoffs without that reference when a context exists are treated as defective.
+- Add client-side registry tracking of path/`task_id`/`Last-updated`, new decision-preparation integration, and board-workflow integration for start/resumption/follow-up and remainder previews.
+- Preserve backward compatibility: tasks without a compact context behave unchanged; creating one is an optional, user-confirmed choice with no board mutation and no new MCP tool or backend field.
+
 ## 2026-09-29-r12
 
 - Propose classification only for trackable outcomes; search existing Board Projects and tickets before offering a confirmed extension, ticket, workstream or Inbox setup.

@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,6 +21,7 @@ function runtime(directory: string, url = "http://127.0.0.1:4101") {
 function fakeBoard(rows: Array<{ id: string; projectId: string; title: string; description?: string; status: string; priority: string }>) {
   const originalFetch = globalThis.fetch;
   const calls: Array<{ path: string; method: string }> = [];
+  let failNextMove = false;
   globalThis.fetch = (async (input, init) => {
     const url = new URL(String(input));
     const method = init?.method ?? "GET";
@@ -39,13 +40,21 @@ function fakeBoard(rows: Array<{ id: string; projectId: string; title: string; d
       status = 201;
     } else if (url.pathname === "/api/tickets") {
       value = rows.filter((row) => !url.searchParams.get("status") || row.status === url.searchParams.get("status"));
+    } else if (url.pathname.endsWith("/move") && method === "POST") {
+      if (failNextMove) { status = 503; failNextMove = false; }
+      else {
+        const id = url.pathname.split("/")[3];
+        const row = rows.find((item) => item.id === id);
+        if (!row) status = 404;
+        else { row.status = (JSON.parse(String(init?.body)) as { status: string }).status; value = row; }
+      }
     } else if (url.pathname.startsWith("/api/tickets/") && method === "GET") {
       value = rows.find((row) => row.id === url.pathname.slice("/api/tickets/".length));
       if (!value) status = 404;
     } else throw new Error(`Unexpected ${method} ${url.pathname}`);
     return new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
   }) as typeof fetch;
-  return { calls, restore: () => { globalThis.fetch = originalFetch; } };
+  return { calls, failMoveOnce: () => { failNextMove = true; }, restore: () => { globalThis.fetch = originalFetch; } };
 }
 
 test("task reads neither create projects nor metadata; UI and MCP tasks have stable separate IDs", async () => {
@@ -79,14 +88,137 @@ test("corrupt and unsupported metadata fail closed and preserve original bytes",
   const board = fakeBoard([]);
   try {
     const state = runtime(directory);
-    for (const raw of ["{broken", JSON.stringify({ schema: 2, projects: {}, tasks: {}, comments: {}, links: {} }),
-      JSON.stringify({ schema: 1, projects: [], tasks: {}, comments: {}, links: {} })]) {
+    for (const raw of ["{broken", JSON.stringify({ schema: "3", projects: {}, tasks: {}, comments: {}, links: {}, transfers: {}, documents: {} }),
+      JSON.stringify({ schema: 2, projects: {}, tasks: {}, comments: {}, links: {} }),
+      JSON.stringify({ schema: 1, projects: [], tasks: {}, comments: {}, links: {} }),
+      JSON.stringify({ schema: 3, projects: {}, tasks: {}, comments: {}, links: {}, transfers: {}, documents: {
+        "task_aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa": [{ role: "concept_plan", path: "../../private.md" }],
+      } })]) {
       await writeFile(state.taskboardMetadataFile, raw);
       await assert.rejects(new ProjectBoardService(state).listTasks(), { code: "TASKBOARD_METADATA_ERROR" });
       await assert.rejects(new ProjectBoardService(state).createTask({ title: "Do not create" }), { code: "TASKBOARD_METADATA_ERROR" });
       assert.equal(await readFile(state.taskboardMetadataFile, "utf8"), raw);
     }
     assert.equal(board.calls.some((call) => call.method === "POST"), false);
+  } finally {
+    board.restore();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("semantic task documents: register after file confirmation, resume, paginated read and bounded paths", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ocvm-board-doc-"));
+  const board = fakeBoard([{ id: "backend-1", projectId: "backend-project", title: "Documents", status: "todo", priority: "medium" }]);
+  try {
+    const state = runtime(directory);
+    const service = new ProjectBoardService(state);
+    const taskId = (await service.getTask((await service.listTasks())[0]!.task_id)).task_id;
+    const compact = `.opencode/tasks/task-${taskId}.compact.md`;
+    const plan = `planning/task-concepts/${taskId}-concept-plan.md`;
+    const detail = `planning/task-concepts/${taskId}-architecture.md`;
+    assert.deepEqual((await service.getDocuments(taskId)).documents, []); // Old tasks need no sidecar write.
+    await assert.rejects(service.registerDocument(taskId, "compact_context", compact), { code: "TASK_DOCUMENT_MISSING" });
+    const legacy = JSON.stringify({ schema: 2, projects: {}, tasks: {}, comments: {}, links: {}, transfers: {} });
+    await writeFile(state.taskboardMetadataFile, legacy);
+    assert.deepEqual((await service.getDocuments(taskId)).documents, []);
+    assert.equal(await readFile(state.taskboardMetadataFile, "utf8"), legacy); // Legacy read stays read-only.
+    await mkdir(join(directory, ".opencode/tasks"), { recursive: true });
+    await mkdir(join(directory, "planning/task-concepts"), { recursive: true });
+    await writeFile(join(directory, compact), `Task-ID: ${taskId}\nState: ready\n`);
+    await writeFile(join(directory, plan), `Task-ID: ${taskId}\nPlan: ${"ä".repeat(70_000)}\n`);
+    await writeFile(join(directory, detail), `Task-ID: ${taskId}\nArchitecture: bounded\n`);
+    await assert.rejects(service.readDocument(taskId, "concept_plan"), { code: "TASK_DOCUMENT_REF_NOT_FOUND" });
+    await service.registerDocument(taskId, "compact_context", compact);
+    assert.equal((JSON.parse(await readFile(state.taskboardMetadataFile, "utf8")) as { schema: number }).schema, 3);
+    await service.registerDocument(taskId, "concept_plan", plan);
+    await service.registerDocument(taskId, "concept_detail", detail);
+    const secondDetail = `planning/task-concepts/${taskId}-test-plan.md`;
+    await writeFile(join(directory, secondDetail), `Task-ID: ${taskId}\nTests: pending\n`);
+    await service.registerDocument(taskId, "concept_detail", secondDetail);
+    await assert.rejects(service.readDocument(taskId, "concept_detail"), { code: "INVALID_ARGUMENT" });
+    assert.match((await service.readDocument(taskId, "concept_detail", detail)).text, /Architecture: bounded/u);
+    await assert.rejects(service.registerDocument(taskId, "concept_plan", secondDetail), { code: "TASK_DOCUMENT_PATH_INVALID" });
+    assert.equal((await service.getTask(taskId)).documents?.length, 4);
+    const restarted = new ProjectBoardService(state);
+    const documents = (await restarted.getDocuments(taskId)).documents;
+    assert.deepEqual(documents.map((item) => item.role), ["compact_context", "concept_plan", "concept_detail", "concept_detail"]);
+    assert.equal(documents[1]?.state, "available");
+    let offset = 0;
+    let revision: string | undefined;
+    let assembled = "";
+    do {
+      const page = await restarted.readDocument(taskId, "concept_plan", undefined, offset, 127, revision);
+      assert.equal(page.range.start, offset);
+      revision = page.revision;
+      offset = page.range.end;
+      assembled += page.text;
+      if (!page.has_more) break;
+    } while (true);
+    assert.equal(assembled, await readFile(join(directory, plan), "utf8"));
+    assert.equal(revision, documents[1]?.revision);
+    await assert.rejects(restarted.readDocument(taskId, "concept_plan", undefined, 1), { code: "TASK_DOCUMENT_CHANGED" });
+    const insideUmlaut = Buffer.byteLength(`Task-ID: ${taskId}\nPlan: `) + 1;
+    await assert.rejects(restarted.readDocument(taskId, "concept_plan", undefined, insideUmlaut, 128, revision),
+      { code: "INVALID_ARGUMENT" });
+    await writeFile(join(directory, plan), `Task-ID: ${taskId}\nPlan: changed\n`);
+    await assert.rejects(restarted.readDocument(taskId, "concept_plan", undefined, offset - 10, 128, revision),
+      { code: "TASK_DOCUMENT_CHANGED" });
+    await writeFile(join(directory, plan), Buffer.concat([Buffer.from(`Task-ID: ${taskId}\n`), Buffer.from([0xff])]));
+    await assert.rejects(restarted.readDocument(taskId, "concept_plan"), { code: "TASK_DOCUMENT_INVALID" });
+    await writeFile(join(directory, plan), `Task-ID: ${taskId}\n${"x".repeat(1024 * 1024)}\n`);
+    await assert.rejects(restarted.readDocument(taskId, "concept_plan"), { code: "TASK_DOCUMENT_LIMIT" });
+    await writeFile(join(directory, plan), `Task-ID: ${taskId}\nPlan: current\n`);
+    await assert.rejects(restarted.registerDocument(taskId, "concept_plan", "planning/task-concepts/other.md"),
+      { code: "TASK_DOCUMENT_PATH_INVALID" });
+    await assert.rejects(restarted.registerDocument(taskId, "concept_detail", `planning/task-concepts/${taskId}-../escape.md`),
+      { code: "TASK_DOCUMENT_PATH_INVALID" });
+    await assert.rejects(restarted.readDocument(taskId, "concept_detail", `planning/task-concepts/${taskId}-unregistered.md`),
+      { code: "TASK_DOCUMENT_REF_NOT_FOUND" });
+    await writeFile(join(directory, compact), `Task-ID: task_aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\nwrong\n`);
+    await assert.rejects(restarted.readDocument(taskId, "compact_context"), { code: "TASK_DOCUMENT_MISMATCH" });
+    await rm(join(directory, compact));
+    await symlink(join(directory, detail), join(directory, compact));
+    await assert.rejects(restarted.readDocument(taskId, "compact_context"), { code: "TASK_DOCUMENT_PATH_INVALID" });
+    await rm(join(directory, compact));
+    assert.equal((await restarted.getDocuments(taskId)).documents[0]?.state, "missing");
+    await assert.rejects(restarted.readDocument(taskId, "compact_context"), { code: "TASK_DOCUMENT_MISSING" });
+    await rm(join(directory, ".opencode/tasks"), { recursive: true });
+    await symlink(join(directory, "planning/task-concepts"), join(directory, ".opencode/tasks"));
+    await assert.rejects(restarted.readDocument(taskId, "compact_context"), { code: "TASK_DOCUMENT_PATH_INVALID" });
+  } finally {
+    board.restore();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("document initialization precedes board move; failed move keeps todo and reuses refs", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ocvm-board-doc-init-"));
+  const board = fakeBoard([{ id: "backend-1", projectId: "backend-project", title: "Work", status: "todo", priority: "medium" }]);
+  try {
+    const service = new ProjectBoardService(runtime(directory));
+    const id = (await service.listTasks())[0]!.task_id;
+    const compact = `.opencode/tasks/task-${id}.compact.md`;
+    const plan = `planning/task-concepts/${id}-concept-plan.md`;
+    await mkdir(join(directory, ".opencode/tasks"), { recursive: true });
+    await mkdir(join(directory, "planning/task-concepts"), { recursive: true });
+    await assert.rejects(service.registerDocument(id, "compact_context", compact), { code: "TASK_DOCUMENT_MISSING" });
+    assert.equal((await service.getTask(id)).status, "todo");
+    await writeFile(join(directory, compact), `Task-ID: ${id}\nState: ready\n`);
+    await writeFile(join(directory, plan), `Task-ID: ${id}\nGoal: work\n`);
+    await service.registerDocument(id, "compact_context", compact);
+    await service.registerDocument(id, "concept_plan", plan);
+    assert.equal((await service.getDocuments(id)).documents.length, 2);
+    board.failMoveOnce();
+    await assert.rejects(service.moveTask(id, "in_progress"), { code: "TASKBOARD_ERROR" });
+    assert.equal((await service.getTask(id)).status, "todo");
+    const resumed = new ProjectBoardService(runtime(directory));
+    await resumed.registerDocument(id, "compact_context", compact);
+    await resumed.registerDocument(id, "concept_plan", plan);
+    assert.equal((await resumed.getDocuments(id)).documents.length, 2);
+    assert.equal((await resumed.moveTask(id, "in_progress")).status, "in_progress");
+    assert.equal((await resumed.getTask(id)).documents?.length, 2);
+    const moved = board.calls.findIndex((call) => call.path.endsWith("/move"));
+    assert.ok(moved > board.calls.findIndex((call) => call.path === "/api/tickets/backend-1"));
   } finally {
     board.restore();
     await rm(directory, { recursive: true, force: true });
@@ -253,6 +385,14 @@ test("pinned upstream binary: confirmed Inbox, multi-project identity and recove
     await board.linkTask(task.task_id, { sessionId: "ses_one", messageId: "msg_one", result: "Result one", artifactRefs: ["file:a"] });
     await board.linkTask(task.task_id, { sessionId: "ses_two", messageId: "msg_two", result: "Result two", artifactRefs: ["file:b"] });
     await board.addComment(task.task_id, "Decision");
+    const contextPath = `.opencode/tasks/task-${task.task_id}.compact.md`;
+    const planPath = `planning/task-concepts/${task.task_id}-concept-plan.md`;
+    await mkdir(join(directory, ".opencode/tasks"), { recursive: true });
+    await mkdir(join(directory, "planning/task-concepts"), { recursive: true });
+    await writeFile(join(directory, contextPath), `Task-ID: ${task.task_id}\nCurrent state\n`);
+    await writeFile(join(directory, planPath), `Task-ID: ${task.task_id}\nPlan\n`);
+    await board.registerDocument(task.task_id, "compact_context", contextPath);
+    await board.registerDocument(task.task_id, "concept_plan", planPath);
     const requestId = randomUUID();
     const input = { taskId: task.task_id, targetBoardProjectId: work.board_project_id,
       expectedSourceBoardProjectId: inbox.board_project_id, requestId };
@@ -294,6 +434,8 @@ test("pinned upstream binary: confirmed Inbox, multi-project identity and recove
     assert.equal(actual.description, "Keep obligation");
     assert.equal(actual.comments[0]!.body, "Decision");
     assert.deepEqual(actual.links?.map((link) => link.message_id), ["msg_one", "msg_two"]);
+    assert.deepEqual(actual.documents?.map((entry) => entry.role), ["compact_context", "concept_plan"]);
+    assert.equal((await new ProjectBoardService(state).getDocuments(task.task_id)).documents[1]?.state, "available");
     assert.deepEqual((await board.listTasks({ boardProjectId: work.board_project_id, sessionId: "ses_two" }))
       .map((item) => item.task_id), [task.task_id]);
     assert.deepEqual(await board.listTasks({ boardProjectId: inbox.board_project_id }), []);

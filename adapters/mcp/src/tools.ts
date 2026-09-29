@@ -9,6 +9,7 @@ import * as z from "zod/v4";
 import type { SessionGateway } from "./opencode.js";
 import type { RuntimeDescriptor } from "./types.js";
 import { ProjectBoardService } from "./taskboard.js";
+import type { DocumentRole } from "./taskboard.js";
 import { traceToolCall } from "./diagnostics.js";
 import { SUPPORTED_ATTACHMENT_TYPES } from "./attachments.js";
 import { PROFILE_NAMES, describePolicy, readPolicy, profileState } from "./agent-control.js";
@@ -79,6 +80,23 @@ const taskId = z
   .min(1)
   .max(256)
   .regex(/^[^\s\x00-\x1f\x7f]+$/u);
+const documentRole = z.enum(["compact_context", "concept_plan", "concept_detail"]);
+const documentPath = z.string().min(1).max(512).regex(/^[A-Za-z0-9_./-]+$/u);
+const documentReference = z.object({ role: documentRole, path: documentPath }).strict();
+const documentListOutput = z.object({ task_id: taskId, documents: z.array(documentReference.extend({
+  state: z.enum(["available", "missing"]), total_bytes: z.number().int().nonnegative().optional(),
+  sha256: z.string().optional(), revision: z.string().optional(),
+}).strict()) }).strict();
+const registerDocumentInput = z.object({ task_id: taskId, role: documentRole, path: documentPath,
+  expected_path: documentPath.optional() }).strict();
+const documentRefsOutput = z.object({ task_id: taskId, documents: z.array(documentReference) }).strict();
+const readDocumentInput = z.object({ task_id: taskId, role: documentRole, path: documentPath.optional(),
+  offset: z.number().int().nonnegative().default(0), revision: z.string().max(128).optional(),
+  max_bytes: z.number().int().min(4).max(MAX_CONTENT_BYTES).default(DEFAULT_CONTENT_BYTES) }).strict();
+const documentContentOutput = z.object({ task_id: taskId, role: documentRole, path: documentPath,
+  revision: z.string(), unit: z.literal("utf8_bytes"), total_bytes: z.number().int().nonnegative(),
+  sha256: z.string(), range: z.object({ start: z.number().int().nonnegative(), end: z.number().int().nonnegative() }).strict(),
+  text: z.string(), has_more: z.boolean(), content_complete: z.boolean() }).strict();
 const taskInputBase = z.object({ project_id: taskId.optional(), board_project_id: taskId.optional() }).strict();
 const boardProjectOutput = z.object({ board_project_id: taskId, name: z.string(), prefix: z.string(),
   status: z.string(), is_default: z.boolean() }).strict();
@@ -117,6 +135,7 @@ const taskOutput = z
       result: z.string().optional(),
       artifact_refs: z.array(z.string()).optional(),
     }).strict()).optional(),
+    documents: z.array(documentReference).optional(),
   })
   .strict();
 const listTasksInput = taskInputBase
@@ -844,6 +863,20 @@ export function createMcpServer(
         success(await board.getTask(input.task_id), "Returned project task."),
       ),
     );
+    server.registerTool("register_task_document", {
+      title: "Register Task Document", description: "Bind an existing task-ID-marked project document to a semantic task role. No file is written; conflicting replacements require expected_path.",
+      inputSchema: registerDocumentInput, outputSchema: documentRefsOutput, annotations: writeAnnotations,
+    }, safeHandler(async (input) => success(await board.registerDocument(input.task_id,
+      input.role as DocumentRole, input.path, input.expected_path), "Registered task document.")));
+    server.registerTool("get_task_documents", {
+      title: "Get Task Documents", description: "Read registered semantic document roles and current file revisions for one project task; missing files are explicit.",
+      inputSchema: getTaskInput, outputSchema: documentListOutput, annotations: readOnlyAnnotations,
+    }, safeHandler(async (input) => readSuccess(await board.getDocuments(input.task_id), "Returned task document references.")));
+    server.registerTool("read_task_document", {
+      title: "Read Task Document", description: "Read a UTF-8 byte page of a registered task document only. For later pages send the returned revision and next offset; changed files fail closed.",
+      inputSchema: readDocumentInput, outputSchema: documentContentOutput, annotations: readOnlyAnnotations,
+    }, safeHandler(async (input) => readSuccess(await board.readDocument(input.task_id,
+      input.role as DocumentRole, input.path, input.offset, input.max_bytes, input.revision), "Returned task document page.")));
     server.registerTool(
       "create_project_task",
       {
@@ -1717,6 +1750,22 @@ export function createMcpServer(
                       ),
                     ),
             );
+          case "register_task_document":
+            return await validatedToolCall(registerDocumentInput, documentRefsOutput, input,
+              async (value) => board ? success(await board.registerDocument(value.task_id,
+                value.role as DocumentRole, value.path, value.expected_path), "Registered task document.") :
+                errorResult(new AdapterError("TASKBOARD_UNAVAILABLE", "Taskboard is not enabled.")));
+          case "get_task_documents":
+            return await validatedToolCall(getTaskInput, documentListOutput, input,
+              async (value) => board ? readSuccess(await board.getDocuments(value.task_id), "Returned task document references.") :
+                errorResult(new AdapterError("TASKBOARD_UNAVAILABLE", "Taskboard is not enabled.")),
+              extra.requestId, request.params.name);
+          case "read_task_document":
+            return await validatedToolCall(readDocumentInput, documentContentOutput, input,
+              async (value) => board ? readSuccess(await board.readDocument(value.task_id, value.role as DocumentRole,
+                value.path, value.offset, value.max_bytes, value.revision), "Returned task document page.") :
+                errorResult(new AdapterError("TASKBOARD_UNAVAILABLE", "Taskboard is not enabled.")),
+              extra.requestId, request.params.name);
           case "create_project_task":
             return await validatedToolCall(
               createTaskInput,

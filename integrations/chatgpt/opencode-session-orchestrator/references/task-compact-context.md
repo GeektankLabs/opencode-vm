@@ -1,0 +1,45 @@
+# Persistent task compact context
+
+Use this convention for a known project-board task that benefits from continuity across substantial work iterations. A **Task Compact Context** is an optional, small Markdown file in the project: working memory for **one** task across agents and sessions. The executing agent reads and maintains it; the orchestrator delegates that work and occasionally checks its quality. It is not a board-wide requirement or an MCP feature.
+
+## Location and distinct roles
+
+The default project-root-relative path is `.opencode/tasks/task-<task_id>.compact.md`, with the **full stable public task ID** substituted literally. For example, a `task_<UUID>` ID yields `task-task_<UUID>.compact.md`. Keep that path across Board Project reclassification. A capable connector stores the semantic `compact_context` reference at the task; recover it through `get_task_documents` after a chat restart. Adapter registration allows only the documented task-ID-marked paths in `.opencode/tasks/`; a pre-existing alternative elsewhere needs an explicit migration/path decision rather than an unsafe read. Never infer file existence from a filename or generic board link.
+
+Start the UTF-8 file with `Task-ID: <exact stable task_id>`, `Title: <board title>` and `Last-updated: <ISO 8601 timestamp with offset>`. Replace stale information rather than accumulating a chronology.
+
+- **Board title/description**: the durable outcome and scope, not an edit-by-edit log. The board is the source of truth for the stable obligation.
+- **Task Compact Context**: achieved versus verified state, confirmed decisions, key findings, unresolved questions/risks/blockers, the next concrete step, and important project-file/artifact and session/result references. When a [Task Concept Plan](task-concept-plan.md) exists, include its **actual path** as the detailed-design reference; summarize current consequences, not its full rationale. It is not authority to change the user's scope or grant permissions.
+- **Session/result history**: original chronological evidence. Read the relevant original before asserting an outcome; cite IDs in the context rather than pasting long reports or tool logs into it.
+
+## Size policy
+
+The compact context stays **exactly one file**. Aim for **about 5,000 tokens**; at **about 7,500** warn and start condensing; by **about 10,000** condense before adding more material. Retain current achieved/verified state, durable findings/decisions, blockers/open points, next step and essential plan/file/result references. Move lengthy rationale, alternatives and design detail into the [Task Concept Plan](task-concept-plan.md), not another context file. If even the essentials cannot fit, report the constraint rather than silently losing them.
+
+These are approximate operational thresholds, not a tokenizer dependency or a byte limit. Use an existing reliable token count when available; otherwise estimate roughly from text length (for example, characters divided by four) and err toward early condensation near a threshold. Do not install a tokenizer just for this rule.
+
+## Give the executing agent the job
+
+For a context-backed task, carry the exact project-relative path and `task_id` to the agent actually doing the work. At **initialization or the first substantial assignment in a new executing session/agent context**, send the full duty **once** in the submitted request (adapt the language to the user). If a concept plan exists, use the [combined initialization wording](task-concept-plan.md#initialization-instruction) instead of duplicating both full instructions:
+
+> Task Compact Context for `<task_id>`: `<project-relative path>`. Read it and check its Task-ID before work if present. This single file is current working state, not a log or the detailed plan: keep achieved/verified state, durable findings/decisions, blockers, next step and essential references; update after substantive iterations and before handoff when file writes are authorized. Aim ~5,000 tokens; warn/condense at ~7,500, and do not let it grow past ~10,000 without condensation. Never split it; put detailed rationale/variants in the Concept Plan if one exists. If missing, mismatched or unwritable, report that and continue only within the approved scope; do not invent content.
+
+For ordinary **substantive** follow-ups in the same work context, repeat the path and the [short reminder](task-concept-plan.md#short-follow-up-reminder) (or its context-only half), **not** the full block and numbers. At a scheduled quality checkpoint, use the fuller refresh below. A task-bound mini read-only instruction may carry a relevant file path without a maintenance reminder; a pure status/result read needs no new agent request at all. Earlier session text and a board link do not replace the selected instruction in an actual handoff.
+
+The executing agent checks existence and identity on first use and reads it again at the start of each new assignment. A substantive iteration means a completed work phase, a material decision/finding, or a changed blocker/next step — not every tool call. The agent reconciles stale entries against verified current evidence; its update is a **project-file write**, never implicit permission to broaden a read-only assignment. For read-only work, ask it to read the file and report needed corrections without writing. If a file is being established for the first time, confirm that choice with the user, then explicitly tell the agent **to create it if missing** at this path in the authorized write-capable request; if an existing file's `Task-ID` belongs to another task, do not overwrite it and ask for a path decision. The handoff's missing-file report applies when creation was not assigned or failed. Tasks without a compact context continue normally; when its status is unknown after a new conversation, the executing agent may check the deterministic path and report absence without creating a file.
+
+## Orchestrator's introductory quality checks
+
+The executing agent remains the primary maintainer. During introduction, the orchestrator **must sample-check** a context-backed task (1) early, after its first substantive completed work assignment(s), and (2) after a long/large iteration or several substantive follow-ups that materially advance the task. Check at these milestones during an interaction, not after every turn or by background polling. Keep the path, last check and any unresolved defect in conversational state; do not claim a registry survives a new chat.
+
+At each checkpoint compare the **actual file content** with the board task and the latest relevant original result(s). Check:
+
+1. The file exists at the expected path, its `Task-ID` matches the stable board `task_id`, and the timestamp/content plausibly reflect the recent work. A reported write or a timestamp alone does not establish freshness.
+2. It captures the actually achieved **and verified** state, confirmed decisions, key findings, open points/risks/blockers, next concrete step, and important artifact/file and result references; distinguish unknowns from verified facts.
+3. It is concise, free of copied logs/chronology and usable to restart: could a new session with the board task, this file and any linked concept plan understand the current state and take the next step?
+
+Refresh the executing agent's duty **in the authorized checkpoint request**: check currency and consistency, estimate size against the ~5,000/~7,500/~10,000-token policy, condense if needed, retain only continuation essentials, and confirm it remains one file. This is a fuller QA reminder, not a repeat of the whole initialization brief on every normal turn. When checking both files, use the [combined QA refresh](task-concept-plan.md#combined-quality-check-refresh).
+
+Prefer direct, **read-only** `get_task_documents` and `read_task_document` when discovered: read the registered `compact_context` in adjacent UTF-8 byte pages with its revision and SHA-256, compare it with the Board task and relevant original result, and restart from zero on `TASK_DOCUMENT_CHANGED`. These tools do not run an agent or browse arbitrary project files. Missing reference/file is a QA finding, not a reason to invent content. When the connector lacks direct reads, retain the agent-mediated fallback: request exact file text with path and `Task-ID` in an authorized checkpoint result; read through the content protocol. Mark agent-supplied text as such, not independent filesystem verification; truncated or missing text leaves QA **pending**. Do not send an unrequested prompt solely for QA.
+
+When a check finds a gap, name the concrete missing/stale point in the next suitable authorized follow-up to the **executing agent** and ask it to repair the same file as part of that work. If no follow-up is authorized, report the gap and wait for authorization; do not quietly take over routine file maintenance or create an MCP/skill improvement task. A read-only follow-up can identify the correction, but must not write the file. No automatic board mutation or Done transition follows from a context check.

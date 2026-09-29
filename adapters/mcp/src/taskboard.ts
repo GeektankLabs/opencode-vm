@@ -1,12 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
-import { lstat, mkdir, open, readFile, rename, unlink } from "node:fs/promises";
-import { dirname } from "node:path";
+import { lstat, mkdir, open, readFile, realpath, rename, unlink } from "node:fs/promises";
+import { basename, dirname, join, resolve, sep } from "node:path";
+import { READ_PAYLOAD_BYTES, utf8Prefix, jsonBytes } from "./content.js";
 import type { RuntimeDescriptor } from "./types.js";
 import { AdapterError } from "./types.js";
 
 type TaskLink = { session_id: string; message_id?: string; result?: string; artifact_refs?: string[] };
+export type DocumentRole = "compact_context" | "concept_plan" | "concept_detail";
+type TaskDocument = { role: DocumentRole; path: string };
 type BackendProject = { id: string; name: string; prefix: string; status: string };
 type BackendSubtask = { id: string; title: string; completed: boolean; position: number };
 type Transfer = {
@@ -27,12 +30,13 @@ type Transfer = {
 };
 
 type Metadata = {
-  schema: 2;
+  schema: 3;
   projects: Record<string, { backend_id: string }>;
   tasks: Record<string, { backend_id: string; project_id: string; scope: string }>;
   comments: Record<string, Array<{ id: string; body: string; created_at: string }>>;
   links: Record<string, TaskLink[]>;
   transfers: Record<string, Transfer>;
+  documents: Record<string, TaskDocument[]>;
 };
 
 type BackendTask = {
@@ -77,6 +81,7 @@ type PublicTask = {
   comments: Array<{ id: string; body: string; created_at: string }>;
   session_ids: string[];
   links?: TaskLink[];
+  documents?: TaskDocument[];
 };
 
 // The upstream v0.6.0 list endpoint has no pagination or query. Fail rather than
@@ -85,6 +90,9 @@ export const TASK_SCAN_LIMIT = 500;
 export const TASK_RESULT_LIMIT = 50;
 const MAX_BOARD_RESPONSE_BYTES = 1024 * 1024;
 const MAX_TASK_OUTPUT_BYTES = 40_000;
+const MAX_DOCUMENT_BYTES = 1024 * 1024;
+const MAX_DOCUMENT_DETAILS = 16;
+const DOCUMENT_ROLES = ["compact_context", "concept_plan", "concept_detail"];
 
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -99,9 +107,11 @@ function searchIncomplete(): AdapterError {
 }
 
 function parseMetadata(value: unknown): Metadata {
-  if (!record(value) || (value.schema !== 1 && value.schema !== 2) || !record(value.projects) || !record(value.tasks) ||
+  if (!record(value) || (value.schema !== 1 && value.schema !== 2 && value.schema !== 3) ||
+      !record(value.projects) || !record(value.tasks) ||
       !record(value.comments) || !record(value.links)) throw metadataError();
-  if (value.schema === 2 && !record(value.transfers)) throw metadataError();
+  if (value.schema !== 1 && !record(value.transfers)) throw metadataError();
+  if (value.schema === 3 && !record(value.documents)) throw metadataError();
   for (const mapping of Object.values(value.projects)) {
     if (!record(mapping) || typeof mapping.backend_id !== "string") throw metadataError();
   }
@@ -130,17 +140,40 @@ function parseMetadata(value: unknown): Metadata {
         !["prepared", "creating", "staged", "subtask_creating", "subtask_toggling", "deleting", "remapping",
           "activating", "completed", "aborted", "unresolved"].includes(String(transfer.state))) throw metadataError();
   }
-  return { ...value, schema: 2, transfers } as Metadata;
+  const documents = value.schema === 3 ? value.documents : {};
+  for (const [taskId, entries] of Object.entries(documents as Record<string, unknown>)) {
+    if (!/^task_[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/u.test(taskId) ||
+        !Array.isArray(entries) || entries.length > MAX_DOCUMENT_DETAILS + 2 ||
+        entries.some((item) => !record(item) || !DOCUMENT_ROLES.includes(String(item.role)) ||
+          typeof item.path !== "string" || !validDocumentPath(taskId, item.role as DocumentRole, item.path)) ||
+        entries.filter((item) => item.role === "compact_context").length > 1 ||
+        entries.filter((item) => item.role === "concept_plan").length > 1 ||
+        new Set(entries.map((item) => item.path)).size !== entries.length) throw metadataError();
+  }
+  return { ...value, schema: 3, transfers, documents } as Metadata;
 }
 
 const emptyMetadata = (): Metadata => ({
-  schema: 2,
+  schema: 3,
   projects: {},
   tasks: {},
   comments: {},
   links: {},
   transfers: {},
+  documents: {},
 });
+
+// Deliberate role-bound directories/names, not a general path-based repo reader.
+function validDocumentPath(taskId: string, role: DocumentRole, path: string): boolean {
+  if (path.length > 512 || path.includes("\\") || path.includes("\0") || path.includes("..") ||
+      !/^[A-Za-z0-9_./-]+$/u.test(path)) return false;
+  if (role === "compact_context") return path === `.opencode/tasks/task-${taskId}.compact.md` ||
+    path === `.opencode/tasks/${taskId}.compact.md`;
+  if (role === "concept_plan") return path === `planning/task-concepts/${taskId}-concept-plan.md`;
+  return path.startsWith(`planning/task-concepts/${taskId}-`) &&
+    path !== `planning/task-concepts/${taskId}-concept-plan.md` &&
+    /^[-a-z0-9]+\.md$/u.test(path.slice(`planning/task-concepts/${taskId}-`.length));
+}
 
 type TaskboardRuntime = RuntimeDescriptor & {
   taskboardUrl: string;
@@ -235,6 +268,147 @@ export class ProjectBoardService {
     const task = this.publicTask(row, metadata, true);
     if (Buffer.byteLength(JSON.stringify(task), "utf8") > MAX_TASK_OUTPUT_BYTES) throw searchIncomplete();
     return task;
+  }
+
+  async registerDocument(taskId: string, role: DocumentRole, path: string, expectedPath?: string) {
+    return this.withMetadataLock(async () => {
+      const metadata = await this.loadMetadata();
+      this.requireNoPendingTransfer(metadata);
+      const row = await this.resolveTask(taskId, metadata);
+      if (!validDocumentPath(taskId, role, path)) throw new AdapterError("TASK_DOCUMENT_PATH_INVALID", "Task document path is not allowed for this role.");
+      await this.documentBytes(taskId, path);
+      const entries = metadata.documents[taskId] ?? [];
+      const current = role === "concept_detail"
+        ? entries.find((item) => item.role === role && item.path === expectedPath)
+        : entries.find((item) => item.role === role);
+      if (expectedPath !== undefined && current?.path !== expectedPath) {
+        throw new AdapterError("TASK_DOCUMENT_CONFLICT", "Expected task document reference changed.");
+      }
+      if (entries.some((item) => item.path === path && item.role !== role) ||
+          (role !== "concept_detail" && current && current.path !== path && expectedPath === undefined)) {
+        throw new AdapterError("TASK_DOCUMENT_CONFLICT", "Task document role already refers to another path.");
+      }
+      if (role === "concept_detail" && !current && !entries.some((item) => item.path === path) &&
+          entries.filter((item) => item.role === role).length >= MAX_DOCUMENT_DETAILS) {
+        throw new AdapterError("TASK_DOCUMENT_LIMIT", "Task concept detail reference limit reached.");
+      }
+      const updated = current ? entries.map((item) => item === current ? { role, path } : item) :
+        entries.some((item) => item.path === path) ? entries : [...entries, { role, path }];
+      if (new Set(updated.map((item) => item.path)).size !== updated.length) {
+        throw new AdapterError("TASK_DOCUMENT_CONFLICT", "Task document path is already registered.");
+      }
+      metadata.tasks[taskId] = { backend_id: row.id, project_id: this.boardId(row.projectId, metadata), scope: "project-local" };
+      metadata.documents[taskId] = updated;
+      await this.saveMetadata(metadata);
+      return { task_id: taskId, documents: updated };
+    });
+  }
+
+  async getDocuments(taskId: string) {
+    const metadata = await this.loadMetadata();
+    this.requireNoPendingTransfer(metadata);
+    await this.resolveTask(taskId, metadata);
+    const documents = [];
+    for (const ref of metadata.documents[taskId] ?? []) {
+      try {
+        const bytes = await this.documentBytes(taskId, ref.path);
+        const sha256 = createHash("sha256").update(bytes).digest("hex");
+        documents.push({ ...ref, state: "available" as const, total_bytes: bytes.length,
+          sha256, revision: `task-file-v1:${sha256}` });
+      } catch (error) {
+        if (!(error instanceof AdapterError) || error.code !== "TASK_DOCUMENT_MISSING") throw error;
+        documents.push({ ...ref, state: "missing" as const });
+      }
+    }
+    return { task_id: taskId, documents };
+  }
+
+  async readDocument(taskId: string, role: DocumentRole, path?: string, offset = 0, maxBytes = 8192, revision?: string) {
+    if (path !== undefined && !validDocumentPath(taskId, role, path)) {
+      throw new AdapterError("TASK_DOCUMENT_PATH_INVALID", "Task document path is not allowed for this role.");
+    }
+    const metadata = await this.loadMetadata();
+    this.requireNoPendingTransfer(metadata);
+    await this.resolveTask(taskId, metadata);
+    const matches = (metadata.documents[taskId] ?? []).filter((item) => item.role === role &&
+      (path === undefined || item.path === path));
+    if (!matches.length) throw new AdapterError("TASK_DOCUMENT_REF_NOT_FOUND", "Task document role/path is not registered.");
+    if (matches.length !== 1) throw new AdapterError("INVALID_ARGUMENT", "Select a registered concept_detail path.");
+    const ref = matches[0]!;
+    const bytes = await this.documentBytes(taskId, ref.path);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const currentRevision = `task-file-v1:${sha256}`;
+    if ((offset > 0 && !revision) || (revision && revision !== currentRevision)) {
+      throw new AdapterError("TASK_DOCUMENT_CHANGED", "Task document revision changed; restart from offset zero using the current document revision.");
+    }
+    if (offset > bytes.length || (offset < bytes.length && (bytes[offset]! & 0xc0) === 0x80)) {
+      throw new AdapterError("INVALID_ARGUMENT", "Task document offset is outside a UTF-8 boundary.");
+    }
+    const remaining = bytes.subarray(offset).toString("utf8");
+    let text = utf8Prefix(remaining, maxBytes);
+    let end = offset + Buffer.byteLength(text);
+    const result = () => ({ task_id: taskId, role, path: ref.path, revision: currentRevision,
+      unit: "utf8_bytes" as const, total_bytes: bytes.length, sha256, range: { start: offset, end },
+      text, has_more: end < bytes.length, content_complete: end === bytes.length });
+    while (text && jsonBytes(result()) > READ_PAYLOAD_BYTES / 2) {
+      text = utf8Prefix(text, Math.floor(Buffer.byteLength(text) / 2));
+      end = offset + Buffer.byteLength(text);
+    }
+    if (end === offset && offset < bytes.length) throw new AdapterError("RESPONSE_BUDGET_EXCEEDED", "Task document page cannot fit the response budget.");
+    return result();
+  }
+
+  private async documentBytes(taskId: string, path: string): Promise<Buffer> {
+    if (!DOCUMENT_ROLES.some((role) => validDocumentPath(taskId, role as DocumentRole, path))) {
+      throw new AdapterError("TASK_DOCUMENT_PATH_INVALID", "Task document path is not allowed.");
+    }
+    const root = this.runtime.project;
+    const absolute = resolve(root, path);
+    if (!absolute.startsWith(`${root}${sep}`) || basename(absolute) !== path.split("/").at(-1)) {
+      throw new AdapterError("TASK_DOCUMENT_PATH_INVALID", "Task document path escapes the project.");
+    }
+    let current = root;
+    for (const segment of path.split("/").slice(0, -1)) {
+      current = join(current, segment);
+      const info = await lstat(current).catch(() => undefined);
+      if (!info) throw new AdapterError("TASK_DOCUMENT_MISSING", "Task document directory does not exist.");
+      if (!info.isDirectory() || info.isSymbolicLink()) throw new AdapterError("TASK_DOCUMENT_PATH_INVALID", "Task document directory is not a regular directory.");
+    }
+    let file;
+    try { file = await open(absolute, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new AdapterError("TASK_DOCUMENT_MISSING", "Task document file does not exist.");
+      throw new AdapterError("TASK_DOCUMENT_PATH_INVALID", "Task document file cannot be opened safely.");
+    }
+    try {
+      const info = await file.stat();
+      if (!info.isFile()) throw new AdapterError("TASK_DOCUMENT_PATH_INVALID", "Task document must be a regular file.");
+      if (info.size > MAX_DOCUMENT_BYTES) throw new AdapterError("TASK_DOCUMENT_LIMIT", "Task document exceeds the read limit.");
+      // Check the opened object, not merely its path, before exposing any bytes.
+      if (await realpath(`/proc/self/fd/${file.fd}`).catch(() => undefined) !== absolute) {
+        throw new AdapterError("TASK_DOCUMENT_PATH_INVALID", "Task document resolves outside its registered project path.");
+      }
+      const buffer = Buffer.alloc(MAX_DOCUMENT_BYTES + 1);
+      let length = 0;
+      while (length < buffer.length) {
+        const { bytesRead } = await file.read(buffer, length, buffer.length - length, length);
+        if (!bytesRead) break;
+        length += bytesRead;
+      }
+      if (length > MAX_DOCUMENT_BYTES) throw new AdapterError("TASK_DOCUMENT_LIMIT", "Task document exceeds the read limit.");
+      const after = await file.stat();
+      if (after.size !== info.size || after.mtimeMs !== info.mtimeMs || after.ino !== info.ino || length !== info.size) {
+        throw new AdapterError("TASK_DOCUMENT_CHANGED", "Task document changed during the read.");
+      }
+      const bytes = buffer.subarray(0, length);
+      let text: string;
+      try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
+      catch { throw new AdapterError("TASK_DOCUMENT_INVALID", "Task document is not valid UTF-8."); }
+      if (!text.startsWith(`Task-ID: ${taskId}\n`) && !text.startsWith(`Task-ID: ${taskId}\r\n`)) {
+        throw new AdapterError("TASK_DOCUMENT_MISMATCH", "Task document header belongs to another task.");
+      }
+      return bytes;
+    } finally { await file.close(); }
   }
 
   async createTask(input: {
@@ -755,6 +929,7 @@ export class ProjectBoardService {
       comments: metadata.comments[taskId] ?? [],
       session_ids: [...new Set(links.map((link) => link.session_id))],
       ...(includeLinks ? { links } : {}),
+      ...(includeLinks ? { documents: metadata.documents[taskId] ?? [] } : {}),
     };
   }
 

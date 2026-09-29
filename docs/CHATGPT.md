@@ -67,6 +67,8 @@ Downloading/installing this ZIP changes neither the app/workspace permission pol
 
 Skill r11 reads the project's Agent Control Hub profile preference when the selected connector exposes it. For **new authorized work** it chooses `deep`, `standard`, or `execution`, applies an exact available configured runtime only to an idle session, verifies it, and briefly reports profile and model/variant before submitting once. Explicit user runtime choices override the profile. Existing result/status reads never change runtime; unavailable configured mappings are not silently substituted. MCP is the first connector with this capability, while A2A/OpenLive do not yet expose profile reads. The Hub stores only provider/model/variant IDs in `<project>/.opencode-vm/agent-control.json`.
 
+Skill r19 and MCP adapter 0.1.17 add project-task document roles (`compact_context`, `concept_plan`, optional `concept_detail`). For a confirmed `todo` → `in_progress` workflow, the work agent prepares both main documents while the task remains `todo`; the orchestrator verifies and registers their references before asking the Board to move. When the connected MCP catalog exposes `get_task_documents` and `read_task_document`, ChatGPT can answer brief task-status questions from the compact context and check document maintenance directly without another agent run. Actual work outcomes still require original session/result evidence. Update the installed skill ZIP and refresh the connector tool catalog independently.
+
 ## 4. Start with a read-only smoke test
 
 Paste this into the selected ChatGPT conversation:
