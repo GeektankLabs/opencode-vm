@@ -446,6 +446,24 @@ test("pinned upstream binary: confirmed Inbox, multi-project identity and recove
     assert.equal(target.subtasks[0].completed, true);
     assert.equal(target.description.includes("transfer-pending"), false);
     await assert.rejects(board.reclassifyTask({ ...input, requestId: randomUUID() }), { code: "TASK_TRANSFER_CONFLICT" });
+    // Workstream -> workstream reclassification of an unrelated task.
+    const inter = await board.createTask({ boardProjectId: work.board_project_id, title: "Move me between workstreams" });
+    const interTransfer = randomUUID();
+    const interInput = { taskId: inter.task_id, targetBoardProjectId: inbox.board_project_id,
+      expectedSourceBoardProjectId: work.board_project_id, requestId: interTransfer };
+    const interMoved = await board.reclassifyTask(interInput);
+    assert.equal(interMoved.state, "completed");
+    assert.equal(interMoved.current_native_key?.startsWith("INBOX-"), true);
+    assert.equal((await board.getTask(inter.task_id)).board_project_id, inbox.board_project_id);
+    // Replay with the original UUID and matching source Board Project remains idempotent.
+    assert.deepEqual(await new ProjectBoardService(state).reclassifyTask(interInput), interMoved);
+    // Stale target: changing the destination for the same UUID must fail closed
+    // even when the source still matches.
+    await assert.rejects(board.reclassifyTask({ ...interInput,
+      targetBoardProjectId: work.board_project_id }), { code: "TASK_TRANSFER_CONFLICT" });
+    // The moved task remains uniquely addressable under its public task_id after the replay attempt.
+    const movedTask = (await board.getTask(inter.task_id));
+    assert.equal(movedTask.task_id, inter.task_id);
     const extra = await board.createTask({ title: "Lost staging response" });
     const retryId = randomUUID();
     const originalPost = globalThis.fetch;

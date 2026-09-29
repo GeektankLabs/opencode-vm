@@ -527,12 +527,23 @@ export class ProjectBoardService {
           throw new AdapterError("TASK_TRANSFER_CONFLICT", "Transfer request ID is bound to a different or aborted operation.");
         }
         if (transfer.state === "completed") return this.transferStatus(transfer);
+        // A previously completed or in-progress request keeps its journal unless the
+        // caller's expected source no longer matches the live Ticket. The Inbox
+        // retry after an interrupted DELETE is part of that contract: the
+        // original source was deleted on purpose, and the request itself remains
+        // valid until completed or aborted through this exact path.
+        const currentSource = await this.ticketOrMissing(transfer.source.id);
+        if (currentSource && this.boardId(currentSource.projectId, metadata) !== transfer.source_board_project_id) {
+          transfer.state = "aborted";
+          await this.saveMetadata(metadata);
+          throw new AdapterError("TASK_TRANSFER_CONFLICT", "Source Ticket no longer belongs to the expected Board Project.");
+        }
       } else {
         this.requireNoPendingTransfer(metadata);
         const source = await this.resolveTask(input.taskId, metadata);
         const sourceProject = this.boardId(source.projectId, metadata);
-        if (sourceProject !== input.expectedSourceBoardProjectId || sourceProject !== this.projectId()) {
-          throw new AdapterError("TASK_TRANSFER_CONFLICT", "Source is not the confirmed default Board Project.");
+        if (sourceProject !== input.expectedSourceBoardProjectId) {
+          throw new AdapterError("TASK_TRANSFER_CONFLICT", "Source Board Project does not match the expected Board Project.");
         }
         const target = await this.getProject(input.targetBoardProjectId, metadata);
         if (!target || target.id === sourceProject) throw new AdapterError("TASK_TRANSFER_CONFLICT", "Target must be another Board Project.");
