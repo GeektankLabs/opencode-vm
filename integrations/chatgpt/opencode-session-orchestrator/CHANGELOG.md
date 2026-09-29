@@ -38,10 +38,11 @@
 - Add client-side registry tracking of path/`task_id`/`Last-updated`, new decision-preparation integration, and board-workflow integration for start/resumption/follow-up and remainder previews.
 - Preserve backward compatibility: tasks without a compact context behave unchanged; creating one is an optional, user-confirmed choice with no board mutation and no new MCP tool or backend field.
 
-## 2026-09-29-r12
+## 2026-09-29-r13
 
 - Propose classification only for trackable outcomes; search existing Board Projects and tickets before offering a confirmed extension, ticket, workstream or Inbox setup.
 - Keep board writes user-confirmed, distinguish native Inbox-to-workstream reclassification from the unavailable global/local transfer, and recover uncertain transfers by the same request UUID.
+- Allow the same reclassification between any two existing active Board Projects; replay with a stale source fails closed and an aborted journal rejects further use of that UUID.
 - Keep technical transfer staging and agent/session completion separate from business Done; add synthetic classification and recovery cases.
 
 ## 2026-09-28-r11
