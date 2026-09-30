@@ -1,6 +1,6 @@
 Task-ID: task_9dc6e797-b884-589a-99d7-fd3ceceb5414
 Title: Orchestrator Skill – agent-managed Worktree-Isolation und persistente Arbeitspakete
-Last-updated: 2026-09-30T21:10:44+02:00
+Last-updated: 2026-09-30T21:13:39+02:00
 
 ## Concept Plan
 
@@ -30,9 +30,9 @@ Kanonischer Plan: `planning/task-concepts/task_9dc6e797-b884-589a-99d7-fd3ceceb5
 
 - Orchestrator-Skill auf **2026-09-30-r25** erweitert: generische agent-managed Git-/Worktree-Ownership, verifizierte Write-Targets, Basis-/Dirty-/Integrationsnachweis, serielle Integration und fail-safe Retention/Cleanup.
 - Persistente Work Packages über bestehende Board-Managementtasks + C/P beschrieben: ID-/Goal-/Muss-Optional-Ermittlung, Todo-Readinesslücken, Wellenplanung, `WORK_PACKAGE_READY` nach `REGISTERED` und vor Boardmove, Autonomie/`INPUT_REQUIRED`, Morning-Handoff, Work-vs-Chat und getrennte Runtimewahl.
-- Neue Skillreferenzen `references/worktree-ownership.md` und `references/work-packages.md`; Board-, Taskdokument-, Follow-through- und Regressionstexte sowie `docs/CHATGPT.md` aktualisiert. Keine MCP-Datenstruktur, Session-Policy oder Product Runtime geändert.
+- Neue Skillreferenzen `references/worktree-ownership.md` und `references/work-packages.md`; Board-, Taskdokument-, Follow-through- und Regressionstexte sowie `docs/CHATGPT.md` aktualisiert. `WORK_PACKAGE_READY` ist explizit zusätzliches Boardmove-Gate nach `REGISTERED`. Keine MCP-Datenstruktur, Session-Policy oder Product Runtime geändert.
 - `python3 -B tests/chatgpt_skill_test.py`: **20 Tests PASS**. Enthält static/client-flow Checks und einen echten temporären Git-Test für getrennte Worktree-Indizes, gemeinsames Git-Verzeichnis und Shared-Hunk-Mergekonflikt.
-- `python3 -B scripts/build-chatgpt-skill.py --check`: PASS; Inventar/ZIP/Checksumme/latest konsistent. Aktuelle ZIP-SHA-256: `0850f5da2de9fc0ca64b3c2a9279a15108cf83a033122cbef5378d29685fc871`. `git diff --check`: PASS.
+- `python3 -B scripts/build-chatgpt-skill.py --check`: PASS; Inventar/ZIP/Checksumme/latest konsistent. Aktuelle ZIP-SHA-256: `fb2b5b2b5ac1018f6ceb4f0b350f58b4a141d5b664e1306247160287a9cf47ee`. `git diff --check`: PASS.
 - Lokaler Implementierungscommit: `06af861f3a77b6e502368fc4f74562aee199aab9` — `feat(skill): coordinate persistent work packages`.
 - Keine externe ChatGPT-Work-/Hosted-Abnahme, macOS/Lima-Mount-/Credentialabnahme oder aktive Skillinstallation/Connector-Restart durchgeführt. Tatsächliche Work-Tool-Treebindung bleibt vor realen isolierten Writes zu verifizieren.
 

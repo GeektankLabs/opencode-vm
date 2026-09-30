@@ -884,6 +884,7 @@ class SkillPackageTest(unittest.TestCase):
                          "do not translate an OpenCode provider/model/variant id", "INPUT_REQUIRED"):
             self.assertIn(required.lower(), packages.lower())
         self.assertIn("package gate **after** `REGISTERED`", board)
+        self.assertIn("additional prerequisite after `REGISTERED`", board)
         self.assertIn("external acceptance", context.lower())
         self.assertIn("integration-tree `HEAD`", packages)
         self.assertIn("ChatGPT Work" , docs)
