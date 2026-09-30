@@ -1,9 +1,9 @@
 name: Managed sessions
 on:
   push:
-    paths: ["runtime/**", "adapters/**", "opencode-vm.sh", "tests/managed*", "tests/helpers/managed_runtime.py", ".github/workflows/managed-sessions.yml"]
+    paths: ["runtime/**", "adapters/**", "opencode-vm.sh", "scripts/build-managed-runtime.py", "tests/managed*", "tests/helpers/managed_runtime.py", ".github/workflows/managed-sessions.yml"]
   pull_request:
-    paths: ["runtime/**", "adapters/**", "opencode-vm.sh", "tests/managed*", "tests/helpers/managed_runtime.py", ".github/workflows/managed-sessions.yml"]
+    paths: ["runtime/**", "adapters/**", "opencode-vm.sh", "scripts/build-managed-runtime.py", "tests/managed*", "tests/helpers/managed_runtime.py", ".github/workflows/managed-sessions.yml"]
 permissions:
   contents: read
 jobs:

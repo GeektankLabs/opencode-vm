@@ -1,6 +1,6 @@
 Task-ID: task_25b3af4f-e97f-5707-b523-13bcc99ed03c
 Title: OpenCode VM – agent-managed Sessions non-interactive betreiben, lokale Git-Arbeit erlauben, Remote-Push sperren
-Last-updated: 2026-09-30T17:07:30Z
+Last-updated: 2026-09-30T23:35:01+02:00
 Implementation-state: full-scope-locally-implementation-complete; implementation-committed; external-acceptance-separate
 
 ## Concept Plan
@@ -48,6 +48,13 @@ Kanonischer Detailplan: `planning/task-concepts/task_25b3af4f-e97f-5707-b523-13b
 - Neue Policyunits 4, A2Ahooks 2, Lifecycle/Source-/Embedded-Standaloneparität 3 PASS. Echte 1.18.33 Chat/Responses/Anthropic-Gates für terminalen Loopstop/Folgeturn, no Questions, Gitautonomie/Scope, Drift/Restart/Child/Background/Always-Allow/Hierarchie PASS. Echte A2A 1.2.0 service creation/context/preferred/prompt_async/command PASS.
 - AgentControl 39, Hub 9, Launcher 4 + DOM 8 PASS; Launcherproxy 1 PASS/1 bestehender Opt-in SKIP, Editor 18 PASS/1 bestehender Live-SKIP + Extension PASS. Skill 17, Release Metadata/State 5+5 PASS.
 - MCP-Adapter-/Lock-/Tunnel-, OpenLive-/Install-/Besprechung-Lifecycle PASS; Bash syntax, ShellCheck error level, actionlint, diff --check und eingebetteter Payloadcheck PASS. Fixture-/Buildrawdaten in /tmp/opencode/ocvm-managed-* und managed-{mcp,openlive}-{a,b}.tar, VM-ephemer.
+
+## CI-Nachkorrektur: Python-unabhängiger Payloadcheck
+
+- CI-Fehler auf Basis `da0cb55af87271c3cd8199d6f5fe96536185b81f` lokal reproduziert: Builder `--check` bestand mit Python 3.13.15, scheiterte mit Python 3.12.3. Die entpackten Tar-/Runtimebytes sind exakt gleich; nur GZIP-Headerbyte 9 unterscheidet sich (`255` vs. Unix `3`) durch `gzip.compress(mtime=0)` auf Python 3.11/3.12.
+- `scripts/build-managed-runtime.py` erzeugt nun mit `gzip.GzipFile(filename="", compresslevel=9, mtime=0)` den kanonischen Header. Bereits eingebetteter Payload bleibt byteidentisch; `opencode-vm.sh`, Runtime-Sources und Version/Pins bleiben unverändert. Komprimierter Payload-SHA-256 auf beiden Interpretern: `ba3d46993087110b5f61afb79f361b3c3f2f8d43787ac366e5e0bfa6c94b113e`.
+- Maintained Lifecycle-Suite um zwei Builderregressionen erweitert: altes GZIP-OS-Verhalten simulieren, exakte Bytes/Member/Metadata, read-only Check, echte Source-Drift verweigern und idempotent regenerieren. Suite **5 PASS** jeweils mit Python 3.12.3 und 3.13.15; Builder `--check` auf beiden PASS; Policy **4 PASS**, A2A-Hooks **2 PASS**, actionlint und diff --check PASS.
+- CI-Pathfilter nimmt den Builder selbst auf. Fix, Regressionen und dieser Context werden als taskbegrenzter lokaler Commit festgehalten; der GitHub-Lauf wurde hier nicht manuell gestartet. Kein Push/Release/Deployment, Runtime-/Connectorrestart oder Boardwrite. Keine Konzept-/Policyänderung, daher P unverändert.
 
 ## Entscheidungslage / Readiness
 

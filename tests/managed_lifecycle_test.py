@@ -1,11 +1,19 @@
 """Execute the actual host payload installer against source/standalone fixtures."""
+import base64
+from contextlib import redirect_stdout
+import gzip
+import io
 import json
 import os
 from pathlib import Path
 import re
+import runpy
 import subprocess
+import sys
+import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = (ROOT / "opencode-vm.sh").read_text()
@@ -13,6 +21,68 @@ FUNCTION = re.search(r"^managed_policy_install\(\) \{\n.*?^\}", SCRIPT, re.M | r
 
 
 class LifecycleTest(unittest.TestCase):
+    def builder_fixture(self, root):
+        (root / "runtime").mkdir()
+        for name in ("managed-core.mjs", "managed-policy.mjs", "a2a-managed.py"):
+            (root / "runtime" / name).write_bytes((ROOT / "runtime" / name).read_bytes())
+        (root / "scripts").mkdir()
+        builder = root / "scripts/build-managed-runtime.py"
+        builder.write_bytes((ROOT / "scripts/build-managed-runtime.py").read_bytes())
+        embedded = re.search(r"# BEGIN GENERATED MANAGED RUNTIME\n.*?# END GENERATED MANAGED RUNTIME",
+                             SCRIPT, re.S)[0]
+        script = root / "opencode-vm.sh"
+        script.write_text("# preserve prefix\n" + embedded + "\n# preserve suffix\n")
+        return builder, script
+
+    def run_builder(self, builder, *args):
+        original_compress = gzip.compress
+
+        def legacy_compress(data, compresslevel=9, *, mtime=None):
+            # Reproduce the Python 3.11/3.12 zlib fast-path header on any host.
+            result = bytearray(original_compress(data, compresslevel=compresslevel, mtime=mtime))
+            result[9] = 3  # Unix OS marker, while the checked-in payload uses 255.
+            return bytes(result)
+
+        with patch.object(sys, "argv", [str(builder), *args]), \
+                patch.object(gzip, "compress", legacy_compress), redirect_stdout(io.StringIO()):
+            runpy.run_path(str(builder), run_name="__main__")
+
+    def test_builder_preserves_exact_embedded_bytes_across_legacy_gzip_headers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            builder, script = self.builder_fixture(Path(tmp))
+            before = script.read_bytes()
+            self.run_builder(builder, "--check")
+            self.assertEqual(script.read_bytes(), before)  # --check never writes.
+            self.run_builder(builder)
+            self.assertEqual(script.read_bytes(), before)  # Same bytes, no runtime/version churn.
+            encoded = re.search(r"OCVM_MANAGED_RUNTIME_GZIP_BASE64='([^']+)'", script.read_text())[1]
+            compressed = base64.b64decode(encoded)
+            self.assertEqual(compressed[9], 255)
+            with tarfile.open(fileobj=io.BytesIO(gzip.decompress(compressed)), mode="r:") as archive:
+                self.assertEqual(archive.getnames(), ["managed-core.mjs", "managed-policy.mjs", "a2a-managed.py"])
+                for entry in archive.getmembers():
+                    self.assertTrue(entry.isfile())
+                    self.assertEqual((entry.mode, entry.mtime, entry.uid, entry.gid), (0o644, 0, 0, 0))
+                    self.assertEqual(archive.extractfile(entry).read(), (ROOT / "runtime" / entry.name).read_bytes())
+
+    def test_builder_still_rejects_source_drift_and_rebuilds_idempotently(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            builder, script = self.builder_fixture(root)
+            before = script.read_bytes()
+            source = root / "runtime/managed-core.mjs"
+            source.write_bytes(source.read_bytes() + b"\n// changed fixture\n")
+            with self.assertRaisesRegex(AssertionError, "embedded managed runtime is stale"):
+                self.run_builder(builder, "--check")
+            self.assertEqual(script.read_bytes(), before)
+            self.run_builder(builder)
+            rebuilt = script.read_bytes()
+            self.assertNotEqual(rebuilt, before)
+            self.run_builder(builder, "--check")
+            os.utime(source, (1700000000, 1700000000))
+            self.run_builder(builder)
+            self.assertEqual(script.read_bytes(), rebuilt)
+
     def test_source_and_standalone_install_are_idempotent_and_preserve_manual_config(self):
         for standalone in (False, True):
             with self.subTest(standalone=standalone), tempfile.TemporaryDirectory() as tmp:

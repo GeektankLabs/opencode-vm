@@ -19,7 +19,12 @@ with tarfile.open(fileobj=buffer, mode="w", format=tarfile.USTAR_FORMAT) as arch
         info.mode = 0o644
         info.mtime = 0
         archive.addfile(info, io.BytesIO(data))
-encoded = base64.b64encode(gzip.compress(buffer.getvalue(), mtime=0)).decode()
+# gzip.compress(mtime=0) uses a platform-specific OS byte on Python 3.11/3.12.
+# GzipFile writes the canonical header on all supported Python versions.
+compressed = io.BytesIO()
+with gzip.GzipFile(filename="", fileobj=compressed, mode="wb", compresslevel=9, mtime=0) as compressor:
+    compressor.write(buffer.getvalue())
+encoded = base64.b64encode(compressed.getvalue()).decode()
 block = "# BEGIN GENERATED MANAGED RUNTIME\nOCVM_MANAGED_RUNTIME_GZIP_BASE64='" + "\n".join(textwrap.wrap(encoded, 120)) + "'\n# END GENERATED MANAGED RUNTIME"
 script = ROOT / "opencode-vm.sh"
 content = script.read_text()
