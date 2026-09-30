@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026-09-30-r21
+
+- Prefer discovered `add_task_document_bindings` for both main roles in one add-only commit; retain `register_task_document` only when the new tool is absent, never after a conflict/error.
+- Preserve `CONCEPT_READY` → bindings → available/path/revision readback → `REGISTERED` → separate Board move/status readback → `BOARD_MOVED`, including orphan reuse and exact-replay recovery. No cross-store transaction is claimed; uncertain Board delivery requires status reconciliation.
+- Add explicitly authorized native management notes: task read, one narrow append, readback; no blind retry, automatic notes or general-edit fallback. Document UI/edit races and honest annotations without approval promises.
+- Extend synthetic sequence, replay, fallback, failure and note regressions; hosted model behavior remains separate from package/connector tests.
+
+## 2026-09-29-r20
+
+- Introduce labelled checkpoints `CONCEPT_READY` (agent), `REGISTERED` (orchestrator — both roles bound and read back as `available`) and `BOARD_MOVED` (orchestrator — Board move + readback confirmed) as the single shared frame for the post-agent follow-through. The agent's `CONCEPT_READY` is the start of the orchestrator's follow-through, not its end; the Board never moves before `REGISTERED`.
+- Add `references/initialization-follow-through.md` as the canonical document for the labelled checkpoints, the orphan-files recovery path and the failure-shape catalogue; reference it from `SKILL.md`, `references/board-workflow.md` and `references/task-concept-plan.md`.
+- Make the orphan-files recovery path explicit: detect → verify `Task-ID` → reuse existing matching files → run the same `register_task_document` + `get_task_documents` sequence → run the Board move + readback. Do not ask the executing agent to recreate, do not rename, do not invent legacy artifact links. A foreign `Task-ID` at a canonical path is a collision and stops the run.
+- Require the executing agent's reply on a successful file creation/reconciliation to end with the literal `CONCEPT_READY:` label and the actual `Task-ID` from each file's head block (not a paraphrase). Path-only reports are rejected; the orchestrator asks for the actual `Task-ID` before any registration call.
+- Extend the regression scenarios with rows that cover: orchestrator advances the Board before `REGISTERED`; orchestrator skips the Board move after `REGISTERED`; orphan matching files reused without recreation; uncertain Board readback; same-session follow-up continuation; approval interrupt that preserves the last successful step and resumes from the next pending step.
+- Add a flow-level regression test (`test_initialization_follow_through_sequence_walks_orchestrator_side`) in `tests/chatgpt_skill_test.py` that walks the ordered sequence against a small in-memory `FakeConnector` + `FakeAgent` across six scripted scenarios (clean run, premature-Board-advance guard, partial registration, move-failure, orphan reuse, foreign-Task-ID collision) and asserts the orchestrator's action in each.
+- Preserve every r19 feature and assertion; no new MCP tool, scheduler, daemon or background process.
+
 ## 2026-09-29-r19
 
 - For confirmed `todo` -> `in_progress` work, keep the Board task `todo` while the executing agent creates/reuses and identifies both task files; register/read back semantic `compact_context` and `concept_plan` references before the Board move. Reuse documents after an uncertain or failed move.

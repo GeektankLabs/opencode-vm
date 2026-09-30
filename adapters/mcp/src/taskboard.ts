@@ -90,6 +90,7 @@ export const TASK_SCAN_LIMIT = 500;
 export const TASK_RESULT_LIMIT = 50;
 const MAX_BOARD_RESPONSE_BYTES = 1024 * 1024;
 const MAX_TASK_OUTPUT_BYTES = 40_000;
+export const MAX_TASK_DESCRIPTION_LENGTH = 32_000;
 const MAX_DOCUMENT_BYTES = 1024 * 1024;
 const MAX_DOCUMENT_DETAILS = 16;
 const DOCUMENT_ROLES = ["compact_context", "concept_plan", "concept_detail"];
@@ -268,6 +269,62 @@ export class ProjectBoardService {
     const task = this.publicTask(row, metadata, true);
     if (Buffer.byteLength(JSON.stringify(task), "utf8") > MAX_TASK_OUTPUT_BYTES) throw searchIncomplete();
     return task;
+  }
+
+  async addManagementNote(taskId: string, note: string): Promise<PublicTask> {
+    if (!/^task_[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/u.test(taskId) ||
+        typeof note !== "string" || !note.trim() || note.trim().length > MAX_TASK_DESCRIPTION_LENGTH) {
+      throw new AdapterError("INVALID_ARGUMENT", "A stable task ID and a nonempty bounded note are required.");
+    }
+    return this.withMetadataLock(async () => {
+      const metadata = await this.loadMetadata();
+      this.requireNoPendingTransfer(metadata);
+      const row = await this.resolveTask(taskId, metadata);
+      const prefix = row.description ?? "";
+      const description = `${prefix}${prefix ? "\n\n" : ""}Management Note:\n${note.trim()}`;
+      if (description.length > MAX_TASK_DESCRIPTION_LENGTH) {
+        throw new AdapterError("TASK_DESCRIPTION_LIMIT", "Appended task description exceeds the character limit.");
+      }
+      if (Buffer.byteLength(JSON.stringify(this.publicTask({ ...row, description }, metadata, true)), "utf8") > MAX_TASK_OUTPUT_BYTES) {
+        throw searchIncomplete();
+      }
+      const updated = await this.request<BackendTask>(`/api/tickets/${encodeURIComponent(row.id)}`,
+        { method: "PUT", body: { description } });
+      return this.publicTask(updated, metadata, true);
+    });
+  }
+
+  async addDocumentBindings(taskId: string, bindings: { compactContext?: string; conceptPlan?: string }) {
+    if (!/^task_[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/u.test(taskId) ||
+        (bindings.compactContext === undefined && bindings.conceptPlan === undefined) ||
+        Object.keys(bindings).some((key) => key !== "compactContext" && key !== "conceptPlan")) {
+      throw new AdapterError("INVALID_ARGUMENT", "A stable task ID and at least one main document role are required.");
+    }
+    return this.withMetadataLock(async () => {
+      const metadata = await this.loadMetadata();
+      this.requireNoPendingTransfer(metadata);
+      const row = await this.resolveTask(taskId, metadata);
+      const requested: TaskDocument[] = [];
+      if (bindings.compactContext !== undefined) requested.push({ role: "compact_context", path: bindings.compactContext });
+      if (bindings.conceptPlan !== undefined) requested.push({ role: "concept_plan", path: bindings.conceptPlan });
+      for (const { role, path } of requested) {
+        if (!validDocumentPath(taskId, role, path)) throw new AdapterError("TASK_DOCUMENT_PATH_INVALID", "Task document path is not allowed for this role.");
+        await this.documentBytes(taskId, path);
+      }
+      const entries = metadata.documents[taskId] ?? [];
+      for (const { role, path } of requested) {
+        if (entries.some((item) => (item.role === role && item.path !== path) || (item.path === path && item.role !== role))) {
+          throw new AdapterError("TASK_DOCUMENT_CONFLICT", "Task document role or path is already bound differently.");
+        }
+      }
+      const additions = requested.filter((ref) => !entries.some((item) => item.role === ref.role && item.path === ref.path));
+      if (!additions.length) return { task_id: taskId, documents: entries };
+      const updated = [...entries, ...additions];
+      metadata.tasks[taskId] = { backend_id: row.id, project_id: this.boardId(row.projectId, metadata), scope: "project-local" };
+      metadata.documents[taskId] = updated;
+      await this.saveMetadata(metadata);
+      return { task_id: taskId, documents: updated };
+    });
   }
 
   async registerDocument(taskId: string, role: DocumentRole, path: string, expectedPath?: string) {

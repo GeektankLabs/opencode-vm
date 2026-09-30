@@ -2,6 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { traceToolCall } from "./diagnostics.js";
 
+test("low-risk task write diagnostics name tools without note, path or result contents", async () => {
+  for (const tool of ["add_task_management_note", "add_task_document_bindings"]) {
+    const lines: string[] = [];
+    await traceToolCall(tool, { task_id: "task_aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      note: "PRIVATE NOTE", compact_context: "PRIVATE PATH", concept_plan: "PRIVATE PLAN" },
+    async () => ({ content: [{ type: "text", text: "PRIVATE RESULT" }] }), (line) => lines.push(line));
+    assert.match(lines[0]!, new RegExp(`"tool":"${tool}"`, "u"));
+    assert.equal(lines.length, 2);
+    assert.doesNotMatch(lines.join(""), /PRIVATE/u);
+  }
+});
+
 test("communication logs correlate calls without copying input or results", async () => {
   const lines: string[] = [];
   let calls = 0;

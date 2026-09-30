@@ -33,6 +33,12 @@ The web launcher already registers project-ready Editor and Taskboard entries. T
 
 `list_project_tasks` scans the complete upstream project/status list locally and filters title/description text, linked session, edit timestamp and terminal state. Upstream v0.6.0 has no search cursor or pagination. A scan exceeding 1 MiB/500 tickets, or a result exceeding 50 tickets/40,000 UTF-8 bytes, returns `TASK_SEARCH_INCOMPLETE`, never a partial list or a false absence claim. `get_project_task(task_id)` supports exact stable IDs and shows complete links where they fit the response budget; `list_project_tasks(session_id=...)` is reverse lookup. No new parent/child, resolution, cross-store CAS or task-synthesis write tool is added. The companion ChatGPT skill can produce a read-only remainder preview using these reads.
 
+## Additive task writes (MCP adapter 0.1.18)
+
+The optional catalog now has 18 Board tools. `add_task_document_bindings` validates one/both main-role files and all conflicts before one schema-3 sidecar commit; exact replay revalidates without publication. No replace, retarget, file write or Board-status mutation is allowed. Existing `register_task_document(expected_path)` remains available for deliberate replacements and detail roles.
+
+`add_task_management_note` appends a visible native description block through one description-only PUT. Cooperating writers share the existing lock; UI/general edits do not, and upstream has no CAS. This accepted race boundary does not guarantee globally loss-free append. Character and full task-read UTF-8 budgets are checked before PUT; uncertain delivery requires readback, never a blind retry. The tools have honest additive write annotations, not approval guarantees. The r21 client keeps mandatory document readback and a separate Board move; fallback to register occurs only when the bundle tool is absent. See [MCP contract](docs/MCP-INTERFACE.md#optional-project-local-taskboard-tools-adapter-0118).
+
 ## PLAN Import Boundary
 
 No `PLAN-*.md` file is automatically synchronized or imported. `source.file`, `source.section`, and `source.entry` are a documented idea for a later explicit importer, **not fields in the current sidecar**. A future importer could retain Markdown origins without making Markdown and the board competing authorities.

@@ -1,6 +1,6 @@
 {
   "name": "ocvm-mcp-adapter",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "private": true,
   "type": "module",
   "engines": {
@@ -12,7 +12,8 @@
     "pretest": "npm run build",
     "test": "node --test dist/*.test.js",
     "pretest:integration": "npm run build",
-    "test:integration": "node tests/opencode-integration.mjs"
+    "test:integration": "node tests/opencode-integration.mjs",
+    "test:taskboard": "npm run build && node tests/taskboard-integration.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.1",

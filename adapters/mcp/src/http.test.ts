@@ -720,8 +720,20 @@ test("MCP board search, reverse lookup, complete links and overflow use the publ
   const directory = await mkdtemp(join(tmpdir(), "ocvm-board-wire-"));
   let rows = [{ id: "backend-1", projectId: "backend-project", title: "Review work", description: "Searchable body",
     status: "todo", priority: "medium" }];
+  const puts: Array<Record<string, unknown>> = [];
   const backend = http.createServer((request, response) => {
     response.setHeader("content-type", "application/json");
+    if (request.url === "/api/tickets/backend-1" && request.method === "PUT") {
+      let body = "";
+      request.on("data", (chunk) => { body += String(chunk); });
+      request.on("end", () => {
+        const patch = JSON.parse(body) as Record<string, unknown>;
+        puts.push(patch);
+        Object.assign(rows[0]!, patch);
+        response.end(JSON.stringify(rows[0]));
+      });
+      return;
+    }
     if (request.url === "/api/projects") response.end(JSON.stringify([{ id: "backend-project", prefix: "OCHASH", name: "project", status: "active" }]));
     else if (request.url === "/api/tickets" || request.url?.startsWith("/api/tickets?")) response.end(JSON.stringify(rows));
     else if (request.url === "/api/tickets/backend-1") response.end(JSON.stringify(rows[0]));
@@ -749,7 +761,12 @@ test("MCP board search, reverse lookup, complete links and overflow use the publ
     assert.equal(catalog.tools.filter((tool) => tool.name.endsWith("_project_task") ||
       ["list_project_tasks", "add_task_comment", "link_task_to_session", "list_board_projects",
         "get_board_project", "create_board_project", "get_task_transfer_status",
-        "register_task_document", "get_task_documents", "read_task_document"].includes(tool.name)).length, 16);
+        "register_task_document", "get_task_documents", "read_task_document",
+        "add_task_management_note", "add_task_document_bindings"].includes(tool.name)).length, 18);
+    for (const [name, idempotentHint] of [["add_task_management_note", false], ["add_task_document_bindings", true]] as const) {
+      assert.deepEqual(catalog.tools.find((tool) => tool.name === name)?.annotations,
+        { readOnlyHint: false, destructiveHint: false, idempotentHint, openWorldHint: false });
+    }
     assert.equal(catalog.tools.find((tool) => tool.name === "list_project_tasks")?.annotations?.readOnlyHint, true);
     assert.equal(catalog.tools.find((tool) => tool.name === "get_task_documents")?.annotations?.readOnlyHint, true);
     assert.equal(catalog.tools.find((tool) => tool.name === "read_task_document")?.annotations?.readOnlyHint, true);
@@ -766,6 +783,25 @@ test("MCP board search, reverse lookup, complete links and overflow use the publ
     const tasks = (found.structuredContent as { tasks: Array<{ task_id: string }> }).tasks;
     assert.equal(tasks.length, 1);
     const id = tasks[0]!.task_id;
+    const noted = await client.callTool({ name: "add_task_management_note", arguments: { task_id: id, note: " Follow up " } });
+    assert.equal(noted.isError, undefined);
+    assert.equal((noted.structuredContent as { description: string }).description, "Searchable body\n\nManagement Note:\nFollow up");
+    assert.deepEqual(puts, [{ description: "Searchable body\n\nManagement Note:\nFollow up" }]);
+    for (const [name, args, code] of [
+      ["add_task_management_note", { task_id: id, note: "No status", status: "done" }, "INVALID_ARGUMENT"],
+      ["add_task_management_note", { task_id: id, note: "  " }, "INVALID_ARGUMENT"],
+      ["add_task_management_note", { task_id: "task_alias", note: "Invalid" }, "INVALID_ARGUMENT"],
+      ["add_task_management_note", { task_id: "task_aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", note: "Unknown" }, "TASK_NOT_FOUND"],
+      ["add_task_document_bindings", { task_id: id }, "INVALID_ARGUMENT"],
+      ["add_task_document_bindings", { task_id: id, compact_context: "../../private" }, "TASK_DOCUMENT_PATH_INVALID"],
+      ["add_task_document_bindings", { task_id: id, concept_detail: "private" }, "INVALID_ARGUMENT"],
+      ["add_task_document_bindings", { task_id: id, compact_context: "private", expected_path: "private" }, "INVALID_ARGUMENT"],
+    ] as const) {
+      const invalid = await client.callTool({ name, arguments: args });
+      assert.equal(invalid.isError, true);
+      assert.equal((invalid._meta as Record<string, any>)["opencode-vm/error"].code, code);
+    }
+    assert.equal(puts.length, 1);
     const contextPath = `.opencode/tasks/task-${id}.compact.md`;
     await mkdir(join(directory, ".opencode/tasks"), { recursive: true });
     await writeFile(join(directory, contextPath), `Task-ID: ${id}\nStatus: ready\n`);
@@ -773,6 +809,14 @@ test("MCP board search, reverse lookup, complete links and overflow use the publ
       task_id: id, role: "compact_context", path: contextPath,
     } });
     assert.equal(registered.isError, undefined);
+    const bound = await client.callTool({ name: "add_task_document_bindings", arguments: { task_id: id, compact_context: contextPath } });
+    assert.equal(bound.isError, undefined);
+    assert.deepEqual(bound.structuredContent, registered.structuredContent);
+    const alternate = `.opencode/tasks/${id}.compact.md`;
+    await writeFile(join(directory, alternate), `Task-ID: ${id}\n`);
+    const conflict = await client.callTool({ name: "add_task_document_bindings", arguments: { task_id: id, compact_context: alternate } });
+    assert.equal(conflict.isError, true);
+    assert.equal((conflict._meta as Record<string, any>)["opencode-vm/error"].code, "TASK_DOCUMENT_CONFLICT");
     const refs = await client.callTool({ name: "get_task_documents", arguments: { task_id: id } });
     assert.deepEqual((refs.structuredContent as { documents: Array<{ role: string; path: string }> }).documents
       .map((ref) => [ref.role, ref.path]), [["compact_context", contextPath]]);

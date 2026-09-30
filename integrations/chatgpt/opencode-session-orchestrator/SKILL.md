@@ -6,7 +6,7 @@ license: MIT
 
 # OpenCode Session Orchestrator
 
-Release marker: **2026-09-29-r19**. This is the skill revision, not an MCP version.
+Release marker: **2026-09-30-r21**. This is the skill revision, not an MCP version.
 
 This is a client-side workflow skill. The user supplies a working compatible MCP connection, including when using Secure MCP Tunnel. The skill contains no tunnel, account, server alias or credentials and does not configure the connection.
 
@@ -23,6 +23,7 @@ Read references when their workflow is relevant:
 - A bounded question alongside a busy workstream, or archival of its answer: [Clarification sessions](references/clarification-sessions.md).
 - A board task whose work spans several agent iterations or a fresh session: [Task compact context](references/task-compact-context.md).
 - A complex or conceptually rich board task that warrants a persistent planning document: [Task concept plan](references/task-concept-plan.md).
+- Post-`CONCEPT_READY` follow-through on a confirmed `todo` -> `in_progress` transition: [Initialization follow-through](references/initialization-follow-through.md).
 - Behavior review or an authorized smoke test: [Regression scenarios](references/regression-scenarios.md).
 - Existing project tasks, proposed classification, board links, or consolidation of remaining work: [Board workflow](references/board-workflow.md).
 
@@ -132,7 +133,11 @@ A normal receipt is concise: task purpose, target, ID and verified state. Reserv
 
 ## Initialize concept plan + compact context on `todo` -> `in_progress`
 
-For a user-confirmed `todo` -> `in_progress` transition, keep the task **`todo`** while the executing agent receives the one-time full [initialization instruction](references/task-concept-plan.md#initialization-instruction) in an authorized write-capable assignment. Reuse/create both task-ID-marked files without overwriting a mismatched ID; the plan carries relevant ticket concepts and the context starts with verified state or explicit uncertainty and the actual plan path. Read the original result. With discovered `register_task_document`/`get_task_documents`, register `compact_context` and `concept_plan` at the confirmed paths, read back their available revisions and correct roles, **then** use the discovered Board move tool to change status. If confirmation/registration fails, leave `todo`; if the Board move fails or is uncertain, keep the files/references and re-read the exact Board task before any retry. Never create duplicates or claim success from a submission receipt. A board read or `todo`-only inspection creates nothing; already `in_progress` tasks without a plan need explicit authorized backfill. If semantic registration tools are absent, **stop before this new transition** and explain the unsupported prerequisite; do not silently substitute the legacy workflow. See [board workflow](references/board-workflow.md) for recovery details.
+For a user-confirmed `todo` -> `in_progress` transition, keep the task **`todo`** while the executing agent receives the one-time full [initialization instruction](references/task-concept-plan.md#initialization-instruction) in an authorized write-capable assignment. Reuse/create both task-ID-marked files without overwriting a mismatched ID; the plan carries relevant ticket concepts and the context starts with verified state or explicit uncertainty and the actual plan path. Read the original result.
+
+Three labelled checkpoints drive the rest of the transition: `CONCEPT_READY` is the **agent's** terminal return on successful file creation/reconciliation; `REGISTERED` is the **orchestrator's** first checkpoint once the preferred discovered `add_task_document_bindings` bundle and mandatory `get_task_documents` readback show both main roles as `available`, with exact paths and revisions; `BOARD_MOVED` is its second checkpoint once the separate Board move/status readback confirm `in_progress`. Only when the new binding tool is absent may `register_task_document` be used; a bundle error/conflict is not permission to fall back to replacement. The agent's `CONCEPT_READY` is the **start** of follow-through, not its end. The Board task **then** moves only after `REGISTERED`. See [Initialization follow-through](references/initialization-follow-through.md) for checkpoints, orphan reuse and failure recovery.
+
+If confirmation/registration fails, leave `todo`; if the Board move fails or is uncertain, keep the files/references and re-read the exact Board task before any retry. Never create duplicates or claim success from a submission receipt. A board read or `todo`-only inspection creates nothing; already `in_progress` tasks without a plan need explicit authorized backfill. If semantic registration tools are absent, **stop before this new transition** and explain the unsupported prerequisite; do not silently substitute the legacy workflow. See [board workflow](references/board-workflow.md) for recovery details.
 
 ## Sample-check task files during introduction
 
@@ -141,6 +146,10 @@ The **executing agent** maintains both files; the **orchestrator** samples quali
 ## Read task documents for management questions
 
 For an Executive Summary, current progress, blockers/open points, next step or concept status of a known board task, prefer **read-only** `get_project_task` + `get_task_documents`/`read_task_document`; do not start an agent merely to copy a file. Read `compact_context` first for the current state; add `concept_plan` only for target/design/implementation/test depth, then only relevant `concept_detail` documents indicated by its main index. Read bounded pages with stable revisions, not entire plans by default. For claims about work actually performed, verify linked original results/tests; a plan or context is not execution evidence. If the connector lacks these tools, use only available stored reads and disclose the gap; a fresh agent investigation needs its own authorization. See [board workflow](references/board-workflow.md).
+
+## Append an authorized management note
+
+For an explicitly requested short management note, discover `add_task_management_note`, read the known task, append only the authorized note once and verify through `get_project_task`. This is a non-idempotent write: uncertain results require readback, never blind retry. Executive Summary/status/remainder reads and initialization create no notes; missing note capability does not permit general description replacement. Keep durable context in task files. See [Management notes](references/board-workflow.md#management-notes). Additive MCP annotations are hints, not authorization or a guarantee that the host suppresses approval UI.
 
 ## Observe progress and sessions needing attention
 

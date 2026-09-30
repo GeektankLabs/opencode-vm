@@ -88,4 +88,6 @@ Both artifact builders require GNU tar. GitHub's Ubuntu runner supplies it; on m
 
 ## External acceptance
 
+For additive task writes, `OCVM_TASKBOARD_BIN=/path/to/pinned-v0.6.0/taskboard npm run test:taskboard` in `adapters/mcp` runs a disposable real-backend MCP smoke (no model turns). It checks single/bundled bindings, replay/conflicts/no partial mutation, available revision readback, description-only notes, limits and a lost response after real PUT commit without retry, then a separate Board move/status readback. `OCVM_MCP_TEST_ADAPTER=/path/to/extracted-package/dist/main.js` also tests the production-only installed release package. `OCVM_MCP_TEST_OPENCODE=/path/to/opencode` selects the local binary; `OCVM_MCP_LIVE_RUNTIME=/path/to/runtime.json` optionally performs **discovery only** on an existing connector. All smoke mutations and services use a temporary project/DB/credential and are cleaned up. It does not prove Hosted ChatGPT loaded the skill or suppresses approval UI.
+
 Packaging and automated integration are not substitutes for platform acceptance. Before describing the incoming MCP feature as externally accepted, complete the real macOS/Lima, Secure MCP Tunnel, ChatGPT text, and ChatGPT desktop Voice checks in [`MCP-TUNNEL.md`](MCP-TUNNEL.md). Those checks remain required until recorded against the target host and OpenAI workspace.

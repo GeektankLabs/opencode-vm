@@ -20,12 +20,13 @@ function runtime(directory: string, url = "http://127.0.0.1:4101") {
 
 function fakeBoard(rows: Array<{ id: string; projectId: string; title: string; description?: string; status: string; priority: string }>) {
   const originalFetch = globalThis.fetch;
-  const calls: Array<{ path: string; method: string }> = [];
+  const calls: Array<{ path: string; method: string; body?: Record<string, unknown> }> = [];
   let failNextMove = false;
+  let failNextPut = false;
   globalThis.fetch = (async (input, init) => {
     const url = new URL(String(input));
     const method = init?.method ?? "GET";
-    calls.push({ path: url.pathname, method });
+    calls.push({ path: url.pathname, method, ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}) });
     let value: unknown = [];
     let status = 200;
     if (url.pathname === "/api/projects") {
@@ -48,14 +49,229 @@ function fakeBoard(rows: Array<{ id: string; projectId: string; title: string; d
         if (!row) status = 404;
         else { row.status = (JSON.parse(String(init?.body)) as { status: string }).status; value = row; }
       }
+    } else if (url.pathname.startsWith("/api/tickets/") && method === "PUT") {
+      const row = rows.find((item) => item.id === url.pathname.slice("/api/tickets/".length));
+      if (!row) status = 404;
+      else { Object.assign(row, JSON.parse(String(init?.body))); value = row; }
+      if (failNextPut) { failNextPut = false; throw new Error("Response lost after commit"); }
     } else if (url.pathname.startsWith("/api/tickets/") && method === "GET") {
       value = rows.find((row) => row.id === url.pathname.slice("/api/tickets/".length));
       if (!value) status = 404;
     } else throw new Error(`Unexpected ${method} ${url.pathname}`);
     return new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
   }) as typeof fetch;
-  return { calls, failMoveOnce: () => { failNextMove = true; }, restore: () => { globalThis.fetch = originalFetch; } };
+  return { calls, failPutOnce: () => { failNextPut = true; }, failMoveOnce: () => { failNextMove = true; }, restore: () => { globalThis.fetch = originalFetch; } };
 }
+
+test("management notes preserve prefixes, isolate fields, serialize writers and never retry uncertain PUTs", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ocvm-board-note-"));
+  const rows = [{ id: "backend-1", projectId: "backend-project", title: "Unchanged", description: "Original\n\n",
+    status: "todo", priority: "high" }];
+  const board = fakeBoard(rows);
+  try {
+    const state = runtime(directory);
+    const service = new ProjectBoardService(state);
+    const id = (await service.listTasks())[0]!.task_id;
+    const first = await service.addManagementNote(id, "  Follow up  ");
+    assert.equal(first.description, "Original\n\n\n\nManagement Note:\nFollow up");
+    await Promise.all([service.addManagementNote(id, "Same"), new ProjectBoardService(state).addManagementNote(id, "Same")]);
+    assert.equal(rows[0]!.description, first.description + "\n\nManagement Note:\nSame".repeat(2));
+    assert.deepEqual(board.calls.filter((call) => call.method === "PUT").map((call) => Object.keys(call.body!)),
+      [["description"], ["description"], ["description"]]);
+    assert.deepEqual([rows[0]!.title, rows[0]!.status, rows[0]!.priority], ["Unchanged", "todo", "high"]);
+    await assert.rejects(stat(state.taskboardMetadataFile), { code: "ENOENT" });
+    rows[0]!.description = "";
+    assert.equal((await service.addManagementNote(id, "Empty prefix")).description, "Management Note:\nEmpty prefix");
+    const before = board.calls.filter((call) => call.method === "PUT").length;
+    await assert.rejects(service.addManagementNote(id, "  "), { code: "INVALID_ARGUMENT" });
+    await assert.rejects(service.addManagementNote("task_aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "Unknown"), { code: "TASK_NOT_FOUND" });
+    rows[0]!.description = "x".repeat(31_990);
+    await assert.rejects(service.addManagementNote(id, "Overflow"), { code: "TASK_DESCRIPTION_LIMIT" });
+    rows[0]!.description = "界".repeat(14_000);
+    await assert.rejects(service.addManagementNote(id, "Byte overflow"), { code: "TASK_SEARCH_INCOMPLETE" });
+    assert.equal(board.calls.filter((call) => call.method === "PUT").length, before);
+    rows[0]!.description = "";
+    board.failPutOnce();
+    await assert.rejects(service.addManagementNote(id, "Committed but uncertain"), { code: "TASKBOARD_UNAVAILABLE" });
+    assert.equal(rows[0]!.description, "Management Note:\nCommitted but uncertain");
+    assert.equal(board.calls.filter((call) => call.method === "PUT").length, before + 1);
+  } finally { board.restore(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("add-only document bundles prevalidate, commit once, replay without publication and retain register retarget semantics", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ocvm-board-bindings-"));
+  const board = fakeBoard([{ id: "backend-1", projectId: "backend-project", title: "Bindings", status: "todo", priority: "high" }]);
+  try {
+    const state = runtime(directory);
+    const service = new ProjectBoardService(state);
+    const id = (await service.listTasks())[0]!.task_id;
+    const compact = `.opencode/tasks/task-${id}.compact.md`;
+    const alternate = `.opencode/tasks/${id}.compact.md`;
+    const plan = `planning/task-concepts/${id}-concept-plan.md`;
+    await mkdir(join(directory, ".opencode/tasks"), { recursive: true });
+    await mkdir(join(directory, "planning/task-concepts"), { recursive: true });
+    const bytes = `Task-ID: ${id}\nUnchanged content\n`;
+    await writeFile(join(directory, compact), bytes);
+    await writeFile(join(directory, alternate), bytes);
+    await assert.rejects(service.addDocumentBindings(id, {}), { code: "INVALID_ARGUMENT" });
+    await assert.rejects(service.addDocumentBindings(id, { compactContext: compact, conceptPlan: plan }), { code: "TASK_DOCUMENT_MISSING" });
+    await assert.rejects(stat(state.taskboardMetadataFile), { code: "ENOENT" });
+    await writeFile(join(directory, plan), "Task-ID: task_aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\n");
+    await assert.rejects(service.addDocumentBindings(id, { compactContext: compact, conceptPlan: plan }), { code: "TASK_DOCUMENT_MISMATCH" });
+    assert.deepEqual((await service.getDocuments(id)).documents, []);
+    await writeFile(join(directory, plan), bytes);
+    // Observe actual publication calls without changing production visibility.
+    const writer = service as unknown as { saveMetadata: (...args: unknown[]) => Promise<void> };
+    const save = writer.saveMetadata.bind(service);
+    let saves = 0;
+    writer.saveMetadata = async (...args) => { saves++; await save(...args); };
+    const result = await service.addDocumentBindings(id, { compactContext: compact, conceptPlan: plan });
+    assert.deepEqual(result.documents, [{ role: "compact_context", path: compact }, { role: "concept_plan", path: plan }]);
+    assert.equal(saves, 1);
+    const persisted = await readFile(state.taskboardMetadataFile, "utf8");
+    const inode = (await stat(state.taskboardMetadataFile)).ino;
+    assert.deepEqual(await service.addDocumentBindings(id, { compactContext: compact, conceptPlan: plan }), result);
+    assert.equal(saves, 1);
+    assert.equal((await stat(state.taskboardMetadataFile)).ino, inode);
+    await assert.rejects(service.addDocumentBindings(id, { compactContext: alternate, conceptPlan: plan }), { code: "TASK_DOCUMENT_CONFLICT" });
+    assert.equal(await readFile(state.taskboardMetadataFile, "utf8"), persisted);
+    await writeFile(join(directory, plan), "Task-ID: foreign\n");
+    await assert.rejects(service.addDocumentBindings(id, { compactContext: compact, conceptPlan: plan }), { code: "TASK_DOCUMENT_MISMATCH" });
+    assert.equal(saves, 1);
+    await writeFile(join(directory, plan), bytes);
+    await service.registerDocument(id, "compact_context", alternate, compact);
+    assert.equal((await service.getDocuments(id)).documents[0]!.path, alternate);
+    assert.equal(await readFile(join(directory, compact), "utf8"), bytes);
+    assert.equal((await service.getTask(id)).status, "todo");
+    assert.equal(board.calls.every((call) => call.method === "GET"), true);
+    // A fresh bundle mixes an exact single-role replay with one addition.
+    await rm(state.taskboardMetadataFile);
+    await service.addDocumentBindings(id, { compactContext: compact });
+    const single = await readFile(state.taskboardMetadataFile, "utf8");
+    await assert.rejects(service.addDocumentBindings(id, { compactContext: alternate, conceptPlan: plan }), { code: "TASK_DOCUMENT_CONFLICT" });
+    assert.equal(await readFile(state.taskboardMetadataFile, "utf8"), single);
+    assert.equal((await service.getDocuments(id)).documents.length, 1);
+    await service.addDocumentBindings(id, { compactContext: compact, conceptPlan: plan });
+    assert.equal((await service.getDocuments(id)).documents.length, 2);
+    assert.equal(saves, 4);
+  } finally { board.restore(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("low-risk writes fail closed on transfers, corrupt metadata and scan overflow; note budgets include sidecar fields", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ocvm-board-low-risk-boundary-"));
+  const rows = [{ id: "backend-1", projectId: "backend-project", title: "Boundary", description: "", status: "todo", priority: "medium" }];
+  const board = fakeBoard(rows);
+  try {
+    const state = runtime(directory);
+    const service = new ProjectBoardService(state);
+    const id = (await service.listTasks())[0]!.task_id;
+    const compact = `.opencode/tasks/task-${id}.compact.md`;
+    await mkdir(join(directory, ".opencode/tasks"), { recursive: true });
+    await writeFile(join(directory, compact), `Task-ID: ${id}\n`);
+    const metadata = { schema: 2, projects: {}, tasks: {}, comments: {
+      [id]: [{ id: "comment", body: "界".repeat(12_000), created_at: "2026-09-30T00:00:00Z" }],
+    }, links: { [id]: [{ session_id: "ses", result: "Preserved" }] }, transfers: {} };
+    await writeFile(state.taskboardMetadataFile, JSON.stringify(metadata));
+    const before = await readFile(state.taskboardMetadataFile, "utf8");
+    // Native description alone fits; existing comments push the prospective read beyond 40 KB.
+    await assert.rejects(service.addManagementNote(id, "界".repeat(2_000)), { code: "TASK_SEARCH_INCOMPLETE" });
+    await service.addManagementNote(id, "Within budget");
+    assert.match((await service.getTask(id)).description, /Within budget/u);
+    assert.equal(await readFile(state.taskboardMetadataFile, "utf8"), before);
+    await service.addDocumentBindings(id, { compactContext: compact });
+    const upgraded = JSON.parse(await readFile(state.taskboardMetadataFile, "utf8"));
+    assert.equal(upgraded.schema, 3);
+    assert.deepEqual(upgraded.comments, metadata.comments);
+    assert.deepEqual(upgraded.links, metadata.links);
+    const requestId = randomUUID();
+    upgraded.transfers[requestId] = { request_id: requestId, task_id: id, source: { id: "backend-1" },
+      source_board_project_id: "project_source", target_board_project_id: "project_target",
+      target_backend_project_id: "backend-target", state: "unresolved" };
+    await writeFile(state.taskboardMetadataFile, JSON.stringify(upgraded));
+    const pending = await readFile(state.taskboardMetadataFile, "utf8");
+    const calls = board.calls.length;
+    await assert.rejects(service.addManagementNote(id, "Blocked"), { code: "TASK_TRANSFER_UNRESOLVED" });
+    await assert.rejects(service.addDocumentBindings(id, { compactContext: compact }), { code: "TASK_TRANSFER_UNRESOLVED" });
+    assert.equal(board.calls.length, calls);
+    assert.equal(await readFile(state.taskboardMetadataFile, "utf8"), pending);
+    upgraded.transfers = {};
+    upgraded.documents[id] = [{ role: "concept_plan", path: compact }];
+    await writeFile(state.taskboardMetadataFile, JSON.stringify(upgraded));
+    await assert.rejects(service.addDocumentBindings(id, { compactContext: compact }), { code: "TASKBOARD_METADATA_ERROR" });
+    await assert.rejects(service.addManagementNote(id, "Blocked"), { code: "TASKBOARD_METADATA_ERROR" });
+    await rm(state.taskboardMetadataFile);
+    rows.push(...Array.from({ length: 500 }, (_, index) => ({ id: `extra-${index}`, projectId: "backend-project",
+      title: "Extra", description: "", status: "todo", priority: "medium" })));
+    const puts = board.calls.filter((call) => call.method === "PUT").length;
+    await assert.rejects(service.addManagementNote(id, "Incomplete scan"), { code: "TASK_SEARCH_INCOMPLETE" });
+    await assert.rejects(service.addDocumentBindings(id, { compactContext: compact }), { code: "TASK_SEARCH_INCOMPLETE" });
+    assert.equal(board.calls.filter((call) => call.method === "PUT").length, puts);
+    await assert.rejects(stat(state.taskboardMetadataFile), { code: "ENOENT" });
+  } finally { board.restore(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("concurrent add-only bundles publish once; conflicting canonical paths never silently retarget", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ocvm-board-binding-race-"));
+  const board = fakeBoard([{ id: "backend-1", projectId: "backend-project", title: "Concurrent", status: "todo", priority: "medium" }]);
+  try {
+    const state = runtime(directory);
+    const services = [new ProjectBoardService(state), new ProjectBoardService(state)];
+    const id = (await services[0]!.listTasks())[0]!.task_id;
+    const compact = `.opencode/tasks/task-${id}.compact.md`;
+    const alternate = `.opencode/tasks/${id}.compact.md`;
+    const plan = `planning/task-concepts/${id}-concept-plan.md`;
+    await mkdir(join(directory, ".opencode/tasks"), { recursive: true });
+    await mkdir(join(directory, "planning/task-concepts"), { recursive: true });
+    for (const path of [compact, alternate, plan]) await writeFile(join(directory, path), `Task-ID: ${id}\n`);
+    let saves = 0;
+    for (const service of services) {
+      const writer = service as unknown as { saveMetadata: (...args: unknown[]) => Promise<void> };
+      const save = writer.saveMetadata.bind(service);
+      writer.saveMetadata = async (...args) => { saves++; await save(...args); };
+    }
+    await Promise.all(services.map((service) => service.addDocumentBindings(id, { compactContext: compact, conceptPlan: plan })));
+    assert.equal(saves, 1);
+    await rm(state.taskboardMetadataFile);
+    const outcomes = await Promise.allSettled(services.map((service, index) =>
+      service.addDocumentBindings(id, { compactContext: index ? alternate : compact, conceptPlan: plan })));
+    assert.equal(outcomes.filter((outcome) => outcome.status === "fulfilled").length, 1);
+    const rejected = outcomes.find((outcome) => outcome.status === "rejected") as PromiseRejectedResult;
+    assert.equal(rejected.reason.code, "TASK_DOCUMENT_CONFLICT");
+    assert.equal(saves, 2);
+    assert.equal((await services[0]!.getDocuments(id)).documents.length, 2);
+  } finally { board.restore(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("add-only binding reuses file safety checks without partial publication", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ocvm-board-binding-files-"));
+  const board = fakeBoard([{ id: "backend-1", projectId: "backend-project", title: "Files", status: "todo", priority: "medium" }]);
+  try {
+    const state = runtime(directory);
+    const service = new ProjectBoardService(state);
+    const id = (await service.listTasks())[0]!.task_id;
+    const compact = `.opencode/tasks/task-${id}.compact.md`;
+    const plan = `planning/task-concepts/${id}-concept-plan.md`;
+    await mkdir(join(directory, ".opencode/tasks"), { recursive: true });
+    await mkdir(join(directory, "planning/task-concepts"), { recursive: true });
+    await writeFile(join(directory, compact), `Task-ID: ${id}\n`);
+    for (const [bytes, code] of [
+      [Buffer.concat([Buffer.from(`Task-ID: ${id}\n`), Buffer.from([0xff])]), "TASK_DOCUMENT_INVALID"],
+      [Buffer.from(`Task-ID: ${id}\n${"x".repeat(1024 * 1024)}`), "TASK_DOCUMENT_LIMIT"],
+    ] as const) {
+      await writeFile(join(directory, plan), bytes);
+      await assert.rejects(service.addDocumentBindings(id, { compactContext: compact, conceptPlan: plan }), { code });
+      await assert.rejects(stat(state.taskboardMetadataFile), { code: "ENOENT" });
+    }
+    await rm(join(directory, plan));
+    await symlink(join(directory, compact), join(directory, plan));
+    await assert.rejects(service.addDocumentBindings(id, { compactContext: compact, conceptPlan: plan }), { code: "TASK_DOCUMENT_PATH_INVALID" });
+    await rm(join(directory, plan));
+    await mkdir(join(directory, plan));
+    await assert.rejects(service.addDocumentBindings(id, { compactContext: compact, conceptPlan: plan }), { code: "TASK_DOCUMENT_PATH_INVALID" });
+    await assert.rejects(service.addDocumentBindings("task_aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", { compactContext: compact }), { code: "TASK_NOT_FOUND" });
+    await assert.rejects(stat(state.taskboardMetadataFile), { code: "ENOENT" });
+  } finally { board.restore(); await rm(directory, { recursive: true, force: true }); }
+});
 
 test("task reads neither create projects nor metadata; UI and MCP tasks have stable separate IDs", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ocvm-board-read-"));

@@ -1,5 +1,7 @@
 # Persistent task compact context
 
+For authorized initialization, prefer discovered `add_task_document_bindings` for both main roles; use the register path only when the bundle tool is absent. Binding success or exact replay never replaces mandatory `get_task_documents` readback and the separate Board move. Follow [Initialization follow-through](initialization-follow-through.md).
+
 Use this convention for a known project-board task that benefits from continuity across substantial work iterations. A **Task Compact Context** is an optional, small Markdown file in the project: working memory for **one** task across agents and sessions. The executing agent reads and maintains it; the orchestrator delegates that work and occasionally checks its quality. It is not a board-wide requirement or an MCP feature.
 
 ## Location and distinct roles
@@ -20,7 +22,7 @@ These are approximate operational thresholds, not a tokenizer dependency or a by
 
 ## Give the executing agent the job
 
-For a context-backed task, carry the exact project-relative path and `task_id` to the agent actually doing the work. At **initialization or the first substantial assignment in a new executing session/agent context**, send the full duty **once** in the submitted request (adapt the language to the user). If a concept plan exists, use the [combined initialization wording](task-concept-plan.md#initialization-instruction) instead of duplicating both full instructions:
+For a context-backed task, carry the exact project-relative path and `task_id` to the agent actually doing the work. At **initialization or the first substantial assignment in a new executing session/agent context**, send the full duty **once** in the submitted request (adapt the language to the user). If a concept plan exists, use the [combined initialization wording](task-concept-plan.md#initialization-instruction) instead of duplicating both full instructions. On a successful creation/reconciliation of both files, the agent's terminal return carries the literal `CONCEPT_READY:` label followed by the verified paths and a short summary; the orchestrator continues with the [labelled follow-through](initialization-follow-through.md) — its post-`CONCEPT_READY` steps `REGISTERED` and `BOARD_MOVED` — not at the agent's `CONCEPT_READY`:
 
 > Task Compact Context for `<task_id>`: `<project-relative path>`. Read it and check its Task-ID before work if present. This single file is current working state, not a log or the detailed plan: keep achieved/verified state, durable findings/decisions, blockers, next step and essential references; update after substantive iterations and before handoff when file writes are authorized. Aim ~5,000 tokens; warn/condense at ~7,500, and do not let it grow past ~10,000 without condensation. Never split it; put detailed rationale/variants in the Concept Plan if one exists. If missing, mismatched or unwritable, report that and continue only within the approved scope; do not invent content.
 

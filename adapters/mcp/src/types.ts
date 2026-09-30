@@ -1,7 +1,7 @@
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { dirname, isAbsolute } from "node:path";
 
-export const ADAPTER_VERSION = "0.1.17";
+export const ADAPTER_VERSION = "0.1.18";
 export const MCP_TRANSPORT = "streamable-http-stateless";
 
 export type RuntimeDescriptor = {
@@ -440,6 +440,7 @@ export const ADAPTER_ERROR_CODES = [
   "TASK_DOCUMENT_INVALID",
   "TASK_DOCUMENT_CONFLICT",
   "TASK_DOCUMENT_LIMIT",
+  "TASK_DESCRIPTION_LIMIT",
 ] as const;
 
 export type AdapterErrorCode = (typeof ADAPTER_ERROR_CODES)[number];

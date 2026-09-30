@@ -69,6 +69,8 @@ Skill r11 reads the project's Agent Control Hub profile preference when the sele
 
 Skill r19 and MCP adapter 0.1.17 add project-task document roles (`compact_context`, `concept_plan`, optional `concept_detail`). For a confirmed `todo` → `in_progress` workflow, the work agent prepares both main documents while the task remains `todo`; the orchestrator verifies and registers their references before asking the Board to move. When the connected MCP catalog exposes `get_task_documents` and `read_task_document`, ChatGPT can answer brief task-status questions from the compact context and check document maintenance directly without another agent run. Actual work outcomes still require original session/result evidence. Update the installed skill ZIP and refresh the connector tool catalog independently.
 
+Skill r21 and adapter 0.1.18 prefer `add_task_document_bindings` for one add-only main-role bundle, followed by mandatory available/path/revision readback and a separate Board move/status readback. Only when the new tool is absent may the old register path be used; errors/conflicts never authorize replacement fallback. Explicit short management notes use `add_task_management_note` plus ordinary task readback; pure status/remainder/Executive Summary requests create no notes. Note delivery is non-idempotent and has no upstream UI/edit CAS or blind retry. MCP hints do not guarantee suppression of host approval UI; hosted model behavior remains a separate acceptance level.
+
 ## 4. Start with a read-only smoke test
 
 Paste this into the selected ChatGPT conversation:

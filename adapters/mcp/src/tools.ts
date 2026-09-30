@@ -8,7 +8,7 @@ import { CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod/v4";
 import type { SessionGateway } from "./opencode.js";
 import type { RuntimeDescriptor } from "./types.js";
-import { ProjectBoardService } from "./taskboard.js";
+import { ProjectBoardService, MAX_TASK_DESCRIPTION_LENGTH } from "./taskboard.js";
 import type { DocumentRole } from "./taskboard.js";
 import { traceToolCall } from "./diagnostics.js";
 import { SUPPORTED_ATTACHMENT_TYPES } from "./attachments.js";
@@ -82,6 +82,13 @@ const taskId = z
   .regex(/^[^\s\x00-\x1f\x7f]+$/u);
 const documentRole = z.enum(["compact_context", "concept_plan", "concept_detail"]);
 const documentPath = z.string().min(1).max(512).regex(/^[A-Za-z0-9_./-]+$/u);
+const projectTaskId = z.string().regex(/^task_[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/u);
+const managementNoteInput = z.object({ task_id: projectTaskId,
+  note: z.string().trim().min(1).max(MAX_TASK_DESCRIPTION_LENGTH) }).strict();
+const documentBindingsInput = z.object({ task_id: projectTaskId,
+  compact_context: documentPath.optional(), concept_plan: documentPath.optional() }).strict()
+  .refine((input) => input.compact_context !== undefined || input.concept_plan !== undefined,
+    "At least one main document role is required.");
 const documentReference = z.object({ role: documentRole, path: documentPath }).strict();
 const documentListOutput = z.object({ task_id: taskId, documents: z.array(documentReference.extend({
   state: z.enum(["available", "missing"]), total_bytes: z.number().int().nonnegative().optional(),
@@ -863,6 +870,19 @@ export function createMcpServer(
         success(await board.getTask(input.task_id), "Returned project task."),
       ),
     );
+    server.registerTool("add_task_management_note", {
+      title: "Add Task Management Note",
+      description: "Append one Management Note block to the native task description only. Not idempotent; no automatic retry or UI/edit CAS. Does not change board status.",
+      inputSchema: managementNoteInput, outputSchema: taskOutput,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    }, safeHandler(async (input) => success(await board.addManagementNote(input.task_id, input.note), "Added task management note.")));
+    server.registerTool("add_task_document_bindings", {
+      title: "Add Task Document Bindings",
+      description: "Add one or both main document bindings after complete validation in one sidecar commit. Exact replay is a no-op; conflicting bindings fail. Never writes files, retargets references or changes board status.",
+      inputSchema: documentBindingsInput, outputSchema: documentRefsOutput,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    }, safeHandler(async (input) => success(await board.addDocumentBindings(input.task_id,
+      { compactContext: input.compact_context, conceptPlan: input.concept_plan }), "Added task document bindings.")));
     server.registerTool("register_task_document", {
       title: "Register Task Document", description: "Bind an existing task-ID-marked project document to a semantic task role. No file is written; conflicting replacements require expected_path.",
       inputSchema: registerDocumentInput, outputSchema: documentRefsOutput, annotations: writeAnnotations,
@@ -1750,6 +1770,15 @@ export function createMcpServer(
                       ),
                     ),
             );
+          case "add_task_management_note":
+            return await validatedToolCall(managementNoteInput, taskOutput, input,
+              async (value) => board ? success(await board.addManagementNote(value.task_id, value.note), "Added task management note.") :
+                errorResult(new AdapterError("TASKBOARD_UNAVAILABLE", "Taskboard is not enabled.")));
+          case "add_task_document_bindings":
+            return await validatedToolCall(documentBindingsInput, documentRefsOutput, input,
+              async (value) => board ? success(await board.addDocumentBindings(value.task_id,
+                { compactContext: value.compact_context, conceptPlan: value.concept_plan }), "Added task document bindings.") :
+                errorResult(new AdapterError("TASKBOARD_UNAVAILABLE", "Taskboard is not enabled.")));
           case "register_task_document":
             return await validatedToolCall(registerDocumentInput, documentRefsOutput, input,
               async (value) => board ? success(await board.registerDocument(value.task_id,
