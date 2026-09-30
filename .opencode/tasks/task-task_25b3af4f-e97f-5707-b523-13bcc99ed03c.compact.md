@@ -1,6 +1,6 @@
 Task-ID: task_25b3af4f-e97f-5707-b523-13bcc99ed03c
 Title: OpenCode VM – agent-managed Sessions non-interactive betreiben, lokale Git-Arbeit erlauben, Remote-Push sperren
-Last-updated: 2026-09-30T23:35:01+02:00
+Last-updated: 2026-09-30T23:56:44+02:00
 Implementation-state: full-scope-locally-implementation-complete; implementation-committed; external-acceptance-separate
 
 ## Concept Plan
@@ -56,12 +56,19 @@ Kanonischer Detailplan: `planning/task-concepts/task_25b3af4f-e97f-5707-b523-13b
 - Maintained Lifecycle-Suite um zwei Builderregressionen erweitert: altes GZIP-OS-Verhalten simulieren, exakte Bytes/Member/Metadata, read-only Check, echte Source-Drift verweigern und idempotent regenerieren. Suite **5 PASS** jeweils mit Python 3.12.3 und 3.13.15; Builder `--check` auf beiden PASS; Policy **4 PASS**, A2A-Hooks **2 PASS**, actionlint und diff --check PASS.
 - CI-Pathfilter nimmt den Builder selbst auf. Fix, Regressionen und dieser Context werden als taskbegrenzter lokaler Commit festgehalten; der GitHub-Lauf wurde hier nicht manuell gestartet. Kein Push/Release/Deployment, Runtime-/Connectorrestart oder Boardwrite. Keine Konzept-/Policyänderung, daher P unverändert.
 
+## Release-Vorbereitung v0.7.0
+
+- Nutzer hat Version `0.7.0` als Releasekandidat freigegeben. `OCVM_VERSION` und die drei gemeinsamen Release-Tags stehen auf `0.7.0` / `v0.7.0`; adapter package/code versions bleiben getrennt und unverändert bei OpenLive `0.1.7` und MCP `0.1.21`, da deren Runtimecode nicht geändert wurde.
+- Alle drei bestehenden Adapter/Hub-Archive wurden je zweimal reproduzierbar gebaut; SHA blieb identisch zu den Pins (OpenLive `39a50c51…`, MCP `f6cba660…`, Hub `2ef95615…`). Paketversionen/Dateinamen bleiben unverändert, da kein Adapterverhalten geändert wurde.
+- Adapter checks/builds/unit/integration suites bestanden mit unveränderten Paketversionen. Nach Script-Tag-/Versionsanpassung: `release_metadata_test.py` 5/5, `release_state_test.py` 5/5, Agent Control 39/39, Web Editor 18 pass/1 existing opt-in skip, launcher proxy 1 pass/1 existing skip, extension 1/1, launcher DOM 8/8, actionlint, ShellCheck error-level, Bash syntax und Managed-Runtime-Checks unter Python 3.12/3.13 grün.
+- `.github/workflows/release.yml` remains the mechanism that creates `v0.7.0` and publishes assets after the operator's later push. No local tag was created; no push/manual CI/release/deployment/restart was run. This is only a local candidate commit. Task-P is unchanged because there was no concept change; Board remains `in_progress`.
+
 ## Entscheidungslage / Readiness
 
 - **Keine blockierende Produktentscheidung offen.** G1 ist Defense-in-Depth-Implementierung/Verifikation; G2 ist Umsetzung des festgelegten Non-interactive-Vertrags; G3 ist Abnahme des gewählten credential-/originfreien VM-Vertrags, keine externe-Enforcementmodell-Auswahl.
 - Keine technische Scopeportion wegen neuer Entscheidung geparkt. Lokal implementiert/geprüft; reale macOS/Lima-/Hostcredential-/Origin-/Provider-/Hosted-/Voiceabnahme separat, nicht aus synthetischen Daten ableiten. Aktive Produktionssession/Connector unverändert; neue Policy erst bei normalem späteren Start/Attach/Restart.
 - Userorigin-Fetchausweitung oder ausdrücklicher managed → manual Downgrade wären spätere optionale Scopeentscheidungen, keine Voraussetzungen dieses Tasks. Bestehende Defaults gelten.
-- Lokal abgeschlossen; terminaler Bericht nennt exakte Implementation-/Dokumentcommits und ausgeschlossene Leftovers. Fremde d994-Notiz, fremde C/P und alte untracked dist-Ausgaben bleiben unverändert/unstaged. Nächster Operator-Schritt nur separat autorisierte reale Host-/Provider-/Hosted-/Voiceabnahme, kein automatisches Deployment/Push/Board-Move.
+- Produktimplementation bleibt lokal abgeschlossen. Fremde Todo-/disposable C/P und alte untracked `dist/`-Archive bleiben unangetastet. Nächster Operator-Schritt ist ein späterer Push des Releasecandidate gemäß bestehendem Prozess; erst GitHub Actions erstellt Tag/Release. Reale Host-/Provider-/Hosted-/Voice-Akzeptanz ist separat und kein manueller Release-Schritt dieses Auftrags.
 
 ## Pflege / Evidence
 
