@@ -1,0 +1,13 @@
+[
+  {"profile":"design","mappings":{"standard":"available"},"catalog":"complete","status":"available","resolved_profile":"standard","resolution_path":["design","standard"]},
+  {"profile":"review","mappings":{"deep":"available","standard":"available"},"catalog":"complete","status":"available","resolved_profile":"deep","resolution_path":["review","deep"]},
+  {"profile":"review","mappings":{"standard":"available"},"catalog":"complete","status":"available","resolved_profile":"standard","resolution_path":["review","deep","standard"]},
+  {"profile":"design","mappings":{"design":"available","standard":"available"},"catalog":"complete","status":"available","resolved_profile":"design","resolution_path":["design"]},
+  {"profile":"review","mappings":{"deep":"variant_unavailable","standard":"available"},"catalog":"complete","status":"variant_unavailable","resolved_profile":"deep","resolution_path":["review","deep"]},
+  {"profile":"review","mappings":{"review":"model_unavailable","deep":"available"},"catalog":"complete","status":"model_unavailable","resolved_profile":"review","resolution_path":["review"]},
+  {"profile":"design","mappings":{"standard":"provider_unavailable"},"catalog":"complete","status":"provider_unavailable","resolved_profile":"standard","resolution_path":["design","standard"]},
+  {"profile":"review","mappings":{"deep":"available"},"catalog":"incomplete","status":"catalog_incomplete","resolved_profile":"deep","resolution_path":["review","deep"]},
+  {"profile":"design","mappings":{"standard":"available"},"catalog":"unavailable","status":"catalog_unavailable","resolved_profile":"standard","resolution_path":["design","standard"]},
+  {"profile":"review","mappings":{},"catalog":"unavailable","status":"unconfigured","resolution_path":["review","deep","standard"]},
+  {"profile":"deep","mappings":{"standard":"available"},"catalog":"complete","status":"unconfigured","resolution_path":["deep"]}
+]

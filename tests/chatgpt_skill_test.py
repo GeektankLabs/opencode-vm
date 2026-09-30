@@ -102,7 +102,7 @@ class SkillPackageTest(unittest.TestCase):
         skill = (source / "SKILL.md").read_text()
         clarification = (source / "references/clarification-sessions.md").read_text()
         scenarios = (source / "references/regression-scenarios.md").read_text()
-        for required in ("get_recommended_runtime", "deep", "standard", "execution",
+        for required in ("get_recommended_runtime", "deep", "standard", "execution", "design", "review", "resolution_path", "resolved_profile", "only null",
                          "User-specified", "busy", "pending", "reread", "pure read"):
             self.assertIn(required.lower(), skill.lower())
         self.assertNotIn("gpt-6-luna", clarification)

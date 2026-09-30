@@ -2,11 +2,12 @@ import { lstat, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { AdapterError, type RuntimeDescriptor, type RuntimeOptions } from "./types.js";
 
-export const PROFILE_NAMES = ["deep", "standard", "execution"] as const;
+export const PROFILE_NAMES = ["deep", "standard", "execution", "design", "review"] as const;
 export type ProfileName = (typeof PROFILE_NAMES)[number];
+export const FALLBACKS: Partial<Record<ProfileName, ProfileName[]>> = { design: ["standard"], review: ["deep", "standard"] };
 type Selection = { provider_id: string; model_id: string; variant: string };
 type Policy = {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   revision: number;
   updatedAt: string | null;
   profiles: Record<ProfileName, Selection | null>;
@@ -29,13 +30,14 @@ export async function readPolicy(runtime: RuntimeDescriptor): Promise<Policy> {
     if (!policy || typeof policy !== "object" || Array.isArray(policy)) throw new Error("invalid policy");
     const value = policy as Record<string, unknown>;
     if (Object.keys(value).sort().join() !== "profiles,revision,schemaVersion,updatedAt" ||
-      value.schemaVersion !== 1 || !Number.isSafeInteger(value.revision) || (value.revision as number) < 1 ||
+      ![1, 2].includes(value.schemaVersion as number) || !Number.isSafeInteger(value.revision) || (value.revision as number) < 1 ||
       typeof value.updatedAt !== "string" || !value.updatedAt.endsWith("Z") ||
       !value.profiles || typeof value.profiles !== "object" || Array.isArray(value.profiles))
       throw new Error("unsupported policy");
     const profiles = value.profiles as Record<string, unknown>;
-    if (Object.keys(profiles).sort().join() !== [...PROFILE_NAMES].sort().join()) throw new Error("invalid profiles");
-    for (const name of PROFILE_NAMES) {
+    const names = value.schemaVersion === 1 ? PROFILE_NAMES.slice(0, 3) : PROFILE_NAMES;
+    if (Object.keys(profiles).sort().join() !== [...names].sort().join()) throw new Error("invalid profiles");
+    for (const name of names) {
       const selection = profiles[name];
       if (selection === null) continue;
       if (!selection || typeof selection !== "object" || Array.isArray(selection)) throw new Error("invalid selection");
@@ -44,12 +46,12 @@ export async function readPolicy(runtime: RuntimeDescriptor): Promise<Policy> {
         !id(fields.provider_id) || !id(fields.model_id) || !id(fields.variant))
         throw new Error("invalid selection");
     }
-    return policy as Policy;
+    return { ...policy, profiles: { design: null, review: null, ...profiles } } as Policy;
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") {
       // A missing directory or file is a virtual, entirely unconfigured policy.
       return { schemaVersion: 1, revision: 0, updatedAt: null,
-        profiles: { deep: null, standard: null, execution: null } };
+        profiles: { deep: null, standard: null, execution: null, design: null, review: null } };
     }
     throw new AdapterError("UNSUPPORTED_CONFIGURATION", "Project Agent Control policy is invalid or unsupported.");
   }
@@ -70,8 +72,22 @@ export function describePolicy(runtime: RuntimeDescriptor, policy: Policy, catal
     project_id: runtime.projectHash, schema_version: policy.schemaVersion,
     revision: policy.revision, updated_at: policy.updatedAt,
     catalog_status: !catalog ? "unavailable" : catalog.truncated ? "incomplete" : "complete",
+    fallbacks: FALLBACKS,
     profiles: Object.fromEntries(PROFILE_NAMES.map((name) => [name, {
       selection: policy.profiles[name], status: profileState(policy.profiles[name], catalog),
     }])),
   };
+}
+
+export function resolveProfile(policy: Policy, profile: ProfileName, catalog?: RuntimeOptions) {
+  const resolution_path: ProfileName[] = [];
+  for (const candidate of [profile, ...(FALLBACKS[profile] ?? [])]) {
+    resolution_path.push(candidate);
+    const selection = policy.profiles[candidate];
+    if (selection === null) continue;
+    const status = profileState(selection, catalog);
+    return { profile, policy_revision: policy.revision, status, resolved_profile: candidate, resolution_path,
+      ...(status === "available" ? { runtime: selection } : {}) };
+  }
+  return { profile, policy_revision: policy.revision, status: "unconfigured" as const, resolution_path };
 }

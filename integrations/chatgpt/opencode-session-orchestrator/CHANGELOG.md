@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-09-30-r23
+
+- Integrate ACH-1's actual-capability-gated Design/Review classification, fixed null-only fallbacks and requested/resolved-role disclosure onto the consolidated r21 + Header/r22 baseline.
+- Preserve independent Review intent without automatic findings implementation; keep user override, idle/pending, exact runtime readback and single-send rules.
+- Retain all add-only task binding, header/metadata evidence, same-file recovery, management-note and no-blind-retry rules. Optional-profile availability is discovered, not manufactured by a connector restart.
+
 ## 2026-09-30-r22
 
 - Integrate isolated Header-Validation onto r21: require exact plain-text first lines and actual role/path-bound C/P header/metadata readback in the terminal and original final result before `CONCEPT_READY`; “checked” or IDs alone cannot pass.

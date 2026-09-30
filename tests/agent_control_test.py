@@ -7,12 +7,13 @@ import subprocess
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 import hub.server as server
-from hub.catalog import read_catalog
-from hub.policy import PolicyStore, PolicyConflict, PolicyError, check_selection
+from hub.catalog import read_catalog, mcp_connection, read_capabilities
+from hub.policy import PolicyStore, PolicyConflict, PolicyError, PolicyCapabilityError, PROFILES, check_selection, resolve_profile
 
 
 CATALOG = {"providers": [{"provider_id": "p", "name": "Provider"}],
@@ -33,7 +34,7 @@ class PolicyTest(unittest.TestCase):
 
     def test_missing_policy_is_virtual_and_portable_policy_is_git_ignored(self):
         subprocess.run(["git", "init", "-q", str(self.project)], check=True)
-        self.assertEqual(self.store.read()["profiles"], {"deep": None, "standard": None, "execution": None})
+        self.assertEqual(self.store.read()["profiles"], dict.fromkeys(PROFILES))
         self.assertFalse(self.store.path.exists())
         saved = self.store.update("deep", SELECTION, 0)
         self.assertEqual(saved["revision"], 1)
@@ -50,7 +51,7 @@ class PolicyTest(unittest.TestCase):
 
     def test_future_and_invalid_policy_fail_closed(self):
         self.store.update("deep", SELECTION, 0)
-        original = self.store.path.read_text().replace('"schemaVersion":1', '"schemaVersion":2')
+        original = self.store.path.read_text().replace('"schemaVersion":1', '"schemaVersion":3')
         self.store.path.write_text(original)
         with self.assertRaises(PolicyError):
             self.store.update("execution", SELECTION, 1)
@@ -62,6 +63,16 @@ class PolicyTest(unittest.TestCase):
         with self.assertRaises(PolicyError):
             self.store.update("deep", {**SELECTION, "model_id": "/Users/private/model"}, 0)
         self.assertFalse(self.store.path.exists())
+
+    def test_read_rejects_budget_and_exact_profile_format_without_mutation(self):
+        self.store.update("deep", SELECTION, 0)
+        valid = json.loads(self.store.path.read_text())
+        for data in (b" " * (16 * 1024 + 1),
+                     json.dumps({**valid, "schemaVersion": 2}).encode(),
+                     json.dumps({**valid, "profiles": {**valid["profiles"], "design": None}}).encode()):
+            self.store.path.write_bytes(data)
+            with self.assertRaises(PolicyError): self.store.read()
+            self.assertEqual(self.store.path.read_bytes(), data)
 
     def test_concurrent_revision_allows_only_one_write(self):
         outcomes = []
@@ -85,13 +96,86 @@ class PolicyTest(unittest.TestCase):
         self.assertEqual(check_selection(SELECTION, {**CATALOG, "truncated": True}), "catalog_incomplete")
         self.assertEqual(check_selection(SELECTION, None), "catalog_unavailable")
 
+    def test_explicit_atomic_upgrade_and_clear_preserve_basics(self):
+        self.store.update("deep", SELECTION, 0)
+        self.store.update("standard", SELECTION, 1)
+        original = self.store.path.read_bytes()
+        self.assertEqual(json.loads(original)["schemaVersion"], 1)
+        self.assertEqual(len(json.loads(original)["profiles"]), 3)
+        with self.assertRaises(PolicyCapabilityError):
+            self.store.update("design", SELECTION, 2)
+        self.assertEqual(self.store.path.read_bytes(), original)
+        updated = self.store.update("design", SELECTION, 2, optional_capable=True)
+        backup = self.store.directory / "agent-control.schema1-rev2.backup.json"
+        self.assertEqual(backup.read_bytes(), original)
+        self.assertEqual(backup.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(updated["schemaVersion"], 2)
+        self.assertEqual(updated["revision"], 3)
+        self.assertEqual(updated["profiles"]["deep"], SELECTION)
+        self.assertIsNone(updated["profiles"]["review"])
+        self.assertEqual(self.store.update("design", None, 3)["schemaVersion"], 2)
+
+    def test_first_optional_save_without_original_has_no_fictitious_backup(self):
+        saved = self.store.update("review", SELECTION, 0, optional_capable=True)
+        self.assertEqual(saved["revision"], 1)
+        self.assertEqual(saved["schemaVersion"], 2)
+        self.assertEqual(list(self.store.directory.glob("*.backup.json")), [])
+        self.assertIsNone(saved["profiles"]["design"])
+
+    def test_interrupted_upgrade_replay_and_differing_backup_fail_closed(self):
+        self.store.update("deep", SELECTION, 0)
+        original = self.store.path.read_bytes()
+        with patch("hub.policy.os.replace", side_effect=OSError("interrupted")):
+            with self.assertRaises(OSError):
+                self.store.update("review", SELECTION, 1, optional_capable=True)
+        self.assertEqual(self.store.path.read_bytes(), original)
+        self.assertEqual(self.store.read()["revision"], 1)
+        backup = self.store.directory / "agent-control.schema1-rev1.backup.json"
+        backup.write_bytes(b"different")
+        with self.assertRaises(PolicyError):
+            self.store.update("review", SELECTION, 1, optional_capable=True)
+        self.assertEqual(self.store.path.read_bytes(), original)
+        backup.write_bytes(original)
+        self.assertEqual(self.store.update("review", SELECTION, 1, optional_capable=True)["revision"], 2)
+
+    def test_backup_failure_and_unsafe_paths_do_not_publish(self):
+        self.store.update("deep", SELECTION, 0)
+        original = self.store.path.read_bytes()
+        with patch("hub.policy.os.link", side_effect=OSError("backup failed")):
+            with self.assertRaises(OSError):
+                self.store.update("design", SELECTION, 1, optional_capable=True)
+        self.assertEqual(self.store.path.read_bytes(), original)
+        backup = self.store.directory / "agent-control.schema1-rev1.backup.json"
+        backup.symlink_to(self.store.path)
+        with self.assertRaises(OSError):
+            self.store.update("design", SELECTION, 1, optional_capable=True)
+        self.assertEqual(self.store.path.read_bytes(), original)
+        self.store.path.unlink(); self.store.path.symlink_to(backup)
+        with self.assertRaises(PolicyError): self.store.read()
+
+    def test_shared_resolution_vectors(self):
+        vectors = json.loads((Path(__file__).parent / "fixtures/ach1-resolution.json").read_text())
+        for vector in vectors:
+            policy = self.store.read()
+            for role, state in vector["mappings"].items():
+                selection = dict(SELECTION)
+                if state.endswith("_unavailable"):
+                    selection[{"provider_unavailable": "provider_id", "model_unavailable": "model_id",
+                               "variant_unavailable": "variant"}[state]] = "gone"
+                policy["profiles"][role] = selection
+            catalog = None if vector["catalog"] == "unavailable" else {**CATALOG, "truncated": vector["catalog"] == "incomplete"}
+            result = resolve_profile(policy, vector["profile"], catalog)
+            for key in ("status", "resolved_profile", "resolution_path"):
+                self.assertEqual(result.get(key), vector.get(key), vector)
+            self.assertEqual("runtime" in result, vector["status"] == "available")
+
 
 class HubApiTest(PolicyTest):
     def setUp(self):
         super().setUp()
         self.prior = (server.PROJECT, server.SHARE_ROOT, server.read_catalog)
         server.PROJECT, server.SHARE_ROOT = self.project, Path(self.temp.name)
-        server.read_catalog = lambda *args: CATALOG
+        server.read_catalog = lambda *args, **kwargs: CATALOG
         self.http = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
         self.thread = threading.Thread(target=self.http.serve_forever, daemon=True)
         self.thread.start()
@@ -102,11 +186,11 @@ class HubApiTest(PolicyTest):
         server.PROJECT, server.SHARE_ROOT, server.read_catalog = self.prior
         super().tearDown()
 
-    def request(self, selection, revision=0, origin=True):
+    def request(self, selection, revision=0, origin=True, profile="deep"):
         body = json.dumps({"revision": revision, "selection": selection}).encode()
         headers = {"Content-Type": "application/json"}
         if origin: headers["Origin"] = self.base
-        request = Request(self.base + "/api/control/profiles/deep", data=body, headers=headers, method="PUT")
+        request = Request(self.base + f"/api/control/profiles/{profile}", data=body, headers=headers, method="PUT")
         try:
             with urlopen(request, timeout=3) as response:
                 return response.status
@@ -124,10 +208,32 @@ class HubApiTest(PolicyTest):
         self.assertFalse(self.store.path.exists())
         self.assertEqual(self.request(SELECTION), 200)
         self.assertEqual(self.request(SELECTION), 409)
-        server.read_catalog = lambda *args: {**CATALOG, "truncated": True}
+        server.read_catalog = lambda *args, **kwargs: {**CATALOG, "truncated": True}
         self.assertEqual(self.request(SELECTION, revision=1), 503)
         with urlopen(self.base + "/api/control", timeout=3) as response:
             self.assertEqual(json.load(response)["validation"]["deep"], "catalog_incomplete")
+
+    def test_optional_save_requires_live_capability_and_clear_needs_no_catalog(self):
+        self.assertEqual(self.request(SELECTION, profile="design"), 409)
+        self.assertFalse(self.store.path.exists())
+        with patch.object(server, "read_capabilities", return_value=True):
+            self.assertEqual(self.request(SELECTION, profile="design"), 200)
+        server.read_catalog = lambda *args, **kwargs: None
+        self.assertEqual(self.request(None, revision=1, profile="design"), 200)
+        self.assertEqual(self.store.read()["schemaVersion"], 2)
+
+    def test_http_format_conflict_and_failed_publication_are_distinct(self):
+        self.store.update("deep", SELECTION, 0)
+        original = self.store.path.read_bytes()
+        with patch("hub.policy.os.replace", side_effect=OSError("publication failed")):
+            self.assertEqual(self.request(SELECTION, revision=1), 503)
+        self.assertEqual(self.store.path.read_bytes(), original)
+        invalid = original.replace(b'"schemaVersion":1', b'"schemaVersion":9')
+        self.store.path.write_bytes(invalid)
+        self.assertEqual(self.request(SELECTION, revision=1), 409)
+        self.assertEqual(self.store.path.read_bytes(), invalid)
+        with self.assertRaises(HTTPError) as error: urlopen(self.base + "/api/control", timeout=3)
+        self.assertEqual(json.load(error.exception)["code"], "POLICY_FORMAT_UNSUPPORTED")
 
     def test_private_peer_boundary(self):
         self.assertTrue(server.private_peer("192.168.3.4"))
@@ -163,6 +269,8 @@ class CatalogTest(PolicyTest):
             values = {"SESS_MCP_ENABLED": "1", "SESS_MCP_PORT": str(http.server_port), "SESS_CONTROLLER": "generation"}
             self.assertEqual(read_catalog(root, [(session, values)], "project-hash"), CATALOG)
             self.assertIsNone(read_catalog(root, [(session, values)], "foreign-project"))
+            self.assertEqual(mcp_connection(root, [(session, values)], "foreign-project")["state"], "not_ready")
+            self.assertFalse(read_capabilities(mcp_connection(root, [(session, values)], "project-hash")))
         finally:
             http.shutdown(); http.server_close(); thread.join()
 
@@ -188,6 +296,7 @@ process.on("SIGTERM",()=>{void server.close().then(()=>process.exit(0));});'''
             port = int(process.stdout.readline().strip())
             values = {"SESS_MCP_ENABLED": "1", "SESS_MCP_PORT": str(port), "SESS_CONTROLLER": "generation"}
             self.assertEqual(read_catalog(root, [(session, values)], "project-hash"), CATALOG)
+            self.assertTrue(read_capabilities(mcp_connection(root, [(session, values)], "project-hash")))
         finally:
             process.terminate(); process.communicate(timeout=5)
 

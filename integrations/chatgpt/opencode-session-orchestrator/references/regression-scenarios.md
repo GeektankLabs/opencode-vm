@@ -1,5 +1,19 @@
 # Regression scenarios
 
+## ACH-1 profile regression
+
+| Scenario | Expected behavior |
+| --- | --- |
+| New explicit UI/UX concept task with exposed Design role | Resolve Design → Standard, skipping only null; disclose requested/resolved role and exact tuple. |
+| Independent Review task, Review and Deep null | Resolve Standard; preserve Review evaluation intent and do not implement findings automatically. |
+| Review null, configured Deep unavailable, Standard available | Stop at Deep; no silent substitution or submission. |
+| Design/Review not in actual input enum/output contract | Report unsupported capability; no invented call, live restart or restaging. |
+| Explicit provider/model/variant or profile | User choice wins; failed explicit selection is not healed by another profile. |
+| Pure stored-result read or small follow-up | No runtime switch, new session or model invocation just to read. |
+| Available recommendation but busy/pending target | No runtime write or send; preserve existing agent and permissions. |
+| Uncertain runtime update | Read back exact tuple; no blind retry or second send. |
+| Architecture task containing “design” | Classify actual work package as Deep/Standard as appropriate, not UI Design by keyword. |
+
 These are review cases for the instructions, not permission to submit live tasks. They are synthetic behavioral checks; packaging validation does not establish model behavior or backend correctness.
 
 ## Board classification and recovery

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import http from "node:http";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -55,6 +55,23 @@ test("profile MCP reads resolve an exact configured runtime without mutating the
     const result = await client.callTool({ name: "get_recommended_runtime", arguments: { profile: "deep" } });
     assert.deepEqual((result.structuredContent as { runtime: object }).runtime,
       { provider_id: "provider", model_id: "model", variant: "high" });
+    const review = await client.callTool({ name: "get_recommended_runtime", arguments: { profile: "review" } });
+    assert.deepEqual(review.structuredContent, { profile: "review", policy_revision: 1, status: "available",
+      resolved_profile: "deep", resolution_path: ["review", "deep"], runtime: { provider_id: "provider", model_id: "model", variant: "high" } });
+    const path = join(project, ".opencode-vm", "agent-control.json");
+    const upgraded = { schemaVersion: 2, revision: 2, updatedAt: "2026-09-30T03:00:00Z", profiles: {
+      deep: { provider_id: "provider", model_id: "model", variant: "gone" },
+      standard: { provider_id: "provider", model_id: "model", variant: "high" }, execution: null, design: null, review: null } };
+    await writeFile(path, JSON.stringify(upgraded));
+    const blocked = await client.callTool({ name: "get_recommended_runtime", arguments: { profile: "review" } });
+    assert.deepEqual(blocked.structuredContent, { profile: "review", policy_revision: 2, status: "variant_unavailable",
+      resolved_profile: "deep", resolution_path: ["review", "deep"] });
+    const design = await client.callTool({ name: "get_recommended_runtime", arguments: { profile: "design" } });
+    assert.equal((design.structuredContent as { resolved_profile: string }).resolved_profile, "standard");
+    assert.equal(await readFile(path, "utf8"), JSON.stringify(upgraded));
+    const listed = await client.listTools();
+    const schema = listed.tools.find(tool => tool.name === "get_recommended_runtime")?.inputSchema;
+    assert.deepEqual((schema?.properties?.profile as { enum: string[] }).enum, ["deep", "standard", "execution", "design", "review"]);
     assert.deepEqual(gateway.updateCalls, []);
   } finally {
     await client.close(); await adapter.close(); await rm(project, { recursive: true, force: true });

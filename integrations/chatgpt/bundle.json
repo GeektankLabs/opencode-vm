@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "name": "opencode-session-orchestrator",
-  "revision": "2026-09-30-r22",
+  "revision": "2026-09-30-r23",
   "files": [
     "SKILL.md",
     "CHANGELOG.md",

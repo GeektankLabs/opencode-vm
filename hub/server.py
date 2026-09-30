@@ -26,11 +26,11 @@ from urllib.request import Request, urlopen
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 try:
-    from .policy import PolicyStore, PolicyError, PolicyConflict, PROFILES, check_selection, validate_selection
-    from .catalog import read_catalog
+    from .policy import PolicyStore, PolicyError, PolicyConflict, PolicyCapabilityError, PROFILES, FALLBACKS, check_selection, validate_selection, resolve_profile
+    from .catalog import read_catalog, mcp_connection, read_capabilities
 except ImportError:  # Executed directly as hub/server.py by the host launcher.
-    from policy import PolicyStore, PolicyError, PolicyConflict, PROFILES, check_selection, validate_selection
-    from catalog import read_catalog
+    from policy import PolicyStore, PolicyError, PolicyConflict, PolicyCapabilityError, PROFILES, FALLBACKS, check_selection, validate_selection, resolve_profile
+    from catalog import read_catalog, mcp_connection, read_capabilities
 
 
 ROOT = Path(__file__).resolve().parent
@@ -97,7 +97,10 @@ def read_events(paths: list[tuple[Path, str]]) -> list[dict[str, str]]:
         if not path.is_file() or path.is_symlink():
             continue
         try:
-            data = path.read_bytes()[-MAX_LOG_BYTES:]
+            with path.open("rb") as stream:
+                stream.seek(0, os.SEEK_END)
+                stream.seek(max(0, stream.tell() - MAX_LOG_BYTES))
+                data = stream.read(MAX_LOG_BYTES)
             lines = data.decode("utf-8", "replace").splitlines()[-MAX_EVENTS:]
         except OSError:
             continue
@@ -113,7 +116,7 @@ def project_assignment() -> dict[str, Any] | None:
         return None
     canonical = str(PROJECT)
     for value in registry["projects"].values():
-        if isinstance(value, dict) and value.get("path") and os.path.realpath(value["path"]) == canonical:
+        if isinstance(value, dict) and isinstance(value.get("path"), str) and os.path.realpath(value["path"]) == canonical:
             return {"id": value.get("id", "unknown"), "keyId": value.get("keyId", "unknown"), "tunnelId": value.get("tunnelId", "unknown")}
     return None
 
@@ -155,72 +158,108 @@ def vm_running(name: str) -> bool | None:
         result = subprocess.run(["limactl", "list", name, "--format", "{{.Status}}"], capture_output=True, text=True, timeout=2, check=False)
     except (OSError, subprocess.SubprocessError):
         return None
+    if result.returncode != 0:
+        return None
     status = result.stdout.strip().lower()
-    return True if status == "running" else False if status in {"stopped", "nonexistent", ""} else None
+    return True if status == "running" else False if status == "stopped" else None
 
 
-def status_card(card_id: str, name: str, kind: str, configured: bool, runtime: str, health: str, reason: str, **extra: Any) -> dict[str, Any]:
-    return {"id": card_id, "name": name, "type": kind, "configured": configured, "runtimeStatus": runtime, "healthStatus": health, "statusReason": reason, "lastCheck": now(), "diagnosticsAvailable": bool(extra.pop("diagnosticsAvailable", False)), "logCapability": bool(extra.pop("logCapability", False)), **extra}
+def status_card(card_id, name, configured, state, reason, scope="configuration-only", **extra):
+    health = {"ready": "active/healthy", "not_ready": "warning/degraded"}.get(state, "unknown/stale")
+    return {"id": card_id, "name": name, "type": card_id, "configured": configured, "state": state,
+            "runtimeStatus": health, "healthStatus": health, "statusReason": reason,
+            "lastCheck": now(), "checkScope": scope, "diagnosticsAvailable": True,
+            "logCapability": card_id in {"incoming-mcp", "secure-mcp-tunnel"}, **extra}
 
 
-def build_model() -> dict[str, Any]:
-    sessions = tracked_sessions()
+def build_model(*, sessions=None, connection=None) -> dict[str, Any]:
+    sessions = tracked_sessions() if sessions is None else sessions
     assignment = project_assignment()
     integrations: list[dict[str, Any]] = []
     log_paths: list[tuple[Path, str]] = []
 
-    if assignment:
-        runtime = "inactive/stopped"
-        health = "unknown/stale"
-        reason = "Konfiguration vorhanden; für dieses Projekt ist keine verifizierte Laufzeit aktiv."
-        session = sessions[0][1] if sessions else {}
-        share = SHARE_ROOT / "sessions" / next((p.stem for p, _ in sessions), "")
-        runtime_file = share / "mcp/runtime.json"
-        runtime_data = read_json(runtime_file)
-        if session and runtime_data:
-            running = vm_running(session.get("SESS_NAME", ""))
-            runtime = "active/healthy" if running is True else "unknown/stale" if running is None else "inactive/stopped"
-            health = "unknown/stale" if running is not True else "warning/degraded"
-            reason = "Runtime-Datei vorhanden; Tunnel-Health bleibt ohne verifizierte Control-Plane-Antwort unbekannt."
-            if runtime_data.get("connected") is True:
-                health = "active/healthy"
-                reason = "Der lokale Runtime-Status meldet eine erfolgreiche Tunnel-Verbindung."
-        log_paths += [(share / "mcp/tunnel.log", "secure-mcp-tunnel"), (share / "mcp/backend.log", "mcp-backend")]
-        integrations.append(status_card("secure-mcp-tunnel", "OpenAI Secure MCP Tunnel", "secure-mcp-tunnel", True, runtime, health, reason, endpointClass="outbound HTTPS / tunnel", safeId=safe_id(str(assignment.get("tunnelId", "")), 14), setupRef="docs/MCP-TUNNEL.md", diagnosticsAvailable=True, logCapability=True))
+    session_file, session = sessions[0] if len(sessions) == 1 else (None, {})
+    running = vm_running(session.get("SESS_NAME", "")) if session else None
+    registry_path = SHARE_ROOT / "mcp-tunnel/openai/registry.json"
+    registry = read_json(registry_path)
+    registry_unknown = (registry_path.exists() or registry_path.is_symlink()) and (
+        not isinstance(registry, dict) or not isinstance(registry.get("projects"), dict)
+        or any(not isinstance(value, dict) or not isinstance(value.get("path"), str)
+               for value in registry["projects"].values())
+        or sum(isinstance(value, dict) and isinstance(value.get("path"), str)
+               and os.path.realpath(value["path"]) == str(PROJECT) for value in registry["projects"].values()) > 1)
+    if registry_unknown:
+        assignment = None
+    tunnel_state = "unverified" if assignment or registry_unknown else "not_configured"
+    tunnel_reason = ("Zuordnung vorhanden; Tunnelverbindung nicht bestätigt. Adaptermarker sind kein Tunnel-Health."
+                     if assignment else "Konfiguration nicht lesbar – Status nicht bestätigt." if registry_unknown
+                     else "Keine Tunnelzuordnung für dieses Projekt eingerichtet.")
+    if assignment and running is False:
+        tunnel_state, tunnel_reason = "not_ready", "Projekt-VM ist bestätigt gestoppt; Tunnel benötigt eine laufende Session."
+    integrations.append(status_card("secure-mcp-tunnel", "OpenAI Secure MCP Tunnel", None if registry_unknown else bool(assignment),
+        tunnel_state, tunnel_reason, setupRef="docs/MCP-TUNNEL.md"))
+    for path, values in sessions:
+        share = SHARE_ROOT / "sessions" / path.stem
+        if assignment:
+            log_paths.append((share / "mcp/tunnel.log", "secure-mcp-tunnel"))
+        if values.get("SESS_MCP_ENABLED") == "1":
+            log_paths.append((share / "mcp/backend.log", "incoming-mcp"))
 
-    for _, values in sessions:
-        if values.get("SESS_MCP_ENABLED") != "1":
-            continue
-        port = int(values.get("SESS_MCP_PORT") or 0) if values.get("SESS_MCP_PORT", "").isdigit() else 0
-        available = probe_port(port) if port else False
-        integrations.append(status_card("incoming-mcp", "OpenCode MCP Connector", "incoming-mcp", True, "active/healthy" if available else "unknown/stale", "active/healthy" if available else "unknown/stale", "Loopback-Adapter und Host-Weiterleitung wurden nicht bestätigt." if not available else "Loopback-Port ist erreichbar; der Adapter bleibt projektgebunden.", endpointClass=f"loopback :{port}" if port else "loopback", setupRef="docs/MCP-INTERFACE.md", diagnosticsAvailable=True, logCapability=True))
+    if sessions:
+        connection = connection if connection is not None else mcp_connection(SHARE_ROOT, sessions, project_hash())
+        configured = session.get("SESS_MCP_ENABLED") == "1" if session else None
+        integrations.append(status_card("incoming-mcp", "OpenCode MCP Connector", configured,
+            connection["state"], connection["reason"], "local-mcp-health" if configured and connection["state"] in {"ready", "not_ready"} else "configuration-only",
+            setupRef="docs/MCP-INTERFACE.md"))
+    else:
+        integrations.append(status_card("incoming-mcp", "OpenCode MCP Connector", False, "not_configured",
+            "Nicht aktiviert · eine Projekt-Session mit MCP ist erforderlich.", setupRef="docs/MCP-INTERFACE.md"))
 
-    for _, values in sessions:
-        if values.get("SESS_MODE") != "web":
-            continue
-        port = int(values.get("SESS_PORT") or 0) if values.get("SESS_PORT", "").isdigit() else 0
-        a2a_port = port + 3
-        card_url = f"http://127.0.0.1:{a2a_port}/.well-known/agent-card.json"
-        ok, card = probe_http(card_url)
-        health_ok = False
-        if ok and isinstance(card, dict):
-            interfaces = card.get("supportedInterfaces", [])
-            authoritative = next((item.get("url") for item in interfaces if isinstance(item, dict) and item.get("protocolBinding") == "JSONRPC" and item.get("url")), None)
-            if authoritative:
-                card_url = authoritative.rstrip("/") + "/.well-known/agent-card.json"
-            auth = parse_env(SHARE_ROOT / "sessions" / next((p.stem for p, _ in sessions), "") / "auth.env")
-            secret = auth.get("OPENCODE_SERVER_PASSWORD") or "opencode-vm"
-            health_ok, _ = probe_http(card_url.replace("/.well-known/agent-card.json", "/health"), secret)
-        integrations.append(status_card("a2a", "A2A Agent Interface", "a2a", True, "active/healthy" if health_ok else "unknown/stale", "active/healthy" if health_ok else "error/unhealthy" if ok else "unknown/stale", "Agent Card und Health sind erreichbar." if health_ok else "A2A-Endpoint oder authentifizierter Healthcheck ist nicht erreichbar.", endpointClass=f"HTTP :{a2a_port}", safeId=values.get("SESS_PROJ", "").split("/")[-1], setupRef="docs/A2A-INTERFACE.md", diagnosticsAvailable=True, logCapability=False))
+    a2a_state, a2a_reason = "not_configured", "Nicht aktiviert · benötigt eine Websession."
+    web = session.get("SESS_MODE") == "web"
+    if len(sessions) > 1:
+        a2a_state, a2a_reason = "unverified", "Keine eindeutige Projekt-Session bestätigt."
+    elif web:
+        a2a_state, a2a_reason = "unverified", "A2A-Dienstzuordnung nicht bestätigt."
+        port = session.get("SESS_PORT", "")
+        if port.isdecimal() and 1 <= int(port) <= 65532:
+            ok, card = probe_http(f"http://127.0.0.1:{int(port) + 3}/.well-known/agent-card.json")
+            if not ok:
+                a2a_state, a2a_reason = "not_ready", "Lokale Agent-Card-Probe fehlgeschlagen."
+            elif isinstance(card, dict) and isinstance(card.get("supportedInterfaces"), list):
+                urls = [item.get("url") for item in card["supportedInterfaces"] if isinstance(item, dict)
+                        and item.get("protocolBinding") == "JSONRPC" and isinstance(item.get("url"), str)]
+                if len(urls) == 1:
+                    try:
+                        effective = urlsplit(urls[0])
+                        effective_port = effective.port
+                    except ValueError:
+                        effective, effective_port = None, None
+                    # Use the card's effective port on host loopback, never its host as a credential destination.
+                    if effective and effective.scheme == "http" and private_peer(effective.hostname or "") and effective_port and not effective.username and not effective.password and not effective.query and not effective.fragment and effective.path in {"", "/"}:
+                        auth = parse_env(SHARE_ROOT / "sessions" / session_file.stem / "auth.env")
+                        secret = auth.get("OPENCODE_SERVER_PASSWORD")
+                        if secret:
+                            health_ok, body = probe_http(f"http://127.0.0.1:{effective_port}/health", secret)
+                            if health_ok and isinstance(body, dict) and body.get("status") == "ok" and body.get("service") == "opencode-a2a":
+                                a2a_state, a2a_reason = "ready", "Agent Card und authentifizierter lokaler A2A-Servicehealth bestätigt; kein Client-/LAN-Test."
+                            else:
+                                a2a_state, a2a_reason = "not_ready", "Authentifizierter A2A-Servicehealth fehlgeschlagen."
+    integrations.append(status_card("a2a", "A2A Agent Interface", web if len(sessions) <= 1 else None,
+        a2a_state, a2a_reason, "local-a2a-health" if a2a_state in {"ready", "not_ready"} else "configuration-only", setupRef="docs/A2A-INTERFACE.md"))
 
     openlive = SHARE_ROOT / "openlive/bin/opencode"
-    if openlive.is_file() and not openlive.is_symlink():
-        openlive_runtime = next((read_json(SHARE_ROOT / "sessions" / path.stem / "openlive/runtime.json") for path, _ in sessions if (SHARE_ROOT / "sessions" / path.stem / "openlive/runtime.json").is_file()), None)
-        live = isinstance(openlive_runtime, dict) and bool(openlive_runtime.get("pid"))
-        integrations.append(status_card("openlive", "OpenLive ACP", "openlive-acp", True, "active/healthy" if live else "unknown/stale", "active/healthy" if live else "unknown/stale", "Ein OpenLive-Runtime-Descriptor ist vorhanden." if live else "OpenLive-Bridge ist installiert; ein laufender Voice-Call wird nicht behauptet.", endpointClass="ACP over local bridge", safeId="installed", setupRef="PLAN_OPENLIVE.md", diagnosticsAvailable=False, logCapability=False))
+    installed = openlive.is_file() and not openlive.is_symlink()
+    live_state = "unverified" if installed else "not_configured"
+    live_reason = "Bridge installiert · Projektbereitschaft nicht bestätigt; kein Voice-Call-Nachweis." if installed else "OpenLive-Bridge ist nicht eingerichtet."
+    if openlive.is_symlink() or (openlive.exists() and not installed):
+        installed, live_state, live_reason = None, "unverified", "Bridge-Konfiguration nicht lesbar – Status nicht bestätigt."
+    elif installed and not any(values.get("SESS_MODE") == "web" for _, values in sessions):
+        live_state, live_reason = "not_ready", "Bridge installiert; erforderliche Projekt-Websession fehlt. Voice-Calls werden nicht überwacht."
+    integrations.append(status_card("openlive", "OpenLive ACP", installed, live_state, live_reason, setupRef="PLAN_OPENLIVE.md"))
 
     events = read_events(log_paths)
-    configured_ids = {item["id"] for item in integrations}
+    configured_ids = {item["id"] for item in integrations if item["configured"] is True}
     notices = []
     if not integrations:
         notices.append({"tone": "info", "title": "Keine projektbezogene Verbindung konfiguriert", "body": "Die lokalen Registries und Session-Marker enthalten für dieses Projekt keine aktive Connector-Konfiguration."})
@@ -229,7 +268,7 @@ def build_model() -> dict[str, Any]:
             notices.append({"tone": "warning", "title": item["name"], "body": item["statusReason"], "integrationId": item["id"]})
 
     latest = read_json(ROOT.parent / "integrations/chatgpt/latest.json") or {}
-    return {"schema": 1, "generatedAt": now(), "project": {"name": PROJECT.name, "pathAvailable": True}, "integrations": integrations, "events": events, "notices": notices[:8], "skill": latest, "setupGuides": [
+    return {"schema": 2, "generatedAt": now(), "project": {"name": PROJECT.name, "pathAvailable": True}, "integrations": integrations, "events": events, "notices": notices[:8], "skill": latest, "setupGuides": [
         {"id": "lm-studio", "title": "LM Studio · lokale Modelle", "steps": ["LM Studio auf dem Mac starten und den lokalen Server auf Port 1234 aktivieren.", "Port 1234 ist in der OpenCode-VM-Standardpolicy bereits erlaubt. Bei geänderter Policy mit `opencode-vm ports host add 1234` sicherstellen (mehrfach ausführbar). Die Host-Port-Policy gilt für alle VMs.", "In der OpenCode-Web-UI unter Provider Management den nativen Provider „LM Studio“ verbinden. Bei aktivem Standard-Forwarding erreicht OpenCode ihn im Lima-Gast über `localhost:1234`; eine Custom-Base-URL ist nicht nötig."], "docs": "README.md#network-policy-commands"},
         {"id": "secure-mcp-tunnel", "title": "Secure MCP Tunnel", "when": "not configured or inactive", "steps": ["OpenAI Tunnel und eingeschränkten Tunnel API-Key anlegen.", "opencode-vm provider mcp new openai im Projektverzeichnis ausführen.", "Mit opencode-vm web starten und provider mcp status openai prüfen."], "docs": "docs/MCP-TUNNEL.md"},
         {"id": "a2a", "title": "A2A Agent Interface", "when": "web session required", "steps": ["Eine Web-Session mit opencode-vm web starten.", "Agent Card und /health über den dokumentierten A2A-Port verifizieren.", "Für Diagnose opencode-vm a2a status oder a2a check verwenden."], "docs": "docs/A2A-INTERFACE.md"},
@@ -239,11 +278,17 @@ def build_model() -> dict[str, Any]:
 
 def control_snapshot():
     policy = PolicyStore(PROJECT).read()
-    catalog = read_catalog(SHARE_ROOT, tracked_sessions(), project_hash())
+    sessions = tracked_sessions()
+    connection = mcp_connection(SHARE_ROOT, sessions, project_hash())
+    catalog = read_catalog(SHARE_ROOT, sessions, project_hash(), connection=connection)
     return {"policy": policy, "catalog": catalog, "validation": {
         name: check_selection(policy["profiles"][name], catalog) for name in PROFILES
-    }, "capabilities": {"mcp": "supported", "a2a": "unsupported", "openlive": "unsupported"},
-        "catalogStatus": "unavailable" if catalog is None else "incomplete" if catalog["truncated"] else "complete"}
+    }, "resolutions": {name: resolve_profile(policy, name, catalog) for name in PROFILES},
+        "fallbacks": FALLBACKS,
+        "capabilities": {"mcp": "supported", "optionalProfiles": read_capabilities(connection),
+                         "a2a": "unsupported", "openlive": "unsupported"},
+        "catalogStatus": "unavailable" if catalog is None else "incomplete" if catalog["truncated"] else "complete",
+        "readModel": build_model(sessions=sessions, connection=connection)}
 
 
 def private_peer(address):
@@ -290,7 +335,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 self.send_json(200, control_snapshot())
             except PolicyError:
-                self.send_json(409, {"error": "Unsupported or invalid project policy."})
+                self.send_json(409, {"code": "POLICY_FORMAT_UNSUPPORTED", "error": "Unsupported or invalid project policy."})
         elif path == "/favicon.ico":
             self.send_response(204)
             self.end_headers()
@@ -312,7 +357,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_PUT(self) -> None:  # noqa: N802
         if not self.allowed(write=True):
             return
-        match = re.fullmatch(r"/api/control/profiles/(deep|standard|execution)", self.path)
+        match = re.fullmatch(r"/api/control/profiles/(deep|standard|execution|design|review)", self.path)
         if not match:
             self.send_error(404)
             return
@@ -328,20 +373,40 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(payload, dict) or set(payload) != {"revision", "selection"}:
                 raise PolicyError("Invalid request.")
             selection = validate_selection(payload["selection"])
+            store = PolicyStore(PROJECT)
+            try:
+                current = store.read()
+            except PolicyError:
+                self.send_json(409, {"code": "POLICY_FORMAT_UNSUPPORTED", "error": "Unsupported or invalid project policy."})
+                return
+            capable = False
+            connection = None
+            if selection is not None and (match.group(1) in FALLBACKS or current["schemaVersion"] == 2):
+                connection = mcp_connection(SHARE_ROOT, tracked_sessions(), project_hash())
+                capable = read_capabilities(connection)
+                if not capable:
+                    self.send_json(409, {"code": "POLICY_CAPABILITY_UNAVAILABLE", "error": "Active MCP adapter does not confirm optional profiles and schema 2."})
+                    return
             if selection is not None:
-                catalog = read_catalog(SHARE_ROOT, tracked_sessions(), project_hash())
+                catalog = read_catalog(SHARE_ROOT, tracked_sessions(), project_hash(), connection=connection)
                 if catalog is None or catalog["truncated"]:
-                    self.send_json(503, {"error": "Complete runtime catalog unavailable; policy unchanged."})
+                    self.send_json(503, {"code": "CATALOG_UNAVAILABLE", "error": "Complete runtime catalog unavailable; policy unchanged."})
                     return
                 if check_selection(selection, catalog) != "available":
-                    self.send_json(422, {"error": "Selection is unavailable; policy unchanged."})
+                    self.send_json(422, {"code": "SELECTION_UNAVAILABLE", "reason": check_selection(selection, catalog), "error": "Selection is unavailable; policy unchanged."})
                     return
-            updated = PolicyStore(PROJECT).update(match.group(1), selection, payload["revision"])
+            updated = store.update(match.group(1), selection, payload["revision"], optional_capable=capable)
             self.send_json(200, {"policy": updated})
         except PolicyConflict:
-            self.send_json(409, {"error": "Policy changed; reload before saving."})
+            self.send_json(409, {"code": "POLICY_REVISION_CONFLICT", "error": "Policy changed; reload before saving."})
+        except PolicyCapabilityError:
+            self.send_json(409, {"code": "POLICY_CAPABILITY_UNAVAILABLE", "error": "Active adapter capability unavailable."})
         except (PolicyError, ValueError, UnicodeError):
-            self.send_json(400, {"error": "Invalid or unsupported policy request."})
+            self.send_json(400, {"code": "POLICY_REQUEST_INVALID", "error": "Invalid or unsupported policy request."})
+        except (BrokenPipeError, ConnectionResetError):
+            return  # A lost response is reconciled by a read, never another write.
+        except OSError:
+            self.send_json(503, {"code": "POLICY_SAVE_UNCONFIRMED", "error": "Policy publication not confirmed; read back before another write."})
 
     def send_json(self, code: int, payload: Any) -> None:
         data = json.dumps(payload, ensure_ascii=True).encode("utf-8")

@@ -12,7 +12,7 @@ import { ProjectBoardService, MAX_TASK_DESCRIPTION_LENGTH } from "./taskboard.js
 import type { DocumentRole } from "./taskboard.js";
 import { traceToolCall } from "./diagnostics.js";
 import { SUPPORTED_ATTACHMENT_TYPES } from "./attachments.js";
-import { PROFILE_NAMES, describePolicy, readPolicy, profileState } from "./agent-control.js";
+import { PROFILE_NAMES, describePolicy, readPolicy, resolveProfile } from "./agent-control.js";
 import {
   ACTIVITY_TYPES,
   ADAPTER_VERSION,
@@ -426,14 +426,16 @@ const profileStatus = z.enum(["available", "unconfigured", "provider_unavailable
   "variant_unavailable", "catalog_unavailable", "catalog_incomplete"]);
 const profileEntry = z.object({ selection: profileSelection.nullable(), status: profileStatus }).strict();
 const modelPolicyOutput = z.object({
-  project_id: z.string(), schema_version: z.literal(1), revision: z.number().int().nonnegative(),
+  project_id: z.string(), schema_version: z.union([z.literal(1), z.literal(2)]), revision: z.number().int().nonnegative(),
   updated_at: z.string().nullable(), catalog_status: z.enum(["complete", "incomplete", "unavailable"]),
-  profiles: z.object({ deep: profileEntry, standard: profileEntry, execution: profileEntry }).strict(),
+  profiles: z.object({ deep: profileEntry, standard: profileEntry, execution: profileEntry, design: profileEntry, review: profileEntry }).strict(),
+  fallbacks: z.object({ design: z.array(z.enum(PROFILE_NAMES)), review: z.array(z.enum(PROFILE_NAMES)) }).strict(),
 }).strict();
 const recommendedInput = z.object({ profile: z.enum(PROFILE_NAMES) }).strict();
 const recommendedOutput = z.object({
   profile: z.enum(PROFILE_NAMES), policy_revision: z.number().int().nonnegative(), status: profileStatus,
   runtime: profileSelection.optional(),
+  resolution_path: z.array(z.enum(PROFILE_NAMES)), resolved_profile: z.enum(PROFILE_NAMES).optional(),
 }).strict();
 const runtimeUpdateOutput = z
   .object({
@@ -1368,21 +1370,19 @@ export function createMcpServer(
     if (!runtime) throw new AdapterError("UNSUPPORTED_CONFIGURATION", "Project runtime is unavailable.");
     const policy = await readPolicy(runtime);
     const catalog = await gateway.getSessionRuntimeOptions().catch(() => undefined);
-    const selection = policy.profiles[profile];
-    const status = profileState(selection, catalog);
-    return success({ profile, policy_revision: policy.revision, status,
-      ...(status === "available" && selection ? { runtime: selection } : {}) },
-      status === "available" ? "The configured runtime is currently listed." : "No runtime was selected; inspect the status before submitting work.");
+    const result = resolveProfile(policy, profile, catalog);
+    return success(result,
+      result.status === "available" ? "The configured runtime is currently listed." : "No runtime was selected; inspect the status before submitting work.");
   });
   server.registerTool(
     "get_project_model_policy",
-    { title: "Get Project Model Policy", description: "Read transport-neutral deep, standard and execution project preferences with current catalog validation.",
+    { title: "Get Project Model Policy", description: "Read schema 1/2 preferences for deep, standard, execution, design and review with catalog validation and fixed absence fallbacks.",
       inputSchema: z.object({}).strict(), outputSchema: modelPolicyOutput, annotations: readOnlyAnnotations },
     modelPolicyHandler,
   );
   server.registerTool(
     "get_recommended_runtime",
-    { title: "Get Recommended Runtime", description: "Resolve an exact configured runtime only when currently available. Does not switch any session.",
+    { title: "Get Recommended Runtime", description: "Resolve an exact runtime. Design falls back to standard; review to deep then standard. Only null is skipped; configured unavailable/incomplete mappings stop. Review evaluates without automatically implementing findings. Does not switch any session.",
       inputSchema: recommendedInput, outputSchema: recommendedOutput, annotations: readOnlyAnnotations },
     recommendedHandler,
   );
