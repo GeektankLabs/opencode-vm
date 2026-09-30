@@ -2,13 +2,14 @@
 
 This reference is the canonical document for the **post-`CONCEPT_READY` follow-through**: the orchestrator's ordered steps after the executing agent has reported its file-creation/reconciliation result. It complements the [task concept plan](task-concept-plan.md) §"Mandatory initialization on `todo` -> `in_progress`" (which is the agent's initialization duties) and [board workflow](board-workflow.md) §"Ordered transition and recovery" (which is the orchestrator's ordered sequence at the highest level). Read it whenever a user-confirmed `todo` -> `in_progress` transition is in progress and the agent's correlated result is on the desk.
 
-The shared vocabulary is three labelled checkpoints. None of them is optional and none of them replaces the next.
+The regular task transition uses three labelled checkpoints. None is optional and none replaces the next. A Work Package has one additional, package-only readiness gate between `REGISTERED` and the Board move; it does not change the regular task sequence.
 
 - [`CONCEPT_READY`](#concept-ready) — the **executing agent** has created or reused both task files at the canonical paths, each with a matching `Task-ID`, and reports their actual paths, statuses and a short summary. The agent's terminal return.
 - [`REGISTERED`](#registered) — the **orchestrator** has bound both main roles with preferred `add_task_document_bindings` (register fallback only when absent) and `get_task_documents` shows both as `state:available` with exact paths and revisions.
 - [`BOARD_MOVED`](#board-moved) — the **orchestrator** has called the Board move tool to change the task to `in_progress` and a readback of the Board task confirms the new status.
+- [`WORK_PACKAGE_READY`](work-packages.md#build-the-wave-plan-and-evaluate-work_package_ready) — for a package only, the **orchestrator** has verified the named startable wave against its current task/document revisions, worktree ownership, dependency base and plan before attempting `in_progress`. It is not a Board or server state.
 
-The Board task never moves to `in_progress` before `REGISTERED`. `CONCEPT_READY` is the start of the orchestrator's follow-through, not its end.
+The Board task never moves to `in_progress` before `REGISTERED`; a Work Package also never moves before `WORK_PACKAGE_READY`. `CONCEPT_READY` is the start of the orchestrator's follow-through, not its end. A package that is not ready keeps its registered documents and remains `todo`.
 
 ## CONCEPT_READY
 
@@ -32,13 +33,19 @@ The orchestrator's first internal checkpoint. The orchestrator completes the fol
 2. **Bind both roles.** When discovered, call `add_task_document_bindings` once with `task_id`, `compact_context` and `concept_plan` at the verified paths. All files/Task-IDs/conflicts are validated before one atomic sidecar publication. Exact replay revalidates files and adds no references; no `expected_path`, replacement or file writing exists here. Only if this tool is absent may `register_task_document` bind each main role without `expected_path`; on authorized fallback resume, keep matching successful roles and register only what remains. If neither capability is available, stop before initialization. Generic `artifact_refs` are not substitutes. Optional detail documents still use the existing register tool when authorized.
 3. **Read back both roles.** Call `get_task_documents(task_id)` after the write and require both main roles present, `state:available`, exact paths and revisions. A bundle conflict/error stops before `REGISTERED` and Board move; never fall back to replacement. For an uncertain binding response, first inspect references read-only; a later authorized identical add-only replay is safe, then read back again. This is not permission to blindly retry a Board move or a management note.
 
-The transition to `REGISTERED` is the orchestrator's commitment to the files. Only after `REGISTERED` does the orchestrator proceed to the Board move.
+The transition to `REGISTERED` is the orchestrator's commitment to the files. Only after `REGISTERED` does the orchestrator proceed toward the Board move; a package must first pass the additional gate below.
+
+## WORK_PACKAGE_READY for a package transition
+
+Before moving a package task to `in_progress`, read the current package task, registered C/P and their actual revisions. Check the exact intended first wave, member scopes/documents, expected and actual base HEADs, dependencies, shared-file/version conflict plan, persistent worktree/owner, actual write-tool target, integration owner, operator boundary, acceptance and explicit parked members against [the package readiness contract](work-packages.md#build-the-wave-plan-and-evaluate-work_package_ready).
+
+Report `WORK_PACKAGE_READY` only for that named wave, with package ID, wave, source document revisions, base/integration HEAD and excluded members. If a relevant C/P or base changes during the check, reread it and reevaluate. If any readiness item is missing, retain files/bindings, do not move the Board, and report the concrete gap. `WORK_PACKAGE_READY` is neither `CONCEPT_READY` nor `REGISTERED`, and does not make a member done or prove implementation/integration. After it passes, use the ordinary separate Board move and exact status readback required by [`BOARD_MOVED`](#board-moved).
 
 ## BOARD_MOVED
 
 The orchestrator's second internal checkpoint. The orchestrator completes the following steps, in order:
 
-1. **Call the Board move tool.** With the discovered Board move tool, change the task to `in_progress`.
+1. **Check the preceding gates.** Require `REGISTERED`, and for a Work Package also the current `WORK_PACKAGE_READY` evidence for the exact wave. With the discovered Board move tool, change the task to `in_progress` only after those prerequisites.
 2. **Read the Board task back.** Confirm the status even after an uncertain move. Do not claim `todo` or rollback from a lost response: the move may already have occurred. A confirmed `in_progress` resolves delivery; a verified `todo` permits authorized resume only once non-delivery is established. Other statuses/conflicts require a new decision; unavailable readback leaves status unknown. Preserve registrations/files and never blindly repeat the move.
 3. **Mark the transition complete.** Only after the readback confirms `in_progress` does the orchestrator mark the transition `BOARD_MOVED` and report the verified files, registrations, revisions and Board status to the user.
 

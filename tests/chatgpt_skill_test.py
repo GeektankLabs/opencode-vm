@@ -6,6 +6,7 @@ import io
 from pathlib import Path
 import shutil
 import stat
+import subprocess
 import tempfile
 import unittest
 import zipfile
@@ -856,6 +857,277 @@ class SkillPackageTest(unittest.TestCase):
         notes = Notes(available=False)
         self.assertEqual(request_note(notes, "Missing"), {"error": "unsupported"})
         self.assertEqual(notes.calls, ["get_project_task"])
+
+    def test_worktree_and_work_package_reference_contract(self):
+        source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
+        manifest, _ = BUILDER.package_content(ROOT)
+        skill = (source / "SKILL.md").read_text()
+        worktrees = (source / "references/worktree-ownership.md").read_text()
+        packages = (source / "references/work-packages.md").read_text()
+        board = (source / "references/board-workflow.md").read_text()
+        context = (source / "references/task-compact-context.md").read_text()
+        plan = (source / "references/task-concept-plan.md").read_text()
+        followthrough = (source / "references/initialization-follow-through.md").read_text()
+        scenarios = (source / "references/regression-scenarios.md").read_text()
+        docs = (ROOT / "docs/CHATGPT.md").read_text()
+
+        self.assertIn("references/work-packages.md", manifest["files"])
+        self.assertIn("references/worktree-ownership.md", manifest["files"])
+        self.assertIn("2026-09-30-r25", skill)
+        self.assertIn("## 2026-09-30-r25", (source / "CHANGELOG.md").read_text())
+        for text in (skill, packages, board, followthrough, scenarios):
+            self.assertIn("WORK_PACKAGE_READY", text)
+        for required in ("base HEAD", "one active writer", "verify every write target", "operator-only"):
+            self.assertIn(required.lower(), worktrees.lower())
+        for required in ("TASK_SEARCH_INCOMPLETE", "todo", "registered", "Morning Handoff",
+                         "ChatGPT Work", "OpenCode runtime", "get_recommended_runtime",
+                         "do not translate an OpenCode provider/model/variant id", "INPUT_REQUIRED"):
+            self.assertIn(required.lower(), packages.lower())
+        self.assertIn("package gate **after** `REGISTERED`", board)
+        self.assertIn("external acceptance", context.lower())
+        self.assertIn("integration-tree `HEAD`", packages)
+        self.assertIn("ChatGPT Work" , docs)
+        self.assertIn("do not set or map to the ChatGPT Work model picker", docs)
+
+        rows = {row.split("|")[1].strip(): row.split("|")[2].strip()
+                for row in scenarios.splitlines() if row.startswith("| ") and row.count("|") >= 3}
+        expected_rows = (
+            "Two independent agent-managed tasks will write simultaneously",
+            "The MCP session's directory is the project root but a task worktree is nested below it",
+            "The expected downstream base changed after a predecessor was integrated",
+            "Two member plans touch a shared hunk/version/package/adapter/skill/release file",
+            "A member is blocked by a genuine product or architecture decision while an independent wave is ready",
+            "A member is Board `done` but its commit is required by a downstream implementation",
+            "Cleanup is requested with an active worker, dirty/untracked state, unreviewed result or uncertain integration",
+            "User supplies existing task IDs for a package",
+            "User supplies a goal or a mixture of required and optional tasks",
+            "A package is created in `todo` while one member lacks a concept plan or decision",
+            "Package C/P are registered, but a required decision, worktree, base or tool target is not ready",
+            "Package wave passes all readiness evidence",
+            "A Work Package is started from ordinary Chat after `WORK_PACKAGE_READY`",
+            "A suitable ChatGPT Work session is already active",
+            "A deterministic ready wave has a current configured `execution` profile",
+            "A normal multi-task plan or a complex unresolved integration has a current policy",
+        )
+        for title in expected_rows:
+            with self.subTest(scenario=title):
+                self.assertIn(title, rows)
+                self.assertTrue(rows[title])
+
+    def test_work_package_readiness_ownership_and_resume_flow(self):
+        """Exercise the client-side ownership/readiness checkpoints with disposable fakes."""
+
+        class Worktrees:
+            def __init__(self):
+                self.owners = {}
+                self.records = {}
+
+            def claim(self, task_id, path, owner, base, *, actual_write_target):
+                if path in self.owners or not actual_write_target:
+                    return False
+                self.owners[path] = owner
+                self.records[task_id] = {"path": path, "owner": owner, "base": base,
+                                         "head": base, "dirty": False}
+                return True
+
+            def write(self, task_id, destination):
+                record = self.records[task_id]
+                if destination != record["path"] or self.owners.get(destination) != record["owner"]:
+                    return False
+                record["dirty"] = True
+                return True
+
+            def cleanup(self, task_id, *, integrated, reviewed, owner_stopped, authorized,
+                        external_acceptance_complete=True):
+                record = self.records[task_id]
+                if not (integrated and reviewed and owner_stopped and authorized and
+                        external_acceptance_complete and not record["dirty"]):
+                    return False
+                self.owners.pop(record["path"])
+                return True
+
+        class Package:
+            def __init__(self, members):
+                self.members = {member["id"]: member for member in members}
+                self.context = {"members": list(self.members), "results": {}, "integrations": []}
+                self.documents_registered = False
+                self.status = "todo"
+                self.ready_waves = set()
+
+            @classmethod
+            def create(cls, member_ids, *, complete_search, authorized, member_data):
+                if not complete_search:
+                    return None, "search_incomplete"
+                if not authorized:
+                    return None, "not_authorized"
+                stable_ids = list(dict.fromkeys(member_ids))
+                return cls([member_data[item] for item in stable_ids]), None
+
+            def ready(self, wave, *, target_head):
+                if not self.documents_registered:
+                    return False
+                for member_id in wave:
+                    member = self.members[member_id]
+                    if not (member["concept_ready"] and member["worktree_ready"] and member["scope_ready"]):
+                        return False
+                    if member.get("required_head") and target_head != member["required_head"]:
+                        return False
+                self.ready_waves.add(tuple(wave))
+                return True
+
+            def move_to_progress(self, wave):
+                if tuple(wave) not in self.ready_waves:
+                    return False
+                self.status = "in_progress"
+                return True
+
+            def morning(self, *, documents, original_results, git_state):
+                return {"members": self.context["members"], "documents": documents,
+                        "results": original_results, "git": git_state,
+                        "next": "verify required integration HEAD before dependent wave"}
+
+            def recommend(self, *, fully_specified, conflicts, explicit=None, configured=True):
+                if explicit:
+                    return explicit
+                if not configured:
+                    return None
+                if conflicts:
+                    return "deep"
+                if fully_specified:
+                    return "execution"
+                return "standard"
+
+        member_data = {
+            "member_ready": {"id": "member_ready", "board": "in_progress", "concept_ready": True,
+                             "worktree_ready": True, "scope_ready": True},
+            "member_unready": {"id": "member_unready", "board": "todo", "concept_ready": False,
+                                "worktree_ready": False, "scope_ready": True},
+            "member_dependent": {"id": "member_dependent", "board": "todo", "concept_ready": True,
+                                  "worktree_ready": True, "scope_ready": True,
+                                  "required_head": "integrated-foundation"},
+            "member_done": {"id": "member_done", "board": "done", "concept_ready": True,
+                            "worktree_ready": True, "scope_ready": True},
+        }
+
+        package, error = Package.create(
+            ["member_ready", "member_ready", "member_unready", "member_done", "member_dependent"],
+            complete_search=True, authorized=True, member_data=member_data)
+        self.assertIsNone(error)
+        self.assertEqual(package.status, "todo")
+        self.assertEqual(package.context["members"], ["member_ready", "member_unready", "member_done",
+                                                     "member_dependent"])
+        package.documents_registered = True
+        self.assertFalse(package.ready(["member_unready"], target_head="base-0"))
+        self.assertFalse(package.move_to_progress(["member_unready"]))
+        self.assertEqual(package.status, "todo")  # Not ready is a documented todo preparation state.
+        self.assertTrue(package.ready(["member_ready", "member_done"], target_head="base-0"))
+        self.assertTrue(package.move_to_progress(["member_ready", "member_done"]))
+        self.assertEqual(package.status, "in_progress")
+        self.assertIn("member_done", package.context["members"])  # Done members remain integration evidence.
+
+        # A blocked member does not prevent an unrelated ready member/wave.
+        package.members["member_unready"]["input_required"] = True
+        self.assertTrue(package.ready(["member_ready"], target_head="base-0"))
+        self.assertFalse(package.ready(["member_dependent"], target_head="base-0"))
+        package.context["integrations"].append({"source": "foundation", "target": "integrated-foundation"})
+        self.assertTrue(package.ready(["member_dependent"], target_head="integrated-foundation"))
+
+        worktrees = Worktrees()
+        self.assertFalse(worktrees.claim("bad_target", "/repo/wt/bad", "worker-bad", "base-0",
+                                         actual_write_target=False))
+        self.assertTrue(worktrees.claim("member_a", "/repo/wt/member_a", "worker-a", "base-0",
+                                        actual_write_target=True))
+        self.assertTrue(worktrees.claim("member_b", "/repo/wt/member_b", "worker-b", "base-0",
+                                        actual_write_target=True))
+        self.assertFalse(worktrees.claim("member_c", "/repo/wt/member_a", "worker-c", "base-0",
+                                         actual_write_target=True))
+        self.assertFalse(worktrees.write("member_a", "/repo/root"))
+        self.assertTrue(worktrees.write("member_a", "/repo/wt/member_a"))
+        self.assertFalse(worktrees.cleanup("member_a", integrated=True, reviewed=True,
+                                           owner_stopped=True, authorized=True))
+        worktrees.records["member_a"]["dirty"] = False
+        self.assertFalse(worktrees.cleanup("member_a", integrated=True, reviewed=True,
+                                           owner_stopped=False, authorized=True))
+        self.assertFalse(worktrees.cleanup("member_a", integrated=True, reviewed=True,
+                                           owner_stopped=True, authorized=True,
+                                           external_acceptance_complete=False))
+        self.assertTrue(worktrees.cleanup("member_a", integrated=True, reviewed=True,
+                                          owner_stopped=True, authorized=True))
+
+        # Search gaps and missing package authorization never create a package.
+        self.assertEqual(Package.create(["x"], complete_search=False, authorized=True,
+                                        member_data={})[1], "search_incomplete")
+        self.assertEqual(Package.create(["x"], complete_search=True, authorized=False,
+                                        member_data={})[1], "not_authorized")
+        # Runtime advice distinguishes deterministic, normal, conflict and unavailable cases.
+        self.assertEqual(package.recommend(fully_specified=True, conflicts=False), "execution")
+        self.assertEqual(package.recommend(fully_specified=False, conflicts=False), "standard")
+        self.assertEqual(package.recommend(fully_specified=False, conflicts=True), "deep")
+        self.assertEqual(package.recommend(fully_specified=True, conflicts=True, explicit="standard"), "standard")
+        self.assertIsNone(package.recommend(fully_specified=True, conflicts=False, configured=False))
+        handoff = package.morning(documents={"C": "available", "P": "available"},
+                                  original_results={"member_ready": "finish:stop"},
+                                  git_state={"HEAD": "integrated-foundation", "dirty": False})
+        self.assertEqual(handoff["next"], "verify required integration HEAD before dependent wave")
+        self.assertEqual(handoff["results"]["member_ready"], "finish:stop")
+
+    def test_git_worktrees_isolate_indexes_and_shared_hunks_need_reconciliation(self):
+        """Verify the Git behavior used by the documented worktree contract."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "repo"
+            root.mkdir()
+            worktrees = Path(temporary) / "worktrees"
+            worktrees.mkdir()
+
+            def git(cwd, *args, check=True):
+                return subprocess.run(["git", *args], cwd=cwd, check=check,
+                                      capture_output=True, text=True)
+
+            git(root, "init", "-q", "-b", "main")
+            git(root, "config", "user.name", "Skill Test")
+            git(root, "config", "user.email", "skill-test@example.invalid")
+            (root / "shared.txt").write_text("base\n")
+            git(root, "add", "shared.txt")
+            git(root, "commit", "-q", "-m", "baseline")
+
+            task_a = worktrees / "task-a"
+            task_b = worktrees / "task-b"
+            git(root, "worktree", "add", "-q", "-b", "task/a", str(task_a), "HEAD")
+            git(root, "worktree", "add", "-q", "-b", "task/b", str(task_b), "HEAD")
+            self.assertEqual(Path(git(task_a, "rev-parse", "--show-toplevel").stdout.strip()), task_a)
+            self.assertEqual(Path(git(task_b, "rev-parse", "--show-toplevel").stdout.strip()), task_b)
+            git_dir_a = git(task_a, "rev-parse", "--absolute-git-dir").stdout.strip()
+            git_dir_b = git(task_b, "rev-parse", "--absolute-git-dir").stdout.strip()
+            common_a = git(task_a, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip()
+            common_b = git(task_b, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip()
+            self.assertNotEqual(git_dir_a, git_dir_b)
+            self.assertEqual(common_a, common_b)
+
+            (task_a / "a-only.txt").write_text("a\n")
+            git(task_a, "add", "a-only.txt")
+            self.assertIn("a-only.txt", git(task_a, "status", "--short").stdout)
+            self.assertEqual(git(task_b, "status", "--short").stdout, "")
+            self.assertEqual(git(root, "status", "--short").stdout, "")
+            git(task_a, "commit", "-q", "-m", "task a independent file")
+
+            (task_b / "b-only.txt").write_text("b\n")
+            git(task_b, "add", "b-only.txt")
+            self.assertIn("b-only.txt", git(task_b, "status", "--short").stdout)
+            self.assertEqual(git(task_a, "status", "--short").stdout, "")
+            git(task_b, "commit", "-q", "-m", "task b independent file")
+
+            (task_a / "shared.txt").write_text("from task a\n")
+            git(task_a, "add", "shared.txt")
+            git(task_a, "commit", "-q", "-m", "task a shared hunk")
+            (task_b / "shared.txt").write_text("from task b\n")
+            git(task_b, "add", "shared.txt")
+            git(task_b, "commit", "-q", "-m", "task b shared hunk")
+            git(root, "merge", "--no-ff", "--no-edit", "task/a")
+            conflict = git(root, "merge", "--no-ff", "--no-edit", "task/b", check=False)
+            self.assertNotEqual(conflict.returncode, 0)
+            self.assertTrue((root / "shared.txt").read_text().startswith("<<<<<<<"))
+            git(root, "merge", "--abort")
+            self.assertEqual(git(root, "status", "--short").stdout, "")
 
 
 if __name__ == "__main__":

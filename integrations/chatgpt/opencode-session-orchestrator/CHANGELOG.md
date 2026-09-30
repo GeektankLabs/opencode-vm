@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-09-30-r25
+
+- Define general agent-managed Git/worktree ownership before repository writes: verify the actual repository/worktree/base/dirty state and each file-tool target, assign one active writer per tree/index, isolate concurrent writes and serialize shared integration. Local commits remain task-scoped; remote publishing remains operator-only.
+- Add persistent project-local Work Packages using existing Board management tasks, stable member task IDs and task Compact Context/Concept Plan documents. Cover package assembly from IDs or goal searches, deduplication, `todo` readiness gaps, wave planning, `WORK_PACKAGE_READY`, dependent-HEAD verification, integration, retention and Morning Handoff without a new MCP package schema.
+- Define the plan-bounded autonomy/terminal `INPUT_REQUIRED` contract, compact Chat-to-Work handoff, and separate OpenCode profile resolution from the ChatGPT Work model picker. Work availability and tool access are checked on the actual selected surface; no automatic Work invocation or background monitoring is claimed.
+- Add ownership, package-readiness, dependency, park/continue, cleanup, Work handoff and runtime-choice regression scenarios. Keep `CONCEPT_READY` → `REGISTERED` intact; package-only `WORK_PACKAGE_READY` is an additional pre-Board-move gate.
+
 ## 2026-09-30-r24
 
 - Document backend-owned agent-managed work admission without client flags or repeated primer/permission rituals; preserve READ and pure-management neutrality.

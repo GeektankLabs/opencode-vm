@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "name": "opencode-session-orchestrator",
-  "revision": "2026-09-30-r24",
+  "revision": "2026-09-30-r25",
   "files": [
     "SKILL.md",
     "CHANGELOG.md",
@@ -18,6 +18,8 @@
     "references/progress-activity.md",
     "references/regression-scenarios.md",
     "references/task-compact-context.md",
-    "references/task-concept-plan.md"
+    "references/task-concept-plan.md",
+    "references/work-packages.md",
+    "references/worktree-ownership.md"
   ]
 }

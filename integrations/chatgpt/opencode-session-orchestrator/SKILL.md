@@ -1,12 +1,12 @@
 ---
 name: opencode-session-orchestrator
-description: Coordinate authorized OpenCode-style MCP sessions and optional project-board work through the user's selected connection. Use for task submission, supported file attachments, project-task lookup and synthesis previews, approval troubleshooting, tool progress, complete result retrieval and planning. Discover actual capabilities; separate board work, execution and read coverage. Do not use this skill as permission to start unrequested work.
+description: Coordinate authorized OpenCode-style MCP sessions and optional project-board work through the user's selected connection. Use for task submission, worktree ownership, persistent work packages, supported attachments, project-task lookup, result retrieval, approvals, progress and planning. Discover actual capabilities; separate board work, execution and read coverage. Do not use this skill as permission to start unrequested work.
 license: MIT
 ---
 
 # OpenCode Session Orchestrator
 
-Release marker: **2026-09-30-r24**. This is the skill revision, not an MCP version.
+Release marker: **2026-09-30-r25**. This is the skill revision, not an MCP version.
 
 This is a client-side workflow skill. The user supplies a working compatible MCP connection, including when using Secure MCP Tunnel. The skill contains no tunnel, account, server alias or credentials and does not configure the connection.
 
@@ -23,6 +23,8 @@ Read references when their workflow is relevant:
 - A bounded question alongside a busy workstream, or archival of its answer: [Clarification sessions](references/clarification-sessions.md).
 - A board task whose work spans several agent iterations or a fresh session: [Task compact context](references/task-compact-context.md).
 - A complex or conceptually rich board task that warrants a persistent planning document: [Task concept plan](references/task-concept-plan.md).
+- Agent-managed repository writes, worktree ownership, integration and cleanup: [Worktree ownership](references/worktree-ownership.md).
+- Persistent multi-task coordination, package readiness, Morning Handoff, Work and runtime choice: [Work packages](references/work-packages.md).
 - Post-`CONCEPT_READY` follow-through on a confirmed `todo` -> `in_progress` transition: [Initialization follow-through](references/initialization-follow-through.md).
 - Behavior review or an authorized smoke test: [Regression scenarios](references/regression-scenarios.md).
 - Existing project tasks, proposed classification, board links, or consolidation of remaining work: [Board workflow](references/board-workflow.md).
@@ -147,6 +149,30 @@ If a discovered connector exposes `supersede_unresolved_submission` and the rece
 If the new ordinary send itself returns `SUBMISSION_UNCERTAIN`, delivery may have occurred; follow its original ID and never blindly resend. Do not manually abort or move work to another session to bypass a guard. Reads may have documented internal bookkeeping; do not invent an additional repair operation.
 
 A normal receipt is concise: task purpose, target, ID and verified state. Reserve extended permission diagnostics for an actual fault.
+
+## Assign worktree ownership before agent-managed repository writes
+
+An OpenCode session is not a Git isolation boundary. Before the first substantive agent-managed repository write, read [Worktree ownership](references/worktree-ownership.md) and choose one verified working tree/index with one active owner. Sequential, exclusive work may use the integration tree; concurrent independent writes use separate persistent worktrees by default. Capture the actual repository root, start `HEAD`, dirty/untracked state, worktree path/owner, affected/shared surfaces and integration target in the task handoff; keep the authorized Compact Context current when one exists. Never stage, reset, stash, overwrite or commit unrelated user/task changes.
+
+Verify where **each actual file-write tool** will write. Current MCP session creation is project-path-bound; a shell `workdir`, `cd` or `git -C` does not prove Edit/Write tools use that worktree. If the selected connection cannot target the verified worktree, stop before writing and request an operator-prepared scoped connection or an explicitly exclusive integration-tree assignment. Do not invent a worktree MCP argument or claim that the prompt enforces it. Local commits remain allowed within task scope; remote publishing remains denied/operator-only.
+
+On reuse, reread task files, verify the same worktree identity, HEAD and dirty state, and reconcile required predecessor changes. On integration, a single integrator checks source/base/target/diff, reconciles overlapping or versioned skill/package/adapter changes, runs combined checks, and records both source and target evidence. A dependent task waits for an exact integrated HEAD and required-content readback. Retain dirty, blocked, unreviewed, unintegrated or externally needed worktrees; remove only after owner stop, clean-state/evidence verification and explicit cleanup authorization. See the full reference for checks and failure handling.
+
+## Assemble and manage a persistent work package
+
+For a genuine multi-task outcome, read [Work packages](references/work-packages.md) and the [board workflow](references/board-workflow.md). Start from exact task IDs, a searched goal or required-plus-optional candidates. Read existing tasks and documents, check duplication/superseded status, dependencies, task kind, scope and likely shared file/version/package surfaces. An incomplete search is not proof that a task is absent. Show membership, exclusions and a proposed sequence; create/change a Board management task only within the user's confirmed mutation scope. Reuse stable member IDs. A `todo` package may explicitly carry concept/readiness gaps.
+
+The package task uses its own existing task-ID C/P and normal task-document binding/readback workflow; it does not require new MCP fields. Board state, sessions, implementation, local commits, integration and external acceptance remain separate. A completed member stays visible if it contributes required base/integration evidence.
+
+`WORK_PACKAGE_READY` means only that the **named wave** is safe to start: member scope/documents and decision readiness, required base HEADs, parallel/sequential conflicts, actual tool write-target, persistent worktree ownership, integrator, operator boundary and acceptance are verified. It is a client-side checkpoint, not a Board status or server tool. For a newly initialized package, require it after `REGISTERED` and before the separate `BOARD_MOVED`; if the gate fails, preserve documents and leave the package `todo`. Recheck each dependent wave against the actual integrated HEAD. See [package readiness and initialization ordering](references/work-packages.md#build-the-wave-plan-and-evaluate-work_package_ready).
+
+Inside the documented plan, workers make safe small/medium technical choices autonomously. A real out-of-plan product/architecture/schema/security decision produces the backend's normal terminal `INPUT_REQUIRED`; park dependent work and continue only verified independent waves. Read the original result, resolve the question through Chat/Work, and use a normal same-session follow-up after idle/security-input checks. It is not a native Question reply, Board completion, or integration.
+
+For longer package management, ordinary Chat is suitable for preparation, Readiness decisions and result discussion. Once a wave is ready, route the multi-step management run to ChatGPT Work when that surface actually exposes the selected project connection. If already there, continue; otherwise provide a clear Work-start action and compact copy/paste bootstrap. Do not claim the skill can open Work or use the normal chat as if it had Work's persistence/tools. ChatGPT Work coordinates; the connected OpenCode VM remains the repository worker. Its account/surface/app availability is an execution prerequisite.
+
+Recommend `execution` for a fully specified deterministic wave, `standard` for normal coordination and bounded reconciliation, `deep` for uncertain architecture or hard shared-hunk integration. Explain the reason and resolve through the discovered current OpenCode project policy when that capability is available. This tuple applies only to an OpenCode worker; it does not set ChatGPT Work's model. Respect explicit user selection and configured-unavailable/incomplete stop semantics; never hard-code or silently substitute provider/model/variant IDs. Keep ordinary Work-versus-Chat model selection separate.
+
+At each pause or Morning Handoff, reconstruct from the package Board task, registered C/P, member IDs and available original results. Re-read actual worktree/HEAD/dirty state and distinguish member `done` from package integration/acceptance. Do not promise background monitoring, automatic Morning notification or restored session history.
 
 ## Initialize concept plan + compact context on `todo` -> `in_progress`
 

@@ -47,6 +47,7 @@ Keep these headings when present, deleting what does not apply rather than carry
 - **Requirements and acceptance criteria** — functional and non-functional; explicit, testable acceptance criteria where possible.
 - **Assumptions and constraints** — environment, scope limits, dependencies, exclusions; mark each as settled, open or to verify.
 - **Architecture and design** — high-level components, responsibilities, contracts, data model; reference project files and key interfaces.
+- **For a Work Package** — stable member task IDs/exclusions, task kinds and dependencies, expected base/integration HEADs, explicit parallel/sequential waves, worktree ownership, conflict surfaces, integration/cleanup plan and `WORK_PACKAGE_READY` evidence for each startable wave. See [Persistent Work Packages](work-packages.md).
 - **Alternatives considered** — for each non-trivial decision, the option chosen plus at least one rejected alternative with the reason.
 - **Decisions and rationale** — settled decisions with their rationale, dated when they were made. Cross-reference session/result IDs when the decision came from execution.
 - **Interfaces and data flow** — external/internal interfaces, message shapes, event/data flow, persistence and side effects.
@@ -69,6 +70,7 @@ For a board task with an established concept plan, carry the exact `task_id` and
 
 - Check the path and `Task-ID`; read the plan **before work** when present, reconcile it against current board/evidence, and report absence or mismatch. Never assume a file exists from a board link or an old result.
 - Treat new conceptual findings (changed architecture, new or reversed decision, requirement shift, new risk or interface contract, accepted or rejected alternative) as triggers for a plan update — not merely a context update. Implementation, diagnosis and test work are **all** expected to feed the plan back when the concept or its scaffolding changes; otherwise leave it unchanged.
+- For persistent package management, keep the main plan's membership and wave strategy authoritative. Update it for a genuine dependency/architecture/acceptance shift; routine member/session/HEAD/test observations belong in the package Compact Context and original results, not as a copied chronological log.
 - Update the affected sections and `Last-concept-update`; change the plan's `Status` only if its concept lifecycle actually changed. For major conceptual changes, add a dated entry to a **Change log** section.
 - Keep the plan consistent with the compact context: the compact context may point to the plan and the latest message/result; the plan should not duplicate the context's working-state snapshot.
 - For read-only work, read the plan when relevant and report needed updates without writing.
