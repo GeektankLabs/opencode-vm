@@ -1,6 +1,6 @@
 Task-ID: task_9dc6e797-b884-589a-99d7-fd3ceceb5414
 Title: Orchestrator Skill – agent-managed Worktree-Isolation und persistente Arbeitspakete
-Last-updated: 2026-09-30T21:13:39+02:00
+Last-updated: 2026-09-30T22:43:41+02:00
 
 ## Concept Plan
 
@@ -26,19 +26,28 @@ Kanonischer Plan: `planning/task-concepts/task_9dc6e797-b884-589a-99d7-fd3ceceb5
 7. Normaler Chat plant und bespricht; ChatGPT Work führt sichtbare Mehrschritt-Koordination, OpenCode-VM bleibt Repositorylaufzeit. Keine automatische Work-Aktivierung.
 8. `execution`/`standard`/`deep` folgt der Paketkomplexität und aktueller Projektpolicy; keine hartcodierten Runtime-IDs.
 
-## Implementiert und lokal geprüft
+## Implementiert / aktueller Integrationsstand
 
-- Orchestrator-Skill auf **2026-09-30-r25** erweitert: generische agent-managed Git-/Worktree-Ownership, verifizierte Write-Targets, Basis-/Dirty-/Integrationsnachweis, serielle Integration und fail-safe Retention/Cleanup.
+- Originaler Implementierungsstand **r25**, nach autorisierter Deep-QA korrigierte Quellen und lokales Paket **2026-09-30-r26**: generische agent-managed Git-/Worktree-Ownership, verifizierte Write-Targets, Basis-/Dirty-/Integrationsnachweis, serielle Integration und fail-safe Retention/Cleanup.
 - Persistente Work Packages über bestehende Board-Managementtasks + C/P beschrieben: ID-/Goal-/Muss-Optional-Ermittlung, Todo-Readinesslücken, Wellenplanung, `WORK_PACKAGE_READY` nach `REGISTERED` und vor Boardmove, Autonomie/`INPUT_REQUIRED`, Morning-Handoff, Work-vs-Chat und getrennte Runtimewahl.
 - Neue Skillreferenzen `references/worktree-ownership.md` und `references/work-packages.md`; Board-, Taskdokument-, Follow-through- und Regressionstexte sowie `docs/CHATGPT.md` aktualisiert. `WORK_PACKAGE_READY` ist explizit zusätzliches Boardmove-Gate nach `REGISTERED`. Keine MCP-Datenstruktur, Session-Policy oder Product Runtime geändert.
-- `python3 -B tests/chatgpt_skill_test.py`: **20 Tests PASS**. Enthält static/client-flow Checks und einen echten temporären Git-Test für getrennte Worktree-Indizes, gemeinsames Git-Verzeichnis und Shared-Hunk-Mergekonflikt.
-- `python3 -B scripts/build-chatgpt-skill.py --check`: PASS; Inventar/ZIP/Checksumme/latest konsistent. Aktuelle ZIP-SHA-256: `fb2b5b2b5ac1018f6ceb4f0b350f58b4a141d5b664e1306247160287a9cf47ee`. `git diff --check`: PASS.
-- Lokaler Implementierungscommit: `06af861f3a77b6e502368fc4f74562aee199aab9` — `feat(skill): coordinate persistent work packages`.
+- Vorherige Commitkette: `06af861f3a77b6e502368fc4f74562aee199aab9` (Skill-first Implementation), `955f8780eda5da3209ceeb81949c326ce16b3ac6` (Contextabschluss), `d46b8c15f589760bcfb6e7a7dc8247744e6451dc` (Package-Boardmove-Gate). Full-Commit-Datum 2026-09-30: geprüfter r26-QA-Delta plus kanonische registrierte Nightly-Taskdokumente von D994/CCE/ACH und finale skill-/Paketartefakte; finale SHA in lokaler Git-Historie und Terminalabschluss.
+- QA-Write-Ownership: freigegebener sequenzieller Haupttree `/Users/admin/Documents/github/opencode-vm`, Branch `main`, Git-/Common-Git-Dir `.git`, Owner-Session `ses_f0c8bd82effehrn7eEsIVme66V`; QA-Startbasis `d46b8c15…`, ursprüngliche Taskbasis `d6f41cc…`. Der ausdrückliche Full-Commit-Auftrag nimmt das aktuelle registrierte D994-Contextreadback mit auf; ungebundene Todo-/disposable Dokumente, die abweichende ACH-`/tmp`-Kopie und lokale alte `dist/`-Buildarchive bleiben geschützt.
+- Full-Commit-Allowlist: Task 9 C/P + r26-Quelle/Tests/ZIP; registrierte C/P von abgeschlossenem Follow-through CCE und registrierter kanonischer ACH-Context; D994-Context mit aktuellem `done`-Boardreadback. Die separate ACH-`/tmp`-Contextkopie, ungebundene `todo`-Konzeptpaare, der ausdrücklich disposable Smoke-Task und alte `dist/`-Buildarchive sind kein Teil dieses Commits.
 - Keine externe ChatGPT-Work-/Hosted-Abnahme, macOS/Lima-Mount-/Credentialabnahme oder aktive Skillinstallation/Connector-Restart durchgeführt. Tatsächliche Work-Tool-Treebindung bleibt vor realen isolierten Writes zu verifizieren.
+
+## Deep-QA: PASS für den lokalen Skill-first-Scope
+
+- Vollständiger aktueller Boardtask einschließlich Ergänzung L, registrierte C/P und finaler r25-Codezustand abgeglichen. Deep-Profil zur Reviewzeit: Policyrevision 18, available, `openai / gpt-6.1-sol / xhigh`; laufende Session stimmt exakt überein.
+- Fünf in-scope-Findings geschlossen: repositoryweite Ownership zwischen Paketen; kanonische C/P-Delta-Publikation statt paralleler Worktreekopien; Invalidierung alter Wavegates bei Drift; Schutz ignorierter Outputs/detached Gitobjekte bei Cleanup; vollständige Wiederaufnahme-/Member-Handoff-Regeln. Details und Coverageabgleich im Plan §12. Keine neue MCP-Struktur/Sicherheitsgrenze.
+- Alter Fake akzeptierte einen Boardmove nach fehlgeschlagener Ready-Reevaluation; neuer Negativtest reproduzierte dies. Nach Korrektur scheitern stale Rev-/HEAD-/Member-/Inputfälle, doppelte Tasks/Tree-Aliase, leere/unbekannte/zyklische Wellen und unsichere Cleanupbedingungen. Read-only-Wellen brauchen keine Schreibkopie, späterer Blocker rollt Board nicht zurück. Fake ist Testmodell, keine Produktengine.
+- `python3 -B tests/chatgpt_skill_test.py -v`: **22 PASS / 0 FAIL / 0 SKIP**. Fokuslauf mit vier Lifecycle-/Ownership-/Publikations-/Gitfällen ebenfalls PASS. Echte Disposable-Gittests: verschiedene Indizes, gemeinsames Gitdir, parallele nested/detached Commits, Wiederaufnahme, Shared-Hunk-Konflikt, untracked Removal-Deny und Source-Ref-/Resultaterhalt nach Cleanup+GC.
+- `python3 -B scripts/build-chatgpt-skill.py --check` und `git diff --check`: PASS. Aktuelle lokale r26-ZIP-SHA-256: `c1e93f7e27551c02724a006bd5c06f91884aa5918cdb1d2c9a149e8f6d16cba5`. Paket/Inventar/Privacy/Reproduzierbarkeit geprüft; Python-Coverage ist keine Hosted-Verhaltenscoverage.
+- Kein verbleibender lokaler Produkt-/Architektur-/Schema-/Securityentscheid. Technisch zur Abnahme des dokumentierten Skill-first-Schnitts bereit; echte Host-/Tooltarget-/Hosted-Nachweise bleiben separat, keine vollumfängliche Deployment-/Live-Safetyabnahme behauptet. Board bleibt `in_progress`.
 
 ## Nächster konkreter Schritt
 
-Lokale Produkt-/Skill-/Testarbeit ist committed. Nächster Schritt ist separat autorisierte echte OpenCode-Tool-Worktree-Targeting-/Hostpersistenz- und gegebenenfalls ChatGPT Work/Hosted-Akzeptanz; danach kann der Manager den Taskstatus anhand dieser Evidence abschließen. Keine Remotepublikation.
+Der lokale Full-Commit dieses Arbeitsgangs ist nach dieser Kontextrevision in der Git-Historie nachvollziehbar. Danach bleibt als nächste technische Evidence separat autorisierte echte OpenCode-Tool-Worktree-Targeting-/Hostpersistenz- und ChatGPT Work/Hosted-Akzeptanz. Management entscheidet über fachliche Abnahme/Board-Done; der Commit setzt den Task nicht auf done. Keine Remotepublikation.
 
 ## Grenzen
 

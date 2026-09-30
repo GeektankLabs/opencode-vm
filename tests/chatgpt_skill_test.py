@@ -1,8 +1,10 @@
 """Artifact/privacy regression checks, not live ChatGPT behavior tests."""
 
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
 import importlib.util
 import io
+import json
 from pathlib import Path
 import shutil
 import stat
@@ -873,8 +875,8 @@ class SkillPackageTest(unittest.TestCase):
 
         self.assertIn("references/work-packages.md", manifest["files"])
         self.assertIn("references/worktree-ownership.md", manifest["files"])
-        self.assertIn("2026-09-30-r25", skill)
-        self.assertIn("## 2026-09-30-r25", (source / "CHANGELOG.md").read_text())
+        self.assertIn(manifest["revision"], skill)
+        self.assertIn(f'## {manifest["revision"]}', (source / "CHANGELOG.md").read_text())
         for text in (skill, packages, board, followthrough, scenarios):
             self.assertIn("WORK_PACKAGE_READY", text)
         for required in ("base HEAD", "one active writer", "verify every write target", "operator-only"):
@@ -889,6 +891,15 @@ class SkillPackageTest(unittest.TestCase):
         self.assertIn("integration-tree `HEAD`", packages)
         self.assertIn("ChatGPT Work" , docs)
         self.assertIn("do not set or map to the ChatGPT Work model picker", docs)
+        for required in ("Ownership is repository-wide", "canonical **document root**",
+                         "serially publishes", "hash written in C/P does not keep",
+                         "--ignored", "cooperating-writer convention"):
+            self.assertIn(required, worktrees)
+        for required in ("before each actual dispatch", "failed reevaluation invalidates",
+                         "Empty/unknown waves", "additional prerequisite after `REGISTERED`"):
+            self.assertIn(required.lower(), (skill + packages + board).lower())
+        self.assertIn("including on orphan recovery", followthrough)
+        self.assertIn("member-specific task-file handoffs", packages)
 
         rows = {row.split("|")[1].strip(): row.split("|")[2].strip()
                 for row in scenarios.splitlines() if row.startswith("| ") and row.count("|") >= 3}
@@ -909,6 +920,11 @@ class SkillPackageTest(unittest.TestCase):
             "A suitable ChatGPT Work session is already active",
             "A deterministic ready wave has a current configured `execution` profile",
             "A normal multi-task plan or a complex unresolved integration has a current policy",
+            "Two Work Packages reference the same active member or integration tree",
+            "A worker updates C/P in its isolated worktree while the connector reads canonical project-root documents",
+            "A detached source was semantically ported but its SHA is not reachable from the target",
+            "A previously ready wave fails a current ownership, revision, membership or business-input check",
+            "A proposed wave is empty, includes unknown members or has a prerequisite cycle",
         )
         for title in expected_rows:
             with self.subTest(scenario=title):
@@ -924,7 +940,8 @@ class SkillPackageTest(unittest.TestCase):
                 self.records = {}
 
             def claim(self, task_id, path, owner, base, *, actual_write_target):
-                if path in self.owners or not actual_write_target:
+                path = str(Path(path).resolve())
+                if task_id in self.records or path in self.owners or not actual_write_target:
                     return False
                 self.owners[path] = owner
                 self.records[task_id] = {"path": path, "owner": owner, "base": base,
@@ -932,6 +949,7 @@ class SkillPackageTest(unittest.TestCase):
                 return True
 
             def write(self, task_id, destination):
+                destination = str(Path(destination).resolve())
                 record = self.records[task_id]
                 if destination != record["path"] or self.owners.get(destination) != record["owner"]:
                     return False
@@ -942,18 +960,21 @@ class SkillPackageTest(unittest.TestCase):
                         external_acceptance_complete=True):
                 record = self.records[task_id]
                 if not (integrated and reviewed and owner_stopped and authorized and
-                        external_acceptance_complete and not record["dirty"]):
+                        external_acceptance_complete and not record["dirty"] and
+                        not record.get("untracked") and not record.get("ignored_result")):
                     return False
                 self.owners.pop(record["path"])
+                self.records.pop(task_id)
                 return True
 
         class Package:
             def __init__(self, members):
-                self.members = {member["id"]: member for member in members}
+                self.members = {member["id"]: dict(member) for member in members}
                 self.context = {"members": list(self.members), "results": {}, "integrations": []}
                 self.documents_registered = False
                 self.status = "todo"
-                self.ready_waves = set()
+                self.document_revision = "documents-1"
+                self.ready_waves = {}
 
             @classmethod
             def create(cls, member_ids, *, complete_search, authorized, member_data):
@@ -962,41 +983,86 @@ class SkillPackageTest(unittest.TestCase):
                 if not authorized:
                     return None, "not_authorized"
                 stable_ids = list(dict.fromkeys(member_ids))
+                if not stable_ids or any(item not in member_data for item in stable_ids):
+                    return None, "missing_member"
+                if any(member_data[item].get("superseded") for item in stable_ids):
+                    return None, "superseded_member"
                 return cls([member_data[item] for item in stable_ids]), None
 
+            def snapshot(self, wave, target_head):
+                # Test-only snapshot of discovered inputs, not a product persistence schema.
+                return json.dumps({"documents": self.document_revision,
+                                   "registered": self.documents_registered, "head": target_head,
+                                   "members": self.members, "results": self.context["results"]}, sort_keys=True)
+
             def ready(self, wave, *, target_head):
-                if not self.documents_registered:
+                self.ready_waves.pop(tuple(wave), None)
+                if (not self.documents_registered or not wave or len(set(wave)) != len(wave) or
+                        any(item not in self.members for item in wave)):
+                    return False
+
+                def acyclic(member_id, visiting, visited):
+                    if member_id in visiting or member_id not in self.members:
+                        return False
+                    if member_id in visited:
+                        return True
+                    visiting.add(member_id)
+                    for dependency in self.members[member_id].get("dependencies", []):
+                        if not acyclic(dependency, visiting, visited):
+                            return False
+                    visiting.remove(member_id)
+                    visited.add(member_id)
+                    return True
+
+                if not all(acyclic(item, set(), set()) for item in wave):
                     return False
                 for member_id in wave:
                     member = self.members[member_id]
-                    if not (member["concept_ready"] and member["worktree_ready"] and member["scope_ready"]):
+                    if (member.get("input_required") or not member["concept_ready"] or not member["scope_ready"] or
+                            (member.get("mutating", True) and not member["worktree_ready"])):
                         return False
                     if member.get("required_head") and target_head != member["required_head"]:
                         return False
-                self.ready_waves.add(tuple(wave))
+                    if any(not self.context["results"].get(dependency, {}).get("verified")
+                           for dependency in member.get("dependencies", [])):
+                        return False
+                self.ready_waves[tuple(wave)] = self.snapshot(wave, target_head)
                 return True
 
-            def move_to_progress(self, wave):
-                if tuple(wave) not in self.ready_waves:
+            def move_to_progress(self, wave, target_head="base-0"):
+                if self.ready_waves.get(tuple(wave)) != self.snapshot(wave, target_head):
+                    self.ready_waves.pop(tuple(wave), None)
                     return False
                 self.status = "in_progress"
                 return True
 
             def morning(self, *, documents, original_results, git_state):
+                gaps = [item for item, member in self.members.items()
+                        if member.get("requires_result") and item not in original_results]
+                next_step = "verify required integration HEAD before dependent wave"
+                if not all(documents.get(role) == "available" for role in ("C", "P")):
+                    next_step = "recover canonical documents before dispatch"
+                elif gaps:
+                    next_step = "retrieve missing original results before dispatch"
                 return {"members": self.context["members"], "documents": documents,
                         "results": original_results, "git": git_state,
-                        "next": "verify required integration HEAD before dependent wave"}
+                        "evidence_gaps": gaps, "next": next_step}
 
-            def recommend(self, *, fully_specified, conflicts, explicit=None, configured=True):
+            def recommend(self, *, fully_specified, conflicts, explicit=None):
                 if explicit:
                     return explicit
-                if not configured:
-                    return None
                 if conflicts:
                     return "deep"
                 if fully_specified:
                     return "execution"
                 return "standard"
+
+            def resolve_runtime(self, *, status, recommendation=None, current=None):
+                if status == "available":
+                    return recommendation
+                if status == "unconfigured":
+                    return current
+                raise ValueError(status)  # Configured outage/incomplete is not an absence fallback.
 
         member_data = {
             "member_ready": {"id": "member_ready", "board": "in_progress", "concept_ready": True,
@@ -1065,12 +1131,90 @@ class SkillPackageTest(unittest.TestCase):
         self.assertEqual(package.recommend(fully_specified=False, conflicts=False), "standard")
         self.assertEqual(package.recommend(fully_specified=False, conflicts=True), "deep")
         self.assertEqual(package.recommend(fully_specified=True, conflicts=True, explicit="standard"), "standard")
-        self.assertIsNone(package.recommend(fully_specified=True, conflicts=False, configured=False))
+        tuple_from_policy = ("fixture-provider", "fixture-model", "fixture-variant")
+        self.assertEqual(package.resolve_runtime(status="available", recommendation=tuple_from_policy),
+                         tuple_from_policy)
+        self.assertEqual(package.resolve_runtime(status="unconfigured", current="suitable-current"),
+                         "suitable-current")
+        for status in ("unavailable", "catalog_incomplete", "unsupported"):
+            with self.subTest(runtime_status=status):
+                with self.assertRaisesRegex(ValueError, status):
+                    package.resolve_runtime(status=status, current="suitable-current")
         handoff = package.morning(documents={"C": "available", "P": "available"},
                                   original_results={"member_ready": "finish:stop"},
                                   git_state={"HEAD": "integrated-foundation", "dirty": False})
         self.assertEqual(handoff["next"], "verify required integration HEAD before dependent wave")
         self.assertEqual(handoff["results"]["member_ready"], "finish:stop")
+
+        # Negative controls missing in the initial 20-test acceptance.
+        package.status = "todo"
+        self.assertTrue(package.ready(["member_dependent"], target_head="integrated-foundation"))
+        package.members["member_dependent"]["concept_ready"] = False
+        self.assertFalse(package.ready(["member_dependent"], target_head="integrated-foundation"))
+        self.assertFalse(package.move_to_progress(["member_dependent"], "integrated-foundation"))
+        self.assertEqual(package.status, "todo")
+        self.assertFalse(package.ready([], target_head="integrated-foundation"))
+        self.assertFalse(worktrees.claim("member_b", "/repo/wt/duplicate-b", "another-package", "base-0",
+                                         actual_write_target=True))
+        self.assertFalse(worktrees.claim("alias", "/repo/wt/../wt/member_b", "another-package", "base-0",
+                                         actual_write_target=True))
+        for field in ("untracked", "ignored_result"):
+            worktrees.records["member_b"][field] = True
+            self.assertFalse(worktrees.cleanup("member_b", integrated=True, reviewed=True,
+                                               owner_stopped=True, authorized=True))
+            worktrees.records["member_b"][field] = False
+
+        # Readiness cannot survive changed revisions/base/membership or a business blocker.
+        package.members["member_dependent"]["concept_ready"] = True
+        self.assertTrue(package.ready(["member_dependent"], target_head="integrated-foundation"))
+        self.assertFalse(package.move_to_progress(["member_dependent"], "newer-unverified-head"))
+        self.assertTrue(package.ready(["member_ready"], target_head="base-0"))
+        package.document_revision = "documents-2"
+        self.assertFalse(package.move_to_progress(["member_ready"]))
+        self.assertTrue(package.ready(["member_ready"], target_head="base-0"))
+        package.members["member_ready"]["input_required"] = True
+        self.assertFalse(package.ready(["member_ready"], target_head="base-0"))
+        self.assertFalse(package.move_to_progress(["member_ready"]))
+        package.members["member_ready"]["input_required"] = False
+        self.assertTrue(package.ready(["member_ready"], target_head="base-0"))
+        package.members.pop("member_ready")
+        package.context["members"].remove("member_ready")
+        self.assertFalse(package.move_to_progress(["member_ready"]))
+        self.assertFalse(package.ready(["unknown"], target_head="base-0"))
+
+        # Read-only waves do not require a write worktree; cyclic prerequisites do not start.
+        package.members["member_unready"].update(concept_ready=True, mutating=False, input_required=False)
+        self.assertTrue(package.ready(["member_unready"], target_head="base-0"))
+        package.members["member_unready"]["dependencies"] = ["member_dependent"]
+        package.members["member_dependent"]["dependencies"] = ["member_unready"]
+        self.assertFalse(package.ready(["member_unready"], target_head="integrated-foundation"))
+        package.members["member_dependent"]["dependencies"] = []
+        self.assertFalse(package.ready(["member_unready"], target_head="integrated-foundation"))
+        package.context["results"]["member_dependent"] = {"verified": True}
+        self.assertTrue(package.ready(["member_unready"], target_head="integrated-foundation"))
+        package.status = "in_progress"
+        package.members["member_unready"]["input_required"] = True
+        self.assertFalse(package.ready(["member_unready"], target_head="integrated-foundation"))
+        self.assertEqual(package.status, "in_progress")  # Park wave, do not roll back Board.
+
+        self.assertEqual(Package.create(["unknown"], complete_search=True, authorized=True,
+                                        member_data=member_data)[1], "missing_member")
+        superseded = {"old": {"id": "old", "superseded": True}}
+        self.assertEqual(Package.create(["old"], complete_search=True, authorized=True,
+                                        member_data=superseded)[1], "superseded_member")
+
+        # A fresh manager consumes reread persisted inputs, not an earlier chat registry.
+        restored = Package(list(json.loads(json.dumps(package.members)).values()))
+        restored.context = json.loads(json.dumps(package.context))
+        restored.members["member_done"]["requires_result"] = True
+        morning = restored.morning(documents={"C": "available", "P": "available"},
+                                   original_results={}, git_state={"HEAD": "integrated-foundation"})
+        self.assertIn("member_done", morning["members"])
+        self.assertEqual(morning["evidence_gaps"], ["member_done"])
+        self.assertEqual(morning["next"], "retrieve missing original results before dispatch")
+        missing_docs = restored.morning(documents={"C": "missing", "P": "available"},
+                                        original_results={}, git_state={})
+        self.assertEqual(missing_docs["next"], "recover canonical documents before dispatch")
 
     def test_git_worktrees_isolate_indexes_and_shared_hunks_need_reconciliation(self):
         """Verify the Git behavior used by the documented worktree contract."""
@@ -1129,6 +1273,137 @@ class SkillPackageTest(unittest.TestCase):
             self.assertTrue((root / "shared.txt").read_text().startswith("<<<<<<<"))
             git(root, "merge", "--abort")
             self.assertEqual(git(root, "status", "--short").stdout, "")
+
+    def test_nested_worktree_resume_cleanup_and_detached_source_retention(self):
+        """Real disposable Git evidence; not a macOS/Lima or Hosted-agent acceptance."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = (Path(temporary) / "repo")
+            root.mkdir()
+            root = root.resolve()
+
+            def git(cwd, *args, check=True):
+                return subprocess.run(["git", "-c", "user.name=Skill QA",
+                                       "-c", "user.email=skill-qa@example.invalid", *args],
+                                      cwd=cwd, check=check, capture_output=True, text=True, timeout=15)
+
+            git(root, "init", "-q", "-b", "main")
+            (root / ".gitignore").write_text(".opencode-vm/\n*.result\n")
+            (root / "base.txt").write_text("baseline\n")
+            git(root, "add", ".gitignore", "base.txt")
+            git(root, "commit", "-q", "-m", "baseline")
+            base = git(root, "rev-parse", "HEAD").stdout.strip()
+            worktrees = root / ".opencode-vm" / "worktrees"
+            worktrees.mkdir(parents=True)
+            task_a, task_b = worktrees / "task-a", worktrees / "task-b"
+            for path in (task_a, task_b):
+                git(root, "worktree", "add", "-q", "--detach", str(path), base)
+                self.assertEqual(git(path, "rev-parse", "HEAD").stdout.strip(), base)
+                self.assertEqual(Path(git(path, "rev-parse", "--show-toplevel").stdout.strip()), path)
+
+            # Two real concurrent writers, each using its own index and detached HEAD.
+            def write_and_commit(path):
+                filename = f"{path.name}.txt"
+                (path / filename).write_text(f"owned by {path.name}\n")
+                git(path, "add", filename)
+                git(path, "commit", "-q", "-m", f"{path.name} local outcome")
+                return git(path, "rev-parse", "HEAD").stdout.strip()
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                source_a, source_b = list(executor.map(write_and_commit, (task_a, task_b)))
+            self.assertNotEqual(source_a, source_b)
+            self.assertEqual(git(root, "status", "--short", "--untracked-files=all").stdout, "")
+            self.assertTrue(git(root, "check-ignore", str(task_a.relative_to(root))).stdout)
+            self.assertFalse((task_a / "task-b.txt").exists())
+            self.assertFalse((task_b / "task-a.txt").exists())
+
+            # A fresh reader recovers the same worktree/base/HEAD, not the root HEAD.
+            self.assertEqual(git(task_a, "rev-parse", "HEAD").stdout.strip(), source_a)
+            self.assertEqual(git(root, "rev-parse", "HEAD").stdout.strip(), base)
+            (task_a / "unpublished.md").write_text("uncommitted task context\n")
+            removal = git(root, "worktree", "remove", str(task_a), check=False)
+            self.assertNotEqual(removal.returncode, 0)
+            self.assertTrue((task_a / "unpublished.md").exists())
+            (task_a / "unpublished.md").unlink()  # Test-owned disposable content only.
+            (task_a / "acceptance.result").write_text("required ignored acceptance evidence\n")
+            self.assertEqual(git(task_a, "status", "--short").stdout, "")
+            self.assertIn("acceptance.result", git(task_a, "status", "--short", "--ignored").stdout)
+
+            # Semantic port: source isn't an ancestor, so retain a local source ref before cleanup.
+            (root / "task-a.txt").write_bytes((task_a / "task-a.txt").read_bytes())
+            git(root, "add", "task-a.txt")
+            git(root, "commit", "-q", "-m", "reconcile task a on integration target")
+            target = git(root, "rev-parse", "HEAD").stdout.strip()
+            self.assertNotEqual(git(root, "merge-base", "--is-ancestor", source_a, target,
+                                    check=False).returncode, 0)
+            source_ref = "refs/heads/ocvm-task-a-source"
+            git(root, "update-ref", source_ref, source_a, "0" * 40)
+            self.assertEqual(git(root, "rev-parse", source_ref).stdout.strip(), source_a)
+            preserved = root / ".opencode-vm" / "preserved-task-a.result"
+            preserved.write_bytes((task_a / "acceptance.result").read_bytes())
+            (task_a / "acceptance.result").unlink()
+            self.assertEqual(git(task_a, "status", "--short", "--ignored").stdout, "")
+            git(root, "worktree", "remove", str(task_a))
+            self.assertFalse(task_a.exists())
+            # Prune only this disposable fixture: a Markdown hash would not retain objects.
+            git(root, "reflog", "expire", "--expire=now", "--all")
+            git(root, "gc", "--prune=now")
+            self.assertEqual(git(root, "cat-file", "-t", source_a).stdout.strip(), "commit")
+            self.assertEqual(git(root, "rev-parse", source_ref).stdout.strip(), source_a)
+            self.assertEqual(preserved.read_text(), "required ignored acceptance evidence\n")
+            self.assertTrue(task_b.exists())
+            self.assertEqual(git(task_b, "rev-parse", "HEAD").stdout.strip(), source_b)
+
+    def test_canonical_document_publication_preserves_newer_content_and_reconciles_uncertainty(self):
+        """Filesystem workflow fixture; no claim of a native publication API/CAS."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            canonical = root / "project" / ".opencode" / "tasks" / "task-fixture.compact.md"
+            worker_copy = root / "worktree" / ".opencode" / "tasks" / canonical.name
+            canonical.parent.mkdir(parents=True)
+            worker_copy.parent.mkdir(parents=True)
+            header = b"Task-ID: task_fixture\n"
+            canonical.write_bytes(header + b"baseline\n")
+            read_revision = hashlib.sha256(canonical.read_bytes()).hexdigest()
+            worker_copy.write_bytes(header + b"worker checkpoint\n")
+            publications = []
+
+            def publish(expected_revision, *, lost_response=False):
+                if canonical.is_symlink() or not canonical.is_file():
+                    return "unsafe_path"
+                if hashlib.sha256(canonical.read_bytes()).hexdigest() != expected_revision:
+                    return "revision_conflict"
+                data = worker_copy.read_bytes()
+                if not data.startswith(header):
+                    return "foreign_task"
+                canonical.write_bytes(data)  # Cooperating owner only, not cross-client CAS.
+                publications.append(canonical)
+                if lost_response:
+                    raise TimeoutError("publication response lost")
+                return "published"
+
+            self.assertNotEqual(worker_copy.read_bytes(), canonical.read_bytes())
+            canonical.write_bytes(header + b"newer canonical decision\n")
+            self.assertEqual(publish(read_revision), "revision_conflict")
+            self.assertEqual(canonical.read_bytes(), header + b"newer canonical decision\n")
+            self.assertEqual(publications, [])
+            # Reconcile the worker delta with the newer canonical bytes, not whole-file overwrite.
+            worker_copy.write_bytes(header + b"newer canonical decision\nworker checkpoint\n")
+            current_revision = hashlib.sha256(canonical.read_bytes()).hexdigest()
+            with self.assertRaises(TimeoutError):
+                publish(current_revision, lost_response=True)
+            self.assertEqual(canonical.read_bytes(), worker_copy.read_bytes())
+            self.assertEqual(publications, [canonical])  # Readback, not a second publication.
+            worker_copy.write_bytes(b"Task-ID: task_foreign\nforeign body\n")
+            current_revision = hashlib.sha256(canonical.read_bytes()).hexdigest()
+            self.assertEqual(publish(current_revision), "foreign_task")
+            self.assertEqual(publications, [canonical])
+            retained_bytes = canonical.read_bytes()
+            outside = root / "other-task.md"
+            outside.write_bytes(retained_bytes)
+            canonical.unlink()
+            canonical.symlink_to(outside)
+            self.assertEqual(publish(current_revision), "unsafe_path")
+            self.assertEqual(outside.read_bytes(), retained_bytes)
 
 
 if __name__ == "__main__":

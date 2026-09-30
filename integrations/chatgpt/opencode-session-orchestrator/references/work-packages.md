@@ -27,6 +27,8 @@ planning/task-concepts/<package_task_id>-concept-plan.md
 
 The plan contains the goal/scope, member and exclusion rationale, dependencies, ownership/worktree plan, version/shared-hunk map, integration target, waves, operator boundaries, acceptance and cleanup. The compact context is the short current snapshot: per-member Board state, session/message/result evidence, worktree/base/HEAD/commit/dirty state, implementation/integration/acceptance state, blockers and next safe management action. Keep the two roles distinct; do not paste histories/logs or the full plan into C.
 
+Apply repository-wide ownership across packages as described in [Worktree ownership](worktree-ownership.md#choose-one-owner-and-one-working-copy). A second package referencing an active member does not acquire permission to start it again or write its tree/index. Record the existing execution owner and consume its results. One document owner serializes package C/P and publication of member deltas to the canonical connector document root; private worktree copies are not registered canonical state. See [document publication](worktree-ownership.md#publish-task-documents-without-a-second-writer).
+
 On the authorized package transition, use the existing document lifecycle: leave Board `todo`; create/reconcile both files, exact header readback and correlated `CONCEPT_READY`; register with discovered `add_task_document_bindings` if present, otherwise `register_task_document` only when the bundle tool is absent; read both as `available` with exact paths/revisions (`REGISTERED`). Do not fall back after a bundle error. **For a package, apply the readiness gate below after `REGISTERED` and before the separate Board move.** If not ready, preserve the registered documents and leave the package in `todo`; a later authorized readiness transition reuses them. Move the Board only after the gate passes and read back status (`BOARD_MOVED`). Uncertain writes require the existing readback/recovery rules, not blind retries. See [Initialization follow-through](initialization-follow-through.md).
 
 No package-specific MCP fields are needed: use task description for stable outcome/membership, C/P for the full working state, existing task/session links for supported evidence references, and original messages/files/Git reads for claims. If direct task-document tools are absent, keep to the skill's exact-text fallback; don't invent capabilities or assert that references can be read.
@@ -40,16 +42,18 @@ Create explicit waves such as discovery/concept readiness, independent isolated 
 Mark the named wave `WORK_PACKAGE_READY` only when all applicable checks pass:
 
 - membership, goal, exclusions, acceptance and authorization for that wave are explicit;
-- every starting task is implementation-ready for its assigned scope and has current required task documents;
+- every starting task is ready for its assigned analysis, concept, review or implementation scope and has current required task documents;
 - task dependencies, expected basis and actual required prior integration are verifiable;
-- simultaneous writers have separate usable persistent worktrees and unique owners, or the plan deliberately sequences them;
-- tool-level file-write targeting is verified, not inferred from shell `workdir` or the prompt;
+- simultaneous repository writers have separate usable persistent worktrees and unique repository-wide owners, or the plan deliberately sequences them; pure read-only members need no write worktree;
+- for mutating members, tool-level file-write targeting is verified, not inferred from shell `workdir` or the prompt;
 - likely shared-hunk, version, package, submodule, generated-output and test-service conflicts have an explicit order/reconciliation plan;
 - integration owner/target, combined checks, checkpoints, retention and next handoff are specified;
 - actual decisions and operator boundaries are settled, or the affected task is explicitly parked outside this wave;
 - the latest package/membership/task-document/baseline observations are cited with time/source.
 
 A ready wave does not imply all package tasks are ready. An unready member can remain `todo` or blocked while an independent ready wave proceeds. A member's blocked condition does not block independent work unless dependency or shared-state analysis shows that the other wave is unsafe.
+
+Reject an empty/unknown-member wave, unresolved dependency cycle or dependency on an unverified result. Before each actual dispatch, resume or Board move, revalidate the named wave against current membership, relevant member/package document revisions, integration HEAD/content, ownership, pending input and authorized scope. A failed reevaluation invalidates its earlier ready evidence; a saved `WORK_PACKAGE_READY` label is not perpetual admission. Changes while a member is already executing pause/replan only affected dependent work at a safe checkpoint, never trigger a duplicate send, abort or forced reset. Already `in_progress` packages retain their actual Board status when a later wave is blocked; only the wave is parked. Do not roll the Board back to `todo` just to repeat readiness or registration.
 
 After a dependency integrates, verify the real integration-tree `HEAD` and the presence of required content before starting downstream tasks. Update package C with the new target, resulting integration commit and actual checks. Retain done members in package membership and report their implementation/commit contribution even if external acceptance is outstanding.
 
@@ -125,3 +129,5 @@ tests, commits, integration and external acceptance separately.
 ```
 
 The assistant should confirm the exact package/wave, the C/P actually read, the verified owner/base, the OpenCode connection it can use and its next safe step. That is an acknowledgement, not proof that any member started. Capture each actual OpenCode submission's receipt and original result using the usual per-session contract; do not assume queueing or issue a second send after an uncertain response.
+
+Before a Work handoff, show the profile recommendation/reason and currently resolvable runtime or explicit capability/availability gap. In the destination, revalidate readiness and the connection; for every actual member submission include that member's stable task ID, exact established C/P paths, canonical document root and code worktree/owner/base. Use the existing full-care briefing once in a new executing context and the short reminder for ordinary follow-ups. The package-only bootstrap does not replace member-specific task-file handoffs.

@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-09-30-r26
+
+- Deep-QA clarifies existing ownership across simultaneous Work Packages/manual writers and serial publication of member C/P deltas to the canonical connector document root; a private worktree copy is not a registered document.
+- Revalidate named-wave readiness on every dispatch/resume and reject stale, empty, unknown-member or cyclic-dependency evidence. Apply write-worktree checks to mutating members only; a blocked later wave leaves an already started package's actual Board status intact.
+- Complete the existing cleanup contract for relevant ignored outputs and detached-source commit reachability. Preserve source evidence before removal; an SHA in Markdown is not a retained Git object.
+- Strengthen focused negative regressions for cross-package ownership, readiness drift, evidence-limited Morning Handoff and real nested/detached Git worktree retention. Keep the existing MCP/Managed/approval and document-binding boundaries unchanged.
+
 ## 2026-09-30-r25
 
 - Define general agent-managed Git/worktree ownership before repository writes: verify the actual repository/worktree/base/dirty state and each file-tool target, assign one active writer per tree/index, isolate concurrent writes and serialize shared integration. Local commits remain task-scoped; remote publishing remains operator-only.

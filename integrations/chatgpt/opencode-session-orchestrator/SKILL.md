@@ -6,7 +6,7 @@ license: MIT
 
 # OpenCode Session Orchestrator
 
-Release marker: **2026-09-30-r25**. This is the skill revision, not an MCP version.
+Release marker: **2026-09-30-r26**. This is the skill revision, not an MCP version.
 
 This is a client-side workflow skill. The user supplies a working compatible MCP connection, including when using Secure MCP Tunnel. The skill contains no tunnel, account, server alias or credentials and does not configure the connection.
 
@@ -154,6 +154,8 @@ A normal receipt is concise: task purpose, target, ID and verified state. Reserv
 
 An OpenCode session is not a Git isolation boundary. Before the first substantive agent-managed repository write, read [Worktree ownership](references/worktree-ownership.md) and choose one verified working tree/index with one active owner. Sequential, exclusive work may use the integration tree; concurrent independent writes use separate persistent worktrees by default. Capture the actual repository root, start `HEAD`, dirty/untracked state, worktree path/owner, affected/shared surfaces and integration target in the task handoff; keep the authorized Compact Context current when one exists. Never stage, reset, stash, overwrite or commit unrelated user/task changes.
 
+Check ownership across all known packages and manual/editor writers on the repository; shared member IDs do not authorize duplicate execution. For isolated workers, distinguish the canonical connector document root from the code worktree and serialize publication of task-owned document deltas by the document/integration owner. Registered C/P must remain regular canonical files, never symlinks or silently replaced by stale worktree copies. This workflow supplies no native cross-client lock or filesystem isolation guarantee.
+
 Verify where **each actual file-write tool** will write. Current MCP session creation is project-path-bound; a shell `workdir`, `cd` or `git -C` does not prove Edit/Write tools use that worktree. If the selected connection cannot target the verified worktree, stop before writing and request an operator-prepared scoped connection or an explicitly exclusive integration-tree assignment. Do not invent a worktree MCP argument or claim that the prompt enforces it. Local commits remain allowed within task scope; remote publishing remains denied/operator-only.
 
 On reuse, reread task files, verify the same worktree identity, HEAD and dirty state, and reconcile required predecessor changes. On integration, a single integrator checks source/base/target/diff, reconciles overlapping or versioned skill/package/adapter changes, runs combined checks, and records both source and target evidence. A dependent task waits for an exact integrated HEAD and required-content readback. Retain dirty, blocked, unreviewed, unintegrated or externally needed worktrees; remove only after owner stop, clean-state/evidence verification and explicit cleanup authorization. See the full reference for checks and failure handling.
@@ -165,6 +167,8 @@ For a genuine multi-task outcome, read [Work packages](references/work-packages.
 The package task uses its own existing task-ID C/P and normal task-document binding/readback workflow; it does not require new MCP fields. Board state, sessions, implementation, local commits, integration and external acceptance remain separate. A completed member stays visible if it contributes required base/integration evidence.
 
 `WORK_PACKAGE_READY` means only that the **named wave** is safe to start: member scope/documents and decision readiness, required base HEADs, parallel/sequential conflicts, actual tool write-target, persistent worktree ownership, integrator, operator boundary and acceptance are verified. It is a client-side checkpoint, not a Board status or server tool. For a newly initialized package, require it after `REGISTERED` and before the separate `BOARD_MOVED`; if the gate fails, preserve documents and leave the package `todo`. Recheck each dependent wave against the actual integrated HEAD. See [package readiness and initialization ordering](references/work-packages.md#build-the-wave-plan-and-evaluate-work_package_ready).
+
+Revalidate readiness before every actual wave dispatch/resume against current membership, relevant document revisions, base/content and repository-wide ownership; discard stale ready evidence after a failed check. Apply write-worktree checks only to mutating members. Empty/unknown waves or unresolved dependency cycles are not ready. A blocked later wave does not roll an already `in_progress` package back to `todo` or authorize duplicate work.
 
 Inside the documented plan, workers make safe small/medium technical choices autonomously. A real out-of-plan product/architecture/schema/security decision produces the backend's normal terminal `INPUT_REQUIRED`; park dependent work and continue only verified independent waves. Read the original result, resolve the question through Chat/Work, and use a normal same-session follow-up after idle/security-input checks. It is not a native Question reply, Board completion, or integration.
 

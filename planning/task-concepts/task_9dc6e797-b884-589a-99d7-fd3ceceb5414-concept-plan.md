@@ -1,7 +1,7 @@
 Task-ID: task_9dc6e797-b884-589a-99d7-fd3ceceb5414
 Title: Orchestrator Skill – agent-managed Worktree-Isolation und persistente Arbeitspakete
 Status: active
-Last-concept-update: 2026-09-30T20:42:00+02:00
+Last-concept-update: 2026-09-30T21:54:33+02:00
 
 # Kanonischer Concept Plan
 
@@ -70,12 +70,14 @@ Vorhandene Worktrees unter `/tmp/opencode/` sind temporäre historische Evidence
 
 Vor substantieller Schreibarbeit klassifiziert der Orchestrator den Task als read-only oder mutierend. Reine Reads/Reviews benötigen keinen separaten Worktree. Schreibarbeit erhält explizite Tree-Ownership:
 
-- sequenziell und allein im Integration-Tree nur bei bestätigter Exklusivität und ohne fremde/unerklärte Änderungen;
+- sequenziell und allein im Integration-Tree nur bei bestätigter Exklusivität, ohne fremden aktiven Indexowner oder unerklärte/überlappende Änderungen; bekannte unabhängige Leftovers bleiben über eine explizite Task-Pfad-Allowlist geschützt;
 - parallel standardmäßig in je eigenen Task-Worktrees;
 - gemeinsam berührte Versionen, Packages, Adapter, Skillbundle, Launcher, Submodule, Generated Files oder Shared-Hunks entweder sequenziert oder isoliert mit später geplanter Reconciliation;
 - unklarer Index/Owner, fehlende Persistenz oder nicht verifizierbare Session-/Toolpfadbindung verhindert den Start der betroffenen Write-Welle.
 
 Vor Write werden `git rev-parse --show-toplevel`, `--git-dir`, `--git-common-dir`, aktueller HEAD, `git status --short` inklusive untracked Dateien, Branch/Detached-Zustand, benötigte Submodule und Zielpfad verifiziert. Der Orchestrator protokolliert Initialzustand und speichert den Start-Basis-HEAD unveränderlich. Ein vorhandener Nutzer-/Fremd-Diff wird weder gestasht noch zurückgesetzt/committed. Änderungen werden nur in task-eigene Pfade integriert.
+
+Ownership gilt repositoryweit auch gegenüber anderen Paketen und manuellen/Editorschreibern. Dieselbe Mitglieds-ID in mehreren Paketen bedeutet eine vorhandene Ausführung mit gemeinsam konsumierter Evidence, nicht mehrere Worker. Physische Tree-/Git-Identität entscheidet; Aliasnamen, idle oder verschwundener Manager und veraltete Contextzeit beweisen keine Freigabe. Unvollständige Ownershipevidence stoppt betroffene Writes. Kein nativer Lease/CAS wird dadurch eingeführt.
 
 ### 4.2 Pflichtmetadaten im Compact Context
 
@@ -91,6 +93,8 @@ Für Wiederaufnahme desselben Tasks werden C/P, konkrete Sessionresultate und ak
 
 Linked Worktrees teilen Git-Objekte und einige Repositorymetadaten/Refs. Taskbranches und Ref-Namen sind kollisionsfrei. Keine gleichzeitige Änderung derselben Branch, globaler Gitkonfiguration, gemeinsamer Tags, Worktreeverwaltung oder Garbage Collection. Submodules und gemeinsame Build-/Testausgaben sind gesonderte Konfliktflächen.
 
+Der kanonische Dokumentroot des Connectors und der Code-Worktree werden im tatsächlichen Member-Handoff getrennt benannt. Worker lesen die registrierten C/P samt Revision, pflegen task-eigene unveröffentlichte Arbeitsfassungen und liefern einen darauf basierenden Delta. Der Dokument-/Integrationsowner publiziert seriell nur diesen Delta auf unveränderte reguläre kanonische Taskpfade nach frischem Inhalts-/Revisionsvergleich und Header-/available-Readback. Stale Copy, Symlink und stilles Retarget sind keine Publikation. Paket-C/P haben einen Schreibowner. Nach Unterbrechung/Ungewissheit werden vorhandene Bytes und Worker-Delta geprüft, kein blinder Retry. Der Worker bleibt Inhaltsverantwortlicher; dies konkretisiert die bereits ausgearbeitete zentrale Publikationsstrategie.
+
 ### 4.4 Integration, Sequenzierung und Cleanup
 
 Ein Integrator besitzt den gemeinsamen Ziel-Tree allein. Vor Übernahme werden Quellcommit, dessen Parent/Basis, Ziel-HEAD, tatsächlicher Diff, Scope und aktuelle Dirty-Dateien geprüft. Saubere, unabhängige Diffs können gezielt integriert werden. Überlappende Dateien/Hunks/Metadaten werden semantisch reconciliiert, nicht durch blindes Cherry-pick, `ours`/`theirs` oder Dateikopie ersetzt. Kombinierte passende Regression läuft danach. Gemeinsame Skill-/MCP-/Release-Artefakte werden auf Zielbasis regeneriert/verifiziert.
@@ -100,6 +104,8 @@ Jeder Integrationsdatensatz hält Quelltask, Quellcommit, Quellbasis, Zielbasis 
 Abhängige Wellen starten erst nach Readback des tatsächlichen integrierten Ziel-HEAD und Abgleich gegen den in ihrem Plan erwarteten Stand. Ein neuerer Commit allein genügt nicht, wenn die erforderlichen Changes fehlen. Ein geparkter Task hält nicht unabhängige Wellen auf.
 
 Worktree bleibt erhalten bei Work-in-progress, Dirty-/Untracked-Daten, ungeklärten Outputs, fehlender Integration, unerledigtem Ergebnisreview oder benötigter Abnahme. Entfernen nur nach verifiziertem Ownerstillstand, explizit autorisiertem Cleanup, Sicherung/Integration relevanter Arbeit und persistentem Nachweis. Kein force-remove, Reset, stilles Stashen oder Löschen fremder Dateien.
+
+Auch relevante ignorierte Outputs werden vor Entfernung geprüft; normales clean `git status` genügt dafür nicht. Ein nach semantischer Integration nicht vom Ziel erreichbarer detached Quellcommit wird vor Cleanup durch eine verifizierte eindeutige taskeigene lokale Referenz oder ein dauerhaftes Gitbundle erhalten. Eine SHA-Notiz allein erhält kein Objekt über GC. Die retained Ref wird weder überschrieben noch implizit mitgelöscht; bei unklarer Erhaltung bleibt der Worktree.
 
 ## 5. Persistente Arbeitspakete
 
@@ -140,6 +146,8 @@ Voraussetzungen für die benannte Welle:
 7. Operatorgrenze, Integrator und Prüf-/Handoffkriterien sind benannt.
 
 Für jede abhängige Welle wird vor Start dieselbe Prüfung mit aktuellem Integrations-HEAD erneut durchgeführt. Paket-`in_progress` und `WORK_PACKAGE_READY` sind getrennte Fakten: vorhandene Todo-Pakete dürfen vorbereitet werden; ein ausführbarer Status wird erst nach Readiness und jeweiliger autorisierter Boardtransition behauptet.
+
+Vor jedem tatsächlichen Dispatch/Resume/Move erfolgt ein Abgleich mit aktueller Mitgliedschaft, relevanten Paket-/Memberdokumentrevisionen, Basis/benötigtem Inhalt, Ownership und Pending-/Scopesituation. Fehlgeschlagene Reevaluation verwirft die alte Ready-Evidence. Leere/unbekannte Wellen und ungeklärte Abhängigkeitszyklen sind nicht ready. Schreibkopie-/Write-Target-Pflichten gelten nur für mutierende Member; Analyse/Review bleibt ihrem Read-only-Scope entsprechend startbar. Blockade einer späteren Welle belässt den echten `in_progress`-Boardstatus und autorisiert keine doppelte Submission, Abort oder Reset.
 
 ### 5.5 Autonomie und Parken
 
@@ -242,3 +250,38 @@ Es gibt keine blockierende Konzeptentscheidung. Bewusste Betriebsgrenzen statt o
 ## 11. Abschlusskriterien
 
 Lokale Konzept-/Implementierungsarbeit ist für den autorisierten Scope abschließbar, wenn taskgebundene C/P valide persistiert und semantisch gebunden sind; alle skill-first Anforderungen aus §3–9 und die Regressionen enthalten sind; Bundle/Revision/ZIP/SHA konsistent sind; lokale vorgeschriebene Tests bestehen; und Commit-/Diffzustand taskgenau dokumentiert ist. Das behauptet weder Remote-Publishing noch Deployment, aktive Connector-/Skillinstallation, Hosted Verhalten oder externe Operatorakzeptanz. Task `done` setzt verifizierten Business-Outcomenachweis und eine getrennte autorisierte Boardmutation voraus.
+
+Zusätzlich verlangt die gelesene Board-Ergänzung **L** einen separaten Deep-Quality-Review vor Abnahme/Done: Board + registrierte C/P + Source + Testevidence prüfen, nur kleine in-scope-Korrekturen, deren Nachprüfung und Nutzung der zur Reviewzeit verfügbaren Deep-Projektpolicy. Keine dauerhafte Modellzuordnung. Der QA-Auftrag dieser Session autorisiert diese Prüfung/Korrekturen, keinen Board-Done-/Remote-/Deploymentschritt.
+
+## 12. Deep-QA – Prüfstand und nachvollziehbare Findings
+
+Reviewbasis: `d46b8c15f589760bcfb6e7a7dc8247744e6451dc` mit Implementation `06af861f…`, Contextabschluss `955f8780…` und Gatekorrektur `d46b8c15…`. Der Kontext hatte nur den ersten Implementationcommit erwähnt; die QA-Reconciliation ergänzt den vollständigen lokalen Integrationsstand.
+
+Der aktuelle Connector löste das Deep-Profil mit Policyrevision **18** als available auf. Die laufende Reviewsession `ses_f0c8bd82effehrn7eEsIVme66V` verwendet exakt den zurückgegebenen Tuple `openai / gpt-6.1-sol / xhigh`; kein Busy-Session-Modellwechsel wurde versucht. Dies ist Reviewevidence dieses Zeitpunktes, keine fest kodierte Workflowwahl.
+
+### 12.1 In-scope-Korrekturen
+
+| Finding | Korrektur / Nachweisart |
+|---|---|
+| Paketlokale Sicht konnte dasselbe Task-/Tree-Ziel zwischen zwei Paketen doppelt vergeben; keine operative Aussage zur unbekannten Ownership. | Repositoryweite kooperative Ownership einschließlich manueller Writer/physischer Aliase, Evidence teilen statt doppelt ausführen, bei unvollständigem Read stoppen. Kein Lock-/Lease-Unterbau. Negativfälle im Testfixture ergänzt. |
+| Isolierte C/P-Kopie war nicht ausreichend vom kanonischen Connector-Dokumentroot getrennt; laufende Worker könnten zentrale Docs parallel verändern. | Bestehende serielle taskgebundene Delta-Publikation mit Ausgangsrevision/Conflict-/Uncertain-Readback ergänzt. Reguläre bestehende Bindings bleiben, keine Symlinks/Retargets. Filesystemfixture prüft Stale-Publikation, fremden Header, Symlink und verlorene Antwort ohne zweiten Write. |
+| Readiness-Negativtests betrachteten keine ehemals passierte Welle nach Drift; das Testmodell behielt einen Ready-Marker nach fehlgeschlagener Reevaluation. | Neuer Negativtest reproduzierte den falschen Boardmove im alten Fake; Testfixture bindet Ready an aktuelle Inputs/Revisions/Basis und invalidiert Fehlschlag. Skill-Vertrag präzisiert dieselbe bestehende Pre-dispatch-/Resume-Pflicht, Read-only-Ausnahmen und unveränderten Boardstatus bei späterer Wellenblockade. |
+| Cleanup konnte wichtige ignorierte Resultate übersehen; SHA-Text garantiert keine Erreichbarkeit eines detached Quellcommits nach semantischer Integration. | Ignored-Outputprüfung und expliziter Gitobjekterhalt vor Entfernung. Echter Disposable-Gittest mit nested/detached Worktrees, untracked Removal-Deny, gesichertem Resultat/Source-Ref und anschließendem GC. |
+| Recovery-/Handofftexte und Package-only Gate waren nicht an allen konkreten Wiederaufnahme-/Memberdispatchpfaden sichtbar. | Packagegate auch in Plan-/Orphan-Follow-through, Member-Handoff mit beiden Roots/exakten Taskpfaden und Runtimebegründung vor Workübergabe. Bestehender r21/Header/Managed-Vertrag bleibt erhalten. |
+
+### 12.2 Anforderungs- und Coverageabgleich
+
+Alle 27 bestehenden Akzeptanzkriterien und die neue Board-Ergänzung L wurden gegen tatsächliche r25-Quellen geprüft; QA-Präzisierungen liegen als Skillrevision r26 auf derselben Architektur vor.
+
+- **AC 1–5:** allgemeine Ownership, verschiedene Trees/Indizes, Pflichtmetadaten, Reuse, Cleanup. Dokumentvertrag + Fake-Negativfälle; echte Gitfixtures belegen isolierte Indizes, Shared-Hunk-Konflikt, nested/detached Wiederaufnahme und Source-Erhaltung.
+- **AC 6–12:** Managementkarte/stabile Member, getrennte C/P-/Zustandsrollen, Wellen/HEAD/Integration, unabhängige Weiterarbeit und Morning-Handoff. Skill-/Registrierungsvertrag; repräsentative Client-Decision-Fakes für Ready/Unready/Blocked/Done/Missing-Evidence, keine behauptete native Engine.
+- **AC 13–15:** verlangter Szenarienkatalog, konkreter Nightlyfall in §2.3 und keine neue MCP-Komplexität. Git-Szenarien und Textvertrag werden geprüft; externe/Gast-Tool- und Hostedlevel getrennt.
+- **AC 16–23:** IDs/Goal-/Muss-Optional-Suche, Todo-Lücken, benannte Wavegates, minimalfunktionale Autonomie, kurzer Bootstrap und dynamische Runtime. Pflichtszenarien/Textvertrag plus repräsentativer Membership-/Readiness-/Runtime-Fake; Goal-Suche und Promptbefolgung durch Hostedmodelle bleiben externe Verhaltensabnahme.
+- **AC 24–27:** sichtbares Chat→Work, Erklärung/Startschritt/Reuse; Quellen/Bootstrap geprüft. Eine Work-UI-API, ein Modellpickerwechsel oder Hosted-Toolverfügbarkeit wird nicht behauptet.
+- **L:** verfügbare Deep-Policy exakt mit Reviewruntime abgeglichen, kleiner Korrekturscope und geforderte Nachprüfung; Business-Done bleibt Managemententscheidung.
+
+Das Produkt ist ein instruction-only Skill, daher ist eine Prozentzahl aus der Python-Testcodecoverage keine Feature-/Safetyabdeckung. Statische Inhalts-/Paketprüfungen, explizit testlokale Clientwalks, tatsächliches Disposable-Gitverhalten und externe OpenCode-/Hosted-/Host-Abnahme werden getrennt ausgewiesen. Python-Fakes sind keine Produktimplementierung und beweisen nicht, dass ein Hostedmodell den Vertrag befolgt.
+
+### 12.3 Abschließende Evidence
+
+Nachprüfung der korrigierten r26-Quellen: vollständige Skill-/Paketregression **22 PASS / 0 FAIL / 0 SKIP**, Fokuslauf mit vier Ownership-/Publikations-/Gitfällen PASS, Builder `--check` und `git diff --check` PASS. QA-Urteil für den lokalen Skill-first-Scope: **PASS**, technisch abnahmebereit ohne verbleibendes internes Finding. Abschließender Registrierungs-/Inhaltsreadback und Revisionen werden im terminalen QA-Ergebnis berichtet. Kein offener Produktentscheid ist für diese bestehenden Vertragskorrekturen erforderlich; externe Host-/Tooltarget-/Hosted-Akzeptanz bleibt unverändert ein separater Nachweis. Der QA-Delta baut auf `d46b8c15…` auf; Commit-/Board-/Deploymentevidence folgt getrennt im Compact Context/Git-Verlauf.

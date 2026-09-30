@@ -17,6 +17,8 @@ Pure reads and reviews need no write worktree. One explicitly exclusive, sequent
 
 One active writer owns each working tree/index. Handing it to another session requires a verified stop/idle point, current Git readback and an explicit ownership update. A child session is not a worktree. Do not start a concurrent write child in the same tree; give it a distinct worktree or sequence it.
 
+Ownership is repository-wide, including other Work Packages and manual/editor writers. Before assigning a task/tree or the integration target, read the known active package/task contexts and session evidence on the selected project, and resolve any overlapping owner. A task listed in two packages has one executing owner; the other package consumes its evidence or waits, rather than starting a duplicate worker. Compare physical worktree paths/Git identities, not path aliases or package titles. An unavailable/incomplete ownership read, idle session, old timestamp or disappeared manager is not proof that the tree is free. Coordinate the handover before writing. This is a cooperating-writer convention, not a cross-client lock, lease, CAS or arbitrary-process sandbox.
+
 ## Verify the tree before writing
 
 Capture actual Git state, not only the prompt's claimed path:
@@ -42,6 +44,8 @@ For opencode-vm, `.opencode-vm/` is already ignored. Prefer the persistent, proj
 
 Check that the path is absent or demonstrably belongs to this exact task before creating/reusing it; confirm Git reports it as an active worktree and that its contents/common Git directory remain reachable from the host after the VM ends. `/tmp` is disposable, not a Morning-Handoff store, unless an independently verified snapshot/transfer is part of the authorized task. For other repositories, discover a persistent mounted path and a suitable ignore rule; never create repository state outside the authorized project just because this example exists.
 
+Being ignored only prevents accidental staging by the parent checkout; it does not prove a host mount or persistence. Verify ignore behavior from the parent and durability of the worktree **and** common Git directory. If a recorded worktree is missing, keep its old base/commit/dirty-state evidence, locate preserved changes and reconcile before any reconstruction. Do not silently recreate it from the latest main HEAD.
+
 Branches are optional; detached worktrees are valid. If a task branch is useful, use a unique task-specific local name and verify it is not already checked out elsewhere. Linked worktrees have separate checkouts/indexes, but share object storage and some refs/configuration. Do not concurrently mutate the same branch, common Git config, tags, worktree registrations or shared submodule checkout. A worktree does not isolate shared build outputs, test databases or service ports; identify and separate those too.
 
 ## Verify every write target
@@ -63,6 +67,12 @@ For an established task Compact Context, keep a compact current record of:
 
 For a small task without persistent task documents, carry the same essential ownership/base in its actual task handoff and final result; do not create a Board card or C/P solely to manufacture a worktree registry. For a multi-iteration task, maintain its authorized Compact Context and point to its Concept Plan. Board links to sessions/results are useful references, not proof of Git state.
 
+### Publish task documents without a second writer
+
+Distinguish the connector's canonical **document root** from the worker's **code worktree** in each isolated-task handoff. The same relative C/P path in two checkouts is not the same registered file. Read the registered canonical bytes/revisions first; a worker can maintain an unpublished task-owned copy in its code worktree and return a scoped delta based on those revisions. The integration/document owner serially publishes that delta to the same canonical task-ID paths after verifying the original revision and current contents; conflict requires reconciliation, not overwriting a newer plan/context. The executing worker remains responsible for the content. Parallel workers never edit shared package C/P, the canonical integration-tree documents or its index concurrently.
+
+Use regular files at the existing registered paths: no symlink to a worktree, retargeted binding or automatic copy of an entire planning directory. After publication reread headers and the canonical availability/path/revision, then update the package checkpoint. On interruption or uncertain publication, inspect the existing canonical bytes and worker delta before any retry. Merely reporting a worktree-copy update does not establish that ChatGPT can read it through `read_task_document`. Document-only publication changes C/P revisions and requires current readiness readback; it does not prove product integration.
+
 On same-task follow-up, reread the task documents and inspect the actual worktree, HEAD, status and task scope. Reuse only after matching the path/Git identity and resolving its previous owner. Never silently continue from a different/older base. If the expected integration base moved, compare the required changes, record old and new bases, and replan/reconcile before dependent writes; do not automatically rebase, reset, merge or overwrite.
 
 ## Plan conflicts and serialize integration
@@ -72,7 +82,7 @@ Before parallelizing, compare member scopes and planned file surfaces. Treat sha
 One integrator owns the common integration tree at a time:
 
 1. Read the source task's original result and verify the exact source commit, its parent/base, current source dirty/untracked state and intended file scope.
-2. Read the integration tree's actual target `HEAD` and dirty state. Do not operate on a dirty tree unless every change is explained and belongs to this authorized integration.
+2. Read the integration tree's actual target `HEAD`, index and dirty state. Unexplained/overlapping changes or another writer's staged entries block integration. Known unrelated leftovers can remain untouched only when exclusive ownership is confirmed, the integration cannot affect them and an explicit task-owned path allowlist protects them. Never include them in the commit or clear them to make integration pass.
 3. Compare source and target history/diffs. Cherry-pick only a suitable task-owned commit when its base and changes are compatible. Otherwise port/reconcile the intended changes semantically; do not blindly copy whole files, choose `ours`/`theirs`, or revive stale generated artifacts.
 4. Rebuild shared versioned bundles/pins on the consolidated target when required; run relevant combined regressions.
 5. Record source task/commit/base, target base before, resulting integration commit/HEAD, included/excluded scope and test evidence. A semantic port need not make the source SHA an ancestor of the target; explicitly show the target commit that contains the reconciled change.
@@ -85,6 +95,8 @@ A blocked task does not block a different, genuinely independent wave. Keep the 
 Keep the task worktree when a worker is active, the result has not been reviewed, the task is blocked, any relevant staged/unstaged/untracked change remains, integration is uncertain/pending, an external acceptance depends on it, or source evidence is needed for reconciliation. An integrated local commit may still require retention while Hosted/operator acceptance is open.
 
 Removal requires all of the following to be verified: the owner stopped; the task result and exact source state were reviewed; every relevant change is integrated or explicitly preserved elsewhere; target integration/readback and required checks are recorded; no required acceptance depends on the checkout; and cleanup is within the user's authorization. Check `git status` and `git worktree list` immediately before cleanup. No force-remove, reset, implicit stash, branch deletion, common-object cleanup or deletion of a dirty/unknown worktree. If any check is unclear, retain it and report the exact reason.
+
+Include relevant ignored outputs in this inspection (`git status --short --untracked-files=all --ignored`); an ordinary clean status can hide an ignored result or unpublished document. Preserve such files or establish that their disposal is authorized before removal. For a detached source whose SHA must remain available after semantic integration, first verify a unique task-owned local reference or a durable Git bundle retains the exact source commit. A hash written in C/P does not keep its objects reachable after worktree removal/GC. Never replace an existing reference or delete the retained reference as an implicit part of cleanup; if retention is unclear, keep the worktree.
 
 ## Useful regression cases
 

@@ -60,7 +60,7 @@ An interrupted initialization can leave matching files at canonical paths, no se
 3. **Reuse.** Do **not** ask the executing agent to recreate the files. Do **not** rename the existing files. Do **not** invent legacy artifact links.
 4. **Bind.** Use the same preferred add-only bundle and absent-tool register fallback as fresh initialization. Existing matching references are safe; a different main binding is a conflict, never a retarget opportunity.
 5. **Read back.** Run the same `get_task_documents` flow used for fresh files.
-6. **Move and readback.** Run the same Board move + readback flow used for fresh files.
+6. **Readiness, move and readback.** For a Work Package, require the current named-wave `WORK_PACKAGE_READY` after `REGISTERED`, including on orphan recovery. Then run the same Board move + readback flow used for fresh files. Readiness failure preserves the documents and stops before a move.
 
 The recovery path produces the same end state as the fresh-init path. The two paths differ only in whether the agent is asked to write the files; in both paths the orchestrator's follow-through is identical. The user-confirmed transition package is the only authorization for any of these steps; a fresh chat that finds orphan files does not silently resume the transition without re-confirming the original `todo` -> `in_progress` authorization.
 

@@ -1,8 +1,9 @@
 Task-ID: task_d9944c0e-5acb-5d73-8030-4fbc0c025be0
 Title: MCP – additive Low-Risk Task Writes für Management Notes und Task-Dokumente
-Last-updated: 2026-09-30T02:13:00Z
+Last-updated: 2026-09-30T22:43:41+02:00
 Implementation-state: fully-integrated; locally-accepted; DONE-ready
-Board-status-at-review: in_progress (final GET-only readback); this agent did not move the production task
+Board-status-at-review: in_progress (final GET-only readback at that time); this agent did not move the production task
+Current Board status: done, independently read back at 2026-09-30T04:24:10.409519805+02:00; this commit does not change it
 
 ## Concept Plan
 
@@ -24,7 +25,8 @@ Detailed requirements/design/decisions/test plan: `planning/task-concepts/task_d
 - Script `0.6.4` (alle drei Release-Tags `v0.6.4`), MCP `0.1.18`, Skill `2026-09-30-r21`; SDK-/Zod-Pins unveraendert. 18 optionale Board-Tools.
 - `dist/opencode-vm-mcp-adapter-0.1.18.tar`: SHA-256 `fc105244698aae3d673f73038ff6507a5667fdda4e244012020d660240c7cca7`, passender Script-Pin.
 - Skill ZIP: SHA-256 `5df8fff1aacacf40b1b05d7b125628a0fa181a54d2853f4c24f0f01a5df160dc`; `bundle.json`, `latest.json`, ZIP und `.sha256` konsistent.
-- Unveraenderte OpenLive 0.1.6-/Hub-Archive lokal erneut gebaut, Pins bestaetigt; drei Archive und `SHA256SUMS` unter `dist/`. Keine Commits, Tags, Remote-Writes oder veroeffentlichten Releases.
+- Unveraenderte OpenLive 0.1.6-/Hub-Archive lokal erneut gebaut, Pins bestaetigt; die damaligen drei Archive und `SHA256SUMS` lagen unter `dist/`. Zum D994-Abschluss gab es keine weiteren taskbezogenen Commits, Tags, Remote-Writes oder veroeffentlichten Releases; spaetere Main-Commits gehoeren anderen Aufgaben.
+- Lokaler Commit: `39f975ad0b693c2841cb4aa4fa82c2f3a10da24d` — `feat(mcp): add low-risk task writes and r21 workflow`. Diese nachtraegliche SHA-Notiz ist bewusst nicht Teil eines zweiten housekeeping commits.
 
 ## Durable decisions
 
@@ -40,12 +42,12 @@ Detailed requirements/design/decisions/test plan: `planning/task-concepts/task_d
 
 ## Remaining external adoption
 
-- Fachlich-technisch DONE-ready fuer den freigegebenen Integrations-/lokalen Abnahmescope; kein Implementierungsblocker. Board bleibt bis Management-Abschluss `in_progress`.
+- Fachlich-technisch DONE-ready fuer den freigegebenen Integrations-/lokalen Abnahmescope; kein Implementierungsblocker. Board ist im aktuellen Readback `done`; Hosted ChatGPT/Voice- und Operatorakzeptanz bleiben separate Adoptionsevidence.
 - Nach koordinierter Aktivierung Connector-Katalog aktualisieren und Skill r21 importieren; Hosted ChatGPT/Voice-Verhalten separat akzeptieren. Keine Approval-Unterdrueckung behaupten. MacOS/Host-Rebuild und Release-Veroeffentlichung sind separate Maintainer-/Umgebungsaktionen, nicht hier ausgefuehrt.
 
 ## Next concrete step
 
-Jetzt: Abschlussresultat und lokale Artefakte an Management uebergeben; keine weiteren Feature-/Integrationsarbeiten erforderlich. Remote-Push/Release und produktive Aktivierung erfolgen separat. Kein produktiver Board-Move durch diesen Agenten.
+Kein weiterer D994-Implementierungsschritt: lokales Outcome bleibt DONE-ready und der aktuelle Board-Readback ist `done`. Verbleibende Hosted-Adoption/Releases sind separate Operatoraktionen; dieser Task/Full-Commit setzt keinen Remote- oder Deployment-Schritt um.
 
 ## Essential references
 
