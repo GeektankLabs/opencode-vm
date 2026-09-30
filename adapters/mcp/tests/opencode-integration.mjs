@@ -14,7 +14,7 @@ import net from "node:net";
 import { deflateSync } from "node:zlib";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { createOpencodeClient } from "@opencode-ai/sdk/v2";
@@ -31,6 +31,9 @@ const dataHome = join(temporary, "data");
 const stateHome = join(temporary, "state");
 const runtimeDirectory = join(temporary, "runtime");
 const mcpDirectory = join(temporary, "mcp");
+const managedSocket = join(temporary, "managed.sock");
+const previousManagedSocket = process.env.OCVM_MANAGED_POLICY_SOCKET;
+process.env.OCVM_MANAGED_POLICY_SOCKET = managedSocket;
 const credentialFile = join(mcpDirectory, "credential");
 const runtimeFile = join(mcpDirectory, "runtime.json");
 const readyFile = join(mcpDirectory, "ready.json");
@@ -186,10 +189,14 @@ try {
   const providerPort = await listen(provider);
   const opencodePort = await reservePort();
   const mcpPort = await reservePort();
+  const policyDependency = spawnSync("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund", "--silent", `@opencode-ai/plugin@${OPEN_CODE_VERSION}`], { cwd: configDirectory, encoding: "utf8" });
+  assert.equal(policyDependency.status, 0, policyDependency.stderr);
   await writeFile(
     join(configDirectory, "opencode.json"),
     `${JSON.stringify({
       autoupdate: false,
+      $schema: "https://opencode.ai/config.json",
+      plugin: [pathToFileURL(resolve(adapter, "../../runtime/managed-policy.mjs")).href],
       permission: { bash: "allow" },
       model: "integration/test-model",
       small_model: "integration/test-model",
@@ -247,6 +254,7 @@ try {
         XDG_STATE_HOME: stateHome,
         OPENCODE_CONFIG: join(configDirectory, "opencode.json"),
         OPENCODE_DISABLE_AUTOUPDATE: "1",
+        OCVM_MANAGED_POLICY_SOCKET: managedSocket,
       },
       stdio: ["ignore", "ignore", "pipe"],
     },
@@ -1352,6 +1360,8 @@ try {
   );
   process.stdout.write("MCP real OpenCode integration passed.\n");
 } finally {
+  if (previousManagedSocket === undefined) delete process.env.OCVM_MANAGED_POLICY_SOCKET;
+  else process.env.OCVM_MANAGED_POLICY_SOCKET = previousManagedSocket;
   await writeFile(toolGate, "release").catch(() => {});
   for (const release of heldPrompts.values()) release();
   await mcpClient?.close().catch(() => undefined);

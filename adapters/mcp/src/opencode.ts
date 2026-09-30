@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { request as httpRequest } from "node:http";
 import { lstat, readFile } from "node:fs/promises";
 import { createOpencodeClient } from "@opencode-ai/sdk/v2";
 import type { FilePartInput, TextPartInput } from "@opencode-ai/sdk/v2";
@@ -222,6 +223,29 @@ export class OpenCodeGateway implements SessionGateway {
   compatibilityCheck(): Promise<void> {
     this.compatibilityPromise ??= this.checkCompatibility();
     return this.compatibilityPromise;
+  }
+
+  protected async adoptManagedSession(sessionId: string): Promise<void> {
+    const socketPath = process.env.OCVM_MANAGED_POLICY_SOCKET;
+    if (!socketPath) throw new AdapterError("BACKEND_INCOMPATIBLE", "The agent-managed backend policy is not installed. Start or attach with the current opencode-vm before submitting work.");
+    await new Promise<void>((resolve, reject) => {
+      const request = httpRequest({ socketPath, path: "/adopt", method: "POST", headers: { "content-type": "application/json" }, timeout: this.backendDeadlineMs }, response => {
+        let text = "";
+        response.on("data", chunk => { text += chunk; if (text.length > 4096) request.destroy(new Error("Managed policy response exceeded its limit")); });
+        response.on("end", () => {
+          try {
+            const result = JSON.parse(text);
+            if (result.error === "MANAGED_SESSION_BUSY") throw new AdapterError("SESSION_BUSY", "The session became busy before managed work admission.", undefined, "backend_active");
+            if (result.error === "MANAGED_INPUT_PENDING") throw new AdapterError("INPUT_REQUIRED", "The session has pending operator input; no work was admitted.", undefined, "pending_input");
+            if (response.statusCode !== 200 || result.session_id !== sessionId || result.agent_managed !== true || result.revision !== 1) throw new Error("Managed policy adoption was not confirmed");
+            resolve();
+          } catch (error) { reject(error); }
+        });
+      });
+      request.on("timeout", () => request.destroy(new Error("Managed policy admission timed out")));
+      request.on("error", reject);
+      request.end(JSON.stringify({ session_id: sessionId, ingress: "mcp" }));
+    }).catch(error => { if (error instanceof AdapterError) throw error; throw new AdapterError("BACKEND_INCOMPATIBLE", "Agent-managed policy adoption could not be verified; no work prompt was submitted."); });
   }
 
   async enableActivity(path: string): Promise<void> {
@@ -449,6 +473,7 @@ export class OpenCodeGateway implements SessionGateway {
       ) {
         throw new Error("Session settings were not persisted.");
       }
+      await this.adoptManagedSession(id);
       return {
         project: this.projectIdentity(),
         session_id: session.id,
@@ -1505,6 +1530,7 @@ export class OpenCodeGateway implements SessionGateway {
       // this is still not a cross-client backend transaction.
       await this.requireIdle(sessionId);
       const attachments = this.attachments.resolve(sessionId, attachmentIds);
+      await this.adoptManagedSession(sessionId);
       const parts: Array<TextPartInput | FilePartInput> = [
         { type: "text", text: message },
       ];
@@ -1695,6 +1721,8 @@ export class OpenCodeGateway implements SessionGateway {
         sessionId,
         guardedMessageId,
       );
+
+      await this.adoptManagedSession(sessionId);
 
       const parts: Array<TextPartInput | FilePartInput> = [
         { type: "text", text: message },

@@ -16,7 +16,7 @@ import {
   type RemoteReady,
 } from "./protocol.js";
 
-const ADAPTER_VERSION = "0.1.6";
+const ADAPTER_VERSION = "0.1.7";
 const HEARTBEAT_MS = 15_000;
 const CHILD_GRACE_MS = 5_000;
 

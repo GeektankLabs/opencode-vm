@@ -89,6 +89,15 @@ Documentation snapshot: 2026-09-27. See [sources](approval-sources.md). Revalida
 
 ## 6. Backend permission vs ChatGPT permission
 
+If the discovered backend enforces agent-managed work, it owns classification:
+ordinary work creation/submission adopts server-side; reads and pure management
+do not. No client flag or repeated primer is necessary. A terminal business
+`INPUT_REQUIRED` report is readable result text, not a permission request. Resolve
+the stated question/context/options in Voice/Chat and, after idle/pending checks,
+send one normal authorized follow-up to the same session. It does not authorize
+deployment, remote publishing, scope expansion or permission replies. Independent
+real security/host permissions retain their own operator path.
+
 A backend may already permit work in a selected sandbox. Reuse that boundary; do not add another agent-created approval for every harmless action inside an explicitly authorized task.
 
 A backend permission request, however, is not automatically resolved by ChatGPT's remembered approval. Report its actual action and scope. Do not auto-accept all future backend requests based on a broad trust statement.

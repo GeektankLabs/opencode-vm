@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 ADAPTER="$ROOT/adapters/mcp"
+python3 "$ROOT/scripts/build-managed-runtime.py" --check
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 1; }
 VERSION="$(jq -er '.version' "$ADAPTER/package.json")"
 grep -qF "export const ADAPTER_VERSION = \"$VERSION\";" "$ADAPTER/src/types.ts" || {
@@ -28,7 +29,8 @@ mkdir -p "$(dirname "$OUTPUT")"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 STAGE="$TMP/$NAME"
-mkdir -p "$STAGE/dist"
+mkdir -p "$STAGE/dist" "$STAGE/runtime"
+cp -p "$ROOT/runtime/managed-core.mjs" "$ROOT/runtime/managed-policy.mjs" "$ROOT/runtime/a2a-managed.py" "$STAGE/runtime/"
 
 (
   cd "$ADAPTER"

@@ -132,6 +132,15 @@ The `WWW-Authenticate` response header is `Bearer, Basic realm="opencode-a2a"`.
 
 ## 5. Sending a message
 
+Agentic work creation/continuation automatically adopts the target session's
+backend managed policy, including context reuse and explicit preferred-session
+binding. The repository-owned launcher also covers the supported `prompt_async`
+and `command` work methods. Discovery/status/history and pure management remain
+neutral; disabled shell/workspace capabilities remain disabled. Missing business
+decisions end as normal terminal `INPUT_REQUIRED` text for an ordinary same-session
+follow-up, not a native Question. Real permission interrupts remain distinct.
+See [Managed sessions](MANAGED-SESSIONS.md); no client mode flag is required.
+
 `SendMessage` is **blocking by default** and returns the finished task. No polling, no
 subscription, no streaming needed.
 

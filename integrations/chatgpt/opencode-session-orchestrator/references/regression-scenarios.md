@@ -131,6 +131,13 @@ For full-read acceptance fetch all content pages and verify the final offset. Ve
 
 ## Approval and flow cases
 
+Agent-managed business-handback cases use the actual backend contract: no client
+flag or repeated primer. READ and pure management must not reclassify manual
+sessions. A completed turn with ordinary INPUT_REQUIRED text is business attention,
+not Board completion: read question/context/options, resolve in Voice/Chat, check
+same-session idle/no real pending input, then send one normal authorized follow-up.
+No Question reply, permission autoapproval, new answer session or denial bypass.
+
 No live sends are authorized by this file.
 
 | Case | Required behavior |

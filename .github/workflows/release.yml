@@ -10,6 +10,7 @@ on:
       - opencode-vm.sh
       - adapters/openlive-acp/**
       - adapters/mcp/**
+      - runtime/**
       - scripts/build-openlive-adapter.sh
       - scripts/build-mcp-adapter.sh
       - scripts/build-agent-hub.sh
@@ -109,7 +110,7 @@ jobs:
               changed_files="$(gh api \
                 "repos/$GITHUB_REPOSITORY/compare/$OPENLIVE_RELEASE_TAG...$GITHUB_SHA" \
                 --paginate --jq '.files[].filename')"
-              if grep -Eq '^(opencode-vm\.sh|scripts/build-(openlive|mcp)-adapter\.sh|scripts/build-agent-hub\.sh|hub/|adapters/(openlive-acp|mcp)/)' \
+              if grep -Eq '^(opencode-vm\.sh|scripts/build-(openlive|mcp)-adapter\.sh|scripts/build-agent-hub\.sh|hub/|runtime/|adapters/(openlive-acp|mcp)/)' \
                 <<<"$changed_files"; then
                 echo "Release inputs changed without incrementing OCVM_VERSION." >&2
                 exit 1

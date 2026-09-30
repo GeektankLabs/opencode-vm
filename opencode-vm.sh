@@ -33,10 +33,10 @@ OPENLIVE_SETTINGS="$HOME/Library/Application Support/OpenLive/data/settings.json
 OPENLIVE_PREVIOUS_COMMAND="$OPENLIVE_DIR/previous-command"
 OPENLIVE_AUTH_MARKER="__opencode_vm_openlive__"
 OPENLIVE_LOCK_PATH=""
-OPENLIVE_ADAPTER_VERSION="0.1.6"
-OPENLIVE_ADAPTER_TAG="v0.6.6"
-OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.6.tar"
-OPENLIVE_ADAPTER_SHA256="06f461873b8b299de98220aa577824eb9807672b26cb069541acebcdd2d973b9"
+OPENLIVE_ADAPTER_VERSION="0.1.7"
+OPENLIVE_ADAPTER_TAG="v0.6.7"
+OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.7.tar"
+OPENLIVE_ADAPTER_SHA256="39a50c5127b0a577b54e4790b5c3c1f463b35a52b42c4343aa639dcea53bad47"
 OPENLIVE_ACP_SDK_VERSION="1.2.1"
 OPENLIVE_SDK_VERSION="1.18.21"
 OPENLIVE_MANAGER_AGENT="openlive-manager"
@@ -44,17 +44,140 @@ OPENLIVE_MANAGER_DESCRIPTION="Read-only OpenLive voice session manager"
 OPENLIVE_MANAGER_PROMPT="You manage an OpenLive voice call. The voice_sessions tool is available and you must call it before listing, inspecting, summarizing, checking, attaching to, or creating project sessions. Never claim session details without a successful tool result. Ask for clarification if a requested session is ambiguous. Create a new work session only when the user explicitly asks for one. Apart from that explicit create action, you are read-only: do not edit files, run shell commands, create tasks, or mutate sessions. Keep responses brief and conversational: one or two plain sentences without Markdown, paths, URLs, code, or stray symbols. When attachment or creation succeeds, tell the user the next voice prompt will continue in that session."
 MCP_CONNECTOR_DIR="$SHARE_ROOT/mcp-connector"
 MCP_ADAPTER_CACHE_ROOT="$MCP_CONNECTOR_DIR/adapters"
-MCP_ADAPTER_VERSION="0.1.20"
-MCP_ADAPTER_TAG="v0.6.6"
-MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.20.tar"
-MCP_ADAPTER_SHA256="73eac51146d48335264f5759c55a3a1a68a00694ab01463df3dd4d1abc5d2a3e"
+MCP_ADAPTER_VERSION="0.1.21"
+MCP_ADAPTER_TAG="v0.6.7"
+MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.21.tar"
+MCP_ADAPTER_SHA256="f6cba6609f895e75e9e1e8d022f7ca667012802b1332e1b78674ddb6bf816c70"
 MCP_SDK_VERSION="1.30.1"
 MCP_OPENCODE_SDK_VERSION="1.18.21"
 MCP_TESTED_PROTOCOL_VERSION="2025-11-25"
 MCP_TUNNEL_DIR="$SHARE_ROOT/mcp-tunnel/openai"
-HUB_ASSET_TAG="v0.6.6"
+HUB_ASSET_TAG="v0.6.7"
 HUB_ASSET_FILENAME="opencode-vm-hub-1.tar"
 HUB_ASSET_SHA256="2ef956152cb1141239b58cd379726873824136dee25baff42d16bed4934b6034"
+
+# BEGIN GENERATED MANAGED RUNTIME
+OCVM_MANAGED_RUNTIME_GZIP_BASE64='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'
+# END GENERATED MANAGED RUNTIME
 
 # Per-project VM sizing. The shared base VM is always provisioned at these
 # values; a project that needs more (or less) stores an override in its own
@@ -167,7 +290,7 @@ TASKBOARD_ARM64_SHA256="3749fb985f544fdb6788ba1dff69761e599ff82b3fe86d39ca54307c
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.6.6"
+OCVM_VERSION="0.6.7"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -8263,6 +8386,38 @@ mcp_adapter_source_dir() {
   printf '%s\n' "$cached"
 }
 
+# Source checkouts use the adjacent payload. Standalone has the exact payload
+# embedded, so manual/offline starts do not acquire a new download dependency.
+managed_policy_install() {
+  local share="$1" src="$SCRIPT_DIR/runtime" dir file
+  dir="$share/config/opencode/managed-policy"
+  if [[ ! -f "$src/managed-policy.mjs" ]]; then
+    src=""
+  fi
+  for file in "$share/config" "$share/config/opencode" "$dir"; do
+    [[ ! -L "$file" ]] || return 1
+  done
+  mkdir -p "$dir" || return 1
+  for file in managed-core.mjs managed-policy.mjs a2a-managed.py; do
+    [[ ! -L "$dir/$file" ]] || return 1
+    if [[ -n "$src" ]]; then
+      [[ -f "$src/$file" && ! -L "$src/$file" ]] || { echo "[managed] Incomplete runtime policy payload." >&2; return 1; }
+      cp -p "$src/$file" "$dir/$file" || return 1
+    fi
+  done
+  if [[ -z "$src" ]]; then
+    local decode="--decode"
+    [[ "$(uname -s)" != Darwin ]] || decode="-D"
+    printf '%s' "$OCVM_MANAGED_RUNTIME_GZIP_BASE64" | base64 "$decode" | gzip -dc | tar -xf - -C "$dir" || return 1
+  fi
+  local cfg="$share/config/opencode/opencode.json" uri="file://$dir/managed-policy.mjs"
+  [[ ! -L "$cfg" ]] || return 1
+  if [[ ! -f "$cfg" ]]; then printf '%s\n' '{"$schema":"https://opencode.ai/config.json"}' > "$cfg" || return 1; fi
+  jq_inplace "$cfg" --arg plugin "$uri" '
+    .plugin = ((.plugin // []) | map(select(. != $plugin))) + [$plugin]
+  ' || return 1
+}
+
 mcp_adapter_present() {
   [[ -e "$SCRIPT_DIR/adapters/mcp" || -e "$(mcp_adapter_cache_dir)" ]]
 }
@@ -10240,7 +10395,7 @@ You are running inside an isolated Lima VM managed by opencode-vm. The project d
 
 ## Coding Principles
 
-1. **Think before coding.** State your assumptions explicitly. If the request is ambiguous or you see multiple reasonable interpretations, surface them and ask before implementing. If no user is available to ask (autonomous or A2A runs), choose the most minimal interpretation consistent with the request and state the assumption in your report.
+1. **Think before coding.** State your assumptions explicitly. In manual sessions, surface ambiguities and ask before implementing. In backend agent-managed work, safe reversible details may use documented assumptions within task scope; missing business/product decisions require a normal terminal INPUT_REQUIRED report with concrete question, context and options. Do not open a native end-user dialog; the orchestrator supplies a normal follow-up in the same session.
 2. **Simplicity first (YAGNI).** Deliver the minimal code that solves the stated problem. **Follow YAGNI** ("You Aren't Gonna Need It"): no speculative features, unrequested abstractions, or flexibility for imagined future needs. If a need is real, add it when it arrives.
 3. **Surgical changes.** Modify only what's required for the request. Preserve existing style and structure; don't fold in unrelated refactors or "while I'm here" cleanups.
 4. **Stay in scope.** A finding discovered during implementation or testing may enter the current implementation cycle only if it is required to (a) make the agreed goal functional, (b) fix a regression caused by the current patch, or (c) pass a mandatory validation of the current scope. Everything else — improvement ideas, side issues, additional hardening — is documented and reported at the end, never implemented.
@@ -13568,6 +13723,8 @@ start_a2a() {
     return 0
   fi
   A2A_BIN="$HOME/.local/share/opencode-a2a-venv/bin/opencode-a2a"
+  export A2A_PYTHON="$HOME/.local/share/opencode-a2a-venv/bin/python"
+  export A2A_LAUNCHER="$SESS_SHARE/config/opencode/managed-policy/a2a-managed.py"
   if [ ! -x "$A2A_BIN" ]; then
     echo "[a2a] opencode-a2a is not installed in this VM — A2A endpoints unavailable."
     echo "[a2a]   Install it with: opencode-vm init   (or re-run: opencode-vm web)"
@@ -13644,7 +13801,7 @@ start_a2a() {
       waited=$(( waited + 1 ))
     done
     while true; do
-      aa-exec -p opencode-sandbox -- "$bin" serve >>/tmp/ocvm-a2a.log 2>&1 &
+      aa-exec -p opencode-sandbox -- "$A2A_PYTHON" "$A2A_LAUNCHER" "$bin" serve >>/tmp/ocvm-a2a.log 2>&1 &
       echo $! > /tmp/ocvm-a2a.run.pid
       wait $! || true
       sleep 2
@@ -14375,6 +14532,7 @@ attach_session() {
     auth_share_had=1
   fi
   skills_sync_besprechung_for_session "$resume_share" || { _attach_transition_fail; return 1; }
+  managed_policy_install "$resume_share" || { _attach_transition_fail; return 1; }
   if [[ ! -f "$AUTH_SYNC_DIR/runs/$old_auth_generation/baseline.json" \
         && -f "$resume_share/xdg-data/opencode/auth.json" ]]; then
     # Pre-baseline session: preserve the candidate once, then let the operator
@@ -14609,6 +14767,7 @@ attach_session() {
     export XDG_CONFIG_HOME="$SESS_SHARE/config"
     export XDG_DATA_HOME=/tmp/oc-xdg-data
     export XDG_STATE_HOME=/tmp/oc-xdg-state
+    export OCVM_MANAGED_POLICY_SOCKET="/tmp/ocvm-managed/$(printf %s "$PROJ_DIR" | sha256sum | cut -c1-40).sock"
     export OCVM_ATTACHMENTS_DIR="$SESS_SHARE/attachments"
     prepare_openlive_adapter() {
       [ "$OC_MODE" = "web" ] || return 0
@@ -15841,6 +16000,7 @@ start_session() {
     ecc_seed_homunculus "$proj_state" "$sess_share"
     cp -p "$sess_cfg_file" "$sess_share/config/opencode/.opencode.json"
   fi
+  managed_policy_install "$sess_share" || return 1
 
   if [[ "$SESSION_MODE" == "web" ]]; then
     resolve_session_auth "$sess_share" || return 1
@@ -16484,6 +16644,7 @@ start_session() {
     # Config stays on mount (small JSON files, safe over virtiofs)
     export XDG_CONFIG_HOME="$SESS_SHARE/config"
     export OCVM_ATTACHMENTS_DIR="$SESS_SHARE/attachments"
+    export OCVM_MANAGED_POLICY_SOCKET="/tmp/ocvm-managed/$(printf %s "$PROJ_DIR" | sha256sum | cut -c1-40).sock"
     prepare_openlive_adapter() {
       [ "$OC_MODE" = "web" ] || return 0
       [ -n "$OC_OPENLIVE_PROJECT_HASH" ] || return 1

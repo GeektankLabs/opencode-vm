@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import http from "node:http";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { OpenCodeGateway } from "./opencode.js";
 import type { RuntimeDescriptor } from "./types.js";
@@ -135,6 +138,17 @@ test("generated OpenCode client uses the expected scoped routes and 204 admissio
     response.writeHead(404).end();
   });
   const port = await listen(backend);
+  const policyCalls: unknown[] = [];
+  const policyDirectory = await mkdtemp(join(tmpdir(), "ocvm-policy-wire-"));
+  const policySocket = join(policyDirectory, "control.sock");
+  const policy = http.createServer(async (request, response) => {
+    const body = JSON.parse(await readBody(request));
+    policyCalls.push(body);
+    json(response, { session_id: body.session_id, revision: 1, agent_managed: true });
+  });
+  await new Promise<void>(resolve => policy.listen(policySocket, resolve));
+  const previousPolicySocket = process.env.OCVM_MANAGED_POLICY_SOCKET;
+  process.env.OCVM_MANAGED_POLICY_SOCKET = policySocket;
   const previousPassword = process.env.OPENCODE_SERVER_PASSWORD;
   const previousUsername = process.env.OPENCODE_SERVER_USERNAME;
   process.env.OPENCODE_SERVER_PASSWORD = "backend-password";
@@ -173,6 +187,7 @@ test("generated OpenCode client uses the expected scoped routes and 204 admissio
       "existing",
     );
     const receipt = await gateway.sendMessage("ses_wire", "wire prompt");
+    assert.deepEqual(policyCalls, [{ session_id: "ses_wire", ingress: "mcp" }, { session_id: "ses_wire", ingress: "mcp" }]);
     assert.match(receipt.message_id, /^msg_[a-f0-9]{32}$/u);
 
     const expectedAuthorization = `Basic ${Buffer.from("backend-user:backend-password").toString("base64")}`;
@@ -233,6 +248,10 @@ test("generated OpenCode client uses the expected scoped routes and 204 admissio
       parts: [{ type: "text", text: "wire prompt" }],
     });
   } finally {
+    if (previousPolicySocket === undefined) delete process.env.OCVM_MANAGED_POLICY_SOCKET;
+    else process.env.OCVM_MANAGED_POLICY_SOCKET = previousPolicySocket;
+    await new Promise<void>(resolve => policy.close(() => resolve()));
+    await rm(policyDirectory, { recursive: true, force: true });
     if (previousPassword === undefined)
       delete process.env.OPENCODE_SERVER_PASSWORD;
     else process.env.OPENCODE_SERVER_PASSWORD = previousPassword;

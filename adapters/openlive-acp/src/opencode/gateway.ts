@@ -1,3 +1,4 @@
+import { request as httpRequest } from "node:http";
 import {
   createOpencodeClient,
   type Event,
@@ -60,6 +61,27 @@ export class OpenCodeGateway {
             }
           : {}),
       });
+  }
+
+  protected async adoptManagedSession(sessionId: string): Promise<void> {
+    const socketPath = process.env.OCVM_MANAGED_POLICY_SOCKET;
+    if (!socketPath) throw new Error("Agent-managed backend policy is unavailable; start or attach with current opencode-vm before work.");
+    await new Promise<void>((resolve, reject) => {
+      const request = httpRequest({ socketPath, path: "/adopt", method: "POST", headers: { "content-type": "application/json" }, timeout: 8_000 }, response => {
+        let text = "";
+        response.on("data", chunk => { text += chunk; if (text.length > 4096) request.destroy(new Error("Managed policy response limit")); });
+        response.on("end", () => {
+          try {
+            const result = JSON.parse(text);
+            if (response.statusCode !== 200 || result.session_id !== sessionId || result.agent_managed !== true || result.revision !== 1) throw new Error("Agent-managed adoption could not be verified; no work prompt was sent.");
+            resolve();
+          } catch (error) { reject(error); }
+        });
+      });
+      request.on("timeout", () => request.destroy(new Error("Managed policy timeout")));
+      request.on("error", reject);
+      request.end(JSON.stringify({ session_id: sessionId, ingress: "openlive" }));
+    });
   }
 
   async health(): Promise<void> {
@@ -242,6 +264,7 @@ export class OpenCodeGateway {
     );
     if (!response.data)
       throw new Error("OpenCode did not create the work session");
+    await this.adoptManagedSession(response.data.id);
     return response.data;
   }
 
@@ -334,6 +357,7 @@ export class OpenCodeGateway {
       await this.requireImageInput(settings.model, signal);
       if (signal.aborted) throw abortError();
     }
+    if (settings.agent !== "openlive-manager") await this.adoptManagedSession(sessionId);
     let stopped = false;
     const requestAbort = new AbortController();
     const requestSignal = AbortSignal.any([signal, requestAbort.signal]);

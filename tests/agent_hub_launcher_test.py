@@ -35,10 +35,14 @@ class AgentHubLauncherTest(unittest.TestCase):
             script = "\n".join(extract(name) for name in (
                 "agent_hub_source_dir", "agent_hub_runtime_path", "agent_hub_stop",
                 "agent_hub_health", "agent_hub_start"))
+            hub_sha = re.search(r'^HUB_ASSET_SHA256="([^"]+)"', SCRIPT, re.M)[1]
+            version = re.search(r'^OCVM_VERSION="([^"]+)"', SCRIPT, re.M)[1]
             code = f"""set -euo pipefail
 SCRIPT_DIR={shlex.quote(str(ROOT))}
 SHARE_ROOT={shlex.quote(temporary)}
 AGENT_HUB_PORT={port}
+HUB_ASSET_SHA256={hub_sha}
+OCVM_VERSION={version}
 proj_hash() {{ python3 -c 'import hashlib,os,sys; print(hashlib.md5(os.fsencode(sys.argv[1])).hexdigest())' "$1"; }}
 {script}
 share={shlex.quote(str(share))}

@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Event } from "@opencode-ai/sdk/v2";
-import { OpenCodeGateway } from "./opencode/gateway.js";
+import { OpenCodeGateway as ProductionGateway } from "./opencode/gateway.js";
 import type { PromptHooks } from "./opencode/gateway.js";
 import type { PromptUpdate, RuntimeDescriptor } from "./types.js";
+const managedCalls: string[] = [];
+class OpenCodeGateway extends ProductionGateway {
+  protected async adoptManagedSession(id: string): Promise<void> { managedCalls.push(id); }
+}
 
 const runtime: RuntimeDescriptor = {
   schema: 1,
@@ -24,6 +28,16 @@ test("missing OpenCode status entries are idle", async () => {
   const gateway = new OpenCodeGateway(runtime, client as never);
 
   assert.equal(await gateway.status("session-idle"), "idle");
+});
+
+test("work creation adopts but manager creation does not", async () => {
+  const client = { session: { async create() { return { data: { id: "created" } }; } } };
+  const gateway = new OpenCodeGateway(runtime, client as never);
+  const before = managedCalls.length;
+  await gateway.ensureManager(undefined, "Manager");
+  assert.equal(managedCalls.length, before);
+  await gateway.createSession("Work", { agent: "build", model: { providerID: "fixture", modelID: "model" } });
+  assert.deepEqual(managedCalls.slice(before), ["created"]);
 });
 
 test("required manager tool must be registered in OpenCode", async () => {

@@ -51,7 +51,7 @@ const server = https.createServer(
       schema: 1,
       protocol: "ocvm-openlive.v1",
       scriptVersion: "0.5.49",
-      adapterVersion: "0.1.6",
+      adapterVersion: "0.1.7",
       projectId: "setup-project-id",
       displayName: "Setup Remote",
       ready: true,

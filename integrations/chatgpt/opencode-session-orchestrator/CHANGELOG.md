@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-09-30-r24
+
+- Document backend-owned agent-managed work admission without client flags or repeated primer/permission rituals; preserve READ and pure-management neutrality.
+- Distinguish normal terminal business INPUT_REQUIRED text from real pending security/host approvals; resolve in Voice/Chat and send one normal same-session follow-up.
+- Keep local development autonomy task-scoped and remote publishing operator-only; retain r21/Header/ACH-1 contracts and Review intent.
+
 ## 2026-09-30-r23
 
 - Integrate ACH-1's actual-capability-gated Design/Review classification, fixed null-only fallbacks and requested/resolved-role disclosure onto the consolidated r21 + Header/r22 baseline.

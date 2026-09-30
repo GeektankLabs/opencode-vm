@@ -11,7 +11,7 @@ OpenCode runs in a VM, not directly on host.
 
 - System Isolation 
     - You share just project files, not your personal system & user space.
-    - OpenCode cannot commit to origin git, so you have final control over your project.
+    - Local Git work and commits stay local; publishing to your origin is operator-only on the host.
 
 - Network Isolation
     - The AI can access the internet to load rescources and research.
@@ -20,6 +20,17 @@ OpenCode runs in a VM, not directly on host.
 - Familiar workflow
     - Start Opencode-VM in a terminal in VisualStudio Code with `opencode-vm start`
     - Let the AI start up docker containers in the VM on host ports (localhost:port)
+
+## Agent-managed work
+
+Agentic work through MCP, A2A and OpenLive automatically adopts an **agent-managed
+session**. Reads and pure management remain neutral. Authorized local development
+includes commits without separate confirmation; missing business decisions end
+as readable terminal `INPUT_REQUIRED` text, answered through a normal same-session
+follow-up. Native Questions are suppressed, independent security permissions stay
+separate, and remote publishing is denied without an approval prompt. The primary
+boundary remains guest/host credential and origin separation. See
+[Managed sessions](docs/MANAGED-SESSIONS.md).
 
 ## Requirements
 

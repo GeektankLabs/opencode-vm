@@ -10,12 +10,16 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { McpHttpServer } from "./http.js";
 import { READ_RESPONSE_BYTES, READ_PAYLOAD_BYTES } from "./content.js";
 import type { SessionV2Info } from "@opencode-ai/sdk/v2";
-import { OpenCodeGateway } from "./opencode.js";
+import { OpenCodeGateway as ProductionGateway } from "./opencode.js";
 import { AdapterError } from "./types.js";
 import type { RuntimeDescriptor, TaskResult } from "./types.js";
 import type { SubmissionGuardOverrideInput } from "./types.js";
 
 const project = "/project";
+const managedCalls: string[] = [];
+class OpenCodeGateway extends ProductionGateway {
+  protected override async adoptManagedSession(id: string): Promise<void> { managedCalls.push(id); }
+}
 
 function runtime(managerFile?: string): RuntimeDescriptor {
   return {
@@ -1636,6 +1640,36 @@ test("creation binds runtime defaults and a root project session without sending
     providerID: "provider",
     modelID: "model",
   });
+});
+
+test("work creation/send adopt automatically while reads and pure management stay neutral", async () => {
+  const state = baseState();
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  const before = managedCalls.length;
+  await gateway.getSessionDetails("ses_work");
+  await gateway.getSessionHistory("ses_work");
+  await gateway.renameSession("ses_work", "Managed neutrality fixture");
+  await gateway.updateSessionRuntime("ses_work", { variant: "default" });
+  await gateway.uploadAttachment("ses_work", "note.txt", "text/plain", Buffer.from("fixture").toString("base64"));
+  assert.equal(managedCalls.length, before);
+  await gateway.sendMessage("ses_work", "ordinary flagless work");
+  assert.deepEqual(managedCalls.slice(before), ["ses_work"]);
+  await gateway.archiveSession("ses_work");
+  assert.equal(managedCalls.length, before + 1);
+  const created = await gateway.createSession("New agent work");
+  assert.equal(managedCalls.at(-1), created.session_id);
+});
+
+test("policy failure prevents prompt admission and creation remains uncertain without retry", async () => {
+  class FailingGateway extends OpenCodeGateway {
+    protected override async adoptManagedSession(): Promise<void> { throw new AdapterError("BACKEND_INCOMPATIBLE", "policy unavailable"); }
+  }
+  const state = baseState();
+  const gateway = new FailingGateway(runtime(), fakeClient(state) as never);
+  await assert.rejects(gateway.sendMessage("ses_work", "work"), { code: "BACKEND_INCOMPATIBLE" });
+  assert.equal(state.promptCalls.length, 0);
+  await assert.rejects(gateway.createSession("work"), { code: "CREATION_UNCERTAIN" });
+  assert.equal(state.createCalls.length, 1);
 });
 
 test("renaming uses OpenCode's native title field and preserves session identity, runtime, and history", async () => {

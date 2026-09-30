@@ -1416,7 +1416,7 @@ export function createMcpServer(
     {
       title: "Create OpenCode Session",
       description:
-        "Create an empty root work session in this configured project using OpenCode's default work agent/model. Use when the user requests a new session. Returns session_id; call send_message separately to start work. Non-idempotent: do not retry automatically if creation is uncertain.",
+        "Create an empty root work session in this configured project using OpenCode's default work agent/model. Backend work creation automatically adopts agent-managed policy; no client flag is needed. Reads and pure management do not adopt manual sessions. Returns session_id; call send_message separately to start work. Non-idempotent: do not retry automatically if creation is uncertain.",
       inputSchema: createSessionInputSchema,
       outputSchema: createSessionOutputSchema,
       annotations: {
@@ -1533,7 +1533,7 @@ export function createMcpServer(
     {
       title: "Send OpenCode Message",
       description:
-        "Submit one asynchronous prompt; this can run commands and change project files. Optional attachments are one-use attachment_id values returned by upload_attachment, never paths. Non-idempotent: do not blindly retry an uncertain request. SESSION_BUSY means active backend work, pending input, or a concurrent MCP write. Historical receipt uncertainty does not block a technically idle session; inspect old receipts separately with get_task_result. SUBMISSION_UNCERTAIN means delivery may already have occurred; the exact same immediate retry is protected, while a different authorized follow-up may proceed when the backend is idle. Associated attachment references are consumed.",
+        "Submit one asynchronous prompt; this can run commands and change project files. Backend work admission automatically adopts agent-managed policy without a client flag. Missing business decisions return ordinary terminal INPUT_REQUIRED text for a normal same-session follow-up; independent real security permissions remain separate. Optional attachments are one-use attachment_id values returned by upload_attachment, never paths. Non-idempotent: do not blindly retry an uncertain request. SESSION_BUSY means active backend work, pending input, or a concurrent MCP write. Historical receipt uncertainty does not block a technically idle session; inspect old receipts separately with get_task_result. SUBMISSION_UNCERTAIN means delivery may already have occurred; the exact same immediate retry is protected, while a different authorized follow-up may proceed when the backend is idle. Associated attachment references are consumed.",
       inputSchema: sendMessageInputSchema,
       outputSchema: sendMessageOutputSchema,
       annotations: writeAnnotations,

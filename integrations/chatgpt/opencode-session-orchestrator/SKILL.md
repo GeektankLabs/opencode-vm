@@ -6,7 +6,7 @@ license: MIT
 
 # OpenCode Session Orchestrator
 
-Release marker: **2026-09-30-r23**. This is the skill revision, not an MCP version.
+Release marker: **2026-09-30-r24**. This is the skill revision, not an MCP version.
 
 This is a client-side workflow skill. The user supplies a working compatible MCP connection, including when using Secure MCP Tunnel. The skill contains no tunnel, account, server alias or credentials and does not configure the connection.
 
@@ -107,6 +107,20 @@ Claim a verified SHA-256 only after actually computing it over the complete reco
 Use the [approval reference](references/approval-flow.md) for edge cases. Product rules are surface-specific; the dated [source notes](references/approval-sources.md) are not proof of the current account's settings.
 
 ## Submit authorized tasks and verify exact delivery
+
+When the actual backend contract uses agent-managed work, classification is
+automatic at work admission/creation; do not add a special flag, permission tweak
+or repeated initialization prompt. Reads and pure management stay neutral. Local
+development commits may be already authorized within task scope; remote publishing
+remains operator-only under the backend's documented boundary.
+
+A normal terminal result can contain a business `INPUT_REQUIRED` report even when
+the backend says completed. Read its concrete question, context and options,
+resolve that decision in Voice/Chat, check the same session is idle/no pending
+security input, then send one authorized normal follow-up to that same session.
+Do not call Question replies, create a new session to answer it, or mark the Board
+done from technical turn completion. Real pending permissions/host approvals remain
+separate and are never automatically approved by this handback flow.
 
 - Every new task submitted to an existing OpenCode session via `send_message` must be treated as an explicit **WRITE** connector call, regardless of whether the remote agent is asked only to read. When a user clearly authorizes that new task, invoke the actual discovered `send_message` tool once; a composed prompt or retrieval call is not a submission. Let host/backend permissions decide whether on-screen approval is required; neither demand a card nor try to bypass or manufacture one.
 - Preserve the independent remote scope in the message. For a read-only task, explicitly say, for example: “READ-ONLY analysis only; do not modify files, run tests, deploy, or change infrastructure.” Tailor exclusions to the user's actual scope; do not infer that words in a prompt technically enforce read-only backend permissions. A planning-file update may edit only the authorized plan files, not implement the feature.

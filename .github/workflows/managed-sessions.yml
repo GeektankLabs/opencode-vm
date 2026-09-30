@@ -1,0 +1,42 @@
+name: Managed sessions
+on:
+  push:
+    paths: ["runtime/**", "adapters/**", "opencode-vm.sh", "tests/managed*", "tests/helpers/managed_runtime.py", ".github/workflows/managed-sessions.yml"]
+  pull_request:
+    paths: ["runtime/**", "adapters/**", "opencode-vm.sh", "tests/managed*", "tests/helpers/managed_runtime.py", ".github/workflows/managed-sessions.yml"]
+permissions:
+  contents: read
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+      - name: Prepare disposable runtimes
+        run: |
+          mkdir -p /tmp/opencode
+          npm install -g opencode-ai@1.18.33
+          python3 -m venv /tmp/opencode/a2a
+          /tmp/opencode/a2a/bin/pip install 'opencode-a2a==1.2.0' 'sqlalchemy[asyncio]'
+          npm ci --ignore-scripts --prefix adapters/mcp
+          npm ci --ignore-scripts --prefix adapters/openlive-acp
+          npm run build --prefix adapters/mcp
+          npm run build --prefix adapters/openlive-acp
+      - name: Policy and lifecycle unit gates
+        run: |
+          python3 scripts/build-managed-runtime.py --check
+          node --test tests/managed_policy_test.mjs
+          python3 -B tests/managed_a2a_test.py
+          python3 -B tests/managed_lifecycle_test.py
+      - name: Actual 1.18.33 completion and ingress gates
+        env:
+          OCVM_MANAGED_A2A_BIN: /tmp/opencode/a2a/bin
+        run: |
+          python3 -B tests/managed_policy_integration.py
+          python3 -B tests/managed_policy_integration.py --sdk @ai-sdk/openai
+          python3 -B tests/managed_policy_integration.py --sdk @ai-sdk/anthropic
+          python3 -B tests/managed_ingress_integration.py
