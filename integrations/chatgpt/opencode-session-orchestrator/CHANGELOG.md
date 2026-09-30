@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-09-30-r22
+
+- Integrate isolated Header-Validation onto r21: require exact plain-text first lines and actual role/path-bound C/P header/metadata readback in the terminal and original final result before `CONCEPT_READY`; “checked” or IDs alone cannot pass.
+- Diagnose missing file vs wrong path vs ID/format mismatch; repair only the same safely task-owned files within authorized scope, preserve body and successful bindings, renew evidence, bind/read back again. Foreign identity requires `INPUT_REQUIRED`, never overwrite.
+- Preserve r21's preferred add-only bundle, absent-tool register fallback, exact replay, mandatory available/path/revision readback and separate Board move/status readback. No fallback after error, replace/retarget, new parser/tool, CAS or blind note/move retry.
+- Port header/recovery regressions onto both binding paths and keep local/synthetic evidence distinct from Hosted model behavior.
+
 ## 2026-09-30-r21
 
 - Prefer discovered `add_task_document_bindings` for both main roles in one add-only commit; retain `register_task_document` only when the new tool is absent, never after a conflict/error.

@@ -462,7 +462,8 @@ export class ProjectBoardService {
       try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
       catch { throw new AdapterError("TASK_DOCUMENT_INVALID", "Task document is not valid UTF-8."); }
       if (!text.startsWith(`Task-ID: ${taskId}\n`) && !text.startsWith(`Task-ID: ${taskId}\r\n`)) {
-        throw new AdapterError("TASK_DOCUMENT_MISMATCH", "Task document header belongs to another task.");
+        throw new AdapterError("TASK_DOCUMENT_MISMATCH",
+          `Task document at ${path} has a mismatched task ID or header format. First line must be exactly "Task-ID: ${taskId}" (plain text, no extra spacing), followed by LF or CRLF.`);
       }
       return bytes;
     } finally { await file.close(); }

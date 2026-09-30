@@ -6,7 +6,7 @@ license: MIT
 
 # OpenCode Session Orchestrator
 
-Release marker: **2026-09-30-r21**. This is the skill revision, not an MCP version.
+Release marker: **2026-09-30-r22**. This is the skill revision, not an MCP version.
 
 This is a client-side workflow skill. The user supplies a working compatible MCP connection, including when using Secure MCP Tunnel. The skill contains no tunnel, account, server alias or credentials and does not configure the connection.
 
@@ -138,6 +138,8 @@ For a user-confirmed `todo` -> `in_progress` transition, keep the task **`todo`*
 Three labelled checkpoints drive the rest of the transition: `CONCEPT_READY` is the **agent's** terminal return on successful file creation/reconciliation; `REGISTERED` is the **orchestrator's** first checkpoint once the preferred discovered `add_task_document_bindings` bundle and mandatory `get_task_documents` readback show both main roles as `available`, with exact paths and revisions; `BOARD_MOVED` is its second checkpoint once the separate Board move/status readback confirm `in_progress`. Only when the new binding tool is absent may `register_task_document` be used; a bundle error/conflict is not permission to fall back to replacement. The agent's `CONCEPT_READY` is the **start** of follow-through, not its end. The Board task **then** moves only after `REGISTERED`. See [Initialization follow-through](references/initialization-follow-through.md) for checkpoints, orphan reuse and failure recovery.
 
 If confirmation/registration fails, leave `todo`; if the Board move fails or is uncertain, keep the files/references and re-read the exact Board task before any retry. Never create duplicates or claim success from a submission receipt. A board read or `todo`-only inspection creates nothing; already `in_progress` tasks without a plan need explicit authorized backfill. If semantic registration tools are absent, **stop before this new transition** and explain the unsupported prerequisite; do not silently substitute the legacy workflow. See [board workflow](references/board-workflow.md) for recovery details.
+
+Require each actual first line to be exactly `Task-ID: <stable task_id>` with the full ID substituted literally: plain text, no Markdown heading/backticks, alternate label or extra spacing. Before `CONCEPT_READY`, the agent must reread both real headers and metadata, print them in the terminal with role and actual path, and include those exact readback lines in its final result. **Agent success without header evidence is not accepted**; “checked” alone leaves initialization pending and Board `todo`. Agent-supplied evidence is not independent adapter verification. On binding failure, diagnose missing file vs wrong path vs header mismatch; minimally correct the same safely task-owned files in authorized work, reread and bind again through the preferred add-only bundle (register fallback only if absent). Both roles must read back `available` with exact paths/revisions before a separate Board move/status readback. Never retarget, fall back after a bundle error, or blindly retry a note/move. A foreign Task-ID requires `INPUT_REQUIRED`, never overwrite. Use shared adapter validation, not a new prevalidation tool.
 
 ## Sample-check task files during introduction
 

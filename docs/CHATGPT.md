@@ -71,6 +71,8 @@ Skill r19 and MCP adapter 0.1.17 add project-task document roles (`compact_conte
 
 Skill r21 and adapter 0.1.18 prefer `add_task_document_bindings` for one add-only main-role bundle, followed by mandatory available/path/revision readback and a separate Board move/status readback. Only when the new tool is absent may the old register path be used; errors/conflicts never authorize replacement fallback. Explicit short management notes use `add_task_management_note` plus ordinary task readback; pure status/remainder/Executive Summary requests create no notes. Note delivery is non-idempotent and has no upstream UI/edit CAS or blind retry. MCP hints do not guarantee suppression of host approval UI; hosted model behavior remains a separate acceptance level.
 
+Skill r22 integrates Header-Validation with the r21 workflow: exact plain-text `Task-ID: <stable task_id>` first lines, actual C/P header/metadata readback in the agent's terminal and final result before `CONCEPT_READY`. “Checked” alone is not evidence. Adapter 0.1.19 clarifies the existing ID-or-format mismatch diagnostic without relaxing validation or adding a tool. Safely owned formatting errors are repaired minimally in the same files, followed by renewed evidence, preferred bundle (fallback only if absent) and fresh available/path/revision readback before separate Board move/status readback. Foreign IDs require `INPUT_REQUIRED`, never overwrite. Reimport the new ZIP for external skill acceptance; local package tests do not prove Hosted behavior.
+
 ## 4. Start with a read-only smoke test
 
 Paste this into the selected ChatGPT conversation:

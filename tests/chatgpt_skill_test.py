@@ -239,6 +239,46 @@ class SkillPackageTest(unittest.TestCase):
         self.assertIn("do not submit any new agent prompt", rows["User asks only for existing status/result"])
         self.assertIn("short reminder", board)
 
+    def test_header_evidence_and_same_file_recovery_instruction_contract(self):
+        # Static skill contract regression; does not claim hosted model behavior.
+        source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
+        texts = {name: (source / path).read_text() for name, path in (
+            ("skill", "SKILL.md"), ("context", "references/task-compact-context.md"),
+            ("plan", "references/task-concept-plan.md"), ("board", "references/board-workflow.md"),
+            ("followthrough", "references/initialization-follow-through.md"))}
+        for name, text in texts.items():
+            with self.subTest(document=name):
+                self.assertIn("Task-ID: <stable task_id>", text)
+                for required in ("backticks", "spacing", "terminal", "final result", "CONCEPT_READY", "INPUT_REQUIRED"):
+                    self.assertIn(required, text)
+                self.assertIn("success without header evidence is not accepted", text.lower())
+        instruction = texts["plan"].split("When that request initializes or repairs documents", 1)[1].split(
+            "### Short follow-up reminder", 1)[0]
+        for required in ("first three lines", "first four", "role and actual path", "exact readback lines",
+                         "missing file vs wrong path vs header mismatch", "never overwrite", "do not move the Board yourself"):
+            self.assertIn(required, instruction)
+        recovery = texts["board"].split("For a registration failure", 1)[1].split("With an older connector", 1)[0]
+        for required in ("TASK_DOCUMENT_MISSING", "TASK_DOCUMENT_PATH_INVALID", "TASK_DOCUMENT_MISMATCH",
+                         "do not infer a foreign owner solely from this code", "preserving their body", "reread",
+                         "register again", "both roles `available`", "current revisions", "same files at the same paths",
+                         "separate status readback", "preferred bundle", "never create replacement"):
+            self.assertIn(required, recovery)
+        self.assertLess(recovery.index("register again"), recovery.index("both roles `available`"))
+        self.assertLess(recovery.index("both roles `available`"), recovery.index("only then `in_progress`"))
+        scenarios = (source / "references/regression-scenarios.md").read_text()
+        rows = {row.split("|")[1].strip(): row.split("|")[2].strip()
+                for row in scenarios.splitlines() if row.startswith("| ") and row.count("|") >= 3}
+        no_evidence = rows['Agent reports success or "headers checked" but supplies no actual lines']
+        self.assertIn("not accepted", no_evidence)
+        self.assertIn("Leave Board `todo`", no_evidence)
+        self.assertIn("no registration/move", no_evidence)
+        self.assertIn("INPUT_REQUIRED", rows["Real header contains a foreign Task-ID"])
+        self.assertIn("do not overwrite", rows["Real header contains a foreign Task-ID"])
+        malformed = rows["Header uses Markdown heading, backticks, alternate label or extra spacing"]
+        for required in ("not proof of another owner", "same safely task-owned files",
+                         "both roles `available` with exact paths/revisions", "preferred bundle", "fallback only if absent"):
+            self.assertIn(required, malformed)
+
     def test_ordered_task_document_initialization_and_read_only_management(self):
         source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
         skill = (source / "SKILL.md").read_text()

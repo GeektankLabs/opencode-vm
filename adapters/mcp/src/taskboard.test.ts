@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -405,6 +405,117 @@ test("semantic task documents: register after file confirmation, resume, paginat
     board.restore();
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("document header ID/format diagnostics fail closed for both roles and add-only bundle without publishing", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ocvm-board-headers-"));
+  const board = fakeBoard([{ id: "backend-1", projectId: "backend-project", title: "Headers", status: "todo", priority: "medium" }]);
+  try {
+    const state = runtime(directory);
+    const service = new ProjectBoardService(state);
+    const id = (await service.listTasks())[0]!.task_id;
+    await mkdir(join(directory, ".opencode/tasks"), { recursive: true });
+    await mkdir(join(directory, "planning/task-concepts"), { recursive: true });
+    const foreignId = `task_${randomUUID()}`;
+    const invalid = [
+      `Task-ID: ${foreignId}\n`,
+      `# Task-ID: ${id}\n`, `\`Task-ID: ${id}\`\n`, `\`\`\`\nTask-ID: ${id}\n\`\`\`\n`,
+      `Task ID: ${id}\n`, `Task-ID:${id}\n`, `Task-ID:  ${id}\n`,
+      ` Task-ID: ${id}\n`, `Task-ID: ${id} \n`, `\nTask-ID: ${id}\n`,
+    ];
+    for (const [role, path] of [
+      ["compact_context", `.opencode/tasks/task-${id}.compact.md`],
+      ["concept_plan", `planning/task-concepts/${id}-concept-plan.md`],
+    ] as const) {
+      // The other bundle file is good: failure cannot publish even that role.
+      const compact = `.opencode/tasks/task-${id}.compact.md`;
+      const plan = `planning/task-concepts/${id}-concept-plan.md`;
+      await writeFile(join(directory, role === "compact_context" ? plan : compact), `Task-ID: ${id}\nGood body\n`);
+      for (const header of invalid) {
+        const text = `${header}Preserve this body\n`;
+        await writeFile(join(directory, path), text);
+        const expected = {
+          code: "TASK_DOCUMENT_MISMATCH",
+          message: `Task document at ${path} has a mismatched task ID or header format. First line must be exactly "Task-ID: ${id}" (plain text, no extra spacing), followed by LF or CRLF.`,
+        };
+        await assert.rejects(service.registerDocument(id, role, path), expected);
+        await assert.rejects(service.addDocumentBindings(id, { compactContext: compact, conceptPlan: plan }), expected);
+        assert.equal(await readFile(join(directory, path), "utf8"), text);
+        assert.deepEqual((await service.getDocuments(id)).documents, []);
+        await assert.rejects(stat(state.taskboardMetadataFile), { code: "ENOENT" });
+        assert.equal((await service.getTask(id)).status, "todo");
+      }
+    }
+    const missing = `planning/task-concepts/${id}-concept-plan-missing.md`;
+    await assert.rejects(service.registerDocument(id, "concept_detail", missing), { code: "TASK_DOCUMENT_MISSING" });
+    await assert.rejects(service.registerDocument(id, "compact_context", missing), { code: "TASK_DOCUMENT_PATH_INVALID" });
+    assert.equal(board.calls.some((call) => call.method !== "GET"), false);
+  } finally { board.restore(); await rm(directory, { recursive: true, force: true }); }
+});
+
+for (const bundle of [false, true]) test(`document header recovery preserves r21 ${bundle ? "bundle" : "register fallback"} and readback gate`, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ocvm-board-header-recovery-"));
+  const board = fakeBoard([{ id: "backend-1", projectId: "backend-project", title: "Recovery", status: "todo", priority: "medium" }]);
+  try {
+    const state = runtime(directory);
+    const service = new ProjectBoardService(state);
+    const id = (await service.listTasks())[0]!.task_id;
+    const compact = `.opencode/tasks/task-${id}.compact.md`;
+    const plan = `planning/task-concepts/${id}-concept-plan.md`;
+    await mkdir(join(directory, ".opencode/tasks"), { recursive: true });
+    await mkdir(join(directory, "planning/task-concepts"), { recursive: true });
+    const compactText = `Task-ID: ${id}\nTitle: Recovery\nLast-updated: 2026-09-30T00:00:00+00:00\nState: initialized\n`;
+    const body = "Title: Recovery\nStatus: draft\nLast-concept-update: 2026-09-30T00:00:00+00:00\nGoal: preserve requirements\n";
+    await writeFile(join(directory, compact), compactText);
+    await writeFile(join(directory, plan), `# Task-ID: ${id}\n${body}`);
+    if (bundle) {
+      await assert.rejects(service.addDocumentBindings(id, { compactContext: compact, conceptPlan: plan }), { code: "TASK_DOCUMENT_MISMATCH" });
+      await assert.rejects(stat(state.taskboardMetadataFile), { code: "ENOENT" });
+    } else {
+      await service.registerDocument(id, "compact_context", compact);
+      const before = await readFile(state.taskboardMetadataFile, "utf8");
+      await assert.rejects(service.registerDocument(id, "concept_plan", plan), { code: "TASK_DOCUMENT_MISMATCH" });
+      assert.equal(await readFile(state.taskboardMetadataFile, "utf8"), before);
+    }
+    assert.equal((await service.getTask(id)).status, "todo");
+    assert.equal(board.calls.some((call) => call.path.endsWith("/move")), false);
+    // Authorized same-file repair preserves body and existing LF/CRLF compatibility.
+    const corrected = `Task-ID: ${id}\r\n${body}`;
+    await writeFile(join(directory, plan), corrected);
+    assert.equal(await readFile(join(directory, compact), "utf8"), compactText);
+    const resumed = new ProjectBoardService(state);
+    const bind = () => bundle ? resumed.addDocumentBindings(id, { compactContext: compact, conceptPlan: plan }) :
+      resumed.registerDocument(id, "concept_plan", plan);
+    await bind();
+    const bound = await readFile(state.taskboardMetadataFile, "utf8");
+    const inode = (await stat(state.taskboardMetadataFile)).ino;
+    // A good old registration cannot hide a later malformed header, even on exact replay.
+    await writeFile(join(directory, plan), `\`Task-ID: ${id}\`\n${body}`);
+    await assert.rejects(bind(), { code: "TASK_DOCUMENT_MISMATCH" });
+    await assert.rejects(resumed.getDocuments(id), { code: "TASK_DOCUMENT_MISMATCH" });
+    await assert.rejects(resumed.readDocument(id, "concept_plan"), { code: "TASK_DOCUMENT_MISMATCH" });
+    assert.equal(await readFile(state.taskboardMetadataFile, "utf8"), bound);
+    assert.equal((await resumed.getTask(id)).status, "todo");
+    assert.equal(board.calls.some((call) => call.path.endsWith("/move")), false);
+    await writeFile(join(directory, plan), corrected);
+    await bind();
+    if (bundle) assert.equal((await stat(state.taskboardMetadataFile)).ino, inode);
+    const documents = (await resumed.getDocuments(id)).documents;
+    assert.deepEqual(documents.map((item) => [item.role, item.path, item.state]), [
+      ["compact_context", compact, "available"], ["concept_plan", plan, "available"],
+    ]);
+    for (const document of documents) {
+      assert.ok(document.state === "available");
+      assert.equal(document.sha256, createHash("sha256").update(await readFile(join(directory, document.path))).digest("hex"));
+      assert.equal(document.revision, `task-file-v1:${document.sha256}`);
+      assert.equal((await resumed.readDocument(id, document.role)).revision, document.revision);
+    }
+    assert.equal(await readFile(join(directory, plan), "utf8"), corrected);
+    assert.equal((await resumed.getTask(id)).status, "todo");
+    await resumed.moveTask(id, "in_progress"); // Client ordering, not new server admission.
+    assert.equal((await resumed.getTask(id)).status, "in_progress");
+    assert.equal(board.calls.filter((call) => call.path.endsWith("/move")).length, 1);
+  } finally { board.restore(); await rm(directory, { recursive: true, force: true }); }
 });
 
 test("document initialization precedes board move; failed move keeps todo and reuses refs", async () => {

@@ -16,8 +16,8 @@ The executing agent's terminal return on a successful file creation/reconciliati
 
 1. The literal label `CONCEPT_READY:` appears in the agent's correlated original result. (The label is for the orchestrator's bookkeeping; it is a skill-level vocabulary term, not a server field.)
 2. The agent reports the **actual** path of each file (`planning/task-concepts/<task_id>-concept-plan.md` and `.opencode/tasks/task-<task_id>.compact.md`).
-3. The agent reports the actual `Task-ID` from each file's head block — `task_<UUID>`, not a paraphrase.
-4. The agent reports the plan's `Status` and the context's `Last-updated`.
+3. The agent reports C's actual first three lines (Task-ID, Title, Last-updated) and P's actual first four (Task-ID, Title, Status, Last-concept-update), read from the real files and printed in the terminal and original final result under each role/path. First line must be exactly plain-text `Task-ID: <stable task_id>` with the full ID substituted: no heading/backticks/alternate label/extra spacing. Agent success without header evidence is not accepted; “checked” or paths/IDs alone cannot pass.
+4. Header metadata identifies the intended task; a foreign Task-ID requires `INPUT_REQUIRED`, never overwrite/rename/retarget. Agent-supplied evidence is not independent adapter verification.
 5. The agent supplies a short summary (problem, design, next concrete step).
 
 If any of these fields is missing, the orchestrator rejects the checkpoint and stops with Board still `todo`. Path-only reports are not sufficient: a path-only report is indistinguishable from a hallucinated path. The orchestrator asks the executing agent to provide the actual `Task-ID` from each file's head block before any registration call. See the [regression scenarios](regression-scenarios.md#ordered-initialization-direct-document-reads-and-executive-view) for the explicit reject row.
@@ -69,6 +69,7 @@ Each failure shape has a precise orchestrator action. The principle is fail-clos
 | One of two registrations fails | Stop with Board still `todo`. Preserve the successful registration. On a later authorized retry, register only the missing role; do not duplicate the successful one. |
 | Add-only bundle conflicts or a file has a wrong Task-ID/path | Stop before `REGISTERED` with Board still `todo`; no partial publication, no replacement fallback or Board move. |
 | Add-only bundle response is lost/uncertain | Read references first; preserve files. An authorized identical replay is idempotent, then mandatory available/path/revision readback. No changed-path retry. |
+| Header format mismatch in a safely task-owned file | Keep `todo`, inspect actual header/ownership, minimally repair the same file in authorized work and renew exact header/metadata evidence. Rebind using the preferred bundle, absent-tool register fallback only; require both roles available with exact paths/revisions before separate move/status readback. A bundle error does not enable replacement fallback. |
 | Both registrations succeed but `get_task_documents` does not show both roles as `available` | Stop with Board still `todo`. The successful registration is preserved; the readback gap is a registration-state issue, not a Board-state issue. |
 | Both registrations read back as `available` but the Board move returns uncertain or fails | Preserve files/references; read exact Board status before any retry. It may already be `in_progress`. Unknown delivery is not rollback or confirmed `todo`; retry only after non-delivery is established. |
 | Board move returns success but readback does not show `in_progress` | Do not mark `BOARD_MOVED`. Preserve files/references and report actual status/unknown; reconcile before any retry. |

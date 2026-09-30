@@ -37,6 +37,8 @@ Last-concept-update: <ISO 8601 timestamp with offset>
 
 `Status` records the concept lifecycle, not the board status. `Last-concept-update` records the last substantive update; a new entry is not required for every micro-edit, but the timestamp is refreshed whenever the concept, architecture, decisions or plan change.
 
+The canonical first line is exactly `Task-ID: <stable task_id>` after literal substitution of the full ID. The code fence above is explanatory, not part of the file: no Markdown heading, backticks, alternate label, leading blank line/BOM or extra spacing. Use exactly one space after the colon, none at either end. Write UTF-8 with LF; existing CRLF remains accepted. This applies to compact context/detail documents too. Compare actual bytes/lines, not a visually similar rendered heading.
+
 ## Recommended sections
 
 Keep these headings when present, deleting what does not apply rather than carrying empty sections:
@@ -81,6 +83,10 @@ At the confirmed transition, first substantial task work or **new executing sess
 
 If only the plan exists before transition, use a plan-only first-work instruction instead: `Task <task_id> P:<plan path> — Plan = detailed requirements/design/decisions/implementation/test concept within board scope; session results = evidence. Check Task-ID/read first; update for substantive conceptual findings. Main file ~20k target/~30k warn/~40k split into task-ID detail docs, retain canonical index. No duplicate history; report missing/mismatched files or unauthorized writes.` Do not imply an uncreated context file exists.
 
+When that request initializes or repairs documents for a transition, append this evidence duty in the **actual agent request**:
+
+> First line in each real file must be exactly `Task-ID: <stable task_id>` with the full ID substituted, plain text without heading/backticks/alternate label/extra spacing. Before `CONCEPT_READY`, reread both actual headers: C's first three lines (Task-ID, Title, Last-updated) and P's first four (Task-ID, Title, Status, Last-concept-update). Print them in the terminal labeled with role and actual path and include those exact readback lines in the final result; “checked” alone is insufficient. Report missing file vs wrong path vs header mismatch or unwritable precisely. If a different Task-ID owns a path, return `INPUT_REQUIRED`; never overwrite it. Registration/available/path/revision readback and subsequent Board move/status readback remain orchestrator duties; do not move the Board yourself.
+
 ### Short follow-up reminder
 
 For **normal substantive** same-context work, carry both exact paths in one line with only this reminder; do **not** repeat the full briefing or thresholds:
@@ -108,7 +114,7 @@ For a user-confirmed `todo` -> `in_progress` transition, **keep the Board task `
 2. If existing files already cover the task (deterministic path or known alternative), **reuse and reconcile** them; confirm both `Task-ID` headers, the plan's `Status` and the context's `Last-updated`. If a file at the expected path belongs to another task, **do not overwrite or rename it**. Stop that file's initialization, report the collision and get an explicit path decision before writing there.
 3. Have the executing agent draft or reconcile the concept plan from the current board description and relevant prior concept work; carry relevant conceptual starting state into the plan (problem, outcome, requirements, assumptions, architecture sketch, open questions). An initial plan must contain meaningful task-specific content, not an empty template.
 4. Create or reconcile the compact context minimally: the **actual** concept plan path, genuinely verified state (or "verification pending"), settled decisions so far, open questions and the next concrete step. Include a source message/result ID only when already known; an ID returned after this submission cannot be written into the same initial prompt/file by assumption.
-5. Return the exact paths, statuses and a short summary in the work result; the orchestrator records them in conversational state and includes both references in the next task-bound handoff.
+5. Before `CONCEPT_READY`, reread both real headers/metadata (C first three lines, P first four); print them in the terminal with role and actual path and return those exact lines as evidence plus paths/statuses/summary. The orchestrator checks each first line against the canonical form before binding; agent success without header evidence is not accepted. Never infer file bytes from the prompt or intended write. Carry both references in the next task-bound handoff. For failed binding use [same-file recovery](board-workflow.md#ordered-transition-and-recovery); keep `todo` until both roles read back available with correct paths/revisions.
 
 **Orchestrator's post-`CONCEPT_READY` follow-through**, in order, is the labelled-checkpoint sequence in [initialization follow-through](initialization-follow-through.md):
 
@@ -116,7 +122,7 @@ For a user-confirmed `todo` -> `in_progress` transition, **keep the Board task `
 2. Verify each file on disk; reject foreign `Task-ID`s at canonical paths (collision, not permission to overwrite).
 3. Prefer discovered `add_task_document_bindings` for `compact_context` and `concept_plan` in one add-only bundle. Only if it is absent use `register_task_document` without `expected_path`; preserve partial success and register only the missing role on authorized resume. A bundle conflict/error stops with Board `todo`, never falls back to replacement. Exact replay is safe after read-only reconciliation of an uncertain binding commit. See [Initialization follow-through](initialization-follow-through.md).
 4. Read `get_task_documents(task_id)` back; require both roles as `state:available` with correct paths and revisions. Transition the orchestrator's own state to `REGISTERED`.
-5. Call the Board move tool to change the task to `in_progress`. Read the Board task back; the move is `BOARD_MOVED` only after the readback confirms `in_progress`. If the move returns uncertain or the readback does not show `in_progress`, stop with Board still `todo`; preserve files and registrations; re-read the exact Board task before any retry.
+5. Separately call the Board move tool and read actual status back; `BOARD_MOVED` requires confirmed `in_progress`. An uncertain move may have committed: preserve files/bindings, report verified status or unknown, never infer `todo`/rollback or blindly retry.
 6. An approval interrupt before any of these steps completes preserves the last successful step and the verified files; on confirmed re-authorization, the next open step resumes — never restart the whole sequence and never recreate files.
 
 A board read or a `todo` state alone **must not** create either file. Existing tasks without a concept plan remain usable before this transition, and a task already `in_progress` without a plan is not treated as if a new transition just occurred. Any later backfill requires an explicit authorized work request; do not invent a past transition or change board status to trigger one.
