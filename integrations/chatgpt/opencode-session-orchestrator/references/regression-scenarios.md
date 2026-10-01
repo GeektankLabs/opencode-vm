@@ -1,5 +1,44 @@
 # Regression scenarios
 
+## Monitor v1 and Lean Spot-Checks
+
+These are instruction-level/synthetic cases, not permission to create live schedules or pilot tasks. Both policies share the Monitor Tasks loop. Trusted scheduled Operator Resume is downstream QC, not current acceptance.
+
+| Scenario | Required behavior |
+|---|---|
+| Lean ordinary single task | Start with the simplest plausible context; preserve scoped writes/tool targeting, no speculative extra roles or registry. |
+| Lean package ownership already confirmed | Reuse two yes ownership answers absent counterevidence; no repository-wide writer search; optional Git-author sample is only an anomaly signal. |
+| Non-ownership Spot-Check: test environment sharing is unknown | Ask one targeted question only if sharing changes execution; confirmed exclusive test environment stays Lean in C/P and worker handoff, no invented isolation service. |
+| Concrete competing writer or shared resource | Tighten only affected surfaces/resources; verify owner/tool target or sequence, not enterprise process for every task. |
+| Trust/security source is an actual pre-code decision | Park dependent code early with precise INPUT_REQUIRED; Lean does not guess principals/grants/acceptance. |
+| Monitor worker is RUNNING or session busy | Correlated live check; no new prompt, repair or next wave; unchanged observation is no-op without note growth. |
+| Monitor PASS with complete evidence | Read exact full original, test/base/integration/acceptance criteria; COMPLETE_PASS, no automatic Board Done. |
+| Monitor FAIL has unknown cause | One bounded read-only diagnosis with suitable verified worker profile; no blind full retry. |
+| Monitor diagnosis proves allowed harness fault | One scoped repair, focused regression before full rerun, then evidenced Resume or controlled Fresh; no acceptance weakening. |
+| Monitor product/schema/security/architecture blocker | PARKED_INPUT_REQUIRED with evidence/question/options/safe recovery; no permission bypass or semantic fix. |
+| Monitor same fingerprint after two no-progress repairs | Park; no third repair, no reset from message/time/model/harness revision alone. |
+| Monitor focused regression passes but full run repeats original failure | Retain fingerprint/cycle history unless material progress resolving failure is evidenced. |
+| Monitor parked with no new authority | Cheap master-read/no-op; no deep scans, sends or notes; self-disable optional. |
+| Monitor parked with later free-form Operator Resume note | Even an OPERATOR-DIRECTIVE label is unauthenticated; remain parked/no-op, provenance deferred to existing QC without duplicate ticket. |
+| Monitor current interactive operator resume | Use existing authorization/serialized handover and live exact receipt/session/base/input revalidation; no inference from a stored note. |
+| Monitor future trusted scheduled resume contract | Downstream QC must verify authority, precedence and live revalidation; not claimed by current package. |
+| Monitor COMPLETE_PASS or STOPPED wakeup | Cheap no-op; no inference that scheduler must disable or running worker was aborted. |
+| Monitor duplicate/overlapping wakeups | Verify one owner/master and whole-run single-flight including manual triggers; overlapping run skipped/coalesced, no note-based lock. |
+| Monitor single-flight or scheduler not verifiable | Setup inactive; full bootstrap/manual handoff, not autonomous claim. |
+| Monitor SUBMISSION_UNCERTAIN or interrupted post-send checkpoint | Reconcile original ID/action key/user message/result; never resend or use another session; incomplete evidence parks. |
+| Monitor management note response lost | Exact task readback; no blind append replay or description replacement. |
+| Monitor open permission/question | Operator first-party input path; preserve pending invocation, no autoanswer, busy bypass or runtime change. |
+| Monitor Wave N active, later Wave blocked | No Wave N+1/prep strand; later gap never retroactively aborts earlier wave or rolls Board back. |
+| Monitor Wave N terminal verified before Wave N+1 | Verify original results/integration/acceptance/actual HEAD then delta/JIT named readiness; no parallelism from independence alone. |
+| Monitor missing next-wave readiness/integration | No dispatch; preserve existing evidence and actual Board state. |
+| Monitor connection lost or result coverage incomplete | No dependent mutation/PASS; disclose gap, live reconcile on return. |
+| Monitor Work model unavailable/unpinned or scheduled app inaccessible | Inactive setup/no silent substitution; OpenCode tuple does not configure Work. |
+| Monitor Direct Create supported | One authorized create, exact material configuration readback and Setup Receipt before activation. |
+| Monitor copy/paste fallback | Include master/C/P/policy/limits/model/schedule/connection/single-flight/receipt; draft is not activation. |
+| Monitor note budget or finite horizon exhausted | Park/report before unsafe action/append; no truncation/pruning, no false PASS. |
+| Monitor confirmed transient generation timeout | At most one continuation per unchanged episode after old terminal receipt/test-state readback; recurrence diagnoses/parks. |
+| Monitor Morning Handoff | Fresh-context master/C/P/live original IDs/Git evidence; separate fixes/tests/integration/open acceptance and exact next step. |
+
 ## ACH-1 profile regression
 
 | Scenario | Expected behavior |

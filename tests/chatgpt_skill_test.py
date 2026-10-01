@@ -1353,6 +1353,164 @@ class SkillPackageTest(unittest.TestCase):
             self.assertTrue(task_b.exists())
             self.assertEqual(git(task_b, "rev-parse", "HEAD").stdout.strip(), source_b)
 
+    def test_monitor_reference_and_lean_contract(self):
+        source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
+        manifest, _ = BUILDER.package_content(ROOT)
+        monitor = (source / "references/monitor-tasks.md").read_text()
+        integration = (source / "references/integration-test-monitor.md").read_text()
+        packages = (source / "references/work-packages.md").read_text()
+        skill = (source / "SKILL.md").read_text()
+        for name in ("monitor-tasks", "integration-test-monitor"):
+            self.assertIn(f"references/{name}.md", manifest["files"])
+            self.assertIn(f"references/{name}.md", skill)
+        for term in ("simple first / complexity on evidence", "Operator Spot-Check",
+                     "downstream QC", "unauthenticated/free-form"):
+            self.assertIn(term.lower(), skill.lower())
+        for term in ("strictly sequential", "delta/JIT", "only human owner",
+                     "one coordinated writing agent/monitor strand", "anomaly signal"):
+            self.assertIn(term, packages)
+        for term in ("PARKED_INPUT_REQUIRED", "COMPLETE_PASS", "STOPPED",
+                     "Direct Create", "Setup Receipt", "single-flight",
+                     "32,000 UTF-16", "40,000 UTF-8", "SUBMISSION_UNCERTAIN",
+                     "action_key", "not MCP", "at most one", "no deep session analysis"):
+            self.assertIn(term, monitor)
+        for term in ("at most two", "Reserve a cycle", "focused regression first",
+                     "A→B→A", "same appropriate session", "one continuation",
+                     "fail-fast", "acceptance semantics", "does not automatically"):
+            self.assertIn(term, integration)
+        rows = {row.split("|")[1].strip(): row.split("|")[2].strip()
+                for row in (source / "references/regression-scenarios.md").read_text().splitlines()
+                if row.startswith("| ") and row.count("|") >= 3}
+        expected = ("Monitor worker is RUNNING or session busy",
+                    "Monitor PASS with complete evidence", "Monitor FAIL has unknown cause",
+                    "Monitor diagnosis proves allowed harness fault",
+                    "Monitor product/schema/security/architecture blocker",
+                    "Monitor same fingerprint after two no-progress repairs",
+                    "Monitor parked with no new authority",
+                    "Monitor parked with later free-form Operator Resume note",
+                    "Monitor current interactive operator resume",
+                    "Monitor duplicate/overlapping wakeups",
+                    "Monitor SUBMISSION_UNCERTAIN or interrupted post-send checkpoint",
+                    "Monitor open permission/question",
+                    "Monitor Wave N terminal verified before Wave N+1",
+                    "Monitor missing next-wave readiness/integration",
+                    "Monitor connection lost or result coverage incomplete",
+                    "Monitor single-flight or scheduler not verifiable",
+                    "Monitor Morning Handoff",
+                    "Non-ownership Spot-Check: test environment sharing is unknown")
+        for name in expected:
+            self.assertIn(name, rows)
+            self.assertTrue(rows[name])
+
+    def test_monitor_scripted_action_traces_and_fail_closed_boundaries(self):
+        """Synthetic client contract walks; no scheduler/authentication implementation.
+
+        The fake represents platform evidence, not a new runtime engine. It exercises
+        interruption/overlap and both policies as the existing package fakes do.
+        Source/scenario contracts above bind the examples to shipped instructions;
+        hosted model behavior still needs separate authorized pilots.
+        """
+        class Evidence:
+            def __init__(self):
+                self.lifecycle = "ACTIVE"
+                self.calls = []
+                self.active_supervisor = False
+                self.in_flight = False
+                self.uncertain = False
+                self.cycles = 0
+
+            def wake(self, event, *, single_flight=True, interactive=False,
+                     live=True, integrated=True, ready=True, resumable=True):
+                self.calls.append("master_read")
+                if self.active_supervisor or not single_flight:
+                    return "no_action"
+                if self.lifecycle != "ACTIVE":
+                    if not interactive:
+                        return "no_action"  # A note labeled operator is not authentication.
+                    self.calls.append("live_revalidate")
+                    if not live or self.in_flight or self.uncertain:
+                        return "no_action"
+                    self.lifecycle = "ACTIVE"
+                if not live or self.uncertain or event == "uncertain":
+                    self.calls.append("reconcile_original")
+                    return "no_action"
+                if self.in_flight or event in ("running", "busy"):
+                    self.calls.append("correlated_status")
+                    return "no_action"
+                if event in ("product", "permission", "question") or (
+                        event == "repair" and self.cycles >= 2):
+                    self.lifecycle = "PARKED_INPUT_REQUIRED"
+                    action = "park"
+                elif event == "pass":
+                    self.calls.append("full_original")
+                    if not integrated:
+                        return "no_action"
+                    self.lifecycle = "COMPLETE_PASS"
+                    action = "complete"
+                elif event == "wave_done":
+                    self.calls.extend(["full_original", "integration_readback"])
+                    if not integrated:
+                        return "no_action"
+                    self.calls.append("delta_readiness")
+                    if not ready:
+                        return "no_action"
+                    action = "next_wave"
+                elif event == "focused_pass":
+                    self.calls.append("focused_original")
+                    action = "resume" if resumable else "fresh"
+                else:
+                    action = {"fail_unknown": "diagnosis", "repair": "repair",
+                              "fixed": "focused_regression"}[event]
+                if action == "repair":
+                    self.cycles += 1  # Reserved even if a later checkpoint is interrupted.
+                self.calls.extend([action, "exact_readback", "checkpoint_append"])
+                return action
+
+        for event in ("running", "busy", "uncertain"):
+            evidence = Evidence()
+            self.assertEqual(evidence.wake(event), "no_action")
+            self.assertNotIn("checkpoint_append", evidence.calls)
+        for lifecycle in ("PARKED_INPUT_REQUIRED", "COMPLETE_PASS", "STOPPED"):
+            evidence = Evidence()
+            evidence.lifecycle = lifecycle
+            self.assertEqual(evidence.wake("focused_pass"), "no_action")
+            self.assertEqual(evidence.calls, ["master_read"])
+        evidence = Evidence()
+        evidence.lifecycle = "PARKED_INPUT_REQUIRED"
+        self.assertEqual(evidence.wake("focused_pass", interactive=True, live=False), "no_action")
+        self.assertEqual(evidence.lifecycle, "PARKED_INPUT_REQUIRED")
+        self.assertEqual(evidence.wake("focused_pass", interactive=True), "resume")
+        self.assertLess(evidence.calls.index("live_revalidate"), evidence.calls.index("resume"))
+        for event in ("product", "permission", "question"):
+            evidence = Evidence()
+            self.assertEqual(evidence.wake(event), "park")
+            self.assertEqual(evidence.lifecycle, "PARKED_INPUT_REQUIRED")
+        for resumable, final in ((True, "resume"), (False, "fresh")):
+            evidence = Evidence()
+            for event, expected in (("fail_unknown", "diagnosis"), ("repair", "repair"),
+                                    ("fixed", "focused_regression"), ("focused_pass", final)):
+                start = len(evidence.calls)
+                self.assertEqual(evidence.wake(event, resumable=resumable), expected)
+                self.assertEqual(evidence.calls[start:].count("checkpoint_append"), 1)
+            self.assertEqual(evidence.wake("pass"), "complete")
+        evidence = Evidence()
+        self.assertEqual(evidence.wake("repair"), "repair")
+        self.assertEqual(evidence.wake("repair"), "repair")
+        self.assertEqual(evidence.wake("repair"), "park")
+        self.assertEqual(evidence.cycles, 2)
+        evidence = Evidence()
+        self.assertEqual(evidence.wake("wave_done", integrated=False), "no_action")
+        self.assertNotIn("delta_readiness", evidence.calls)
+        self.assertEqual(evidence.wake("wave_done", ready=False), "no_action")
+        self.assertNotIn("next_wave", evidence.calls)
+        self.assertEqual(evidence.wake("wave_done"), "next_wave")
+        self.assertLess(evidence.calls.index("integration_readback"), evidence.calls.index("next_wave"))
+        for overlap in (False, True):
+            evidence = Evidence()
+            evidence.active_supervisor = overlap
+            self.assertEqual(evidence.wake("wave_done", single_flight=overlap), "no_action")
+            self.assertEqual(evidence.calls, ["master_read"])
+
     def test_canonical_document_publication_preserves_newer_content_and_reconciles_uncertainty(self):
         """Filesystem workflow fixture; no claim of a native publication API/CAS."""
         with tempfile.TemporaryDirectory() as temporary:

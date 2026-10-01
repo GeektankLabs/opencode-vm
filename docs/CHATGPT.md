@@ -87,6 +87,8 @@ For parallel repository writes, the skill requires verified Git worktree ownersh
 
 ## 4. Start with a read-only smoke test
 
+Skill r27 adds an instruction-only Monitor Task workflow for explicitly authorized external scheduling. It discovers actual scheduled Work/app/model/readback and single-flight capabilities before activation; a copy/paste bootstrap alone is not an active monitor. Sequential package Waves and long integration/system-test supervision share one master-task/checkpoint loop. Operator Override/Resume provenance remains downstream QC: free-form Management Notes do not authenticate reactivation, so parked scheduled wakeups remain no-op. Update/reimport the companion ZIP and verify its marker in the selected surface; package checks do not prove scheduler access, runtime configuration or hosted pilot acceptance. OpenCode VM does not acquire a scheduler from the ZIP.
+
 Paste this into the selected ChatGPT conversation:
 
 ```text

@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-10-01-r27
+
+- Make simple first / complexity on evidence a core rule with targeted Operator Spot-Checks, persisted Lean assumptions and delta/JIT readiness; keep actual write-target and semantic security boundaries.
+- Add instruction-only scheduler-supported Monitor Tasks: one master, current external capability/model/connection/single-flight gates, Direct Create or full bootstrap, activation readback/receipt, exact correlation and compact append-only checkpoints. No VM scheduler or blind retry.
+- Add two policies sharing one wakeup loop: strictly sequential monitored package Waves and conservative long-test worker plus bounded manager diagnosis/harness repair/focused regression/Resume-or-Fresh. Keep two same-fingerprint no-progress repairs as default.
+- Define ACTIVE/PARKED_INPUT_REQUIRED/COMPLETE_PASS/STOPPED and cheap parked/terminal no-op. Operator Override/Resume provenance stays in existing downstream QC; unauthenticated notes never authorize scheduled reactivation, and no duplicate follow-up is created.
+- Add focused source/scenario and synthetic flow regressions; hosted scheduler/app access and both real pilots remain separate acceptance.
+
 ## 2026-09-30-r26
 
 - Deep-QA clarifies existing ownership across simultaneous Work Packages/manual writers and serial publication of member C/P deltas to the canonical connector document root; a private worktree copy is not a registered document.
