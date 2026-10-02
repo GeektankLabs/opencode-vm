@@ -34,7 +34,7 @@ OPENLIVE_PREVIOUS_COMMAND="$OPENLIVE_DIR/previous-command"
 OPENLIVE_AUTH_MARKER="__opencode_vm_openlive__"
 OPENLIVE_LOCK_PATH=""
 OPENLIVE_ADAPTER_VERSION="0.1.7"
-OPENLIVE_ADAPTER_TAG="v0.7.0"
+OPENLIVE_ADAPTER_TAG="v0.7.1"
 OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.7.tar"
 OPENLIVE_ADAPTER_SHA256="39a50c5127b0a577b54e4790b5c3c1f463b35a52b42c4343aa639dcea53bad47"
 OPENLIVE_ACP_SDK_VERSION="1.2.1"
@@ -45,14 +45,14 @@ OPENLIVE_MANAGER_PROMPT="You manage an OpenLive voice call. The voice_sessions t
 MCP_CONNECTOR_DIR="$SHARE_ROOT/mcp-connector"
 MCP_ADAPTER_CACHE_ROOT="$MCP_CONNECTOR_DIR/adapters"
 MCP_ADAPTER_VERSION="0.1.21"
-MCP_ADAPTER_TAG="v0.7.0"
+MCP_ADAPTER_TAG="v0.7.1"
 MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.21.tar"
 MCP_ADAPTER_SHA256="f6cba6609f895e75e9e1e8d022f7ca667012802b1332e1b78674ddb6bf816c70"
 MCP_SDK_VERSION="1.30.1"
 MCP_OPENCODE_SDK_VERSION="1.18.21"
 MCP_TESTED_PROTOCOL_VERSION="2025-11-25"
 MCP_TUNNEL_DIR="$SHARE_ROOT/mcp-tunnel/openai"
-HUB_ASSET_TAG="v0.7.0"
+HUB_ASSET_TAG="v0.7.1"
 HUB_ASSET_FILENAME="opencode-vm-hub-1.tar"
 HUB_ASSET_SHA256="2ef956152cb1141239b58cd379726873824136dee25baff42d16bed4934b6034"
 
@@ -290,7 +290,7 @@ TASKBOARD_ARM64_SHA256="3749fb985f544fdb6788ba1dff69761e599ff82b3fe86d39ca54307c
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.7.0"
+OCVM_VERSION="0.7.1"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -4449,7 +4449,7 @@ vmcfg_show() {
 _vmcfg_resource_cmd() {
   local res="$1"; shift
   need limactl
-  local proj sub
+  local proj sub disk_grows=0
   proj="$(pwd)"
   sub="${1:-show}"
 
@@ -4551,6 +4551,9 @@ _vmcfg_resource_cmd() {
               echo "[disk] Refusing ${sub} GiB: VM '$SESS_NAME' already has ${existing_disk} GiB. Shrinking is not supported; configuration unchanged." >&2
               return 2
             fi
+            if (( sub > existing_disk )); then
+              disk_grows=1
+            fi
           fi
         fi
         # A future VM is cloned from the base disk. Lima cannot shrink that
@@ -4566,6 +4569,9 @@ _vmcfg_resource_cmd() {
       echo "[$cmd] This project's session VM will use ${sub} ${unit} (default: ${def:-base VM} ${unit})."
       echo "[$cmd]   stored in: $(project_vm_env "$proj")"
       echo "[$cmd]   reset with: opencode-vm ${cmd} default"
+      if [[ "$res" == disk && "$disk_grows" == 1 ]]; then
+        _vmcfg_offer_stop_and_resize "$proj" "$sub" || return 1
+      fi
       _vmcfg_report_pending_restart "$proj"
       ;;
   esac
@@ -4612,7 +4618,7 @@ config_cmd() {
     vmcfg_show "$(pwd)"
     echo "[config] $resource: enter a whole number (GiB for RAM/Disk, count for CPU) or 'default'."
     if [[ "$resource" == disk ]]; then
-      echo "[config] Disk grows on the next stopped-VM start; default never shrinks an existing disk."
+      echo "[config] Disk growth requires a stopped VM. For a running tracked VM, a larger value offers an approved stop and managed resume; default never shrinks an existing disk."
     else
       echo "[config] RAM/CPU changes take effect on clone or stopped-VM start."
     fi
@@ -4626,7 +4632,7 @@ config_cmd() {
 # old size and what it takes to pick the new one up. Expects VM_MEMORY_GIB /
 # VM_CPUS / VM_DISK_GIB to already hold the new values.
 _vmcfg_report_pending_restart() {
-  local proj="$1" senv sess_mem sess_cpu sess_disk want_mem want_cpu drift=""
+  local proj="$1" senv sess_mem sess_cpu sess_disk want_mem want_cpu drift="" disk_pending=0
   senv="$(session_env "$proj")"
   [[ -f "$senv" ]] || return 0
   # shellcheck disable=SC1090
@@ -4644,13 +4650,257 @@ _vmcfg_report_pending_restart() {
   fi
   if [[ -n "${VM_DISK_GIB:-}" && -n "$sess_disk" ]] && (( sess_disk < VM_DISK_GIB )); then
     drift="${drift:+$drift, }disk ${sess_disk} -> ${VM_DISK_GIB} GiB"
+    disk_pending=1
   fi
   [[ -n "$drift" ]] || return 0
   if is_vm_running "$SESS_NAME"; then
-    echo "[vmsize] Session VM '$SESS_NAME' is running — resizing needs a stop ($drift)."
-    echo "[vmsize]   Exit the session, then 'opencode-vm start' applies it."
+    if (( disk_pending )); then
+      echo "[vmsize] Lima cannot grow the disk while session VM '$SESS_NAME' is running; this setting remains pending ($drift)."
+      echo "[vmsize]   To approve a stop and managed resume, rerun 'opencode-vm config disk ${VM_DISK_GIB}'. Otherwise stop the VM, then run 'opencode-vm attach'."
+    else
+      echo "[vmsize] Session VM '$SESS_NAME' is running — resizing needs a stop ($drift)."
+      echo "[vmsize]   Exit the session, then 'opencode-vm start' applies it."
+    fi
   else
     echo "[vmsize] Stopped session VM '$SESS_NAME' still has the old size — 'opencode-vm start' applies it ($drift)."
+  fi
+}
+
+# Offer a retained stop/resize/resume only for a confirmed disk growth on the
+# current project's running session VM. Consent is collected before taking the
+# lifecycle lock, then bound to the exact tracker/controller/auth/config state.
+_vmcfg_offer_stop_and_resize() {
+  local proj="$1" requested="$2" senv instances status answer=""
+  local initial_name initial_project initial_controller initial_auth_generation
+  local initial_disk initial_mem_override initial_cpu_override sess_cfg_hash initial_running=0
+  local sess_name sess_project sess_controller sess_auth_generation sess_mode sess_port
+  local sess_keep_history sess_tls sess_mcp_enabled sess_mcp_port sess_editor_enabled sess_editor_disabled
+  local current_disk current_mem current_cpu want_mem want_cpu pending_resources=""
+  local resize_controller resized_disk attach_rc old_base
+
+  senv="$(session_env "$proj")"
+  [[ -f "$senv" ]] || return 0
+  unset SESS_NAME SESS_PROJ SESS_CONTROLLER SESS_AUTH_GENERATION
+  # shellcheck disable=SC1090
+  if ! source "$senv"; then
+    echo "[disk] Cannot read the tracked session for this project; disk growth remains pending." >&2
+    return 1
+  fi
+  initial_name="${SESS_NAME:-}"
+  initial_project="${SESS_PROJ:-}"
+  initial_auth_generation="${SESS_AUTH_GENERATION:-$initial_name}"
+  initial_controller="${SESS_CONTROLLER:-$initial_auth_generation}"
+  if [[ -z "$initial_name" || "$initial_name" == "$BASE_NAME" || "$initial_project" != "$proj" ]]; then
+    echo "[disk] The tracked VM does not match this project; refusing to offer a stop. Disk growth remains pending." >&2
+    return 1
+  fi
+  if ! instances="$(limactl list -q 2>/dev/null)"; then
+    echo "[disk] Cannot list Lima VMs to check '$initial_name'; disk growth remains pending." >&2
+    return 1
+  fi
+  grep -Fxq "$initial_name" <<< "$instances" || return 0
+  initial_disk="$(_vm_instance_disk_gib "$initial_name" 2>/dev/null || true)"
+  if [[ -z "$initial_disk" ]]; then
+    echo "[disk] Cannot read the current disk size of '$initial_name'; disk growth remains pending." >&2
+    return 1
+  fi
+  (( requested > initial_disk )) || return 0
+  if is_vm_running "$initial_name"; then
+    initial_running=1
+  fi
+  if ! status="$(limactl list "$initial_name" --format '{{.Name}} {{.Status}}' 2>/dev/null)"; then
+    echo "[disk] Cannot confirm the Lima state of '$initial_name'; disk growth remains pending." >&2
+    return 1
+  fi
+  case "$status" in
+    "$initial_name Stopped")
+      if (( initial_running )); then
+        echo "[disk] Lima reports '$initial_name' stopped, but its state check disagrees; no stop was offered." >&2
+        return 1
+      fi
+      return 0
+      ;;
+    "$initial_name Running")
+      if (( initial_running == 0 )); then
+        echo "[disk] Lima reports '$initial_name' running, but its state could not be confirmed; no stop was offered." >&2
+        return 1
+      fi
+      ;;
+    *)
+      echo "[disk] Lima returned an unknown state for '$initial_name'; disk growth remains pending." >&2
+      return 1
+      ;;
+  esac
+
+  vmcfg_load "$proj"
+  if [[ "${VM_DISK_GIB:-}" != "$requested" ]]; then
+    echo "[disk] The saved disk target changed before consent; no VM was stopped." >&2
+    return 1
+  fi
+  initial_mem_override="${VM_MEMORY_GIB:-}"
+  initial_cpu_override="${VM_CPUS:-}"
+  current_mem="$(_vm_instance_mem_gib "$initial_name" 2>/dev/null || true)"
+  current_cpu="$(_vm_instance_cpus "$initial_name" 2>/dev/null || true)"
+  want_mem="$(_effective_vm_mem_gib)"
+  want_cpu="$(_effective_vm_cpus)"
+  if [[ -n "$current_mem" && -n "$want_mem" && "$current_mem" != "$want_mem" ]]; then
+    pending_resources="RAM ${current_mem} -> ${want_mem} GiB"
+  fi
+  if [[ -n "$current_cpu" && -n "$want_cpu" && "$current_cpu" != "$want_cpu" ]]; then
+    pending_resources="${pending_resources:+$pending_resources, }CPU ${current_cpu} -> ${want_cpu}"
+  fi
+
+  echo "[disk] Lima cannot grow a disk while its VM is running."
+  echo "[disk] Stopping '$initial_name' will interrupt in-VM work; the existing VM and project session will be kept and resumed."
+  if [[ -n "$pending_resources" ]]; then
+    echo "[disk] The normal stopped-VM resume will also apply pending RAM/CPU changes: $pending_resources."
+  else
+    echo "[disk] The normal stopped-VM resume also applies any already-pending RAM/CPU overrides."
+  fi
+  if [[ ! -t 0 || ! -r /dev/tty ]]; then
+    echo "[disk] No interactive terminal; not stopping automatically. Disk growth remains pending."
+    return 0
+  fi
+  read -r -p "[disk] Stop, grow to ${requested} GiB, and resume this VM now? [y/N]: " answer </dev/tty || answer=""
+  case "$answer" in
+    y|Y) ;;
+    *) echo "[disk] Not stopping the VM. Disk growth remains pending."; return 0 ;;
+  esac
+
+  if ! lifecycle_lock_acquire "$proj"; then
+    echo "[disk] Could not acquire lifecycle ownership; the VM was not stopped and disk growth remains pending." >&2
+    return 1
+  fi
+  if [[ ! -f "$senv" ]]; then
+    lifecycle_lock_release
+    echo "[disk] The tracked session disappeared after consent; no VM was stopped." >&2
+    return 1
+  fi
+  unset SESS_NAME SESS_PROJ SESS_CONTROLLER SESS_AUTH_GENERATION SESS_MODE SESS_PORT SESS_KEEP_HISTORY SESS_TLS CFG_HASH_AT_START
+  unset SESS_MCP_ENABLED SESS_MCP_PORT SESS_EDITOR_ENABLED SESS_EDITOR_DISABLED
+  # shellcheck disable=SC1090
+  if ! source "$senv"; then
+    lifecycle_lock_release
+    echo "[disk] Cannot reread the tracked session after consent; no VM was stopped." >&2
+    return 1
+  fi
+  sess_name="${SESS_NAME:-}"
+  sess_project="${SESS_PROJ:-}"
+  sess_cfg_hash="${CFG_HASH_AT_START:-}"
+  sess_auth_generation="${SESS_AUTH_GENERATION:-$sess_name}"
+  sess_controller="${SESS_CONTROLLER:-$sess_auth_generation}"
+  sess_mode="${SESS_MODE:-tui}"
+  sess_port="${SESS_PORT:-$DEFAULT_OC_PORT}"
+  sess_keep_history="${SESS_KEEP_HISTORY:-0}"
+  sess_tls="${SESS_TLS:-0}"
+  sess_mcp_enabled="${SESS_MCP_ENABLED:-0}"
+  sess_mcp_port="${SESS_MCP_PORT:-}"
+  sess_editor_enabled="${SESS_EDITOR_ENABLED:-0}"
+  sess_editor_disabled="${SESS_EDITOR_DISABLED:-0}"
+  if [[ "$sess_name" != "$initial_name" || "$sess_project" != "$initial_project" || \
+        "$sess_project" != "$proj" || "$sess_name" == "$BASE_NAME" || \
+        "$sess_controller" != "$initial_controller" || "$sess_auth_generation" != "$initial_auth_generation" ]]; then
+    lifecycle_lock_release
+    echo "[disk] Session identity, controller, or auth generation changed after consent; no VM was stopped." >&2
+    return 1
+  fi
+
+  vmcfg_load "$proj"
+  if [[ "${VM_DISK_GIB:-}" != "$requested" || "${VM_MEMORY_GIB:-}" != "$initial_mem_override" || \
+        "${VM_CPUS:-}" != "$initial_cpu_override" ]]; then
+    lifecycle_lock_release
+    echo "[disk] Sizing configuration changed after consent; no VM was stopped." >&2
+    return 1
+  fi
+  if ! instances="$(limactl list -q 2>/dev/null)" || ! grep -Fxq "$sess_name" <<< "$instances"; then
+    lifecycle_lock_release
+    echo "[disk] The consent-bound VM is no longer listed by Lima; no VM was stopped." >&2
+    return 1
+  fi
+  if ! status="$(limactl list "$sess_name" --format '{{.Name}} {{.Status}}' 2>/dev/null)" || \
+     [[ "$status" != "$sess_name Running" ]] || ! is_vm_running "$sess_name"; then
+    lifecycle_lock_release
+    echo "[disk] The consent-bound VM is no longer confirmed running; no resize or resume was attempted." >&2
+    return 1
+  fi
+  current_disk="$(_vm_instance_disk_gib "$sess_name" 2>/dev/null || true)"
+  if [[ -z "$current_disk" || "$current_disk" != "$initial_disk" ]] || (( current_disk >= requested )); then
+    lifecycle_lock_release
+    echo "[disk] The VM disk changed after consent; no VM was stopped." >&2
+    return 1
+  fi
+
+  resize_controller="${sess_name}-disk-resize-$(date +%s)-$$-${RANDOM}"
+  if ! write_senv "$senv" "$sess_name" "$sess_project" "$sess_cfg_hash" \
+      "$sess_mode" "$sess_port" "$sess_keep_history" "$sess_tls" \
+      "$sess_auth_generation" "$resize_controller" "$sess_mcp_enabled" "$sess_mcp_port" \
+      "$sess_editor_enabled" "$sess_editor_disabled"; then
+    lifecycle_lock_release
+    echo "[disk] Could not record retained resize ownership; no VM was stopped." >&2
+    return 1
+  fi
+  SESS_CONTROLLER="$resize_controller"
+  if ! lifecycle_finalize_runtime "$sess_name" "$sess_auth_generation" "$(session_share_dir "$proj")"; then
+    lifecycle_lock_release
+    echo "[disk] Runtime/auth finalization failed; the VM and project session were preserved without resizing." >&2
+    return 1
+  fi
+
+  if [[ "$sess_mode" == web || "$sess_mode" == tui-mcp ]]; then
+    if ! [[ "$sess_port" =~ ^[0-9]+$ ]]; then
+      lifecycle_lock_release
+      echo "[disk] The saved web port is invalid; the VM was preserved without stopping." >&2
+      return 1
+    fi
+    for old_base in $(seq "$sess_port" $((sess_port + 9))); do
+      stop_web_tunnels "$sess_name" "$old_base" >/dev/null 2>&1 || {
+        lifecycle_lock_release
+        echo "[disk] Could not stop the VM's owned web forwards; refusing to stop the VM." >&2
+        return 1
+      }
+    done
+  fi
+  if ! limactl stop "$sess_name"; then
+    lifecycle_lock_release
+    echo "[disk] VM stop failed or is uncertain; the retained VM/share were preserved without resizing or restart." >&2
+    return 1
+  fi
+  if ! status="$(limactl list "$sess_name" --format '{{.Name}} {{.Status}}' 2>/dev/null)" || \
+     [[ "$status" != "$sess_name Stopped" ]] || is_vm_running "$sess_name"; then
+    lifecycle_lock_release
+    echo "[disk] VM stop could not be verified; refusing to resize or restart it." >&2
+    return 1
+  fi
+
+  vmcfg_load "$proj"
+  if [[ "${VM_DISK_GIB:-}" != "$requested" || "${VM_MEMORY_GIB:-}" != "$initial_mem_override" || \
+        "${VM_CPUS:-}" != "$initial_cpu_override" ]]; then
+    lifecycle_lock_release
+    echo "[disk] Sizing configuration changed during stop; VM remains stopped for explicit recovery." >&2
+    return 1
+  fi
+  current_disk="$(_vm_instance_disk_gib "$sess_name" 2>/dev/null || true)"
+  if [[ -z "$current_disk" || "$current_disk" != "$initial_disk" ]]; then
+    lifecycle_lock_release
+    echo "[disk] VM disk changed during stop; VM remains stopped without an unverified resize." >&2
+    return 1
+  fi
+  _apply_vm_sizing_to_stopped "$sess_name" "[disk]" || true
+  resized_disk="$(_vm_instance_disk_gib "$sess_name" 2>/dev/null || true)"
+  if [[ -z "$resized_disk" ]] || (( resized_disk < requested )); then
+    lifecycle_lock_release
+    echo "[disk] Could not verify disk growth to ${requested} GiB; VM remains stopped. Retry with 'opencode-vm attach'." >&2
+    return 1
+  fi
+
+  echo "[disk] Verified '$sess_name' disk at ${resized_disk} GiB. Releasing lifecycle ownership before managed resume."
+  lifecycle_lock_release
+  if attach_session; then
+    echo "[disk] Managed attach completed for '$sess_name'."
+  else
+    attach_rc=$?
+    echo "[disk] Disk growth is verified, but the session did not resume. Retry with 'opencode-vm attach'." >&2
+    return "$attach_rc"
   fi
 }
 
