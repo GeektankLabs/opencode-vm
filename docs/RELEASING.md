@@ -37,15 +37,35 @@ shasum -a 256 /tmp/openlive-a.tar /tmp/mcp-a.tar /tmp/hub-a.tar
 ```
 
 7. Set `OPENLIVE_ADAPTER_SHA256`, `MCP_ADAPTER_SHA256`, and `HUB_ASSET_SHA256` to those digests and run all validations below.
-8. Commit the release candidate and push it to `main` through the normal host/IDE workflow.
-9. Wait for `.github/workflows/release.yml` to validate the release, create the missing `v<OCVM_VERSION>` tag at that exact commit, and publish all five assets.
-10. Verify pinned artifact URLs and checksums before announcing the release.
+8. Commit the release candidate locally. Record the exact commit and hand it to the operator; a local commit or successful local checks do not publish a release.
+9. The operator pushes that exact candidate commit to `main` through the normal host/IDE workflow. The push and any recovery tag push remain operator actions.
+10. Wait for `.github/workflows/release.yml` to validate that commit, create the missing `v<OCVM_VERSION>` tag at that exact commit, and publish all five assets. Apply the release-completion gate below to the same commit.
+11. Verify pinned artifact URLs and checksums before announcing the release.
 
 Updating `main` remains a host-side maintainer action because session VMs intentionally have no Git origin credentials. Tag and release publication runs in GitHub Actions.
 
-Because a `main` push starts the release workflow, `main` necessarily contains the candidate while validation is still running. Do not run or announce an update during this window. A failed release workflow must be fixed or rerun before the candidate is considered available.
+Because a `main` push starts the release workflow, `main` necessarily contains the candidate while validation is still running. Do not run or announce an update during this window. A failed release workflow is not release availability; diagnose its evidence and follow the repair and re-verification sequence below.
 
 The workflow also accepts a manually pushed `v*` tag as a recovery path. A normal `git push` or IDE "Sync Changes" does not reliably push local tags, so the default process does not create a local tag at all: GitHub creates the tag after every validation passes, then publishes the release. Release jobs are serialized per version, with the running job and latest pending attempt retained. The first successful same-version candidate publishes; later candidates exit without rebuilding only when their script and adapter/Hub build inputs match the published release. An incomplete release, inconsistent tag or asset, unversioned release-input change, or GitHub API failure stops the workflow instead of being mistaken for a successful no-op.
+
+## Release-completion gate and runtime continuity
+
+A candidate is not a completed release until its own pushed commit passes the expected workflow and the corresponding release is verified. Evaluate the exact candidate SHA recorded at local handoff; the branch tip, tag name, push receipt, or a different newer green run is not a substitute.
+
+The gate is **verified green** only when all of the following are evidenced for that candidate:
+
+- The expected release workflow/run has completed successfully, its checked-out/head commit is exactly the candidate SHA, and every required job, validation and publication step has succeeded.
+- The `v<OCVM_VERSION>` tag resolves to that same commit.
+- The release is published (not draft or prerelease) with all five expected assets from the artifact contract above.
+- The published checksum/pin information is consistent with the candidate's validated build inputs. Distinguish checksum metadata or hosted asset digests from a newly downloaded and independently hashed asset; claim the latter only when those bytes were actually read and hashed.
+
+Queued/running, failed, cancelled, missing, inaccessible, incomplete, contradictory or wrong-commit evidence leaves the gate **red or unverified**. Missing evidence is not a pass. Report the candidate SHA, the specific observed run/commit/status and which required release evidence is absent or mismatched. A local test pass, a green run for another commit, or a matching version string alone does not open the gate.
+
+When a failed or incomplete gate needs a repair, identify the failed job/step and supporting log or artifact evidence, then propose the smallest local repair. Make changes or commits only within the already authorized task scope; do not rewrite workflow permissions or release architecture as an improvised fix. A repair that changes the candidate creates a new expected commit: hand off its exact SHA for a new operator push, then verify a new successful run and release evidence against that SHA. The earlier green result does not validate the repaired commit. Pushes, tag writes, release publication/uploads and deployment remain operator-only; do not configure or forward credentials to make them agent actions.
+
+While the expected gate is red or unverified, preserve the working runtime and its recovery state. Do not recommend routine pruning, stopping, fresh starts, restart, reconnect/reattach, recreation, installation/update, or Ctrl+C followed by attach as release troubleshooting. Continue diagnosis and in-scope local repair without interrupting a working runtime when possible. An interruption is an exception only when an explicitly authorized in-scope repair demonstrably requires that specific interruption; state the evidence, why it is technically necessary, and the retained recovery state before acting.
+
+Verified green permits a separate authorized maintenance or acceptance decision; it does not automatically trigger prune/restart, task completion, deployment, announcement or cleanup. Report local candidate/checks, operator push (observed or reported), exact-commit CI/release evidence and any external acceptance as separate facts.
 
 ## Validation
 

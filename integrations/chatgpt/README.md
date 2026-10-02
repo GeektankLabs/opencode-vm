@@ -28,6 +28,7 @@ This directory is separate from the repository's VM-side `skills/registry.json`.
 | `opencode-session-orchestrator/references/decision-preparation.md` | Decision-ready research and authorized concept/planning work |
 | `opencode-session-orchestrator/references/regression-scenarios.md` | Synthetic behavior-review and optional smoke-test cases |
 | `opencode-session-orchestrator/references/worktree-ownership.md` | Repository-wide write ownership, canonical document publication, integration and fail-safe cleanup |
+| `opencode-session-orchestrator/references/release-gates.md` | Repository-policy discovery, exact-commit release verification, operator boundary and runtime preservation |
 | `opencode-session-orchestrator/references/work-packages.md` | Persistent package membership, waves/readiness, Morning Handoff and Chat-to-Work coordination |
 | `opencode-session-orchestrator/references/monitor-tasks.md` | External scheduler setup/receipt, shared bounded wakeup and fail-closed lifecycle/checkpoints |
 | `opencode-session-orchestrator/references/integration-test-monitor.md` | Long-test diagnosis, bounded harness repair, focused regression and Resume/Fresh policy |

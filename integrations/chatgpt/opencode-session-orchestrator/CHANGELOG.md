@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-02-r29
+
+- Add generic release-gate guidance that discovers and follows the target repository's policy, keeps operator-only publication separate from local work, and verifies CI/release evidence against the exact candidate commit.
+- Preserve the working runtime while the expected gate is red or unverified; permit interruption only for an explicitly authorized in-scope repair that demonstrably requires it, with reason and recovery state.
+- Add release-gate regression scenarios and source-contract checks. No publishing, CI, credential, security-boundary or runtime behavior is changed; hosted skill acceptance remains separate.
+
 ## 2026-10-02-r28
 
 - Route explicit management-note verification and monitor checkpoint recovery through the discovered persistent Taskboard journal: latest checkpoint, entries after it, bounded older-history cursors and revision-bound legacy Description pages.

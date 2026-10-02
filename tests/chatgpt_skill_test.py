@@ -1580,6 +1580,70 @@ class SkillPackageTest(unittest.TestCase):
             self.assertEqual(publish(current_revision), "unsafe_path")
             self.assertEqual(outside.read_bytes(), retained_bytes)
 
+    def test_repository_release_gate_policy_and_scenarios(self):
+        """Guard the generic skill and project policy against release-gate drift."""
+        project_policy = (ROOT / "docs/RELEASING.md").read_text()
+        project_guidance = (ROOT / "AGENTS.md").read_text()
+        chatgpt_guidance = (ROOT / "docs/CHATGPT.md").read_text()
+        package_readme = (ROOT / "integrations/chatgpt/README.md").read_text()
+        source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
+        skill = (source / "SKILL.md").read_text()
+        release_reference = (source / "references/release-gates.md").read_text()
+        scenarios = (source / "references/regression-scenarios.md").read_text()
+        changelog = (source / "CHANGELOG.md").read_text()
+        manifest, _ = BUILDER.package_content(ROOT)
+
+        self.assertIn("Release-completion gate and runtime continuity", project_policy)
+        for required in (
+            "exact candidate SHA",
+            "checked-out/head commit is exactly the candidate SHA",
+            "tag resolves to that same commit",
+            "all five expected assets",
+            "red or unverified",
+            "The earlier green result does not validate the repaired commit",
+            "preserve the working runtime and its recovery state",
+            "Do not recommend routine pruning",
+            "explicitly authorized in-scope repair demonstrably requires",
+        ):
+            self.assertIn(required.lower(), project_policy.lower())
+        self.assertIn("docs/RELEASING.md", project_guidance)
+        self.assertIn("Skill r29", chatgpt_guidance)
+
+        self.assertIn("references/release-gates.md", manifest["files"])
+        self.assertIn("references/release-gates.md", skill)
+        self.assertIn("references/release-gates.md", package_readme)
+        self.assertIn(f'## {manifest["revision"]}', changelog)
+        self.assertIn(f'**{manifest["revision"]}**', skill)
+        for required in (
+            "target repository's own release policy",
+            "do not infer workflow names",
+            "operator",
+            "exact intended candidate",
+            "different newer green run",
+            "new candidate commit",
+            "preserve the working runtime",
+            "red or unverified",
+            "demonstrably requires",
+        ):
+            self.assertIn(required.lower(), release_reference.lower())
+        for project_specific in ("task_70e6fe6a-7813-54f2-aa1a-5c068d67ca3b",
+                                 "GeektankLabs", "v0.7.2", "github.com/"):
+            self.assertNotIn(project_specific, release_reference)
+
+        rows = {row.split("|")[1].strip(): row.split("|")[2].strip()
+                for row in scenarios.splitlines() if row.startswith("| ") and row.count("|") >= 3}
+        wrong_commit = rows["A green workflow run belongs to a different or newer commit than the intended candidate"]
+        self.assertIn("exact commit", wrong_commit)
+        self.assertIn("Gate remains unverified", wrong_commit)
+        repaired = rows["An authorized local repair creates a new candidate commit after an earlier green run"]
+        self.assertIn("earlier run does not verify the new commit", repaired)
+        runtime = rows["The expected gate is red or unverified while a working runtime is needed for current work"]
+        for action in ("prune", "restart", "reconnect/reattach", "recreation", "install/update"):
+            self.assertIn(action, runtime)
+        interruption = rows["An explicitly authorized, in-scope repair demonstrably requires interrupting the runtime"]
+        self.assertIn("technical necessity", interruption)
+        self.assertIn("recovery state", interruption)
+
 
 if __name__ == "__main__":
     unittest.main()

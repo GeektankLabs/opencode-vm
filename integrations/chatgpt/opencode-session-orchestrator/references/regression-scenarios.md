@@ -279,6 +279,21 @@ Profile behavior review: a pure status/result read performs no runtime change; a
 | User explicitly chooses a runtime/profile, or configured mapping is unavailable/incomplete | Respect explicit selection. For configured unavailable/incomplete data, report exact limitation and request a safe alternative; no silent model substitution. Unconfigured policy is not a configured unavailable model. |
 | User asks only for package status or Morning Handoff | Use read tools and available documents/results only; do not create a package, send a prompt, move Board state, write notes or start background monitoring. |
 
+## Repository release-gate cases
+
+| Case | Required behavior |
+|---|---|
+| A task prepares a release candidate in a repository | Read the target repository's release policy first. Record the exact local candidate and checks; a local commit is not remote publication. |
+| The operator has not pushed the candidate | Keep push/tag/release/upload/deploy operator-only. Do not claim a remote run or release from a local commit or handoff. |
+| The expected release workflow is queued/running, unavailable, or lacks readable commit evidence | Gate remains unverified. Name the exact missing evidence; do not choose another run or recommend routine runtime interruption. |
+| A green workflow run belongs to a different or newer commit than the intended candidate | Gate remains unverified for the candidate. Match the run's exact commit, not only branch, version, tag name or recency. |
+| The exact-commit workflow is red, failed, cancelled or incomplete | Do not claim release completion. Identify the failing/missing check or publication evidence and propose only the smallest in-scope repair. |
+| Workflow is green for the candidate but the expected tag, published release, asset or checksum evidence is missing/mismatched | Gate remains unverified until the repository policy's complete release evidence matches that exact candidate. |
+| An authorized local repair creates a new candidate commit after an earlier green run | The earlier run does not verify the new commit. Hand off its exact SHA for operator push and require a new successful exact-commit verification. |
+| The expected gate is red or unverified while a working runtime is needed for current work | Preserve the runtime and recovery state. Do not recommend routine prune, stop, restart, reconnect/reattach, recreation, fresh start, install/update or Ctrl+C plus attach. |
+| An explicitly authorized, in-scope repair demonstrably requires interrupting the runtime | Only that specific interruption may proceed; state the evidence and technical necessity, and record the retained recovery state. No broader maintenance permission is implied. |
+| The exact candidate's required workflow and release evidence are verified green | Report the exact commit and observed evidence. Maintenance, task completion, deployment, announcement, cleanup and external acceptance remain separate decisions; do not trigger them automatically. |
+
 ## Task compact context cases
 
 | Case | Required behavior |

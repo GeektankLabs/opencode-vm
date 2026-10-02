@@ -91,6 +91,8 @@ Skill r27 adds an instruction-only Monitor Task workflow for explicitly authoriz
 
 Skill r28 routes journal-capable Monitor recovery through exact Board task reads, latest-checkpoint lookup and entries after that checkpoint; older loop/fingerprint history uses bounded cursor pages when needed. Legacy Description notes remain a separate revision-bound source. Journal markers and entry order remain non-authenticating; r28 does not implement trusted scheduled Operator Override/Resume provenance or change the existing fail-closed boundary.
 
+Skill r29 adds generic repository-release management guidance: it discovers and reads the selected repository's own release policy, separates a local candidate from operator-controlled publication, verifies evidence against the exact candidate commit, and preserves a working runtime while the expected gate is red or unverified. The companion skill contains no project-specific release IDs, URLs, credentials or current version constants. Rebuild/reimport the ZIP to use the new guidance; local package checks do not establish hosted behavior or release acceptance.
+
 Paste this into the selected ChatGPT conversation:
 
 ```text

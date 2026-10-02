@@ -6,7 +6,7 @@ license: MIT
 
 # OpenCode Session Orchestrator
 
-Release marker: **2026-10-02-r28**. This is the skill revision, not an MCP version.
+Release marker: **2026-10-02-r29**. This is the skill revision, not an MCP version.
 
 This is a client-side workflow skill. The user supplies a working compatible MCP connection, including when using Secure MCP Tunnel. The skill contains no tunnel, account, server alias or credentials and does not configure the connection.
 
@@ -24,6 +24,7 @@ Read references when their workflow is relevant:
 - A board task whose work spans several agent iterations or a fresh session: [Task compact context](references/task-compact-context.md).
 - A complex or conceptually rich board task that warrants a persistent planning document: [Task concept plan](references/task-concept-plan.md).
 - Agent-managed repository writes, worktree ownership, integration and cleanup: [Worktree ownership](references/worktree-ownership.md).
+- Release candidates, published-release verification, or maintenance while a release gate is unresolved: [Repository release gates](references/release-gates.md).
 - Persistent multi-task coordination, package readiness, Morning Handoff, Work and runtime choice: [Work packages](references/work-packages.md).
 - Explicit scheduled/night/absence supervision: [Monitor tasks](references/monitor-tasks.md); for long test diagnosis/repair also [Integration-test monitor](references/integration-test-monitor.md).
 - Post-`CONCEPT_READY` follow-through on a confirmed `todo` -> `in_progress` transition: [Initialization follow-through](references/initialization-follow-through.md).
