@@ -817,8 +817,9 @@ class SkillPackageTest(unittest.TestCase):
             self.assertIn("add_task_document_bindings", text)
             self.assertIn("get_task_documents", text)
         workflow = (source / "references/board-workflow.md").read_text()
-        for term in ("add_task_management_note", "non-idempotent", "never blindly retry", "no upstream CAS",
-                     "initialization create no notes", "not a general edit fallback", "approval UI"):
+        for term in ("add_task_management_note", "get_task_management_history", "non-idempotent",
+                     "never blindly retry", "initialization create no notes", "legacy Description",
+                     "after_checkpoint", "approval UI"):
             self.assertIn(term.lower(), workflow.lower() + (source / "SKILL.md").read_text().lower())
 
         # Synthetic client-decision model; actual service semantics are covered by adapter tests.
@@ -828,6 +829,7 @@ class SkillPackageTest(unittest.TestCase):
                 self.uncertain = uncertain
                 self.description = "Original\n"
                 self.status = "todo"
+                self.entries = []
                 self.calls = []
 
             def read(self):
@@ -836,8 +838,12 @@ class SkillPackageTest(unittest.TestCase):
 
             def append(self, note):
                 self.calls.append("add_task_management_note")
-                self.description += "\n\nManagement Note:\n" + note.strip()
+                self.entries.append({"entry_id": "entry-1", "sequence": 1, "text": note.strip()})
                 return not self.uncertain
+
+            def history(self):
+                self.calls.append("get_task_management_history")
+                return list(self.entries)
 
         def request_note(connector, note=None):
             before = connector.read()
@@ -846,13 +852,14 @@ class SkillPackageTest(unittest.TestCase):
             if not connector.available:
                 return {"error": "unsupported"}
             connector.append(note)
-            return connector.read()  # Reconcile even on lost response, no retry/general edit.
+            return {"task": connector.read(), "history": connector.history()}  # Reconcile even on lost response, no retry/general edit.
 
         for uncertain in (False, True):
             notes = Notes(uncertain=uncertain)
             result = request_note(notes, " Follow up ")
-            self.assertEqual(result, {"description": "Original\n\n\nManagement Note:\nFollow up", "status": "todo"})
-            self.assertEqual(notes.calls, ["get_project_task", "add_task_management_note", "get_project_task"])
+            self.assertEqual(result, {"task": {"description": "Original\n", "status": "todo"},
+                                      "history": [{"entry_id": "entry-1", "sequence": 1, "text": "Follow up"}]})
+            self.assertEqual(notes.calls, ["get_project_task", "add_task_management_note", "get_project_task", "get_task_management_history"])
         notes = Notes()
         request_note(notes)
         self.assertEqual(notes.calls, ["get_project_task"])
@@ -1370,14 +1377,17 @@ class SkillPackageTest(unittest.TestCase):
                      "one coordinated writing agent/monitor strand", "anomaly signal"):
             self.assertIn(term, packages)
         for term in ("PARKED_INPUT_REQUIRED", "COMPLETE_PASS", "STOPPED",
-                     "Direct Create", "Setup Receipt", "single-flight",
-                     "32,000 UTF-16", "40,000 UTF-8", "SUBMISSION_UNCERTAIN",
+                      "Direct Create", "Setup Receipt", "single-flight",
+                      "32,000 UTF-16", "64 MiB", "40 KiB", "SUBMISSION_UNCERTAIN",
                      "action_key", "not MCP", "at most one", "no deep session analysis"):
             self.assertIn(term, monitor)
         for term in ("at most two", "Reserve a cycle", "focused regression first",
                      "A→B→A", "same appropriate session", "one continuation",
                      "fail-fast", "acceptance semantics", "does not automatically"):
             self.assertIn(term, integration)
+        for term in ("get_task_management_history", 'mode:"latest_checkpoint"',
+                     'mode:"after_checkpoint"', 'mode:"after"', "legacy_description"):
+            self.assertIn(term, monitor + skill)
         rows = {row.split("|")[1].strip(): row.split("|")[2].strip()
                 for row in (source / "references/regression-scenarios.md").read_text().splitlines()
                 if row.startswith("| ") and row.count("|") >= 3}
@@ -1396,8 +1406,15 @@ class SkillPackageTest(unittest.TestCase):
                     "Monitor missing next-wave readiness/integration",
                     "Monitor connection lost or result coverage incomplete",
                     "Monitor single-flight or scheduler not verifiable",
-                    "Monitor Morning Handoff",
-                    "Non-ownership Spot-Check: test environment sharing is unknown")
+                     "Monitor Morning Handoff",
+                     "Non-ownership Spot-Check: test environment sharing is unknown",
+                     "Requested management note on a journal-capable connector",
+                     "Management journal has a latest checkpoint and later decisions/notes",
+                     "Management journal has older loop/fingerprint history beyond recent tail",
+                     "Management append response is uncertain or journal reports a recovered suffix",
+                     "Journal JSON, identity, head or record is malformed/incomplete",
+                     "Existing legacy Management Notes remain in native Description",
+                     "Connector lacks `get_task_management_history`")
         for name in expected:
             self.assertIn(name, rows)
             self.assertTrue(rows[name])

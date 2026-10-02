@@ -25,6 +25,7 @@ const tools = new Set([
   "get_project_task",
   "register_task_document",
   "add_task_management_note",
+  "get_task_management_history",
   "add_task_document_bindings",
   "get_task_documents",
   "read_task_document",

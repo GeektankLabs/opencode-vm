@@ -369,8 +369,13 @@ Profile behavior review: a pure status/result read performs no runtime change; a
 | Orphan matching files or identical bundle replay | Reuse unchanged files, identical add-only bundle; no duplicate references or new publication on exact replay. Read back before a move; do not repeat an already verified move. |
 | Bundle conflict or second file invalid | Fail closed without partial publication or Board move; no replace/retarget, no fallback after an error. |
 | Bundle response lost after commit | Reconcile references read-only; an authorized identical replay is safe, never a changed-path replacement. |
-| Requested management note | Read known task, invoke `add_task_management_note` once, verify via `get_project_task`; append only authorized text and retain all other fields. |
-| Management-note PUT committed but response lost | Read back and report verified text or uncertainty; no blind retry, no description-replacement fallback. |
+| Requested management note on a journal-capable connector | Read the known task, invoke `add_task_management_note` once, verify entry ID/sequence using `get_task_management_history`; ordinary Description and other task fields remain unchanged. |
+| Management journal has a latest checkpoint and later decisions/notes | Read the checkpoint, then page `after_checkpoint` to the captured head before acting; a later entry must not be hidden by the checkpoint shortcut. |
+| Management journal has older loop/fingerprint history beyond recent tail | Use bounded `after` cursor pages until required coverage is complete; a recent page alone cannot reset a loop guard. |
+| Management append response is uncertain or journal reports a recovered suffix | Reconcile by exact entry ID/sequence/history and current head; no blind retry or Description fallback. |
+| Journal JSON, identity, head or record is malformed/incomplete | Fail closed, preserve bytes, report the history gap and do not perform dependent management action. |
+| Existing legacy Management Notes remain in native Description | Read `legacy_description` as revision-bound UTF-8 ranges without migrating, reordering or inferring actor/timestamp; restart after revision change. |
+| Connector lacks `get_task_management_history` | Follow only its observed legacy behavior and disclose that bounded persistent history is unavailable; do not invent the tool or replace Description. |
 | Executive Summary/status/remainder/initialization without note authorization | Read-only management produces no notes; initialization writes only authorized bindings/move, never an automatic note. |
 | Additive annotations or missing note tool | Hints are not permissions or guaranteed approval suppression; missing tool is a capability gap, not a general edit fallback. |
 | Adapter exposes direct semantic document tools after a new chat | Read `get_project_task` and `get_task_documents(task_id)`; use returned roles/paths/revisions. Generic session artifact links and guessed paths are not canonical task-document discovery. An old task may legitimately have no references. |

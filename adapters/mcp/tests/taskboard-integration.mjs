@@ -63,6 +63,7 @@ try {
     report.current_connector = {
       discovery_only: true,
       note_available: names.includes("add_task_management_note"),
+      history_available: names.includes("get_task_management_history"),
       bindings_available: names.includes("add_task_document_bindings"),
     };
   }
@@ -84,9 +85,8 @@ try {
     OPENCODE_DISABLE_PROJECT_CONFIG: "1", OPENCODE_DISABLE_EXTERNAL_SKILLS: "1",
   });
   const health = await wait(async () => { const response = await fetch(`${backendUrl}/global/health`, { signal: AbortSignal.timeout(1_000) }); return response.ok && response.json(); });
-  // Record real PUT bodies; inject one lost response AFTER real backend commit.
+  // Record any native task PUT: management journal appends must not touch Description.
   const puts = [];
-  let loseNextPutResponse = false;
   proxy = http.createServer(async (request, response) => {
     try {
       const chunks = [];
@@ -96,11 +96,6 @@ try {
       const upstream = await fetch(`${boardUrl}${request.url}`, { method: request.method,
         ...(body.length ? { body, headers: { "content-type": "application/json" } } : {}) });
       const bytes = Buffer.from(await upstream.arrayBuffer());
-      if (request.method === "PUT" && loseNextPutResponse) {
-        loseNextPutResponse = false;
-        response.destroy();
-        return;
-      }
       response.writeHead(upstream.status, { "content-type": "application/json" });
       response.end(bytes);
     } catch { response.writeHead(502).end(); }
@@ -171,20 +166,24 @@ try {
   report.checks.push("single/bundle/replay/conflict/missing/mismatch/all-or-nothing/readback");
   for (const note of ["Follow up", "Follow up"]) await call("add_task_management_note", { task_id: id, note });
   let readback = await call("get_project_task", { task_id: id });
-  assert.equal(readback.description, "Original\n" + "\n\nManagement Note:\nFollow up".repeat(2));
+  assert.equal(readback.description, "Original\n");
   assert.deepEqual([readback.title, readback.priority, readback.status], [task.title, task.priority, "todo"]);
   assert.equal(await readFile(metadataFile, "utf8"), bound);
+  let management = await call("get_task_management_history", { task_id: id, mode: "after", limit: 10 });
+  assert.deepEqual(management.entries.map(({ sequence, text }) => ({ sequence, text })),
+    [{ sequence: 1, text: "Follow up" }, { sequence: 2, text: "Follow up" }]);
+  assert.equal(management.legacy_description.text, "Original\n");
   await error("add_task_management_note", { task_id: "task_aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", note: "Unknown" }, "TASK_NOT_FOUND");
-  await error("add_task_management_note", { task_id: id, note: "界".repeat(14_000) }, "TASK_SEARCH_INCOMPLETE");
-  await error("add_task_management_note", { task_id: id, note: "x".repeat(32_000) }, "TASK_DESCRIPTION_LIMIT");
-  assert.equal(puts.length, 2);
-  loseNextPutResponse = true;
-  await error("add_task_management_note", { task_id: id, note: "Committed response lost" }, "TASKBOARD_UNAVAILABLE");
+  await error("add_task_management_note", { task_id: id, note: "界".repeat(14_000) }, "TASK_MANAGEMENT_JOURNAL_LIMIT");
+  await call("add_task_management_note", { task_id: id, note: "x".repeat(32_000) });
+  await error("add_task_management_note", { task_id: id, note: "x".repeat(32_001) }, "INVALID_ARGUMENT");
+  assert.equal(puts.length, 0);
   readback = await call("get_project_task", { task_id: id });
-  assert.ok(readback.description.endsWith("\n\nManagement Note:\nCommitted response lost"));
-  assert.equal(puts.length, 3, "Uncertain PUT was retried");
-  assert.ok(puts.every((body) => Object.keys(body).join() === "description"));
-  report.checks.push("native append/multiple/prefix/field-isolation/limits/unknown/commit-uncertainty-no-retry");
+  assert.equal(readback.description, "Original\n");
+  management = await call("get_task_management_history", { task_id: id, mode: "latest_checkpoint" });
+  assert.equal(management.entries.length, 0);
+  assert.equal(management.entry_count, 3);
+  report.checks.push("persistent journal append/multiple/legacy/field-isolation/limits/unknown/no native Description PUT");
   await call("move_project_task", { task_id: id, status: "in_progress" });
   assert.equal((await call("get_project_task", { task_id: id })).status, "in_progress");
   report.checks.push("available-revisions-before-separate-board-move/status-readback");

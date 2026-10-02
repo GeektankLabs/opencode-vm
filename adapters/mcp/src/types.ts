@@ -1,7 +1,7 @@
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { dirname, isAbsolute } from "node:path";
 
-export const ADAPTER_VERSION = "0.1.21";
+export const ADAPTER_VERSION = "0.1.22";
 export const MCP_TRANSPORT = "streamable-http-stateless";
 
 export type RuntimeDescriptor = {
@@ -441,6 +441,10 @@ export const ADAPTER_ERROR_CODES = [
   "TASK_DOCUMENT_CONFLICT",
   "TASK_DOCUMENT_LIMIT",
   "TASK_DESCRIPTION_LIMIT",
+  "TASK_MANAGEMENT_JOURNAL_ERROR",
+  "TASK_MANAGEMENT_JOURNAL_UNCERTAIN",
+  "TASK_MANAGEMENT_JOURNAL_LIMIT",
+  "TASK_MANAGEMENT_JOURNAL_CHANGED",
 ] as const;
 
 export type AdapterErrorCode = (typeof ADAPTER_ERROR_CODES)[number];

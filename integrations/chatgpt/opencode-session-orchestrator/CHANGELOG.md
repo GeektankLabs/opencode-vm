@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-02-r28
+
+- Route explicit management-note verification and monitor checkpoint recovery through the discovered persistent Taskboard journal: latest checkpoint, entries after it, bounded older-history cursors and revision-bound legacy Description pages.
+- Keep connector compatibility honest: normal task Description remains unchanged for new journal notes; old connectors retain only their observed legacy behavior, and journal/I/O/coverage uncertainty blocks dependent action without blind replay.
+- Add source/scenario checks for persistent-history use, legacy notes, incomplete-history failures and the r27 monitor boundaries. No operator-authentication or scheduled-resume provenance behavior is added.
+
 ## 2026-10-01-r27
 
 - Make simple first / complexity on evidence a core rule with targeted Operator Spot-Checks, persisted Lean assumptions and delta/JIT readiness; keep actual write-target and semantic security boundaries.

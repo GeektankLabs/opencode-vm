@@ -6,7 +6,7 @@ license: MIT
 
 # OpenCode Session Orchestrator
 
-Release marker: **2026-10-01-r27**. This is the skill revision, not an MCP version.
+Release marker: **2026-10-02-r28**. This is the skill revision, not an MCP version.
 
 This is a client-side workflow skill. The user supplies a working compatible MCP connection, including when using Secure MCP Tunnel. The skill contains no tunnel, account, server alias or credentials and does not configure the connection.
 
@@ -207,7 +207,7 @@ For an Executive Summary, current progress, blockers/open points, next step or c
 
 ## Append an authorized management note
 
-For an explicitly requested short management note, discover `add_task_management_note`, read the known task, append only the authorized note once and verify through `get_project_task`. This is a non-idempotent write: uncertain results require readback, never blind retry. Executive Summary/status/remainder reads and initialization create no notes; missing note capability does not permit general description replacement. Keep durable context in task files. See [Management notes](references/board-workflow.md#management-notes). Additive MCP annotations are hints, not authorization or a guarantee that the host suppresses approval UI.
+For an explicitly requested management note, discover `add_task_management_note` and `get_task_management_history`. Read the known task, append only the authorized note once, then verify its journal entry by returned ID/sequence through history; `get_project_task.description` stays unchanged for new notes. On uncertain delivery, reconcile journal history before any retry. For scheduler recovery, read the latest checkpoint and then use `mode:"after_checkpoint"` pages so newer entries are not hidden; retrieve older history when loop/fingerprint coverage requires it. An absent journal is not proof that legacy Description notes do not exist: page `legacy_description` by its returned UTF-8 revision/range. If the history capability is absent on an older connector, follow only that connector's observed legacy behavior and disclose the gap. Do not blindly replay or replace Description. Executive Summary/status/remainder reads and initialization create no notes. Keep durable design/current state in task files. See [Management notes](references/board-workflow.md#management-notes). Additive MCP annotations are hints, not authorization or a guarantee that the host suppresses approval UI.
 
 ## Observe progress and sessions needing attention
 

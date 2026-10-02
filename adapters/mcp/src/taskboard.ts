@@ -3,9 +3,11 @@ import { spawn } from "node:child_process";
 import { constants } from "node:fs";
 import { lstat, mkdir, open, readFile, realpath, rename, unlink } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
-import { READ_PAYLOAD_BYTES, utf8Prefix, jsonBytes } from "./content.js";
+import { READ_PAYLOAD_BYTES, READ_RESPONSE_BYTES, utf8Prefix, jsonBytes } from "./content.js";
 import type { RuntimeDescriptor } from "./types.js";
 import { AdapterError } from "./types.js";
+import { TaskManagementJournal } from "./management-journal.js";
+import type { ManagementJournalRead, ManagementHistoryOptions } from "./management-journal.js";
 
 type TaskLink = { session_id: string; message_id?: string; result?: string; artifact_refs?: string[] };
 export type DocumentRole = "compact_context" | "concept_plan" | "concept_detail";
@@ -107,6 +109,17 @@ function searchIncomplete(): AdapterError {
   return new AdapterError("TASK_SEARCH_INCOMPLETE", "Project task scan or result exceeds its limit; completeness is not established.");
 }
 
+type LegacyManagementHistory = {
+  source: "native_description";
+  revision: string;
+  total_bytes: number;
+  range: { start: number; end: number };
+  text: string;
+  has_more: boolean;
+};
+
+export type ProjectTaskManagementHistory = ManagementJournalRead & { legacy_description: LegacyManagementHistory };
+
 function parseMetadata(value: unknown): Metadata {
   if (!record(value) || (value.schema !== 1 && value.schema !== 2 && value.schema !== 3) ||
       !record(value.projects) || !record(value.tasks) ||
@@ -182,7 +195,11 @@ type TaskboardRuntime = RuntimeDescriptor & {
 };
 
 export class ProjectBoardService {
-  constructor(private readonly runtime: TaskboardRuntime) {}
+  private readonly managementJournal: TaskManagementJournal;
+
+  constructor(private readonly runtime: TaskboardRuntime) {
+    this.managementJournal = new TaskManagementJournal(runtime.taskboardMetadataFile, runtime.projectHash);
+  }
 
   async listBoardProjects(): Promise<PublicBoardProject[]> {
     const metadata = await this.loadMetadata();
@@ -271,7 +288,9 @@ export class ProjectBoardService {
     return task;
   }
 
-  async addManagementNote(taskId: string, note: string): Promise<PublicTask> {
+  async addManagementNote(taskId: string, note: string): Promise<PublicTask & { management_note: {
+    entry_id: string; sequence: number; generation: string; head_sequence: number;
+  } }> {
     if (!/^task_[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/u.test(taskId) ||
         typeof note !== "string" || !note.trim() || note.trim().length > MAX_TASK_DESCRIPTION_LENGTH) {
       throw new AdapterError("INVALID_ARGUMENT", "A stable task ID and a nonempty bounded note are required.");
@@ -280,18 +299,59 @@ export class ProjectBoardService {
       const metadata = await this.loadMetadata();
       this.requireNoPendingTransfer(metadata);
       const row = await this.resolveTask(taskId, metadata);
-      const prefix = row.description ?? "";
-      const description = `${prefix}${prefix ? "\n\n" : ""}Management Note:\n${note.trim()}`;
-      if (description.length > MAX_TASK_DESCRIPTION_LENGTH) {
-        throw new AdapterError("TASK_DESCRIPTION_LIMIT", "Appended task description exceeds the character limit.");
-      }
-      if (Buffer.byteLength(JSON.stringify(this.publicTask({ ...row, description }, metadata, true)), "utf8") > MAX_TASK_OUTPUT_BYTES) {
+      const task = this.publicTask(row, metadata, true);
+      const receiptBudget = { entry_id: "0".repeat(36), sequence: Number.MAX_SAFE_INTEGER,
+        generation: "0".repeat(36), head_sequence: Number.MAX_SAFE_INTEGER };
+      if (Buffer.byteLength(JSON.stringify({ ...task, management_note: receiptBudget }), "utf8") > MAX_TASK_OUTPUT_BYTES) {
         throw searchIncomplete();
       }
-      const updated = await this.request<BackendTask>(`/api/tickets/${encodeURIComponent(row.id)}`,
-        { method: "PUT", body: { description } });
-      return this.publicTask(updated, metadata, true);
+      const receipt = await this.managementJournal.append(taskId, note);
+      return { ...task, management_note: receipt };
     });
+  }
+
+  async getManagementHistory(taskId: string, options: ManagementHistoryOptions, legacyOffset = 0,
+    legacyRevision?: string, legacyMaxBytes = 4096): Promise<ProjectTaskManagementHistory> {
+    if (!/^task_[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/u.test(taskId) ||
+        !Number.isSafeInteger(legacyOffset) || legacyOffset < 0 ||
+        !Number.isSafeInteger(legacyMaxBytes) || legacyMaxBytes < 0 || legacyMaxBytes > 8192) {
+      throw new AdapterError("INVALID_ARGUMENT", "A stable task ID and bounded legacy-description range are required.");
+    }
+    return this.withMetadataLock(async () => {
+      const metadata = await this.loadMetadata();
+      this.requireNoPendingTransfer(metadata);
+      const row = await this.resolveTask(taskId, metadata);
+      const journal = await this.managementJournal.read(taskId, options);
+      const legacy = this.readLegacyDescription(row.description ?? "", legacyOffset, legacyRevision, legacyMaxBytes);
+      const result: ProjectTaskManagementHistory = { ...journal, legacy_description: legacy };
+      while (jsonBytes(result) > READ_RESPONSE_BYTES - 8192 && result.legacy_description.text) {
+        const shorter = utf8Prefix(result.legacy_description.text,
+          Math.floor(Buffer.byteLength(result.legacy_description.text, "utf8") / 2));
+        result.legacy_description.text = shorter;
+        result.legacy_description.range.end = result.legacy_description.range.start + Buffer.byteLength(shorter, "utf8");
+        result.legacy_description.has_more = result.legacy_description.range.end < result.legacy_description.total_bytes;
+      }
+      if (jsonBytes(result) > READ_RESPONSE_BYTES - 8192) {
+        throw new AdapterError("RESPONSE_BUDGET_EXCEEDED", "Management history response exceeds its bounded serialized budget.");
+      }
+      return result;
+    });
+  }
+
+  private readLegacyDescription(description: string, offset: number, revision?: string, maxBytes = 4096): LegacyManagementHistory {
+    if (!description.isWellFormed()) throw new AdapterError("TASKBOARD_ERROR", "Native task Description is not valid Unicode text.");
+    const bytes = Buffer.from(description, "utf8");
+    const currentRevision = `task-description-v1:${createHash("sha256").update(bytes).digest("hex")}`;
+    if ((offset > 0 && !revision) || (revision && revision !== currentRevision)) {
+      throw new AdapterError("TASK_MANAGEMENT_JOURNAL_CHANGED", "Legacy task Description changed during history pagination; restart at byte zero.");
+    }
+    if (offset > bytes.length || (offset < bytes.length && (bytes[offset]! & 0xc0) === 0x80)) {
+      throw new AdapterError("INVALID_ARGUMENT", "Legacy Description offset is outside a UTF-8 boundary.");
+    }
+    const text = utf8Prefix(bytes.subarray(offset).toString("utf8"), maxBytes);
+    const end = offset + Buffer.byteLength(text, "utf8");
+    return { source: "native_description", revision: currentRevision, total_bytes: bytes.length,
+      range: { start: offset, end }, text, has_more: end < bytes.length };
   }
 
   async addDocumentBindings(taskId: string, bindings: { compactContext?: string; conceptPlan?: string }) {

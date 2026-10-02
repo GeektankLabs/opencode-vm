@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
+import { createServer as createHttpServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -63,7 +64,7 @@ function fakeBoard(rows: Array<{ id: string; projectId: string; title: string; d
   return { calls, failPutOnce: () => { failNextPut = true; }, failMoveOnce: () => { failNextMove = true; }, restore: () => { globalThis.fetch = originalFetch; } };
 }
 
-test("management notes preserve prefixes, isolate fields, serialize writers and never retry uncertain PUTs", async () => {
+test("management journal appends compatibly without growing Description and preserves legacy notes", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ocvm-board-note-"));
   const rows = [{ id: "backend-1", projectId: "backend-project", title: "Unchanged", description: "Original\n\n",
     status: "todo", priority: "high" }];
@@ -72,29 +73,228 @@ test("management notes preserve prefixes, isolate fields, serialize writers and 
     const state = runtime(directory);
     const service = new ProjectBoardService(state);
     const id = (await service.listTasks())[0]!.task_id;
+    assert.equal((await service.getManagementHistory(id, { mode: "recent", limit: 20 })).state, "absent");
+    await assert.rejects(stat(join(directory, "management-journal")), { code: "ENOENT" });
     const first = await service.addManagementNote(id, "  Follow up  ");
-    assert.equal(first.description, "Original\n\n\n\nManagement Note:\nFollow up");
+    assert.equal(first.description, "Original\n\n");
+    assert.equal(first.management_note.sequence, 1);
     await Promise.all([service.addManagementNote(id, "Same"), new ProjectBoardService(state).addManagementNote(id, "Same")]);
-    assert.equal(rows[0]!.description, first.description + "\n\nManagement Note:\nSame".repeat(2));
-    assert.deepEqual(board.calls.filter((call) => call.method === "PUT").map((call) => Object.keys(call.body!)),
-      [["description"], ["description"], ["description"]]);
+    assert.equal(rows[0]!.description, "Original\n\n");
+    const readback = await service.getManagementHistory(id, { mode: "recent", limit: 20 });
+    assert.deepEqual(readback.entries.map((entry) => entry.text), ["Follow up", "Same", "Same"]);
+    assert.deepEqual(readback.entries.map((entry) => entry.sequence), [1, 2, 3]);
+    assert.equal(board.calls.some((call) => call.method === "PUT"), false);
     assert.deepEqual([rows[0]!.title, rows[0]!.status, rows[0]!.priority], ["Unchanged", "todo", "high"]);
     await assert.rejects(stat(state.taskboardMetadataFile), { code: "ENOENT" });
     rows[0]!.description = "";
-    assert.equal((await service.addManagementNote(id, "Empty prefix")).description, "Management Note:\nEmpty prefix");
-    const before = board.calls.filter((call) => call.method === "PUT").length;
+    assert.equal((await service.addManagementNote(id, "Empty prefix")).description, "");
+    assert.deepEqual((await service.getManagementHistory(id, { mode: "recent", limit: 20 })).entries.map((entry) => entry.text),
+      ["Follow up", "Same", "Same", "Empty prefix"]);
     await assert.rejects(service.addManagementNote(id, "  "), { code: "INVALID_ARGUMENT" });
     await assert.rejects(service.addManagementNote("task_aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "Unknown"), { code: "TASK_NOT_FOUND" });
     rows[0]!.description = "x".repeat(31_990);
-    await assert.rejects(service.addManagementNote(id, "Overflow"), { code: "TASK_DESCRIPTION_LIMIT" });
+    assert.equal((await service.addManagementNote(id, "No description growth")).description.length, 31_990);
     rows[0]!.description = "界".repeat(14_000);
     await assert.rejects(service.addManagementNote(id, "Byte overflow"), { code: "TASK_SEARCH_INCOMPLETE" });
-    assert.equal(board.calls.filter((call) => call.method === "PUT").length, before);
-    rows[0]!.description = "";
-    board.failPutOnce();
-    await assert.rejects(service.addManagementNote(id, "Committed but uncertain"), { code: "TASKBOARD_UNAVAILABLE" });
-    assert.equal(rows[0]!.description, "Management Note:\nCommitted but uncertain");
-    assert.equal(board.calls.filter((call) => call.method === "PUT").length, before + 1);
+    assert.equal(board.calls.some((call) => call.method === "PUT"), false);
+    rows[0]!.description = "Original\n\nManagement Note:\nlegacy checkpoint\n";
+    const legacy = await service.getManagementHistory(id, { mode: "recent", limit: 20 }, 0, undefined, 10);
+    assert.equal(legacy.legacy_description.text, "Original\n\n");
+    const legacyNext = await service.getManagementHistory(id, { mode: "recent", limit: 20 },
+      legacy.legacy_description.range.end, legacy.legacy_description.revision, 8192);
+    assert.equal(legacyNext.legacy_description.revision, legacy.legacy_description.revision);
+    assert.match(legacyNext.legacy_description.text, /Management Note:\nlegacy checkpoint/u);
+  } finally { board.restore(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("management journal keeps 64 cycles bounded, pages a captured head, and seeks the latest checkpoint", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ocvm-board-journal-long-"));
+  const rows = [{ id: "backend-1", projectId: "backend-project", title: "Long run",
+    description: "Canonical task\n\nManagement Note:\nlegacy checkpoint", status: "in_progress", priority: "high" }];
+  const board = fakeBoard(rows);
+  try {
+    const state = runtime(directory);
+    const service = new ProjectBoardService(state);
+    const id = (await service.listTasks())[0]!.task_id;
+    const before = JSON.stringify(await service.getTask(id));
+    const unavailable = await service.getManagementHistory(id, { mode: "latest_checkpoint", limit: 20 });
+    assert.equal(unavailable.state, "absent");
+    await assert.rejects(stat(join(directory, "management-journal")), { code: "ENOENT" });
+
+    for (let cycle = 1; cycle <= 64; cycle++) {
+      const note = `MONITOR-CHECKPOINT v1\nrun=${cycle}\nlifecycle=ACTIVE\ncycles=${cycle}\npadding=${"x".repeat(16_000)}`;
+      const appended = await service.addManagementNote(id, note);
+      assert.equal(appended.management_note.sequence, cycle);
+    }
+    assert.equal(JSON.stringify(await service.getTask(id)), before, "ordinary task reads must not grow with journal history");
+
+    const instrumented = service as unknown as { managementJournal: {
+      readRange: (file: unknown, position: number, length: number) => Promise<Buffer>;
+    } };
+    const originalReadRange = instrumented.managementJournal.readRange.bind(instrumented.managementJournal);
+    let bytesRead = 0;
+    instrumented.managementJournal.readRange = async (file, position, length) => {
+      bytesRead += length;
+      return originalReadRange(file, position, length);
+    };
+    const latest = await service.getManagementHistory(id, { mode: "latest_checkpoint", limit: 20 });
+    assert.ok(bytesRead < 64 * 1024, `latest checkpoint read ${bytesRead} bytes from a >1 MiB journal`);
+    bytesRead = 0;
+    const recent = await service.getManagementHistory(id, { mode: "recent", limit: 10 });
+    assert.ok(bytesRead <= 1_100 * 1024, `recent history read ${bytesRead} bytes from a >1 MiB journal`);
+    assert.ok(recent.entries.length > 0 && recent.entries.length <= 10);
+    assert.equal(recent.entries.at(-1)?.sequence, 64);
+    assert.ok(recent.entries[0]!.sequence > 1, "the JSON response byte budget must report omitted older records");
+    assert.equal(recent.has_more, true);
+    assert.equal(latest.entries[0]?.sequence, 64);
+    assert.match(latest.entries[0]!.text, /cycles=64/u);
+    assert.match(latest.legacy_description.text, /Management Note:\nlegacy checkpoint/u);
+    assert.equal((await service.getManagementHistory(id, { mode: "after_checkpoint", limit: 10 })).entries.length, 0);
+
+    const collected: number[] = [];
+    let cursor: string | undefined;
+    let capturedHead = 0;
+    for (let pageIndex = 0; pageIndex < 100; pageIndex++) {
+      const page = await service.getManagementHistory(id, { mode: "after", limit: 7, cursor });
+      capturedHead ||= page.head_sequence;
+      assert.equal(page.captured_head_sequence, 64);
+      collected.push(...page.entries.map((entry) => entry.sequence));
+      if (pageIndex === 0) await service.addManagementNote(id, "post-capture ordinary note");
+      if (!page.has_more) break;
+      assert.ok(page.next_cursor);
+      cursor = page.next_cursor;
+    }
+    assert.equal(capturedHead, 64);
+    assert.deepEqual(collected, Array.from({ length: 64 }, (_, index) => index + 1));
+    const afterAppend = await service.getManagementHistory(id, { mode: "recent", limit: 1 });
+    assert.equal(afterAppend.entries[0]?.sequence, 65);
+    assert.equal(afterAppend.head_sequence, 65);
+    const afterCheckpoint = await new ProjectBoardService(state).getManagementHistory(id, { mode: "after_checkpoint", limit: 10 });
+    assert.deepEqual(afterCheckpoint.entries.map((entry) => entry.text), ["post-capture ordinary note"]);
+    assert.equal(board.calls.some((call) => call.method === "PUT"), false);
+  } finally { board.restore(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("cooperating writer processes serialize journal appends without lost or duplicated entries", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ocvm-board-journal-processes-"));
+  const rows = [{ id: "backend-1", projectId: "backend-project", title: "Process writers", description: "",
+    status: "todo", priority: "medium" }];
+  const backend = createHttpServer((request, response) => {
+    response.setHeader("content-type", "application/json");
+    if (request.method === "GET" && request.url === "/api/projects") {
+      response.end(JSON.stringify([{ id: "backend-project", prefix: "OCABCDEF", name: "Test", status: "active" }]));
+    } else if (request.method === "GET" && request.url === "/api/tickets") {
+      response.end(JSON.stringify(rows));
+    } else if (request.method === "GET" && request.url === "/api/tickets/backend-1") {
+      response.end(JSON.stringify(rows[0]));
+    } else {
+      response.statusCode = 405;
+      response.end(JSON.stringify({ error: "unexpected method" }));
+    }
+  });
+  await new Promise<void>((resolve) => backend.listen(0, "127.0.0.1", resolve));
+  try {
+    const url = `http://127.0.0.1:${(backend.address() as { port: number }).port}`;
+    const state = runtime(directory, url);
+    const service = new ProjectBoardService(state);
+    const id = (await service.listTasks())[0]!.task_id;
+    const moduleUrl = new URL("./taskboard.js", import.meta.url).href;
+    const source = `import { ProjectBoardService } from ${JSON.stringify(moduleUrl)};
+const runtime = JSON.parse(process.env.OCVM_JOURNAL_RUNTIME);
+const service = new ProjectBoardService(runtime);
+await Promise.all(Array.from({ length: 8 }, (_, index) => service.addManagementNote(process.env.OCVM_TASK_ID, \`worker=\${process.env.OCVM_WORKER};entry=\${index}\`)));`;
+    const workers = Array.from({ length: 4 }, (_, worker) => new Promise<void>((resolve, reject) => {
+      const child = spawn(process.execPath, ["--input-type=module", "-e", source], {
+        env: { ...process.env, OCVM_JOURNAL_RUNTIME: JSON.stringify(state), OCVM_TASK_ID: id, OCVM_WORKER: String(worker) },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let stderr = "";
+      child.stderr.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
+      child.once("error", reject);
+      child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`writer ${worker} exited ${code}: ${stderr}`)));
+    }));
+    await Promise.all(workers);
+    const history = await service.getManagementHistory(id, { mode: "after", limit: 50 });
+    assert.deepEqual(history.entries.map((entry) => entry.sequence), Array.from({ length: 32 }, (_, index) => index + 1));
+    assert.equal(new Set(history.entries.map((entry) => entry.text)).size, 32);
+    assert.equal(history.has_more, false);
+  } finally {
+    await new Promise<void>((resolve) => backend.close(() => resolve()));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("journal uncertainty is reconciled from complete bytes; malformed history fails closed without repair", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ocvm-board-journal-fault-"));
+  const board = fakeBoard([{ id: "backend-1", projectId: "backend-project", title: "Faults", description: "Legacy",
+    status: "todo", priority: "medium" }]);
+  try {
+    const state = runtime(directory);
+    const service = new ProjectBoardService(state);
+    const id = (await service.listTasks())[0]!.task_id;
+    await service.addManagementNote(id, "first committed entry");
+    const journal = service as unknown as { managementJournal: { writeHead: (...args: unknown[]) => Promise<void> } };
+    const instance = journal.managementJournal;
+    const publish = instance.writeHead.bind(instance);
+    let failOnce = true;
+    instance.writeHead = async (...args) => {
+      if (failOnce) { failOnce = false; throw new Error("injected head publication fault"); }
+      return publish(...args);
+    };
+    await assert.rejects(service.addManagementNote(id, "second may be committed"), { code: "TASK_MANAGEMENT_JOURNAL_UNCERTAIN" });
+    const reconciled = await service.getManagementHistory(id, { mode: "recent", limit: 10 });
+    assert.equal(reconciled.consistency, "recovered_suffix");
+    assert.deepEqual(reconciled.entries.map((entry) => entry.text), ["first committed entry", "second may be committed"]);
+    await service.addManagementNote(id, "third after reconciliation");
+    assert.deepEqual((await service.getManagementHistory(id, { mode: "recent", limit: 10 })).entries.map((entry) => entry.sequence), [1, 2, 3]);
+
+    const journalPath = join(directory, "management-journal", `${id}.jsonl`);
+    const headPath = join(directory, "management-journal", `${id}.head.json`);
+    await unlink(headPath);
+    const rebuilt = await service.getManagementHistory(id, { mode: "recent", limit: 10 });
+    assert.equal(rebuilt.consistency, "rebuilt_index");
+    assert.equal(rebuilt.entry_count, 3);
+    await assert.rejects(stat(headPath), { code: "ENOENT" }, "a read must not republish a missing derived index");
+    await service.addManagementNote(id, "append after index rebuild");
+    assert.equal((await service.getManagementHistory(id, { mode: "recent", limit: 10 })).entry_count, 4);
+    const originalJournal = await readFile(journalPath);
+    const originalHead = await readFile(headPath);
+    await writeFile(headPath, "{broken\n");
+    await assert.rejects(service.getManagementHistory(id, { mode: "recent", limit: 10 }), { code: "TASK_MANAGEMENT_JOURNAL_ERROR" });
+    await assert.rejects(service.addManagementNote(id, "must not append"), { code: "TASK_MANAGEMENT_JOURNAL_ERROR" });
+    assert.deepEqual(await readFile(journalPath), originalJournal);
+    await writeFile(headPath, originalHead);
+    await writeFile(journalPath, Buffer.concat([originalJournal, Buffer.from("{partial", "utf8")]));
+    const damaged = await readFile(journalPath);
+    await assert.rejects(service.getManagementHistory(id, { mode: "recent", limit: 10 }), { code: "TASK_MANAGEMENT_JOURNAL_ERROR" });
+    await assert.rejects(service.addManagementNote(id, "must not skip partial"), { code: "TASK_MANAGEMENT_JOURNAL_ERROR" });
+    assert.deepEqual(await readFile(journalPath), damaged);
+    assert.equal(board.calls.some((call) => call.method === "PUT"), false);
+
+    await rm(join(directory, "management-journal"), { recursive: true });
+    const outside = join(directory, "outside-journal");
+    await mkdir(outside);
+    await symlink(outside, join(directory, "management-journal"));
+    await assert.rejects(service.getManagementHistory(id, { mode: "recent", limit: 10 }), { code: "TASK_MANAGEMENT_JOURNAL_ERROR" });
+    await assert.rejects(service.addManagementNote(id, "unsafe symlink target"), { code: "TASK_MANAGEMENT_JOURNAL_ERROR" });
+    assert.deepEqual(await readdir(outside), []);
+  } finally { board.restore(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("journal appends fail before creation when the cooperating-writer lock is unsafe", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ocvm-board-journal-lock-"));
+  const board = fakeBoard([{ id: "backend-1", projectId: "backend-project", title: "Lock failure", description: "",
+    status: "todo", priority: "medium" }]);
+  try {
+    const state = runtime(directory);
+    const service = new ProjectBoardService(state);
+    const id = (await service.listTasks())[0]!.task_id;
+    const outside = join(directory, "outside-lock-target");
+    await writeFile(outside, "preserve\n");
+    await symlink(outside, `${state.taskboardMetadataFile}.lock`);
+    await assert.rejects(service.addManagementNote(id, "must not create journal"), { code: "TASKBOARD_METADATA_ERROR" });
+    await assert.rejects(stat(join(directory, "management-journal")), { code: "ENOENT" });
+    assert.equal(await readFile(outside, "utf8"), "preserve\n");
   } finally { board.restore(); await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -173,10 +373,12 @@ test("low-risk writes fail closed on transfers, corrupt metadata and scan overfl
     }, links: { [id]: [{ session_id: "ses", result: "Preserved" }] }, transfers: {} };
     await writeFile(state.taskboardMetadataFile, JSON.stringify(metadata));
     const before = await readFile(state.taskboardMetadataFile, "utf8");
-    // Native description alone fits; existing comments push the prospective read beyond 40 KB.
-    await assert.rejects(service.addManagementNote(id, "界".repeat(2_000)), { code: "TASK_SEARCH_INCOMPLETE" });
+    // Existing task JSON remains under 40 KB; a note no longer adds its bytes to that output.
+    assert.equal((await service.addManagementNote(id, "界".repeat(2_000))).description, "");
     await service.addManagementNote(id, "Within budget");
-    assert.match((await service.getTask(id)).description, /Within budget/u);
+    assert.equal((await service.getTask(id)).description, "");
+    assert.deepEqual((await service.getManagementHistory(id, { mode: "recent", limit: 10 })).entries.map((entry) => entry.text),
+      ["界".repeat(2_000), "Within budget"]);
     assert.equal(await readFile(state.taskboardMetadataFile, "utf8"), before);
     await service.addDocumentBindings(id, { compactContext: compact });
     const upgraded = JSON.parse(await readFile(state.taskboardMetadataFile, "utf8"));

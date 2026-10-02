@@ -85,6 +85,16 @@ const documentPath = z.string().min(1).max(512).regex(/^[A-Za-z0-9_./-]+$/u);
 const projectTaskId = z.string().regex(/^task_[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/u);
 const managementNoteInput = z.object({ task_id: projectTaskId,
   note: z.string().trim().min(1).max(MAX_TASK_DESCRIPTION_LENGTH) }).strict();
+const managementHistoryInput = z.object({
+  task_id: projectTaskId,
+  mode: z.enum(["recent", "after", "after_checkpoint", "latest_checkpoint"]).default("recent"),
+  limit: z.number().int().min(1).max(50).default(20),
+  cursor: z.string().min(1).max(2048).regex(/^[A-Za-z0-9_-]+$/u).optional(),
+  legacy_offset: z.number().int().nonnegative().default(0),
+  legacy_revision: z.string().max(128).optional(),
+  legacy_max_bytes: z.number().int().min(0).max(8192).default(4096),
+}).strict().refine((value) => value.mode === "after" || value.mode === "after_checkpoint" || value.cursor === undefined,
+"Cursor is supported only in after or after_checkpoint mode.");
 const documentBindingsInput = z.object({ task_id: projectTaskId,
   compact_context: documentPath.optional(), concept_plan: documentPath.optional() }).strict()
   .refine((input) => input.compact_context !== undefined || input.concept_plan !== undefined,
@@ -143,8 +153,32 @@ const taskOutput = z
       artifact_refs: z.array(z.string()).optional(),
     }).strict()).optional(),
     documents: z.array(documentReference).optional(),
+    management_note: z.object({ entry_id: z.string().uuid(), sequence: z.number().int().positive(),
+      generation: z.string().uuid(), head_sequence: z.number().int().positive() }).strict().optional(),
   })
   .strict();
+const managementJournalEntryOutput = z.object({ sequence: z.number().int().positive(), entry_id: z.string().uuid(),
+  appended_at: z.string().datetime({ offset: true }), text: z.string(), journal_offset: z.number().int().nonnegative() }).strict();
+const managementHistoryOutput = z.object({
+  task_id: projectTaskId,
+  state: z.enum(["absent", "available"]),
+  consistency: z.enum(["current", "rebuilt_index", "recovered_suffix"]),
+  generation: z.string().uuid().nullable(),
+  head_sequence: z.number().int().nonnegative(),
+  head_bytes: z.number().int().nonnegative(),
+  captured_head_sequence: z.number().int().nonnegative(),
+  captured_head_bytes: z.number().int().nonnegative(),
+  entry_count: z.number().int().nonnegative(),
+  mode: z.enum(["recent", "after", "after_checkpoint", "latest_checkpoint"]),
+  entries: z.array(managementJournalEntryOutput),
+  latest_checkpoint: managementJournalEntryOutput.omit({ text: true }).nullable(),
+  has_more: z.boolean(),
+  next_cursor: z.string().optional(),
+  legacy_description: z.object({ source: z.literal("native_description"), revision: z.string(),
+    total_bytes: z.number().int().nonnegative(),
+    range: z.object({ start: z.number().int().nonnegative(), end: z.number().int().nonnegative() }).strict(),
+    text: z.string(), has_more: z.boolean() }).strict(),
+}).strict();
 const listTasksInput = taskInputBase
   .extend({
     status: z.string().min(1).max(64).optional(),
@@ -874,10 +908,17 @@ export function createMcpServer(
     );
     server.registerTool("add_task_management_note", {
       title: "Add Task Management Note",
-      description: "Append one Management Note block to the native task description only. Not idempotent; no automatic retry or UI/edit CAS. Does not change board status.",
+      description: "Append one task-specific persistent management journal entry without changing the native task Description. Not idempotent; reconcile an uncertain result with get_task_management_history before retrying. Preserves legacy Description notes and does not change Board status.",
       inputSchema: managementNoteInput, outputSchema: taskOutput,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     }, safeHandler(async (input) => success(await board.addManagementNote(input.task_id, input.note), "Added task management note.")));
+    server.registerTool("get_task_management_history", {
+      title: "Get Task Management History",
+      description: "Read bounded task-specific management journal history, a continuation page, the latest checkpoint, and a UTF-8 page of legacy native Description text. Reads never create journal files; missing or inconsistent history is explicit.",
+      inputSchema: managementHistoryInput, outputSchema: managementHistoryOutput, annotations: readOnlyAnnotations,
+    }, safeHandler(async (input) => readSuccess(await board.getManagementHistory(input.task_id,
+      { mode: input.mode, limit: input.limit, cursor: input.cursor }, input.legacy_offset,
+      input.legacy_revision, input.legacy_max_bytes), "Returned bounded task management history.")));
     server.registerTool("add_task_document_bindings", {
       title: "Add Task Document Bindings",
       description: "Add one or both main document bindings after complete validation in one sidecar commit. Exact replay is a no-op; conflicting bindings fail. Never writes files, retargets references or changes board status.",
@@ -1774,6 +1815,13 @@ export function createMcpServer(
             return await validatedToolCall(managementNoteInput, taskOutput, input,
               async (value) => board ? success(await board.addManagementNote(value.task_id, value.note), "Added task management note.") :
                 errorResult(new AdapterError("TASKBOARD_UNAVAILABLE", "Taskboard is not enabled.")));
+          case "get_task_management_history":
+            return await validatedToolCall(managementHistoryInput, managementHistoryOutput, input,
+              async (value) => board ? readSuccess(await board.getManagementHistory(value.task_id,
+                { mode: value.mode, limit: value.limit, cursor: value.cursor }, value.legacy_offset,
+                value.legacy_revision, value.legacy_max_bytes), "Returned bounded task management history.") :
+                errorResult(new AdapterError("TASKBOARD_UNAVAILABLE", "Taskboard is not enabled.")),
+              extra.requestId, request.params.name);
           case "add_task_document_bindings":
             return await validatedToolCall(documentBindingsInput, documentRefsOutput, input,
               async (value) => board ? success(await board.addDocumentBindings(value.task_id,

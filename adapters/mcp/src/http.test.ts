@@ -779,7 +779,7 @@ test("MCP board search, reverse lookup, complete links and overflow use the publ
       ["list_project_tasks", "add_task_comment", "link_task_to_session", "list_board_projects",
         "get_board_project", "create_board_project", "get_task_transfer_status",
         "register_task_document", "get_task_documents", "read_task_document",
-        "add_task_management_note", "add_task_document_bindings"].includes(tool.name)).length, 18);
+        "add_task_management_note", "get_task_management_history", "add_task_document_bindings"].includes(tool.name)).length, 19);
     for (const [name, idempotentHint] of [["add_task_management_note", false], ["add_task_document_bindings", true]] as const) {
       assert.deepEqual(catalog.tools.find((tool) => tool.name === name)?.annotations,
         { readOnlyHint: false, destructiveHint: false, idempotentHint, openWorldHint: false });
@@ -787,6 +787,7 @@ test("MCP board search, reverse lookup, complete links and overflow use the publ
     assert.equal(catalog.tools.find((tool) => tool.name === "list_project_tasks")?.annotations?.readOnlyHint, true);
     assert.equal(catalog.tools.find((tool) => tool.name === "get_task_documents")?.annotations?.readOnlyHint, true);
     assert.equal(catalog.tools.find((tool) => tool.name === "read_task_document")?.annotations?.readOnlyHint, true);
+    assert.equal(catalog.tools.find((tool) => tool.name === "get_task_management_history")?.annotations?.readOnlyHint, true);
     assert.equal(catalog.tools.find((tool) => tool.name === "register_task_document")?.annotations?.readOnlyHint, false);
     assert.equal(catalog.tools.find((tool) => tool.name === "reclassify_project_task")?.annotations?.readOnlyHint, false);
     const projects = await client.callTool({ name: "list_board_projects", arguments: {} });
@@ -802,13 +803,20 @@ test("MCP board search, reverse lookup, complete links and overflow use the publ
     const id = tasks[0]!.task_id;
     const noted = await client.callTool({ name: "add_task_management_note", arguments: { task_id: id, note: " Follow up " } });
     assert.equal(noted.isError, undefined);
-    assert.equal((noted.structuredContent as { description: string }).description, "Searchable body\n\nManagement Note:\nFollow up");
-    assert.deepEqual(puts, [{ description: "Searchable body\n\nManagement Note:\nFollow up" }]);
+    assert.equal((noted.structuredContent as { description: string }).description, "Searchable body");
+    assert.equal((noted.structuredContent as { management_note: { sequence: number } }).management_note.sequence, 1);
+    assert.deepEqual(puts, []);
+    const management = await client.callTool({ name: "get_task_management_history", arguments: { task_id: id } });
+    assert.equal(management.isError, undefined);
+    const history = management.structuredContent as { entries: Array<{ sequence: number; text: string }>; legacy_description: { text: string } };
+    assert.deepEqual(history.entries.map(({ sequence, text }) => ({ sequence, text })), [{ sequence: 1, text: "Follow up" }]);
+    assert.equal(history.legacy_description.text, "Searchable body");
     for (const [name, args, code] of [
       ["add_task_management_note", { task_id: id, note: "No status", status: "done" }, "INVALID_ARGUMENT"],
       ["add_task_management_note", { task_id: id, note: "  " }, "INVALID_ARGUMENT"],
       ["add_task_management_note", { task_id: "task_alias", note: "Invalid" }, "INVALID_ARGUMENT"],
       ["add_task_management_note", { task_id: "task_aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", note: "Unknown" }, "TASK_NOT_FOUND"],
+      ["get_task_management_history", { task_id: id, mode: "recent", cursor: "wrong-mode" }, "INVALID_ARGUMENT"],
       ["add_task_document_bindings", { task_id: id }, "INVALID_ARGUMENT"],
       ["add_task_document_bindings", { task_id: id, compact_context: "../../private" }, "TASK_DOCUMENT_PATH_INVALID"],
       ["add_task_document_bindings", { task_id: id, concept_detail: "private" }, "INVALID_ARGUMENT"],
@@ -818,7 +826,7 @@ test("MCP board search, reverse lookup, complete links and overflow use the publ
       assert.equal(invalid.isError, true);
       assert.equal((invalid._meta as Record<string, any>)["opencode-vm/error"].code, code);
     }
-    assert.equal(puts.length, 1);
+    assert.equal(puts.length, 0);
     const contextPath = `.opencode/tasks/task-${id}.compact.md`;
     await mkdir(join(directory, ".opencode/tasks"), { recursive: true });
     await writeFile(join(directory, contextPath), `Task-ID: ${id}\nStatus: ready\n`);
