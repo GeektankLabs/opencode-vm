@@ -886,7 +886,7 @@ class SkillPackageTest(unittest.TestCase):
         self.assertIn(f'## {manifest["revision"]}', (source / "CHANGELOG.md").read_text())
         for text in (skill, packages, board, followthrough, scenarios):
             self.assertIn("WORK_PACKAGE_READY", text)
-        for required in ("base HEAD", "one active writer", "verify every write target", "operator-only"):
+        for required in ("base HEAD", "one active writer", "verify every write target"):
             self.assertIn(required.lower(), worktrees.lower())
         for required in ("TASK_SEARCH_INCOMPLETE", "todo", "registered", "Morning Handoff",
                          "ChatGPT Work", "OpenCode runtime", "get_recommended_runtime",

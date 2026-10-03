@@ -1,6 +1,6 @@
 # Agent-managed work sessions
 
-**local repo autonomy; remote write operator-only**
+**Backend admission and task-scoped work**
 
 An actual agentic work admission adopts a session server-side. Clients use normal
 tools; no managed flag or repeated initialization prompt is required. Creation
@@ -16,6 +16,11 @@ not enabled by this feature.
 
 ## Work behavior
 
+The injected managed prompt contains task-scope and business-decision handback
+instructions, without Git-specific rules. The shared Bash-description rewrite
+removes the upstream Git confirmation sentence without replacement, including
+the former manual-session clause. Executable permissions remain unchanged.
+
 - Ordinary local development includes status/diff/log, staging/restore, branches,
   appropriate local tags and local commits without another confirmation.
 - Explicit task, read-only/review and agent/session restrictions still apply.
@@ -26,10 +31,6 @@ not enabled by this feature.
   a normal follow-up to the same idle session.
 - Real independent security permissions remain separate pending operator input;
   the feature does not approve/reply to them or reinterpret them as business text.
-- Push, send-pack/http-push/receive-pack, available LFS publishing equivalents and
-  recognized publishing wrappers/aliases are denied without an approval prompt.
-  Otherwise permitted fetch/ls-remote reads remain possible. The existing user-
-  origin access rule is not relaxed.
 
 ## Implementation and lifecycle
 
@@ -65,6 +66,11 @@ until a normal stop/attach/restart. Updating source files alone does not activat
 the policy in an already running OpenCode instance.
 
 ## Boundary and evidence
+
+Executable permission rules and tool/direct-shell guards still deny recognized
+push, send-pack/http-push/receive-pack, LFS publishing and publishing wrappers or
+aliases without an approval prompt. Otherwise permitted fetch/ls-remote reads
+remain possible. These are technical controls, not injected prompt instructions.
 
 The primary boundary is the established VM design: no GitHub/origin credentials
 or configured writable operator origin in the guest; operator credentials and

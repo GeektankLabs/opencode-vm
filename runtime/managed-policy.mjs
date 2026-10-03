@@ -5,7 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { policyDelta, remoteWrite, tokens, handback, PRIMER, COMMIT_SENTENCE, CONDITIONAL_COMMIT, LEGACY_VM_ASK, MANAGED_VM_ASK, protocol, questionInResponse, responseUsage, terminalResponse, REVISION } from "./managed-core.mjs";
+import { policyDelta, remoteWrite, tokens, handback, PRIMER, COMMIT_SENTENCE, LEGACY_VM_ASK, MANAGED_VM_ASK, protocol, questionInResponse, responseUsage, terminalResponse, REVISION } from "./managed-core.mjs";
 
 const FETCH_STATE = Symbol.for("ocvm.managed.fetch.v1");
 const HEADER = "x-ocvm-managed-turn";
@@ -227,12 +227,12 @@ export default async ({ client, directory }) => {
     },
     "experimental.chat.system.transform": async ({ sessionID }, output) => {
       if (sessionID && await isManaged(sessionID)) {
-        for (let i = 0; i < output.system.length; i++) output.system[i] = output.system[i].replace(LEGACY_VM_ASK, MANAGED_VM_ASK).replace(COMMIT_SENTENCE, CONDITIONAL_COMMIT);
+        for (let i = 0; i < output.system.length; i++) output.system[i] = output.system[i].replace(LEGACY_VM_ASK, MANAGED_VM_ASK).replace(COMMIT_SENTENCE, "");
         output.system.push(PRIMER);
       }
     },
     "tool.definition": async ({ toolID }, output) => {
-      if (toolID === "bash" && output.description.includes(COMMIT_SENTENCE)) output.description = output.description.replace(COMMIT_SENTENCE, CONDITIONAL_COMMIT);
+      if (toolID === "bash" && output.description.includes(COMMIT_SENTENCE)) output.description = output.description.replace(COMMIT_SENTENCE, "");
     },
     "chat.headers": async ({ sessionID, message, model, agent }, output) => {
       if (agent === "openlive-manager" || ["title", "summary", "compaction"].includes(agent) || !await isManaged(sessionID)) return;

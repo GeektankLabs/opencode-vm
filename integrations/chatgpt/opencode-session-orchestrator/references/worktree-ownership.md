@@ -34,7 +34,7 @@ git branch --show-current
 git worktree list --porcelain
 ```
 
-Resolve paths physically. Record the initial `HEAD` as immutable **base HEAD** and separately record the current `HEAD` after work. Identify modified, staged, untracked and ignored output relevant to the task. Do not stage, clean, stash, reset, overwrite or commit existing user/other-task changes. Stage explicit task-owned paths; inspect the staged diff before each commit. Local commits within the authorized task scope are already allowed by agent-managed policy. Push, send-pack, LFS publishing and other remote writes remain operator-only.
+Resolve paths physically. Record the initial `HEAD` as immutable **base HEAD** and separately record the current `HEAD` after work. Identify modified, staged, untracked and ignored output relevant to the task. Do not stage, clean, stash, reset, overwrite or commit existing user/other-task changes. Stage explicit task-owned paths; inspect the staged diff before each commit.
 
 For opencode-vm, `.opencode-vm/` is already ignored. Prefer the persistent, project-mounted location:
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-03-r31
+
+- Remove Git-specific managed-policy claims from task submission and worktree guidance; task scope and actual backend controls remain authoritative.
+
 ## 2026-10-03-r30
 
 - Route Chat/Voice scheduled-monitor requests through a complete Work/Worker bootstrap, with wrong-surface redirection and no self-create probe.

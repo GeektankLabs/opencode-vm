@@ -24,11 +24,11 @@ OpenCode runs in a VM, not directly on host.
 ## Agent-managed work
 
 Agentic work through MCP, A2A and OpenLive automatically adopts an **agent-managed
-session**. Reads and pure management remain neutral. Authorized local development
-includes commits without separate confirmation; missing business decisions end
+session**. Reads and pure management remain neutral. Missing business decisions end
 as readable terminal `INPUT_REQUIRED` text, answered through a normal same-session
 follow-up. Native Questions are suppressed, independent security permissions stay
-separate, and remote publishing is denied without an approval prompt. The primary
+separate. The injected prompt has no Git-specific rules; executable permission
+rules and publishing guards remain unchanged. The primary
 boundary remains guest/host credential and origin separation. See
 [Managed sessions](docs/MANAGED-SESSIONS.md).
 

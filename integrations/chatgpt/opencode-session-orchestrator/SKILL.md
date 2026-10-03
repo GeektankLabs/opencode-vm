@@ -6,7 +6,7 @@ license: MIT
 
 # OpenCode Session Orchestrator
 
-Release marker: **2026-10-03-r30**. This is the skill revision, not an MCP version.
+Release marker: **2026-10-03-r31**. This is the skill revision, not an MCP version.
 
 This is a client-side workflow skill. The user supplies a working compatible MCP connection, including when using Secure MCP Tunnel. The skill contains no tunnel, account, server alias or credentials and does not configure the connection.
 
@@ -118,9 +118,7 @@ Use the [approval reference](references/approval-flow.md) for edge cases. Produc
 
 When the actual backend contract uses agent-managed work, classification is
 automatic at work admission/creation; do not add a special flag, permission tweak
-or repeated initialization prompt. Reads and pure management stay neutral. Local
-development commits may be already authorized within task scope; remote publishing
-remains operator-only under the backend's documented boundary.
+or repeated initialization prompt. Reads and pure management stay neutral.
 
 A normal terminal result can contain a business `INPUT_REQUIRED` report even when
 the backend says completed. Read its concrete question, context and options,
@@ -162,7 +160,7 @@ An OpenCode session is not a Git isolation boundary. Before the first substantiv
 
 Check ownership across all known packages and manual/editor writers on the repository; shared member IDs do not authorize duplicate execution. For isolated workers, distinguish the canonical connector document root from the code worktree and serialize publication of task-owned document deltas by the document/integration owner. Registered C/P must remain regular canonical files, never symlinks or silently replaced by stale worktree copies. This workflow supplies no native cross-client lock or filesystem isolation guarantee.
 
-Verify where **each actual file-write tool** will write. Current MCP session creation is project-path-bound; a shell `workdir`, `cd` or `git -C` does not prove Edit/Write tools use that worktree. If the selected connection cannot target the verified worktree, stop before writing and request an operator-prepared scoped connection or an explicitly exclusive integration-tree assignment. Do not invent a worktree MCP argument or claim that the prompt enforces it. Local commits remain allowed within task scope; remote publishing remains denied/operator-only.
+Verify where **each actual file-write tool** will write. Current MCP session creation is project-path-bound; a shell `workdir`, `cd` or `git -C` does not prove Edit/Write tools use that worktree. If the selected connection cannot target the verified worktree, stop before writing and request an operator-prepared scoped connection or an explicitly exclusive integration-tree assignment. Do not invent a worktree MCP argument or claim that the prompt enforces it.
 
 On reuse, reread task files, verify the same worktree identity, HEAD and dirty state, and reconcile required predecessor changes. On integration, a single integrator checks source/base/target/diff, reconciles overlapping or versioned skill/package/adapter changes, runs combined checks, and records both source and target evidence. A dependent task waits for an exact integrated HEAD and required-content readback. Retain dirty, blocked, unreviewed, unintegrated or externally needed worktrees; remove only after owner stop, clean-state/evidence verification and explicit cleanup authorization. See the full reference for checks and failure handling.
 

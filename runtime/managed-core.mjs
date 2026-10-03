@@ -2,11 +2,9 @@
 // These rules are the additional OpenCode work-session behavior contract.
 export const REVISION = 1;
 export const PRIMER = `This work session is agent-managed by its backend ingress.
-Follow the authorized task scope. Ordinary local Git work, branches, local tags and local commits in authorized development are already authorized; do not ask for separate commit confirmation. Explicit read-only/review/task restrictions still apply.
-Do not open questions, quizzes or other end-user dialogs. If a business decision is missing, end the turn with INPUT_REQUIRED, the concrete decision, context, safe options, completed work and paused work. The orchestrator supplies a normal follow-up in this same session.
-Remote publishing is operator-only. The guest must have no GitHub/origin credentials or writable operator origin. Push and equivalent publishing operations are denied, never offered for approval. Do not provision credentials or circumvent policy. Independent security permissions remain separate.`;
+Follow the authorized task scope. Explicit read-only/review/task restrictions still apply.
+Do not open questions, quizzes or other end-user dialogs. If a business decision is missing, end the turn with INPUT_REQUIRED, the concrete decision, context, safe options, completed work and paused work. The orchestrator supplies a normal follow-up in this same session.`;
 export const COMMIT_SENTENCE = "Only commit, amend, push, or create PRs when explicitly requested.";
-export const CONDITIONAL_COMMIT = "In backend agent-managed work, ordinary local commits are already authorized within the development task scope and require no separate confirmation. In manual sessions only commit when explicitly requested. Explicit read-only/review scope remains binding. Only amend or create PRs when explicitly requested; remote publishing remains operator-only.";
 export const LEGACY_VM_ASK = "If the request is ambiguous or you see multiple reasonable interpretations, surface them and ask before implementing. If no user is available to ask (autonomous or A2A runs), choose the most minimal interpretation consistent with the request and state the assumption in your report.";
 export const MANAGED_VM_ASK = "This is backend agent-managed work: document safe reversible assumptions within the authorized scope. If a business/product decision is missing, pause dependent work and return a terminal INPUT_REQUIRED report with question, context and options; the orchestrator supplies a normal follow-up. Do not open a native end-user question.";
 

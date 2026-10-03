@@ -83,7 +83,7 @@ For this integration, **Work is the outer management/orchestration surface** for
 
 The project profiles `execution`/`standard`/`deep` and `get_recommended_runtime` resolve OpenCode runtime preferences only. They do not set or map to the ChatGPT Work model picker. State the coordination complexity recommendation and let the Work user choose among models actually available there; resolve an exact project mapping only for a separately authorized OpenCode worker submission, with the existing idle/pending/runtime-readback rules.
 
-For parallel repository writes, the skill requires verified Git worktree ownership; an OpenCode session alone is not isolation. Existing MCP session creation is project-directory-bound, so check actual file-tool targeting before the first write. Local commits may be authorized within the task scope; remote publishing remains operator-only. The skill's Work Package state is project task documents plus existing Board/session/result evidence; it does not add an MCP package schema or claim automated monitoring. Hosted Work/app access, Work-model choice, macOS/Lima worktree persistence and operator acceptance require separate verification.
+For parallel repository writes, the skill requires verified Git worktree ownership; an OpenCode session alone is not isolation. Existing MCP session creation is project-directory-bound, so check actual file-tool targeting before the first write. The skill's Work Package state is project task documents plus existing Board/session/result evidence; it does not add an MCP package schema or claim automated monitoring. Hosted Work/app access, Work-model choice, macOS/Lima worktree persistence and operator acceptance require separate verification.
 
 ## 4. Start with a read-only smoke test
 
