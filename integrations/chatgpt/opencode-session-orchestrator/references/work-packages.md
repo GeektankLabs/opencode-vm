@@ -33,6 +33,82 @@ On the authorized package transition, use the existing document lifecycle: leave
 
 No package-specific MCP fields are needed: use task description for stable outcome/membership, C/P for the full working state, existing task/session links for supported evidence references, and original messages/files/Git reads for claims. If direct task-document tools are absent, keep to the skill's exact-text fallback; don't invent capabilities or assert that references can be read.
 
+## Synthesize before autonomous execution
+
+Before autonomous execution, reconcile the confirmed package into one **Synthesized Execution Contract** section in its canonical P. C carries the active `SYNTHESIS_REVISION`, phase, current candidate HEAD, receipt/evidence, blockers and next safe action. Existing members keep stable scope/evidence/acceptance and Board states. No new MCP/backend schema, contract store, execution engine or Board status is introduced; `synthesized` is document state.
+
+Fill this minimum contract from actual current sources, not title matches or chat memory:
+
+```text
+Synthesized Execution Contract
+package_id=<exact master task ID>; SYNTHESIS_REVISION=<positive package-local integer>
+revision_state=<candidate or active>; supersedes=<prior revision or none>
+sources=<exact member IDs, Board task revisions, canonical C/P paths + content revisions>
+completed_evidence=<per-member original result/read coverage, source/integrated commits,
+  test/QC subjects + results, unresolved acceptance; explicit imports from prior revision>
+goal_semantics=<one shared goal and reconciled current semantics; superseded clauses>
+dependencies_order=<named waves, required predecessor content, sequential/parallel prohibitions>
+base_HEAD=<exact immutable integrated starting commit>; candidate_HEAD=<current subject>
+writer_integration=<physical code/document roots, owners, actual tool targets,
+  single integrator/publisher, shared/generated surfaces, source-to-target verification>
+autonomous_decisions=<permitted in-scope technical choices and evidenced Board transitions>
+test_integration_QC_gates=<checks, independent reviewer, full-candidate/external gates>
+correction_loop=<eligible findings, separate fixer, fingerprint/history, bounded budget,
+  focused checks/integration and renewed independent QC>
+hard_stops=<new product/architecture/security/scope decision, unreconcilable base/owner,
+  true host/operator permission, exhausted repair budget>
+target_end_state=<package acceptance and READY_FOR_LOCAL_RELEASE_PREP criteria>
+excluded_operator_only=<actual release/tag/remote push/publish/upload/deploy/productive
+  restart, destructive cleanup, unauthorized host/security actions and other exclusions>
+```
+
+`SYNTHESIS_REVISION` starts at 1 for the first synthesis; a **candidate is inactive**. Pin pre-synthesis source bytes/revisions, then separately record publication readback revisions after ownership markers are written, avoiding self-referential hashes. One document owner publishes the contract and each member's `package_id`, `SYNTHESIS_REVISION`, `execution_owner=package` and canonical contract pointer in existing C/P. Activate only after package/member identity/revision/ownership agree and current readiness passes. Partial/uncertain publication blocks dependent dispatch: reread/reconcile the same documents, preserve newer content, never blindly replay or retarget. These are cooperating-workflow markers, not authentication, a lease or a cross-client exactly-once guarantee.
+
+For an active revision, the **package master is sole dispatch owner**. Before any task-level dispatch, check canonical ownership markers and the owning package. Schedulers, other managers and another package referencing it consume package evidence; they must not separately start the synthesized member. Package ownership does not replace the concrete worker/worktree owner or existing single-flight/admission gates. Preserve action keys, actual session/submitted-message receipts and original results; already admitted work is observed and uncertain delivery reconciled, never resent through another session.
+
+Completed/integrated implementation is imported as **completed evidence**, including unresolved member acceptance, and never redispatched wholesale in a new revision. Remaining review/external acceptance and explicitly scoped corrections are distinct obligations. New members remain **unsynthesized**, outside the active revision; neither a Board addition nor a new card silently changes membership, scope or gates. To include them, explicitly synthesize a new revision with exact sources, completed imports and superseded revision, reconcile existing admissions/base/owners and revalidate readiness. A real new dependency blocks affected work instead of silent absorption or omission. A revision change never resets repair history. Routine checkpoints/current HEAD/evidence update within the fixed revision; material membership/semantic/gate changes require a new revision and any genuine decision first.
+
+### Dispatch precedence
+
+For a proposed remaining member implementation step, apply the **first matching row** after canonical reads. These action labels describe reasoning, not tools/API arguments. All gates still apply to other phase actions.
+
+| Condition | Action | Required behavior |
+|---|---|---|
+| Hard stop | INPUT_REQUIRED | New product/architecture/security/scope decision, unreconcilable base/ownership, true host/operator permission or exhausted bounded budget; preserve work and park dependent action. |
+| Contract or readiness invalid | RECONCILE | Missing/conflicting sources, partial markers, stale base/owner or failed named-wave readiness: no dispatch from an old ready label. |
+| Member outside active revision | KEEP_UNSYNTHESIZED | Preserve active contract; no member admission until an explicit new revision. |
+| Caller is not package owner | OBSERVE_PACKAGE | Read/reconcile owning package; zero independent member dispatch. |
+| Prior receipt admitted or uncertain | RECONCILE_RECEIPT | Observe admitted work or recover exact uncertain action/receipt/result; never resend. |
+| Implementation already completed and integrated | IMPORT_COMPLETED_EVIDENCE | Preserve commits/results and separate acceptance; no whole-member rerun. |
+| Remaining step ready | DISPATCH_ONCE | Package owner admits one bounded remaining step with exact member C/P, worker owner/base/target and receipt. |
+
+### Package phases and correction loop
+
+`SYNTHESIS -> READY -> IMPLEMENT/INTEGRATE -> INDEPENDENT_QC -> CORRECTION_LOOP -> FINAL_QC -> LOCAL_RELEASE_PREP -> OPERATOR_HANDOFF`
+
+The correction stage is conditional and loops through renewed independent review. Within a valid authorized contract, commit-ready, integration-ready, QC-startable and permitted evidence-supported Board transitions/readback are **internal transitions**, not operator handoffs. Workers make safe small/medium reversible technical choices inside fixed architecture/scope/acceptance, record material assumptions and continue. A genuine hard stop returns terminal INPUT_REQUIRED with decision/context/options/completed/paused work; no native Question or security autoapproval. Missing required evidence stays PENDING, not invented PASS/FAIL.
+
+Apply these transitions only with current owner/base/receipt evidence. The observed gate must actually pass; elapsed time, idle, Board Done or implementer claims alone are insufficient:
+
+| Phase | Observed gate | Next phase | Required evidence/action |
+|---|---|---|---|
+| SYNTHESIS | contract verified | READY | All fields, source/completed imports and ownership markers consistent; registered documents and current named-wave readiness verified. |
+| READY | admission ready | IMPLEMENT/INTEGRATE | Delta/JIT scope, dependencies, worker/tool targets/base, single-flight and exact receipt reconciliation. |
+| IMPLEMENT/INTEGRATE | integration verified | INDEPENDENT_QC | All remaining waves integrated/checks recorded on exact combined candidate; imported completed waves need no dispatch. |
+| INDEPENDENT_QC | in-scope finding | CORRECTION_LOOP | Unequivocally within unchanged contract/acceptance; available historical budget and separate correction owner. |
+| INDEPENDENT_QC | independent PASS | FINAL_QC | Independent exact-subject evidence; no eligible local finding; retain every external PENDING. |
+| CORRECTION_LOOP | correction integrated | INDEPENDENT_QC | Minimal fix/focused regression/integration, new exact subject and renewed independent reviewer; no self-acceptance. |
+| FINAL_QC | in-scope finding | CORRECTION_LOOP | Same bounded classification; correction returns through renewed independent QC and full-candidate final gate. |
+| FINAL_QC | final PASS | LOCAL_RELEASE_PREP | Mandatory independent full-candidate QC and all retained release gates PASS; zero release-blocking FAIL/PENDING establishes READY_FOR_LOCAL_RELEASE_PREP. |
+| LOCAL_RELEASE_PREP | behavior changed | IMPLEMENT/INTEGRATE | Renew affected combined and independent full-candidate QC; local preparation cannot smuggle a fix. |
+| LOCAL_RELEASE_PREP | local prep verified | OPERATOR_HANDOFF | Exact HEAD, aligned metadata/reproducible artifacts/checks and precise operator-only last steps; no actual publication. |
+
+A reviewer evaluates, without automatic self-fix. The **contract may authorize the package** to route only unequivocally in-scope QC findings to a separate correction worker. Any separately authorized reviewer implementation role still needs a different independent reviewer. Reserve attempts at admission including uncertainty; preserve same/equivalent fingerprints, A→B→A, older history and pending reservations across restart/revision. Default at most two no-progress autonomous repair cycles per equivalent fingerprint, using [existing progress/counter rules](integration-test-monitor.md#fingerprint-counters-and-progress); focused PASS does not erase a recurring full failure. No weakened acceptance, blind resend or silent cap reset/extension. Exhaustion or a new product/architecture/security/scope choice yields INPUT_REQUIRED. Work park never stops scheduler cadence.
+
+FINAL_QC must name exact full candidate HEAD, contract revision, relevant source/document/bundle revisions and independent reviewer. An implementer/fixer cannot supply its own independent acceptance; stale/pre-change or partial-candidate QC cannot pass the gate. Member acceptance, package acceptance, Board status, active revision and local-preparation readiness stay distinct. The package can autonomously reach READY_FOR_LOCAL_RELEASE_PREP when all gates pass; then use the repository's [release process](release-gates.md). Actual release/tag/remote push/publish/upload/deploy/productive restart, destructive cleanup and unauthorized host/security actions remain excluded/operator-only. Preserve the working runtime while release gates are red/unverified.
+
+For migration of an existing package, first integrate the synthesis workflow member, then synthesize pilot revision 1 from the actual integrated candidate. Import completed predecessor and synthesis-member work with exact evidence and separate acceptance gaps; do not replay them. Additional independent **full-candidate FINAL QC after pilot synthesis** is mandatory even if the earlier local QC/fix cycle passed. Source/bundle, imported skill, discovered connector and hosted behavior remain separate evidence levels; synthesis cannot turn PENDING into PASS.
+
 ## Build the wave plan and evaluate `WORK_PACKAGE_READY`
 
 ### Lean package preparation
@@ -67,7 +143,7 @@ After a dependency integrates, verify the real integration-tree `HEAD` and the p
 
 Normal Chat/Voice prepares the complete [Work/Worker bootstrap](monitor-tasks.md), never creates the schedule itself or silently executes a wrong-surface paste. Operator escalation is the worker's duty in both terminal report and uniquely identified package-master checkpoint: system/process/problem/impact, at least two concrete operational examples, then evidence/uncertainty/question; persist context/examples/reason/next permissible step consistently. Missing anchor means a management gap, no member-card guess. Work park/PASS/STOPPED retain scheduler cadence until expiry or explicit SCHEDULER stop. A current non-superseded canonical package decision, including a cross-chat Resume, releases only its bounded step after exact follow-up reconciliation and delta readiness; no separate provenance/register, no duplicate send or loop-history reset.
 
-Use the package task as master under [Monitor Tasks](monitor-tasks.md). Monitored v1 Waves are **strictly sequential**: only one wave active, no next mutating wave or parallel preparation/monitor strand for the same continuation while it runs. Do not parallelize solely because members seem independent. Existing generic parallel-work planning is not permission for Monitor v1 parallel Waves.
+Use the package task as master under [Monitor Tasks](monitor-tasks.md), with the active synthesized contract above before autonomous package execution. Monitored v1 Waves are **strictly sequential**: only one wave active, no next mutating wave or parallel preparation/monitor strand for the same continuation while it runs. Do not parallelize solely because members seem independent. Existing generic parallel-work planning is not permission for Monitor v1 parallel Waves.
 
 After Wave N's terminal original results are read, verify required integration/acceptance and the actually reached base/target HEAD/content. If integration/checks are pending, that remains Wave N management, not Wave N+1 readiness. Only then perform short delta/JIT `WORK_PACKAGE_READY` for Wave N+1: changed relevant documents/dependencies, scope/input, owner/tool target, base/content/resources and next-step acceptance. Reuse valid facts and record current revisions/HEAD; a source commit or Board Done alone does not pass. Dispatch at most one bounded management action through the common loop. A later wave's missing readiness/decision does not retroactively block or abort an earlier already-running wave, roll Board back to todo, or justify a duplicate send.
 
@@ -82,7 +158,7 @@ When a genuine decision exceeds the plan, the member worker must:
 3. leave independent members running only when their bases, scopes and resources are verified independent;
 4. let the orchestrator read that exact result, resolve the decision in Chat/Work with the user, check the original session is idle/no pending security input and send a normal authorized follow-up to that same session.
 
-`INPUT_REQUIRED` is a completed turn, not business/task/package completion. Real host/security permission requests remain independent. Do not use native Question replies, create a second session to evade a busy/unresolved write or auto-change Board status. Record the blocker and next decision in package C on the next authorized maintenance write.
+`INPUT_REQUIRED` is a completed turn, not business/task/package completion. Real host/security permission requests remain independent. Do not use native Question replies, create a second session to evade a busy/unresolved write or move Board state merely from turn completion. Only explicitly contract-permitted, evidence-supported transitions/readback are internal; no new column or acceptance coupling. Record the blocker and next decision in package C on the next authorized maintenance write.
 
 ## Morning Handoff without prior chat context
 
@@ -130,10 +206,14 @@ Coordinate Work Package <package_task_id> for project <verified project/connecti
 Package C: <exact registered compact_context path>
 Package P: <exact registered concept_plan path>
 Gate: WORK_PACKAGE_READY for <named wave> on <verified base HEAD>.
+Contract: SYNTHESIS_REVISION <active revision>; execution_owner=package;
+exact sources/completed evidence/exclusions and phase: <canonical package P section>.
 
 Read the Board task, C and P first. Verify the package/member documents and
 current Board/result evidence; the files define scope and plan, originals prove
-execution. Before writes, verify the task's owner, persistent worktree, base HEAD,
+execution. The package master alone dispatches active-revision members; import
+completed evidence without rerun, keep new members unsynthesized until a new revision.
+Before writes, verify the task's owner, persistent worktree, base HEAD,
 dirty state and actual file-tool target. Follow the planned wave/integrator; do
 not start dependencies on an older HEAD. Update C after substantive milestones;
 update P only for real concept changes. Make safe in-plan technical decisions

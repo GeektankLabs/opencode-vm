@@ -6,6 +6,8 @@ Use only for explicit authorized recurring supervision through an **external, cu
 
 Read the exact selected project/connection and Board task using [Board workflow](board-workflow.md). Use the package task as master for a package; a suitable existing single task may be master; the integration-test policy uses a separate monitoring/master task. Propose/create a separate master only within normal authorized Board mutations. No master means not configured. Preserve existing [C/P roles](task-concept-plan.md), bindings and initialization/readback sequence; do not create a card per wakeup/attempt.
 
+For a package, require its [active Synthesized Execution Contract](work-packages.md#synthesize-before-autonomous-execution) and matching member ownership/revision markers before autonomous execution. The package master is sole dispatch owner; a scheduler/other manager targeting a synthesized member reads the owning package instead of dispatching it separately. Import completed work without rerun, leave new members unsynthesized until an explicit new revision, and carry active revision/phase in existing checkpoints. Contract-authorized technical/Board transitions remain internal; eligible QC corrections use a separate worker and renewed independent QC under preserved historical budgets. This adds no scheduler, lock, backend schema or permission grant.
+
 Before schedule configuration, establish a fixed primer with these fields (client-side convention, **not new MCP arguments**):
 
 | Primer field | Required content |
@@ -46,6 +48,8 @@ Unknown surface: ask for context; this marker does not prove Work capability.
 Set up recurring supervision for master <task ID> on <selected project/connection>.
 C: <exact registered context path>; P: <exact registered plan path>.
 Pattern/objective/PASS: <policy and unchanged criteria>.
+Package only: <active SYNTHESIS_REVISION/phase, canonical contract, completed imports>;
+package master alone dispatches active-revision members; no completed-member replay.
 Monitored task/session/message bindings and recovery: <exact IDs/rules>.
 Schedule: <recurrence, time zone, start/end logic, finite management horizon>.
 Work supervisor model confirmed by operator: <actual selectable model>.
@@ -124,7 +128,7 @@ Fixed Description is outcome/primer and retains legacy Management Notes; P is de
 MONITOR-CHECKPOINT v1
 run=<unique local correlation label>; observed_at=<ISO>; master=<task ID>
 lifecycle=<state>; decision_ref=<current applied canonical decision reference/revision, interactive or persisted cross-chat; none only when no canonical decision applies>
-work=<task/member + session + submitted user message IDs, wave/test run>
+work=<task/member + session + submitted user message IDs, wave/test run; package SYNTHESIS_REVISION/phase when applicable>
 evidence=<assistant result IDs/revisions/read coverage, observed state, time>
 action=<one actual action>; action_key=<scope/stage/previous receipt/decision>
 delivery=<verified admission/uncertain/not sent>; fingerprint=<stable parts/ref>

@@ -1,11 +1,13 @@
 """Artifact/privacy regression checks, not live ChatGPT behavior tests."""
 
 import hashlib
+import copy
 from concurrent.futures import ThreadPoolExecutor
 import importlib.util
 import io
 import json
 from pathlib import Path
+import re
 import shutil
 import stat
 import subprocess
@@ -1784,6 +1786,325 @@ class SkillPackageTest(unittest.TestCase):
         interruption = rows["An explicitly authorized, in-scope repair demonstrably requires interrupting the runtime"]
         self.assertIn("technical necessity", interruption)
         self.assertIn("recovery state", interruption)
+
+
+class SynthesizedContractTest(unittest.TestCase):
+    """Source-bound instruction traces, not a runtime engine or hosted acceptance.
+
+    Read the shipped precedence/phase tables; fixture observations determine which
+    row applies. Expected traces and mutation controls are independent of the table
+    outputs, so changing/removing/reordering a shipped rule changes the outcome.
+    All contract/receipt/reviewer state below is test-only, never a backend schema.
+    """
+
+    def setUp(self):
+        source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
+        self.packages = (source / "references/work-packages.md").read_text()
+        self.dispatch_rows = self.table(self.packages, "| Condition | Action |")
+        self.phase_rows = self.table(self.packages, "| Phase | Observed gate |")
+        template = self.packages.split("Synthesized Execution Contract\n", 1)[1].split("```", 1)[0]
+        self.fields = set(re.findall(r"\b([A-Za-z_]+)=", template))
+        self.trace = []
+
+    @staticmethod
+    def table(text, header):
+        lines = text.split(header, 1)[1].splitlines()[2:]
+        rows = []
+        for line in lines:
+            if not line.startswith("| "):
+                break
+            rows.append([cell.strip() for cell in line.split("|")[1:-1]])
+        return rows
+
+    def contract(self, revision=1, members=None, prior=None):
+        members = copy.deepcopy(members if members is not None else {
+            "member-a": {"board": "in_progress", "acceptance": "PENDING", "integrated": None}
+        })
+        for member in members.values():
+            member["marker"] = {"package_id": "package-a", "SYNTHESIS_REVISION": revision,
+                                "execution_owner": "package"}
+        result = {
+            "package_id": "package-a", "SYNTHESIS_REVISION": revision,
+            "revision_state": "active", "supersedes": prior["SYNTHESIS_REVISION"] if prior else "none",
+            "sources": {key: {"task": "board-r1", "C": "context-r1", "P": "plan-r1"} for key in members},
+            "completed_evidence": {key: copy.deepcopy(value["integrated"]) for key, value in members.items()
+                                   if value["integrated"]},
+            "goal_semantics": "fixed goal/acceptance", "dependencies_order": "serial",
+            "base_HEAD": "a" * 40, "candidate_HEAD": "a" * 40,
+            "writer_integration": {"writers": ["implementer"], "verified": True},
+            "autonomous_decisions": ["small/medium technical choices", "evidenced Board transitions"],
+            "test_integration_QC_gates": {"local": "PASS", "hosted": "PENDING"},
+            "correction_loop": copy.deepcopy(prior["correction_loop"]) if prior else {},
+            "hard_stops": "new decision/conflict/permission/exhaustion",
+            "target_end_state": "READY_FOR_LOCAL_RELEASE_PREP",
+            "excluded_operator_only": ["release", "tag", "remote push", "publish", "upload",
+                                       "deploy", "productive restart", "destructive cleanup"],
+        }
+        return result, members
+
+    def valid(self, contract, members):
+        if (not self.fields <= contract.keys() or contract["revision_state"] != "active" or
+                not contract["writer_integration"]["verified"] or
+                set(contract["sources"]) != set(members)):
+            return False
+        for key, member in members.items():
+            if (set(contract["sources"][key]) != {"task", "C", "P"} or
+                    not all(contract["sources"][key].values()) or
+                    member["marker"] != {"package_id": contract["package_id"],
+                                         "SYNTHESIS_REVISION": contract["SYNTHESIS_REVISION"],
+                                         "execution_owner": "package"} or
+                    (member["integrated"] and contract["completed_evidence"].get(key) != member["integrated"])):
+                return False
+        return True
+
+    def dispatch(self, contract, members, member_id, *, caller="package-a", receipt=None,
+                 hard_stop=False, ready=True, rows=None):
+        conditions = {
+            "Hard stop": hard_stop,
+            "Contract or readiness invalid": not self.valid(contract, members) or not ready,
+            "Member outside active revision": member_id not in members,
+            "Caller is not package owner": caller != contract.get("package_id"),
+            "Prior receipt admitted or uncertain": receipt in {"admitted", "uncertain"},
+            "Implementation already completed and integrated": bool(members.get(member_id, {}).get("integrated")),
+            "Remaining step ready": True,
+        }
+        for condition, action, _ in self.dispatch_rows if rows is None else rows:
+            if conditions[condition]:
+                self.trace.append(action)
+                return action
+        raise AssertionError("Missing shipped dispatch rule")
+
+    def transition(self, phase, gate, contract, *, qc=None, fingerprint="A", in_scope=True):
+        if gate == "in-scope finding":
+            if not in_scope or contract["correction_loop"].get(fingerprint, 0) >= 2:
+                self.trace.append("INPUT_REQUIRED")
+                return "INPUT_REQUIRED"
+            contract["correction_loop"][fingerprint] = contract["correction_loop"].get(fingerprint, 0) + 1
+        if gate in {"independent PASS", "final PASS"}:
+            if (qc is None or qc["reviewer"] in contract["writer_integration"]["writers"] or
+                    qc["HEAD"] != contract["candidate_HEAD"] or
+                    qc["revision"] != contract["SYNTHESIS_REVISION"] or not qc["full_candidate"]):
+                raise ValueError("independent exact full-candidate evidence required")
+            if gate == "final PASS" and any(value != "PASS" for value in contract["test_integration_QC_gates"].values()):
+                raise ValueError("release-blocking FAIL/PENDING")
+        matches = [row[2] for row in self.phase_rows if row[:2] == [phase, gate]]
+        if len(matches) != 1:
+            raise ValueError("no unique shipped phase transition")
+        self.trace.append(matches[0])
+        return matches[0]
+
+    @staticmethod
+    def qc(contract, reviewer="reviewer"):
+        return {"reviewer": reviewer, "HEAD": contract["candidate_HEAD"],
+                "revision": contract["SYNTHESIS_REVISION"], "full_candidate": True}
+
+    def test_synthesis_contract_fields_and_cross_reference_routing(self):
+        self.assertEqual(self.fields, {
+            "package_id", "SYNTHESIS_REVISION", "revision_state", "supersedes", "sources",
+            "completed_evidence", "goal_semantics", "dependencies_order", "base_HEAD", "candidate_HEAD",
+            "writer_integration", "autonomous_decisions", "test_integration_QC_gates", "correction_loop",
+            "hard_stops", "target_end_state", "excluded_operator_only",
+        })
+        contract, members = self.contract()
+        self.assertTrue(self.valid(contract, members))
+        for field in self.fields:
+            broken = copy.deepcopy(contract)
+            broken.pop(field)
+            self.assertEqual(self.dispatch(broken, members, "member-a"), "RECONCILE", field)
+        source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
+        for name in ("SKILL.md", "references/board-workflow.md", "references/monitor-tasks.md"):
+            text = (source / name).read_text()
+            self.assertIn("work-packages.md#synthesize-before-autonomous-execution", text)
+            self.assertIn("SYNTHESIS_REVISION", text)
+        for phrase in ("no new MCP/backend schema", "not a Board status", "execution_owner=package"):
+            self.assertIn(phrase.lower(), (self.packages + (source / "SKILL.md").read_text()).lower())
+
+    def test_synthesis_no_separate_or_double_dispatch(self):
+        contract, members = self.contract()
+        self.dispatch(contract, members, "member-a")
+        self.dispatch(contract, members, "member-a", caller="another-manager")
+        for receipt in ("admitted", "uncertain"):
+            self.dispatch(contract, members, "member-a", receipt=receipt)
+        self.assertEqual(self.trace, ["DISPATCH_ONCE", "OBSERVE_PACKAGE",
+                                     "RECONCILE_RECEIPT", "RECONCILE_RECEIPT"])
+        # Mutation controls: an early ready row or removed owner check must change the trace.
+        reordered = [self.dispatch_rows[-1]] + self.dispatch_rows[:-1]
+        self.assertNotEqual(self.dispatch(contract, members, "member-a", caller="other", rows=reordered),
+                            "OBSERVE_PACKAGE")
+        removed = [row for row in self.dispatch_rows if row[0] != "Caller is not package owner"]
+        self.assertNotEqual(self.dispatch(contract, members, "member-a", caller="other", rows=removed),
+                            "OBSERVE_PACKAGE")
+
+    def test_synthesis_completed_member_import_is_not_rerun(self):
+        evidence = {"source": "b" * 40, "integrated": "c" * 40, "result": "original-result",
+                    "tests": "28 PASS", "acceptance": "PENDING"}
+        for board in ("in_progress", "done"):
+            contract, members = self.contract(members={"completed": {
+                "board": board, "acceptance": "PENDING", "integrated": evidence}})
+            before = copy.deepcopy((contract, members))
+            self.assertEqual(self.dispatch(contract, members, "completed"), "IMPORT_COMPLETED_EVIDENCE")
+            self.assertEqual((contract, members), before)
+        self.assertNotIn("DISPATCH_ONCE", self.trace)
+
+    def test_synthesis_new_revision_pins_sources_and_imports_evidence(self):
+        old, members = self.contract(members={"completed": {
+            "board": "done", "acceptance": "PENDING",
+            "integrated": {"commit": "c" * 40, "result": "original-result", "tests": "PASS"}}})
+        old["correction_loop"] = {"A": 2, "B": 1}
+        saved = json.dumps((old, members), sort_keys=True)
+        restored, restored_members = json.loads(saved)
+        new, imported = self.contract(2, restored_members, restored)
+        new["sources"]["completed"]["C"] = "current-context-r2"
+        self.assertEqual(new["supersedes"], 1)
+        self.assertEqual(new["completed_evidence"], old["completed_evidence"])
+        self.assertEqual(new["correction_loop"], {"A": 2, "B": 1})
+        self.assertEqual(imported["completed"]["marker"]["SYNTHESIS_REVISION"], 2)
+        self.assertEqual(self.dispatch(new, imported, "completed"), "IMPORT_COMPLETED_EVIDENCE")
+        self.assertEqual(json.dumps((old, members), sort_keys=True), saved)
+
+    def test_synthesis_new_unsynthesized_member_does_not_mutate_active_revision(self):
+        contract, members = self.contract()
+        before = json.dumps((contract, members), sort_keys=True)
+        self.assertEqual(self.dispatch(contract, members, "new-member"), "KEEP_UNSYNTHESIZED")
+        self.assertEqual(json.dumps((contract, members), sort_keys=True), before)
+        next_members = copy.deepcopy(members)
+        next_members["new-member"] = {"board": "todo", "acceptance": "PENDING", "integrated": None}
+        new, admitted = self.contract(2, next_members, contract)
+        self.assertEqual(self.dispatch(new, admitted, "new-member"), "DISPATCH_ONCE")
+
+    def test_synthesis_correction_requires_renewed_independent_exact_subject_qc(self):
+        contract, _ = self.contract()
+        old_qc = self.qc(contract)
+        phase = self.transition("INDEPENDENT_QC", "in-scope finding", contract)
+        contract["writer_integration"]["writers"].append("fixer")
+        contract["candidate_HEAD"] = "d" * 40
+        phase = self.transition(phase, "correction integrated", contract)
+        for bad in (old_qc, self.qc(contract, "fixer"), self.qc(contract, "implementer")):
+            with self.assertRaisesRegex(ValueError, "independent exact"):
+                self.transition(phase, "independent PASS", contract, qc=bad)
+        phase = self.transition(phase, "independent PASS", contract, qc=self.qc(contract, "new-reviewer"))
+        self.assertEqual(self.trace, ["CORRECTION_LOOP", "INDEPENDENT_QC", "FINAL_QC"])
+        self.assertEqual(phase, "FINAL_QC")
+        self.assertIn("separate correction worker", self.packages)
+        self.assertIn("different independent reviewer", self.packages)
+
+    def test_synthesis_genuine_decisions_and_permissions_stop_dependent_work(self):
+        for reason in ("product", "architecture", "security", "scope", "unreconcilable base/ownership",
+                       "host/operator permission", "exhausted bounded budget"):
+            with self.subTest(reason=reason):
+                contract, members = self.contract()
+                before = copy.deepcopy((contract, members))
+                self.assertIn(reason, self.dispatch_rows[0][2].lower())
+                self.assertEqual(self.dispatch(contract, members, "member-a", hard_stop=True), "INPUT_REQUIRED")
+                self.assertEqual((contract, members), before)
+        contract, _ = self.contract()
+        self.assertEqual(self.transition("FINAL_QC", "in-scope finding", contract, in_scope=False), "INPUT_REQUIRED")
+        self.assertEqual(contract["correction_loop"], {})
+        self.assertNotIn("DISPATCH_ONCE", self.trace)
+
+    def test_synthesis_technical_milestones_are_internal_transitions(self):
+        contract, members = self.contract()
+        phase = self.transition("SYNTHESIS", "contract verified", contract)
+        phase = self.transition(phase, "admission ready", contract)
+        self.dispatch(contract, members, "member-a")
+        # Source commit/integration milestone -> review; no operator approval handoff.
+        phase = self.transition(phase, "integration verified", contract)
+        self.assertEqual(phase, "INDEPENDENT_QC")
+        self.assertNotIn("OPERATOR_HANDOFF", self.trace)
+        self.assertIn("permitted evidence-supported Board transitions/readback", self.packages)
+        self.assertIn("not operator handoffs", self.packages)
+        self.assertEqual(members["member-a"]["board"], "in_progress")
+
+    def test_synthesis_autonomous_ready_for_local_prep_requires_all_final_gates(self):
+        contract, _ = self.contract()
+        for status in ("PENDING", "FAIL"):
+            contract["test_integration_QC_gates"]["hosted"] = status
+            with self.assertRaisesRegex(ValueError, "release-blocking"):
+                self.transition("FINAL_QC", "final PASS", contract, qc=self.qc(contract))
+        contract["test_integration_QC_gates"]["hosted"] = "PASS"
+        for field, value in (("HEAD", "old-baseline"), ("revision", 0), ("full_candidate", False)):
+            stale = self.qc(contract)
+            stale[field] = value
+            with self.assertRaisesRegex(ValueError, "independent exact"):
+                self.transition("FINAL_QC", "final PASS", contract, qc=stale)
+        phase = self.transition("FINAL_QC", "final PASS", contract, qc=self.qc(contract))
+        self.assertEqual(phase, "LOCAL_RELEASE_PREP")
+        final_row = next(row for row in self.phase_rows if row[:2] == ["FINAL_QC", "final PASS"])
+        self.assertIn("READY_FOR_LOCAL_RELEASE_PREP", final_row[3])
+        self.assertNotIn("OPERATOR_HANDOFF", self.trace)
+
+    def test_synthesis_member_package_acceptance_and_board_remain_distinct(self):
+        contract, members = self.contract(members={"completed": {
+            "board": "done", "acceptance": "PASS", "integrated": {"commit": "c" * 40}}})
+        self.assertEqual(self.dispatch(contract, members, "completed"), "IMPORT_COMPLETED_EVIDENCE")
+        with self.assertRaisesRegex(ValueError, "release-blocking"):
+            self.transition("FINAL_QC", "final PASS", contract, qc=self.qc(contract))
+        self.assertEqual(members["completed"]["board"], "done")
+        self.assertEqual(members["completed"]["acceptance"], "PASS")
+        self.assertEqual(contract["test_integration_QC_gates"]["hosted"], "PENDING")
+
+    def test_synthesis_operator_only_actions_have_no_autonomous_transition(self):
+        contract, _ = self.contract()
+        self.assertEqual(self.transition("LOCAL_RELEASE_PREP", "local prep verified", contract), "OPERATOR_HANDOFF")
+        for action in contract["excluded_operator_only"]:
+            with self.subTest(action=action):
+                with self.assertRaisesRegex(ValueError, "no unique shipped"):
+                    self.transition("OPERATOR_HANDOFF", action, contract)
+        self.assertEqual(self.trace, ["OPERATOR_HANDOFF"])
+        self.assertIn("no actual publication", next(row[3] for row in self.phase_rows
+                                                   if row[:2] == ["LOCAL_RELEASE_PREP", "local prep verified"]))
+
+    def test_synthesis_partial_publication_and_missing_evidence_block_dispatch(self):
+        contract, members = self.contract()
+        for changed in ("revision", "owner", "source", "inactive", "writer", "readiness"):
+            broken, rows = copy.deepcopy((contract, members))
+            if changed == "revision":
+                rows["member-a"]["marker"]["SYNTHESIS_REVISION"] = 2
+            elif changed == "owner":
+                rows["member-a"]["marker"]["package_id"] = "another-package"
+            elif changed == "source":
+                broken["sources"]["member-a"].pop("P")
+            elif changed == "inactive":
+                broken["revision_state"] = "candidate"
+            elif changed == "writer":
+                broken["writer_integration"]["verified"] = False
+            self.assertEqual(self.dispatch(broken, rows, "member-a", ready=changed != "readiness"), "RECONCILE")
+        self.assertNotIn("DISPATCH_ONCE", self.trace)
+
+    def test_synthesis_repair_budget_survives_restart_and_new_revision(self):
+        contract, members = self.contract()
+        self.transition("INDEPENDENT_QC", "in-scope finding", contract, fingerprint="A")
+        self.transition("INDEPENDENT_QC", "in-scope finding", contract, fingerprint="B")
+        restored, restored_members = json.loads(json.dumps((contract, members)))
+        next_contract, _ = self.contract(2, restored_members, restored)
+        self.transition("FINAL_QC", "in-scope finding", next_contract, fingerprint="A")
+        before = copy.deepcopy(next_contract["correction_loop"])
+        self.assertEqual(self.transition("FINAL_QC", "in-scope finding", next_contract, fingerprint="A"),
+                         "INPUT_REQUIRED")
+        self.assertEqual(next_contract["correction_loop"], before)
+        self.assertEqual(before, {"A": 2, "B": 1})
+        self.assertIn("at most two no-progress autonomous repair cycles", self.packages)
+        self.assertIn("Reserve attempts at admission including uncertainty", self.packages)
+
+    def test_synthesis_pilot_imports_completed_work_but_requires_new_full_candidate_qc(self):
+        contract, members = self.contract(members={
+            "stage-one": {"board": "in_progress", "acceptance": "PENDING", "integrated": {"commit": "b" * 40}},
+            "stage-two": {"board": "done", "acceptance": "PASS", "integrated": {"commit": "c" * 40}},
+            "synthesis-member": {"board": "in_progress", "acceptance": "PENDING", "integrated": {"commit": "d" * 40}},
+            "qc-member": {"board": "in_progress", "acceptance": "PENDING", "integrated": None},
+        })
+        for member in ("stage-one", "stage-two", "synthesis-member"):
+            self.dispatch(contract, members, member)
+        self.dispatch(contract, members, "qc-member")
+        self.assertEqual(self.trace, ["IMPORT_COMPLETED_EVIDENCE"] * 3 + ["DISPATCH_ONCE"])
+        old_review = self.qc(contract)
+        contract["candidate_HEAD"] = "e" * 40
+        with self.assertRaisesRegex(ValueError, "independent exact"):
+            self.transition("FINAL_QC", "final PASS", contract, qc=old_review)
+        with self.assertRaisesRegex(ValueError, "release-blocking"):
+            self.transition("FINAL_QC", "final PASS", contract, qc=self.qc(contract))
+        self.assertIn("FINAL QC after pilot synthesis", self.packages)
+        self.assertIn("synthesis cannot turn PENDING into PASS", self.packages)
 
 
 if __name__ == "__main__":

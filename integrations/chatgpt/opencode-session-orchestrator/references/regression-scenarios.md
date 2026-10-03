@@ -287,6 +287,26 @@ Profile behavior review: a pure status/result read performs no runtime change; a
 | User explicitly chooses a runtime/profile, or configured mapping is unavailable/incomplete | Respect explicit selection. For configured unavailable/incomplete data, report exact limitation and request a safe alternative; no silent model substitution. Unconfigured policy is not a configured unavailable model. |
 | User asks only for package status or Morning Handoff | Use read tools and available documents/results only; do not create a package, send a prompt, move Board state, write notes or start background monitoring. |
 
+## Synthesized execution contract cases
+
+Instruction/source-bound synthetic traces must use the shipped dispatch precedence and phase gates in [Work Packages](work-packages.md#synthesize-before-autonomous-execution), with exact candidate/revision/owner/evidence. They are not hosted model/scheduler or backend-lock acceptance. Required external evidence absent stays PENDING.
+
+| Case | Required trace / forbidden effect |
+|---|---|
+| S1 — package and another manager target the same member | One package DISPATCH_ONCE; other manager OBSERVE_PACKAGE; admitted/uncertain receipt RECONCILE_RECEIPT, zero second send or new-session bypass. |
+| S2 — completed member in a new revision | IMPORT_COMPLETED_EVIDENCE with result/commit/tests and separate acceptance PENDING, zero whole-member redispatch regardless of Board state. |
+| S3 — explicit revision replacement | Pin exact task/C/P source revisions, superseded revision and completed imports; preserve evidence/repair reservations, no silent history reset. |
+| S4 — new unsynthesized member | KEEP_UNSYNTHESIZED; active membership/gates unchanged. Explicit new revision plus current readiness is required; a real prerequisite blocks dependent work. |
+| S5 — in-scope QC finding | INDEPENDENT_QC → CORRECTION_LOOP → separate fixer/focused regression/integration → renewed INDEPENDENT_QC → FINAL_QC; stale-subject or fixer self-review cannot pass. |
+| S6 — genuine new decision | Product/architecture/security/scope, unreconcilable base/owner, host permission or exhausted budget → INPUT_REQUIRED, zero dependent mutation/permission bypass. |
+| S7 — purely technical milestone | Commit/integration/QC-startable/permitted Board move/readback stays internal; zero premature OPERATOR_HANDOFF or Board Done from turn completion. |
+| S8 — final release gates | Independent full-candidate FINAL_QC plus all retained gates PASS → READY_FOR_LOCAL_RELEASE_PREP; any release-blocking FAIL/PENDING or stale/partial subject blocks it. |
+| S9 — distinct acceptance | Member Done/integrated/accepted does not imply package acceptance, active synthesis or release readiness; actual Board states remain independently recorded. |
+| S10 — operator-only boundary | After verified local preparation only OPERATOR_HANDOFF; zero actual release/tag/remote push/publish/upload/deploy/productive restart/destructive cleanup. |
+| S11 — incomplete contract or partial publication | RECONCILE; no dispatch with missing source pin, conflicting ownership markers, stale base/readiness or incomplete receipt evidence. |
+| S12 — bounded correction across restart/revision | Preserve two no-progress equivalent attempts/reservations and A→B→A history, no third repair or reset by revision/model/wording; no reviewer self-fix. |
+| S13 — existing-package pilot migration | Integrate synthesis member, import completed predecessors into revision 1, then additional independent full-candidate FINAL QC; prior baseline PASS never substitutes and external PENDING remains. |
+
 ## Repository release-gate cases
 
 | Case | Required behavior |

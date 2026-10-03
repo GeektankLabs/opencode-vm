@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-03-r33
+
+- Synthesize autonomous Work Packages into one revisioned canonical package-P execution contract with source/completed-evidence pins, sole package dispatch ownership and member C/P markers; retain stable tasks and separate acceptance, no new backend schema or Board status.
+- Import completed work without redispatch; require explicit new revisions for new members, preserve receipt/repair history, and define internal technical transitions plus bounded separate-worker correction/renewed independent QC through final local-preparation readiness and operator handoff.
+- Add source-bound dispatch/phase trace regressions and negative controls for the ten synthesis acceptance cases, revision/partial-publication integrity and repair/QC independence. Hosted import/model/scheduler acceptance remains separate; no pilot revision is activated by packaging.
+
 ## 2026-10-03-r32
 
 - Correct the monitor checkpoint `decision_ref` template to retain the current applied canonical decision reference/revision, including persisted cross-chat decisions; use `none` only when no canonical decision applies. Extend the existing Stage-1 source-contract regression for this field. No other workflow or enforcement changes.
