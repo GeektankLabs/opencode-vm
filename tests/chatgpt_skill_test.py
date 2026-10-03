@@ -1423,6 +1423,13 @@ class SkillPackageTest(unittest.TestCase):
         source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
         monitor = (source / "references/monitor-tasks.md").read_text()
         bootstrap = monitor.split("```text", 1)[1].split("```", 1)[0]
+        checkpoint = monitor.split("MONITOR-CHECKPOINT v1\n", 1)[1].split("```", 1)[0]
+        self.assertIn(
+            "decision_ref=<current applied canonical decision reference/revision, "
+            "interactive or persisted cross-chat; none only when no canonical decision applies>",
+            checkpoint,
+        )
+        self.assertNotIn("current interactive source or none", checkpoint)
         for term in ("Work/Worker", "Normal Chat/Voice", "Unknown surface", "master",
                      "C:", "P:", "Schedule:", "model", "Single-flight", "Repair limit",
                      "two concrete operational examples", "persist", "receipt/result",

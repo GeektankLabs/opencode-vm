@@ -123,7 +123,7 @@ Fixed Description is outcome/primer and retains legacy Management Notes; P is de
 ```text
 MONITOR-CHECKPOINT v1
 run=<unique local correlation label>; observed_at=<ISO>; master=<task ID>
-lifecycle=<state>; decision_ref=<current interactive source or none>
+lifecycle=<state>; decision_ref=<current applied canonical decision reference/revision, interactive or persisted cross-chat; none only when no canonical decision applies>
 work=<task/member + session + submitted user message IDs, wave/test run>
 evidence=<assistant result IDs/revisions/read coverage, observed state, time>
 action=<one actual action>; action_key=<scope/stage/previous receipt/decision>

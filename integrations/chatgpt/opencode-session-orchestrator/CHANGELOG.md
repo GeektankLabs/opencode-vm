@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-03-r32
+
+- Correct the monitor checkpoint `decision_ref` template to retain the current applied canonical decision reference/revision, including persisted cross-chat decisions; use `none` only when no canonical decision applies. Extend the existing Stage-1 source-contract regression for this field. No other workflow or enforcement changes.
+
 ## 2026-10-03-r31
 
 - Remove Git-specific managed-policy claims from task submission and worktree guidance; task scope and actual backend controls remain authoritative.
