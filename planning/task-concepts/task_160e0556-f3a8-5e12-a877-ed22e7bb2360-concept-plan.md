@@ -1,11 +1,41 @@
 Task-ID: task_160e0556-f3a8-5e12-a877-ed22e7bb2360
 Title: Orchestrator – Quality-Control-Sammel- und Abnahmetask
-Status: F2 CLOSED / local PASS; prior independent FINAL QC operator-accepted; no renewed QC required; LOCAL_RELEASE_PREP GO/READY; external PENDING
-Last-concept-update: 2026-10-03
+Status: F2 CLOSED; prior QC operator-accepted; no renewed QC; LOCAL_RELEASE_PREP_READY; external PENDING
+Last-concept-update: 2026-10-03T10:19:59Z (completed local preparation)
 
 # Canonical Concept Plan and Independent QC Record
 
-## Effective operator decision and bounded F2 closure — 2026-10-03
+## Current local release-preparation result — not an independent QC rerun
+
+Continuation starts at exact prep base `main@eb2b94f9740d43fb6649042a5e1fd018005cbd42`, tree `9f20d351aa8e774cff849503e3dc97daab10d476`. F2/prior QC acceptance/no-renewed-QC settled. Fresh branch/index/owner/document/Board readback unchanged, all 26 unrelated records preserved. Final scoped release candidate/publication SHA is recorded in original result/HANDOFF after local commit, avoiding self-hashes.
+
+**LOCAL_RELEASE_PREP_READY — explicit continuation completes the run.** Correct-directory `shasum -a 256 -c SHA256SUMS` PASS; prior wrong-cwd invocation was not an artifact/product defect. All remaining locally applicable integration/workflow/production-package checks now PASS on the same release inputs. Final temporary helper parser initially omitted digits in SHA256 key names; corrected helper verifies actual pins/metadata/manifest, with both outcomes logged and no product edit. Scoped local candidate publication and cheap exact-commit/readback pin final SHA in original result/HANDOFF; no renewed independent QC or external acceptance inferred.
+
+| Current check group | Result |
+|---|---|
+| npm ci --ignore-scripts --no-audit --no-fund, both adapters | PASS |
+| OpenLive typecheck/build/full unit suite | 47/47 PASS |
+| MCP typecheck/build/full unit suite | 106 PASS, two optional pinned-upstream skips, 108 total |
+| Companion / managed policy / managed lifecycle | 44/44, 4/4, 5/5 PASS |
+| Existing three archive builders twice into owned a/b + cmp | PASS; all archives byte-identical |
+| actionlint / release_metadata_test.py / release_state_test.py | PASS / 5 PASS / 5 PASS |
+| Documented Bash syntax / ShellCheck --severity=error gate | PASS |
+| Managed-runtime embedded check / r33 skill source-inventory-ZIP-checksum | PASS |
+| Correct-directory `shasum -a 256 -c SHA256SUMS` | PASS; all three archives OK; original wrong-cwd command retained historically |
+| Both required npm --prefix adapter test:integration commands | PASS; disposable OpenCode manager-tool, remote TLS and MCP runtime integration |
+| Workflow Agent Control / editor / launcher proxy Python | 39/19/2 PASS |
+| Editor-extension / launcher DOM Node | 1/8 PASS |
+| Install/Hub/besprechung/Linux-lock/MCP-adapter/OpenLive shell harnesses | All PASS; native macOS is separate PENDING |
+| Extracted production-only dependencies/entry points, packaged manager-tool/TLS, Hub files | PASS; no running runtime changes |
+| Final metadata/locks/pins/five assets/source parity + scoped commit/readback | Actual precommit checks PASS; exact publication/postcommit evidence in original result/HANDOFF |
+
+Exact command/cwd/exit/duration/logs are `.opencode-vm/release-prep/v0.7.4-eb2b94f/checks.jsonl`/logs; final operator handoff/asset manifests there pin publication SHA. Scoped metadata only: existing patch rule 0.7.3→0.7.4, release tag v0.7.4, asset tags/pins aligned. Adapter 0.1.7/0.1.22/r33 unchanged; no behavior change or speculative notes (CI generates them).
+
+Five local assets: script `6689427f09146a4500db2eb83c7b60cfa44f807728eb658220c660c31f2dc5bc`; OpenLive `39a50c5127b0a577b54e4790b5c3c1f463b35a52b42c4343aa639dcea53bad47`; MCP `6379ab973c3fa4151039ff36a73ad2eef32cdb85a670a9d645a8fa09dde441ef`; Hub `2ef956152cb1141239b58cd379726873824136dee25baff42d16bed4934b6034`; SHA256SUMS `3832666e0d942310be34c0a64568b82e8c911b9c066d48204ab463f45f9b70ca`. Exact checksum validation/pins/package locks/script-source parity PASS. Final candidate scope only script + four result docs; original result/HANDOFF records actual postcommit index/content state and routine document readback. Old dist/worktrees untouched; no tag/remote/Board/runtime/deploy/cleanup action.
+
+Next operator action: verify final handoff SHA equals main/HEAD, then host pushes locally validated main candidate; existing CI validates that commit and creates v0.7.4/five assets. No local tag or worker remote action. Exact release-completion gate is still unverified until matching CI/tag/release/checksums; preserve runtime meanwhile. F2 needs no renewed QC. All external PENDING unchanged; local push readiness does not claim hosted/native/overall release acceptance.
+
+## Prior effective operator decision and bounded F2 closure — 2026-10-03
 
 The explicit operator instruction for this correction accepts the prior independent full-candidate FINAL QC on `e6db24b27e888af41cda5b523e043c0ec2c533c0` subject to F2 closure by local regression evidence. **No renewed independent FINAL QC is to be scheduled or required.** This package-specific decision supersedes earlier re-QC/NOT_READY advancement instructions throughout this record, including §0's original finding/handoff and historical §§1–8. Preserve those exact-subject review results as history; do not rewrite the prior independent FAIL as a prior PASS or claim the fixer performed independent QC. Parent P's effective operator-decision section is the canonical current sequence; revision 1/membership and member Board states remain unchanged.
 
