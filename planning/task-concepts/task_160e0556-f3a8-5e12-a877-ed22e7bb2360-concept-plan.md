@@ -1,218 +1,326 @@
 Task-ID: task_160e0556-f3a8-5e12-a877-ed22e7bb2360
 Title: Orchestrator – Quality-Control-Sammel- und Abnahmetask
-Status: draft
-Last-concept-update: 2026-10-02T12:11:57+02:00
+Status: F2 CLOSED / local PASS; prior independent FINAL QC operator-accepted; no renewed QC required; LOCAL_RELEASE_PREP GO/READY; external PENDING
+Last-concept-update: 2026-10-03
 
-# Canonical Concept Plan
+# Canonical Concept Plan and Independent QC Record
 
-## 1. Authority, preparation scope and dependency
+## Effective operator decision and bounded F2 closure — 2026-10-03
 
-This is the existing central QC/acceptance task, not an independent feature/scope-expansion task. Its complete current Board description was read from the local Board service using the stable public task ID and verified against the deterministic ID mapping. It is MCP-16 in workstream `board_project_1bdf1737-f1ca-323e-7a7d-3025c99f2cb4`, status `todo`, priority `high`, last Board update `2026-10-01T17:47:11.097098664+02:00`. The Board task has no task-document mapping in the current project sidecar. The matching task-owned C/P files now exist at the paths below but are not yet registered. QC-5 is an existing `Management Note:` in the authoritative Description, not new scope invented by this preparation.
+The explicit operator instruction for this correction accepts the prior independent full-candidate FINAL QC on `e6db24b27e888af41cda5b523e043c0ec2c533c0` subject to F2 closure by local regression evidence. **No renewed independent FINAL QC is to be scheduled or required.** This package-specific decision supersedes earlier re-QC/NOT_READY advancement instructions throughout this record, including §0's original finding/handoff and historical §§1–8. Preserve those exact-subject review results as history; do not rewrite the prior independent FAIL as a prior PASS or claim the fixer performed independent QC. Parent P's effective operator-decision section is the canonical current sequence; revision 1/membership and member Board states remain unchanged.
 
-Board = outcome/scope and QC criteria. This P = detailed canonical review requirements, settled boundaries, evidence method and test/acceptance concept. C (`.opencode/tasks/task-task_160e0556-f3a8-5e12-a877-ed22e7bb2360.compact.md`) = one terse working-state file. Original session results, inspected bytes/Git and actual test reports = execution evidence. A Board `done`, idle worker, completed model turn or planning statement is not a QC PASS.
+**F2 CLOSED / local PASS**, correction commit `f26d041514dff1e752a97300368c5499d29a114a`, direct child of reviewed HEAD; tree `bab9bad859baf7d3cf80b9f596724d1666dc1816`. Only product-path delta is `tests/chatgpt_skill_test.py` (51 added lines). Independently maintained observed Task/C/P inputs are compared for equality, not just presence. Six present-but-stale pin/changed-observation cases assert RECONCILE and zero DISPATCH_ONCE. Unreconciled revision blocks; explicitly reconciled revision allows one dispatch. Completed/imported evidence and budgets remain preserved. A separate publication/routine evidence control leaves frozen input pins intact without demanding a new revision for marker/QC/current-HEAD updates. No backend validator/schema/locking/product change or shipped-rule delta.
 
-This session reads the complete Board descriptions for Task B, its origin task `task_9dc6e797-b884-589a-99d7-fd3ceceb5414`, and the two user-designated release blockers. The origin is MCP-12, **Orchestrator Skill – agent-managed Worktree-Isolation und persistente Arbeitspakete**, `in_progress`/high, description updated `2026-09-30T20:46:14.201558687+02:00`. Its Board scope covers generic write-tree ownership, persistent package/wave planning, handoff and operator-only remote publishing. Task A is MCP-15, `in_progress`/high. The existing C/P files are retained because their first-line Task-IDs match B; they remain unregistered. This work reconciles task documents only: no QC test/review, correction, document binding, Board move/status change, connector restart, infrastructure action or release. `CONCEPT_READY` is this agent's handoff only; the plan's `draft` label is concept lifecycle, not Board state or a QC verdict.
-
-### Fixed later execution order
-
-1. **Task A:** `task_a73131d9-b3c3-57e2-b1aa-582204f248e0` — Management Journal foundation; implemented, regression-checked and integrated locally.
-   - C: `.opencode/tasks/task-task_a73131d9-b3c3-57e2-b1aa-582204f248e0.compact.md`.
-   - P: `planning/task-concepts/task_a73131d9-b3c3-57e2-b1aa-582204f248e0-concept-plan.md`.
-2. **Task B:** this task — QC/acceptance on A's actual integrated implementation and the current Orchestrator context.
-
-The dependency now has an actual integrated subject: `62869f68fc2ccbea302d34c2bd39900dbc813090` on `main` (parent `e6acbb97adb530caf73163f7ae2b010a81e6e54d`), adapter 0.1.22, script 0.7.2 and companion marker `2026-10-02-r28`. Task A's C/P and its original implementation/test evidence were read. This satisfies the prerequisite to conduct QC-3; **QC-3 and every other point remain PENDING because the Task B review/verdict has not been performed.** A green suite or document handoff is not a QC verdict or hosted acceptance.
-
-## 2. Problem and target outcome
-
-Persistent Work Package and Monitor management must survive a fresh supervisor context. It must recover the current task order, decision/checkpoint, historical repair limits and uncertain worker delivery without redoing an old action or reopening the same already-resolved park. Long-running management also needs storage/read limits that do not invalidate ordinary Board reads. Rules written only in concept text, incomplete synthetic coverage or an unauthenticated resume label cannot prove that behavior.
-
-The target is a traceable verdict **PASS / FAIL / PENDING for each existing QC-1–QC-5**, with actual evidence and honest coverage boundaries. A FAIL names the precise mismatch, affected file/rule/test and smallest correction proposal. Missing prerequisites/external evidence remain PENDING; genuine missing product/architecture/data-schema/security decisions are returned as terminal `INPUT_REQUIRED`, never improvised by the reviewer. This task is the central collection point for relevant QC findings, not authority to create new product semantics.
-
-## 3. Current integrated r28 evidence and inherited contracts
-
-Current review-preparation baseline: `/Users/admin/Documents/github/opencode-vm`, branch `main`, HEAD `62869f68fc2ccbea302d34c2bd39900dbc813090`; integrated Task A is based on `e6acbb97adb530caf73163f7ae2b010a81e6e54d`. Source MCP package/adapter pin is 0.1.22; `integrations/chatgpt/bundle.json`, `SKILL.md` and changelog are r28 (`2026-10-02-r28`). Task B's C/P and several other task C/P plus pre-existing `dist/` archives are untracked and preserved; only the four exact Task A/Task B C/P paths are edited by this document work. The Board and project sidecar are not modified.
-
-Read sources / conceptual anchors:
-
-- `integrations/chatgpt/opencode-session-orchestrator/SKILL.md`: capability discovery, simple-first/Lean assumptions, exact task/receipt/result evidence, scope, staged C/P maintenance, Work/OpenCode boundaries and Monitor routing.
-- `references/monitor-tasks.md`: now routes supported checkpoint recovery through `get_task_management_history`; separates journal and legacy Description, documents 40-KiB note/64-MiB task journal/40,000-byte normal task response and 32,000-UTF-16-codeunit legacy Description boundaries, and explicitly keeps stored-note scheduled-resume provenance deferred/fail-closed.
-- `references/integration-test-monitor.md`: fail-fast worker, bounded manager, fingerprint equivalence/history, reserve-on-admission, two no-progress cycles, transient-continuation bound, focused regression and verified Resume versus Fresh.
-- `references/work-packages.md`, `worktree-ownership.md`: sequential monitored Waves, actual integrated base/current delta readiness, actual file-tool target and cooperating ownership; no native cross-client isolation/lease promise.
-- `references/board-workflow.md`, `task-compact-context.md`, `task-concept-plan.md`, `initialization-follow-through.md`: Board/C/P/evidence roles, identity/size rules, `CONCEPT_READY` → binding/available readback → `REGISTERED` → separate Board move/readback → `BOARD_MOVED`, note authorization and uncertainty.
-- `references/content-protocol.md`, `approval-flow.md`, `progress-activity.md`: complete stable visible originals, omissions/coverage, exact uncertain delivery, current interactive authority versus actual host/backend security input.
-- `references/regression-scenarios.md`, `tests/chatgpt_skill_test.py`, bundle/changelog/latest and `docs/CHATGPT.md`: shipped text/scenario contracts, synthetic behavior and packaging/hosted boundary.
-- Integrated A sources `adapters/mcp/src/management-journal.ts`, `taskboard.ts`, `tools.ts`, `diagnostics.ts`; tests `taskboard.test.ts`, `http.test.ts`, and `tests/taskboard-integration.mjs`; and `docs/MCP-INTERFACE.md`: strict append receipt/history modes, lazy per-task JSONL/head, bounded recent/cursor/checkpoint/legacy reads, metadata-only diagnostics and non-idempotent append. The live Taskboard/OpenCode harness was not run because `OCVM_TASKBOARD_BIN` is unavailable; do not infer active external connector capability from source pins.
-
-Predecessor task plans/C were read for conceptual context, without duplicating their histories:
-
-- `planning/task-concepts/task_9dc6e797-b884-589a-99d7-fd3ceceb5414-concept-plan.md` (Work Package/ownership).
-- `planning/task-concepts/task_80f79e83-7493-5fb4-8131-3ddb072a2071-concept-plan.md` (Monitor r27). Its effective operator addendum explicitly deferred scheduled-resume provenance to existing downstream QC and preserved fail-closed unauthenticated-note behavior.
-
-The integrated r28 skill is locally package-checked (24 skill tests PASS in Task A's evidence). In the current `tests/chatgpt_skill_test.py`, `test_monitor_reference_and_lean_contract` checks r28 source/scenario strings, including journal modes/legacy and fail-closed monitor terms. `test_monitor_scripted_action_traces_and_fail_closed_boundaries` uses an in-memory `Evidence` fake: integer repair counter and boolean `interactive` flag; it does not persist history, authenticate stored decisions or exercise a hosted scheduler. It proves only its synthetic trace contract. Task A's source/process tests provide separate local persistence evidence, not QC-1/2/5 acceptance or an authenticated scheduled-resume authority.
-
-## 4. Requirements and initial QC register
-
-| Point | Initial state | Requirement / pass gate |
-|---|---|---|
-| QC-1 | PENDING — review not executed | Each wake reads canonical order and relevant persistent history/checkpoint/decision, honors newer effective operator decision over stale management intent, revalidates live evidence, and persists one compact checkpoint after a permitted action. |
-| QC-2 | PENDING — review not executed | Evaluate history across runs/restarts; recognize same/practically-equivalent failure path; at most two autonomous no-progress repair cycles, then controlled park/operator report and no repeated autonomous repair without new authorized decision. |
-| QC-3 | **PENDING — prerequisite delivered; review not executed** | Review integrated journal for new Description/output growth, bounded long-history operations and fail-safe I/O/size/parse/coverage errors. Task A's local tests/evidence are available in §3 and its P §10; this row has no verdict yet. |
-| QC-4 | PENDING — integrated alignment review not executed | Board, canonical P, terse C, actual shipped skill/connector paths and meaningful tests agree; contradictions are named findings, not silently reconciled by claims. |
-| QC-5 | PENDING — review/provenance acceptance missing | Interactive unpark decision/fix is durably bound to the correct master and superseded park within existing scope; worker continues without duplicate send; next wake respects the effective newer decision. Unclear master/authority is a fail-closed management gap. |
-
-The later report may divide a point into subchecks to show local versus hosted evidence, but must retain one honest overall PASS/FAIL/PENDING per named Board point. A missing required positive case cannot be hidden behind passed negative/source tests. No verdict is granted by this initialization.
-
-## 5. QC-1 — persistent memory and correct resumption
-
-### Required behavior
-
-Read the exact master/task order every run; recover latest relevant checkpoint, applied decision reference and any newer entries. Task A's latest-checkpoint shortcut cannot hide a newer operator-related note, and a tail cannot prove older state absent. Obtain older history when the pending action/fingerprint/precedence depends on it. Preserve legacy notes as an explicit source rather than treating absent journal as absent memory.
-
-Separate management intent from observed truth: Board status, monitor lifecycle, current session busy/idle, pending permissions/questions, exact user-message receipt, original terminal result/coverage, Git/owner/base, integration and external acceptance. The next action is derived from current evidence within original scope, not a copied historic next-step field.
-
-After one permitted substantive management action, persist a compact checkpoint containing decision/action, exact delivery/result references, remaining next action and park/escalation reason as applicable. Cheap parked/terminal no-op and repeated unchanged running observations must not produce unnecessary notes or dispatch. A storage failure cannot claim a durable checkpoint or park was saved.
-
-### Later acceptance scenarios
-
-1. Fresh manager with no conversational history recovers exact order, task/session/message/result IDs and next permitted step from Board+C/P+journal/legacy+live evidence.
-2. A newer effective authorized decision supersedes an older park/checkpoint; another routine checkpoint cannot silently erase its decision reference.
-3. A worker changed state after the last checkpoint: live reads prevent stale dispatch/PASS and retain exact pending invocation.
-4. Required note/source coverage is partial/corrupt/changed: stop dependent action, disclose gap, no inference of absent decision.
-5. Action admitted but checkpoint response lost: reconcile exact action key/user-message/result and journal entry; no resend or repeated append.
-6. Lifecycle `PARKED_INPUT_REQUIRED`, `COMPLETE_PASS` or `STOPPED` without trusted new authority: master/relevant checkpoint read then cheap no-op before deep worker scans; no write.
-
-Evidence: exact input identity/base, history source/range/head/coverage, observed live state, ordered action trace, append/readback receipt and complete original terminal report references. Stored free-form text is not proof the operator authorized it.
-
-## 6. QC-2 — history-based loop guard
-
-Use the existing r27 policy, without raising limits or changing acceptance semantics: default at most **two autonomous repair cycles for the same/practically-equivalent failure fingerprint without material progress**. Diagnosis alone is not a cycle. Reserve a cycle when repair is admitted; uncertain admission reserves until reconciled, release only on proven non-admission. Attempted fixes cannot disappear because regression, checkpoint or supervisor process failed.
-
-Fingerprint uses stable test/harness/assertion/error/config/environment components; superficial wording, timestamp, model change or a repair's own harness revision cannot reset the original episode. Retain historical A→B→A counts. Material progress requires attributable evidence resolving/narrowing the original failure under unchanged criteria, not an unrelated PASS or weakened assertion. Focused PASS permits continuation but does not erase history if the full run reproduces the original failure.
-
-Later cases:
-
-- First repair + focused failure → supervisor restart/fresh context → second equivalent repair + failure → controlled park; no third repair.
-- Old fingerprint records outside the latest-N tail: retrieve required older coverage; missing coverage cannot reset to zero.
-- A→B→A and practically-equivalent signature under new wording/revision: A's history remains counted.
-- Admitted/uncertain repair interrupted before regression/checkpoint: reserve survives reconstruction; only exact non-admission evidence releases it.
-- At the cap, repeated scheduled wakeups are no-op; report clear `INPUT_REQUIRED`, completed/paused work and safe next decision.
-- New current authorized operator decision can permit a bounded continuation in existing scope only after live revalidation and durable correct-master recording; no invented reset policy. If reset/authorization meaning is genuinely unsettled, return `INPUT_REQUIRED`.
-- Existing one-transient-continuation bound is not a repair-cap loophole. Uncertain receipt/storage never becomes retry permission.
-
-Evidence must demonstrate durable restart reconstruction and absence of the prohibited third action. An in-memory fake with two increments is useful synthetic coverage but insufficient by itself for persistent restart acceptance.
-
-## 7. QC-3 — capacity, long history and fail-safe errors
-
-### Dependency and verdict boundary
-
-The prerequisite is now met for a later authorized review: integrated source at `62869f68fc2ccbea302d34c2bd39900dbc813090`, actual append/history schemas, bounded/lazy storage, legacy Description behavior, measured 64-cycle/read-work fixtures, multi-process concurrency and failure tests were inspected in Task A C/P and the local tree. Those records let the reviewer begin QC-3; they do **not** themselves set its verdict. QC-3 stays PENDING until Task B performs the explicit matrix/acceptance review and records any gaps. Two optional pinned-upstream adapter tests were skipped, and the actual disposable Board/OpenCode harness was not run because `OCVM_TASKBOARD_BIN` is unavailable.
-
-### Later acceptance scenarios
-
-1. 48+ logical hourly management cycles over two days append/read/recover without native Description growth; extended-history fixture exercises bounded reads. Distinguish deterministic simulation from real elapsed-time scheduling.
-2. Ordinary exact/list task reads do not embed complete journal contents; demonstrate stable normal-task serialized size attributable to note growth. Existing native Description/comments/links and unpaginated scan limits still exist; do not claim unrelated unlimited task/search capacity.
-3. Full small history, tail/continuation, efficient latest checkpoint and notes newer than it are retrievable with honest coverage; older fingerprint history remains accessible when required.
-4. Unicode, JSON escaping, long individual note and response-budget boundaries do not silently truncate/drop records or create unreadable successful writes.
-5. Legacy-only/mixed history is preserved and recoverable, including existing Description addenda; a journal absence is not history absence.
-6. Multiple cooperating append processes, restart and read-during-append retain exact task/order boundaries; transfer/reclassification preserves stable task history identity.
-7. I/O/permission/disk/partial write/flush/head-publication faults, malformed JSON/UTF-8/schema, inconsistent boundary, replacement/truncation and expired/wrong read context fail safe. Reconcile an uncertain record, never blindly append again or fall back to Description.
-8. Post-worker-action checkpoint failure stops further dependent action while retaining/recovering the exact worker receipt; do not claim durable park if its persistence failed.
-
-Measure actual bytes/read work and actual serialized responses; counting prose or passing a fake append loop cannot prove read efficiency. Source/package tests cannot establish mount persistence, hosted scheduled access or two days of external operation.
-
-## 8. QC-4 — concept ↔ skill ↔ tests alignment
-
-Create a bounded traceability matrix in the authorized later QC result: `QC requirement → authoritative Board/P clause → actual skill/connector path → concrete test/trace → observed result/coverage → verdict/finding`. Read C for current state and relevant canonical P sections; do not duplicate entire histories.
-
-Check especially:
-
-- A's actual journal/readback contract versus old r27 `get_project_task.description` checkpoint recovery, finite Description-budget wording and management-note source tests. Necessary foundation integration must update those paths consistently; stale old assumptions are findings.
-- Board/C/P identity, current dependency state, source/bundle markers and generated inventory/artifacts. Registered C/P remain regular canonical files at exact paths; a private worktree copy is not independently readable evidence.
-- New append/history/checkpoint tools are actually registered/dispatched with strict schema, correct metadata-only diagnostics and response budgets; no capabilities invented by skill text or manufactured through a connector restart.
-- r27 lifecycle, cheap no-op, one bounded action, exact original/result coverage, no blind retry, loop reservations, focused regression, sequential monitored Waves and actual base/delta readiness are unchanged by storage integration.
-- Tests assert ordered decisions and forbidden side effects, not just keywords. Existing source/scenario and fake tests are explicitly distinguished from real disk/process/MCP transport and hosted model behavior.
-- `CONCEPT_READY`, `REGISTERED`, `BOARD_MOVED`, `WORK_PACKAGE_READY`, local implementation/commit/integration and external acceptance remain separate. Review findings do not automatically authorize implementation or Board Done.
-
-Contradictions are recorded with subject revision, exact file/section/test, severity/uncertainty and smallest correction. Updating a plan to say a test passed is not a correction to behavior. A scope/architecture/security choice is returned to the orchestrator as `INPUT_REQUIRED`.
-
-## 9. QC-5 — Operator Override/Resume after interactive unpark
-
-### Existing outcome and reported reproduction
-
-The Board requires the Orchestrator, after an interactive operator fix/decision/blocker resolution or explicit continuation approval, to persist a durable Resume/Override signal on the **correct master**, in addition to the worker follow-up. Record what changed, the older park/`INPUT_REQUIRED` superseded and the already existing scope released. The next scheduled wake must not blindly repeat that old park/action, and the worker follow-up must not be double-dispatched.
-
-The Board reports a 2026-10-01 Work Package example where interactive continuation alone did not make the new decision durably reconstructible; the additional package-master management record did. This is an acceptance input reported by the Board, not a repro executed here or evidence of authenticated scheduler behavior.
-
-### Required checks, without inventing trust architecture
-
-1. Determine exact master from established task/package/monitor bindings and original decision/worker context. A worker/member task is not automatically the master. Ambiguous/missing/conflicting master means fail-closed management gap, not annotating the most plausible card.
-2. Capture the actual current interactive operator instruction/fix evidence and exact park/checkpoint it resolves. Identify what is permitted/forbidden; do not turn an implementation fix or an arbitrary note into permission for wider product, deployment, remote, schema or security changes.
-3. Persist the authorized Resume/Override once on that master through A's actual append/readback contract, with exact decision/source/park references. Unknown write outcome is reconciled, not repeated. Preserve the signal through later checkpoints/restarts.
-4. Reconcile worker delivery and actual busy/pending-input/result/process/owner/base/connection/single-flight state before one permitted continuation. If the interactive follow-up already admitted the work, the next wake observes it; it does not submit it again.
-5. Next fresh wake reads the canonical order and effective newer decision, verifies the authority available through the real supported contract, then applies live revalidation/one-action policy. Old park text alone must not recreate the identical resolved business question. A new authority/coverage gap remains a separately named gap, not a claim the old fix never happened.
-6. Negative cases: another master's signal, a stale/mismatched superseded checkpoint, conflicting/new stop decision, ambiguous decision source, unauthenticated worker/free-form note, pending security input and uncertain worker/journal state all block dependent mutation.
-
-### r27 provenance boundary and pending positive case
-
-Current r27 intentionally does **not** authenticate stored operator directives. Its ordinary notes expose no human author provenance. `OPERATOR-DIRECTIVE`, newest timestamp/sequence, persisted journal bytes, a worker report and `operator_authorized:true` in the separate unresolved-submission override are not proof of human identity or a trusted scheduled-resume grant. Task A supplies durable storage/read access only; it cannot convert any of these into authority.
-
-Current interactive authorization can follow the existing approval/same-session/live-revalidation flow. The subsequent positive **scheduled** trusted-resume case requires an effective, supported and verified authority/provenance contract. This plan does not choose one, add authentication, introduce a token/role/approval ledger, or weaken fail-closed behavior. If the later authorized QC finds no such contract, report QC-5's positive scheduled case PENDING (or a precise FAIL for a demonstrated contrary behavior) and return terminal `INPUT_REQUIRED` for the real missing decision. Passing free-form-note no-op tests cannot count as passing the positive resume case.
-
-The later regression is exactly `Park → current interactive operator fix/decision → correct-master durable Resume/Override + exact worker follow-up reconciliation → fresh next Wakeup`. Separate verified interactive persistence/no-double-send, negative untrusted wakeup and positive trusted scheduled authority evidence. A synthetic `trusted=True`/`interactive=True` fixture must be labeled simulated; it does not authenticate a real stored note or discharge hosted acceptance.
-
-## 10. Review execution concept, ownership and evidence
-
-No new orchestration engine or QC runtime API is required. Review uses current Board/task-document/history/session/result reads, actual integrated source and bounded test artifacts. Pure stored-result reads require no new worker. A later test/investigation is a separately authorized work instruction and retains actual scope. Runtime selection follows current project capabilities/user choice; do not hard-code provider/model IDs or alter the current runtime merely to read evidence.
-
-Later sequential QC review steps (not part of this document handoff):
-
-1. Reread this task's exact C/P and full current Board, including QC-5; verify identity/revisions and actual A completion/integrated base. Record missing source/result/schema/evidence explicitly.
-2. Freeze the actual subject revision(s), Task A handoff and current companion revision. Revalidate affected tool targets/ownership for any permitted test/document writes. Read-only review does not require an isolated code worktree; correcting code would require explicit authorization and current writer ownership.
-3. Recover full relevant original results and stable content coverage. Distinguish predecessor-reported PASS from directly verified test outcomes and installed/discovered capabilities.
-4. Execute the existing QC points using the above cases and A's meaningful storage/transport tests. Separate source, synthetic, local persistent/process/wire, and hosted evidence. Do not run a live external scheduler/host pilot without its separately authorized configured target and capabilities.
-5. Record PASS/FAIL/PENDING per point with concrete evidence; collect precise contradictions/minimal proposals. New relevant QC findings belong in this canonical review/result and, if separately authorized, the existing Board collection task; no automatic duplicate ticket or Board append during a read.
-6. Apply small in-scope quality corrections only when the later review assignment explicitly authorizes them; then rerun the affected checks, renew subject/evidence and record residual gaps. No new product/architecture/data-schema/security decision is implemented under a QC label.
-7. Update C with actual verdicts/base/result pointers and next action; update P only for genuine conceptual findings. Return acceptance evidence to the orchestrator; Board status change is separate.
-
-## 11. Validation and acceptance levels
-
-Task A's scoped checks have already been run on integrated `main`; Task B has **not** performed QC or rerun tests in this concept-preparation step. The following Task A evidence is available for later criterion-by-criterion review:
-
-- In `adapters/mcp`: `npm run check` PASS; `npm test` 106 PASS / 0 FAIL / 2 opt-in pinned-upstream skips. The live `npm run test:taskboard` harness was not run: `OCVM_TASKBOARD_BIN` and the pinned binary are absent. The harness was syntax-checked only.
-- Journal tests included 64 ~16-KiB checkpoint entries, <64-KiB latest read work, ≤1.1-MiB recent scan, full 64-entry cursor traversal to a captured head, unchanged ordinary task JSON, readable legacy Description ranges, and four child processes × eight unique contiguous appends. Fault fixtures covered uncertain post-log/pre-head reconciliation, corrupt head, partial suffix and unsafe journal/lock symlinks.
-- `bash tests/mcp_adapter_test.sh` PASS (production-only archive/pin/cache checks); `python3 -B tests/release_metadata_test.py` 5 PASS; `bash tests/vm_config_test.sh` PASS. Companion `python3 scripts/build-chatgpt-skill.py --check` PASS and `python3 -B tests/chatgpt_skill_test.py` 24 PASS. These include source/scenario assertions and a synthetic in-memory monitor trace, not real scheduled resumes.
-- No live connector restart/discovery, hosted Work/scheduler, real two-day wait, runtime mount-persistence test, operator identity proof, deployment or external acceptance is claimed. No Task B tests are run in this turn.
-- `git diff --check`, `bash -n`, ShellCheck and integration-harness `node --check` passed in the Task A integration check; Task B's final C/P-only diff must be checked separately. If a later authorized corrective assignment changes sources, rerun only relevant required checks plus applicable companion consistency checks.
-
-Evidence levels must remain distinct:
-
-| Level | What it proves / cannot prove |
+| Closure command/check | Result / exact scope |
 |---|---|
-| Read source/concept matrix | Requirements and actual paths/wording; no execution or real model compliance. |
-| Deterministic synthetic traces | Ordered expected decisions and forbidden sends/appends in the fixture; no persistent storage, external scheduler or real actor provenance unless actually tested at that level. |
-| Real local journal/process/MCP tests | Durable records/restart/concurrency/limits/transport in tested environment; no hosted Work/Scheduler availability or operator identity guarantee. |
-| Reproducible skill package checks | Inventory/markers/artifacts consistency; no installed skill invocation or hosted behavior. |
-| Authorized hosted/host/operator acceptance | Actual configured target, scheduled connection/model/single-flight/readback, fresh-context resume and observed operator flow; only the specifically evidenced scenario. |
+| `python3 -B tests/chatgpt_skill_test.py SynthesizedContractTest.test_synthesis_changed_present_or_stale_pins_reconcile_without_dispatch SynthesizedContractTest.test_synthesis_new_revision_pins_sources_and_imports_evidence SynthesizedContractTest.test_synthesis_publication_and_routine_evidence_do_not_rewrite_input_pins -v` | **3/3 PASS**; six stale/changed Task/C/P negatives, unreconciled/reconciled revision, completed import and publication/routine evidence controls. |
+| `python3 -B tests/chatgpt_skill_test.py -v` | **44/44 PASS**, including all **16 synthesis cases**; source/synthetic/disposable local fixtures, not hosted compliance. |
+| `python3 -B scripts/build-chatgpt-skill.py --check` | **PASS**, existing r33 inventory/ZIP/SHA unchanged, ZIP `e11a233a91cc1920d7df89910190fab42ff2106bdebc4d92697bddf007a6815f`; no shipped skill revision/artifact edit. |
+| `python3 -B scripts/build-managed-runtime.py --check` | **PASS**, embedded/source parity. |
+| `node --test tests/managed_policy_test.mjs` | **4/4 PASS**. |
+| `python3 -B tests/managed_lifecycle_test.py` | **5/5 PASS**. |
+| `bash -n opencode-vm.sh` | **PASS**; no shell edit. |
+| `python3 -B /tmp/opencode/f2-mutation-check.py` | **Mutation control PASS**: memory-only substitution of exact reviewed `valid()` makes six negative subcases and the unreconciled-revision assertion fail as expected. Corrected suite is green. Temporary harness is execution evidence, not a shipped dependency. |
+| `python3 -B /tmp/opencode/f2-preservation.py verify`; Git whitespace/scope/index checks | **PASS**; all 26 unrelated dirty/untracked status/hash records unchanged, aggregate `c94c34de305e2f983e4d1c64b73b56141058c50295bd3f56f00e2bf4bfbd066b`. Only explicit intended paths staged; retained worktrees/artifacts/member/Monitor documents preserved. |
 
-For any required missing level, retain PENDING and name the exact target/capability/evidence needed. Full business acceptance requires all required QC outcomes evidenced; no blanket PASS from A's local completion or a green package suite. External pilot setup, infrastructure, push/publish/deploy and Board Done are not authorized by this document preparation or by an ordinary review.
+**Current gate: `LOCAL_RELEASE_PREP = GO/READY`, not executed by this correction.** Prior independent QC is operator-accepted with F2 closure satisfied; no new local blocker. QC-4 local PASS / overall PENDING; QC-1/2/3/5 overall PENDING. Synthesis stale/changed-pin regression is now local PASS. This is acceptance of the prior review plus bounded fix evidence, not a fresh independent full-candidate PASS.
 
-### Later report shape
+**External PENDING remains visible and unchanged:** actual hosted r33 skill import/model behavior; activated/discovered journal-capable connector/new prompt; hosted Work/single-flight/Setup Receipt/cadence/canonical cross-chat Resume/dual reporting/no-double-dispatch; real durable manager-restart/repair-history reconstruction; journal mount/lifecycle/pinned-upstream/elapsed and remaining fault boundaries; native macOS/Lima/operator acceptance; separate host/security dependency `task_ce242aa5-b674-5c39-b722-aa69228d3b06`. These continue to constrain final release/publication acceptance, while the operator authorizes local preparation now. No PENDING is converted to PASS; no external test/activation was performed.
 
-For each QC point return: verdict; subject HEAD/revision; exact evidence source (file/section, command/result, task/session/message IDs when actually known, history generation/ranges/coverage); observed result; gaps/uncertainty. For FAIL add affected rule/test and minimal corrective proposal. For PENDING add prerequisite and one next bounded evidence step. For `INPUT_REQUIRED` state the concrete missing decision/context/safe options plus completed and paused work. Keep full reports in original session evidence; cite them from C/P rather than copying.
+Serial correction/document owner is `ses_efecfe1adffeHUgqrtVzzG1Jia`, separate from prior reviewer. Fresh main/empty index/no lock and clean test path verified; backend status showed only this session busy. Current assignment explicitly authorizes local correction/commit and canonical package/QC publication, preserving their prior uncommitted evidence. No Board move, worker redispatch, runtime restart, cleanup or remote action. **Exact next authorized stage: LOCAL_RELEASE_PREP** under the existing local-check/artifact/readiness-report process. Actual release/tag/remote push/publish/upload/deploy remains operator-only and unauthorized here. A new substantive blocker/decision requires INPUT_REQUIRED, not GO.
 
-## 12. Decisions, open acceptance questions and maintenance
+## Package execution ownership
 
-Settled from the current Board/user instruction: QC covers exactly the existing QC-1–QC-5; fixed A→B order; Task A's implementation/evidence prerequisite is now delivered, while QC-3 remains PENDING until reviewed; review does not grant feature/security scope; later small corrections need explicit authorization; normal terminal `INPUT_REQUIRED` handles real missing decisions. No new product, architecture or security decision is made by this plan.
+`package_id=task_b0956475-3e93-5478-b611-079d4535ac10`; `SYNTHESIS_REVISION=1`; `execution_owner=package`.
+Canonical contract: `planning/task-concepts/task_b0956475-3e93-5478-b611-079d4535ac10-concept-plan.md#synthesized-execution-contract-revision-1`.
+Effective only with active parent revision/readback; candidate publication admits no dispatch. Package master alone admits remaining obligations. Independent review's original FAIL is preserved in §0; the effective operator decision above accepts it with F2 now closed and establishes LOCAL_RELEASE_PREP GO/READY without renewed QC. §§0–8 retain historical exact subjects; the effective section above and active parent contract supersede their advancement orders. Board states and external release acceptance remain separate.
 
-Open acceptance prerequisite: the actual supported provenance/authority for persisted scheduled Operator Override/Resume is not supplied by r27, r28 or A's journal. Preserve the fail-closed boundary and investigate/report it during authorized QC; do not invent a solution now. This does not block C/P preparation. A's integrated local result is present; hosted/runtime evidence remains absent and separate from local source/test evidence.
+## 0. Historical independent full-candidate FINAL QC — revision 1 / reviewed e6db24b
 
-## 13. Current release blockers and adjacent follow-ups
+### Subject, independence and authority
 
-The complete current Board descriptions for these two user-designated tasks were read. They are separate release blockers/follow-ups, not implementation scope silently absorbed into QC:
+**Verdict: FINAL_QC_FAIL. LOCAL_RELEASE_PREP NOT_READY.** One Medium in-contract regression finding F2; no new product/architecture/security/scope decision. Required external acceptance remains PENDING independently of F2.
 
-- `task_ce242aa5-b674-5c39-b722-aa69228d3b06` — **Scheduled Tasks – Host-/Security-Blockings vor Connector untersuchen**, Inbox/INBOX ticket 5, `todo`/high. Its current scope is to reproduce/classify the pre-dispatch host/safety block and distinguish host-not-delivered, connector rejection and backend failure without bypassing policy. Its latest Board note expressly keeps the Work/Worker implementation separate.
-- `task_1bb4d21a-364c-5b28-88e5-4f503071e387` — **Orchestrator – Scheduled-Monitor nur via Work/Worker starten und Operator-Eskalationen verständlich berichten**, MCP ticket 19, `todo`/high. Its current Board description requires a distinct concept round before it may be moved to `in_progress` or implemented. It covers normal-chat-to-Work/Worker bootstrap routing and clear operator escalation summaries (including persistent correct-master checkpoint mapping).
+- Exact main/HEAD: **`e6db24b27e888af41cda5b523e043c0ec2c533c0`**; tree **`a60734bee4a87e0bb254154d95e450c2e8c3f522`**. Active package `task_b0956475-3e93-5478-b611-079d4535ac10`, **SYNTHESIS_REVISION 1**, active/READY, package dispatch owner. Full subject includes retained Stage 1, canonical Stage 2/Option 1, F1, synthesis implementation and uncommitted pilot publication.
+- Reviewer **`ses_efed8bce5ffe15LGmXtwgGb7ZZ`** is separate from implementation/fix sessions `ses_f03b420f1ffeCOkUh2dlMQI21V`, `ses_f00deeacaffepijOQCMZQRuDrk`, `ses_f0081c157ffeYd6fVG0qgaQyiy` and publisher `ses_f00989676ffemfWQFWu8yqmacI`. Backend status showed only the reviewer busy. No implementation, product test edits, fixer dispatch, Board move, release preparation or runtime change by reviewer.
+- All ten canonical C/P read fully before verdict/write. Exact regular nonsymlink first-line identities and existing metadata bindings checked. Parent input revisions: C `task-file-v1:5e5f216bee5195eb95e86749bc2a032ed47d7731eab1891fc0d6b684d64b4407`, P `task-file-v1:e78f2e81f118cc1d7e87bcfb9d63250bd3ae38d0d5f28b1d1f10faaece41e380`. QC input C `task-file-v1:43f3acbdc8ebfb26b35040358336530b7e80f9aa572179503213d9c35c7066c8`, P `task-file-v1:289098b961b121e2da60d064c3b3442f0773a0951b2cd917356a7ba83f1c2bee`. Parent and all eight member publication hashes match P's publication manifest before this authorized routine QC update. Frozen pre-marker source inputs remain distinct from publication/current evidence; no impossible self-hash required.
+- Fresh read-only local `/api/tickets` plus schema-3 sidecar identity/binding readback verifies parent `todo` / `2026-10-03T03:35:53.227290975+02:00`, QC `in_progress` / `2026-10-03T03:35:55.221097301+02:00`, synthesis `in_progress` / `2026-10-03T11:10:32.744483232+02:00`, Stage 1 `done` / `2026-10-03T04:00:53.844166705+02:00`, Stage 2 `done` / `2026-10-03T02:49:45.312691883+02:00`. Full relevant descriptions/latest notes read. Same-title `task_5da63d17-5fa5-59fb-a40d-87bd0bce1b53` remains excluded. No newer conflicting authority or source/publication drift found.
+- Original visible Stage-1 result `msg_0ff204f6a001n5c13eNEfgGmd7`, Stage-2 `msg_0ff3ba8ea001hh9jghtFz5vhZq`, targeted F1 QC `msg_0ff7b9d35001xtNvsh7afa1fu9`, synthesis `msg_10115a2e9001bhG3sG5M7PbMwf`, activation instruction `msg_a68022b1061f4a71a4de6740bdfdc784` and correlated terminal activation result **`msg_101220953001NFKWQo60xL7xMa`** read completely via exact native stored-message GETs (text parts only). Terminal stop/completion/no error verified; activation result reproduces exact parent final hashes. This verifies cited result coverage, not all historical management turns.
 
-No release/tag/publish/deploy is authorized. Task B's document readiness does not resolve either blocker, pass QC-5, start the `task_1bb4...` concept, change either Board task or authorize release. The next step is orchestrator document registration/readback; a separate Board transition remains explicitly open, and QC review starts only under its own authorized assignment.
+### QC-1–QC-5
 
-Maintenance: C one file, ~5k target/~7.5k warn/condense before ~10k; never split. Main P ~20k target/~30k warn/split by ~40k into task-ID-named details while keeping the main canonical outcome/decisions/current review-test plan/index. Budgets are not minimum lengths. Read files before substantive work, keep C current after substantial iterations and update P/`Last-concept-update` for substantive concept shifts. Avoid full-history duplication and never overwrite a foreign Task-ID or silently retarget bindings.
+| Point | Overall | Source/local result and acceptance limit |
+|---|---|---|
+| QC-1 — durable management memory/resumption | **PENDING** | Source and serialized-local PASS: `monitor-tasks.md:93–105,130–143` retains canonical decisions, pages checkpoint/newer entries, refreshes head, reconciles exact receipt and preserves silent cadence. F1 retained at current line 130. Actual scheduled fresh-context/history reconstruction, repeated elapsed ticks and configured expiry/stop readback unavailable. |
+| QC-2 — historical loop guard | **PENDING** | `integration-test-monitor.md:19–25` and `work-packages.md:106` preserve equivalent fingerprints/reserve-on-admission/two-cycle cap/A→B→A/history across revisions. Existing serialized cases PASS. Actual journal-backed manager-process restart episode reconstruction still missing. |
+| QC-3 — journal/long history/fail-safe errors | **PENDING** | Fresh five real filesystem/process tests and one public MCP wire/schema test PASS on reviewed adapter sources; 64-cycle read budgets/captured-head walk, Description stability, legacy and selected faults covered. Live connector has no journal reader; real mount/lifecycle/elapsed/pinned-upstream and remaining boundary faults unverified. |
+| QC-4 — concept/source/tests/publication alignment | **FAIL** | Stage 1 source alignment, F1 closure, Stage-2 A–G, unchanged enforcement, full r33 generated alignment and current ownership publication PASS. **F2**: required stale/changed source-pin rejection is not meaningfully checked by synthesis fixture; changed nonempty source pin admits synthetic dispatch. Imported skill/live prompt/connector alignment also PENDING. |
+| QC-5 — correct-master durable Override/Resume | **PENDING** | Settled canonical-master authority and source/serialized positive/negative/receipt cases PASS; no separate authentication requirement reopened. Actual hosted next fresh wake, dual terminal/master persistence and no-double-dispatch behavior remain missing. |
+
+These PENDINGs are required release blockers, not defects inferred from unavailable evidence. F2 is a local regression-quality defect; it does not prove deployed model misbehavior.
+
+### Synthesis-specific gates (separate acceptance)
+
+| Gate | Verdict / evidence level | Evidence and remaining limit |
+|---|---|---|
+| Exact revision/publication/ownership identity | **PASS — current documents/Git** | Active parent section, all eight member owner/revision pointers and their publication hashes match; immutable base/candidate/source/main match. Parent states and Board acceptance not collapsed. |
+| Stale/changed source-pin rejection | **FAIL — required local regression, F2** | Source instruction `work-packages.md:40–78,138` is correct; test `valid()` only checks source keys/nonempty values. Independent changed-C-pin probe returns DISPATCH_ONCE, missing-P control reconciles. No evidence that current real pilot pins are stale. |
+| Ownership/dispatch/receipt precedence | **PASS — source/synthetic; hosted PENDING** | First-matching table at `work-packages.md:75–83` plus mutation controls: foreign manager observes package, admitted/uncertain receipt reconciles before dispatch, no second-session bypass. Cooperating markers are not backend exactly-once locking. |
+| Completed imports without redispatch | **PASS — source/synthetic/current pilot evidence** | Actual imported originals/commits retained; completed Stage-1/2/synthesis implementation consumed, QC remains separate owed obligation. No member redispatch in this review/activation. |
+| New unsynthesized member / explicit new revision | **PASS — source/synthetic** | `work-packages.md:69,79`; unchanged active manifest and zero admission for new member, explicit revision imports prior evidence/history. Hosted behavior unverified. |
+| Separate fixer/integration/renewed independent QC | **PASS — source/synthetic** | `work-packages.md:98–108`; stale HEAD, wrong revision, partial subject and fixer/implementer self-QC refused in tests. Actual F2 correction/re-QC has not occurred. |
+| Bounded correction/history reservations | **PASS — source/serialized-local; real reconstruction PENDING** | Same/equivalent fingerprints, two no-progress cycles, A→B→A and uncertainty survive revision; no reset or acceptance weakening. Actual end-to-end manager restart remains QC-2 PENDING. |
+| Hard stops / INPUT_REQUIRED | **PASS — source/synthetic** | Genuine new product/architecture/security/scope/data/schema, irreconcilable owner/base, actual host permission and exhausted budget stop dependent work; concrete report/context/options/completed/paused work. Missing evidence remains PENDING; settled authority not reopened. |
+| Internal milestones and separate states | **PASS — source/synthetic/documents** | No premature operator handoff/Board Done from commit/integration/turn completion; explicitly permitted transitions require evidence/readback. Member scope/Board/acceptance, package state and final acceptance remain separate. |
+| Full-candidate/local-prep gate | **PASS — blocking-rule source/synthetic; release acceptance NOT_READY** | Exact full-subject independent QC and zero release-blocking FAIL/PENDING required. Baseline F1 PASS never substitutes; this F2 FAIL and retained external gaps prohibit local prep. |
+| Operator-only release boundaries | **PASS — source/synthetic/review actions** | No autonomous transition for actual release/tag/push/publish/upload/deploy/productive restart/destructive cleanup; no technical enforcement change. No such action performed. |
+| Imported/runtime/hosted/native acceptance | **PENDING — external** | Built source/bundle is not installed/imported/model/scheduler/native acceptance. Keep the retained required evidence separate. |
+
+### Fresh independent commands and integration checks
+
+| Command/check | Exact result / scope |
+|---|---|
+| `python3 -B tests/chatgpt_skill_test.py` | **42/42 PASS**, including 14 synthesis cases. Source-bound/synthetic scenarios and disposable Git/filesystem fixtures, not hosted compliance. |
+| `python3 -B scripts/build-chatgpt-skill.py --check` | **PASS**; r33 inventory/ZIP/checksum matches without rebuilding artifact files. ZIP **`e11a233a91cc1920d7df89910190fab42ff2106bdebc4d92697bddf007a6815f`**. |
+| `python3 -B scripts/build-managed-runtime.py --check` | **PASS** embedded source parity. |
+| `node --test tests/managed_policy_test.mjs` | **4/4 PASS**. |
+| `python3 -B tests/managed_lifecycle_test.py` | **5/5 PASS**, disposable installer fixtures only. |
+| `bash -n opencode-vm.sh` | **PASS**. No shell edit; prior baseline ShellCheck comparison/102 unchanged warnings remains imported, not a new lint pass. |
+| `npm run check && npm run build` in `adapters/mcp` | **PASS**, 0.1.22 TypeScript/ignored test build output; no bundle/release artifact build or runtime activation. |
+| `node --test --test-name-pattern='management journal\|cooperating writer processes\|journal uncertainty\|journal appends' dist/taskboard.test.js` in `adapters/mcp` | **5/5 PASS**, disposable real journal/process tests. |
+| `node --test --test-name-pattern='MCP board search' dist/http.test.js` in `adapters/mcp` | **1/1 PASS**, disposable HTTP server/official MCP client/strict schemas and journal capability. No active Board write. |
+| Independent memory-only `runpy.run_path` fixture probe | **F2 reproduced**: frozen observed C `context-r1`, contract pin `stale-context-r0` → valid True / DISPATCH_ONCE. Missing P control → RECONCILE. No source edit. Probe also confirms candidate/live-base observations are not modeled; routine candidate changes alone are not a separate finding. |
+| Extract actual system/Bash hook bodies from canonical module and execute with canonical constants/stub predicate | **PASS**: owned managed output has no Git/commit/publication/substitute text, Bash shared replacement empty, unmanaged system gating unchanged, primer 421 bytes. |
+| `git diff --exit-code 4db0ace... HEAD -- runtime opencode-vm.sh adapters scripts docs AGENTS.md README.md integrations/chatgpt/opencode-session-orchestrator/references/worktree-ownership.md` | **PASS**, byte-identical retained technical/enforcement/prompt sources. Prior fixed-tokenizer A–G counts apply unchanged; no live prompt activation inferred. |
+| Required ancestry, source→integrated equality and full synthesis diff | **PASS**: Journal/Stage-1/Stage-2/F1 are ancestors; `fc709756...` vs `a72ab008...` and `04af3ba...` vs `e9dbe7b...` trees equal; synthesis source/main same exact SHA, eleven scoped committed paths inspected. |
+| Git HEAD/main/tree, whitespace/empty cached diff, regular headers/publication hashes | **PASS** before QC write; exact pinned subject and all member publication bytes match. |
+| Read-only live health/catalog | OpenCode **1.18.33**, adapter **0.1.21**, generation **`oc-20260930-011215-attach-1790807165-14654`**, `get_task_management_history` **absent**. Current source adapter **0.1.22** / script **0.7.3** / managed revision **1**; source ≠ activation evidence. |
+
+### F2 — Medium / QC-4 and synthesis regression FAIL
+
+**Contract requirement:** synthesis P §8 A11, QC P §6 revision integrity/meaningful traces, and this review's stale/changed-pin rejection requirement. Shipped `work-packages.md:40–78,138` requires actual current Task/C/P sources and delta/readiness reconciliation before dispatch. Missing/conflicting/stale observations cannot be converted into a ready label.
+
+**Exact defect:** `tests/chatgpt_skill_test.py:1845–1858` checks only the set of `task/C/P` keys and truthiness of their values; no independent observed revisions are supplied or compared. `dispatch()` at lines 1860–1875 therefore treats any nonempty replacement as valid. `test_synthesis_partial_publication_and_missing_evidence_block_dispatch` tests deletion of P, owner/revision/inactive/writer/readiness flags, not changed-but-present Task/C/P pins. The explicit-new-revision test changes a C pin and imports work without an independent current-source reconciliation observation. Required stale/changed-pin rejection is thus not exercised by the otherwise passing 14 synthesis/42 combined suite.
+
+**Independent reproduction:** instantiate the existing `SynthesizedContractTest`, run `setUp()`, obtain `contract()` and freeze a separate observation of `sources`; replace only `sources['member-a']['C']` from `context-r1` to `stale-context-r0`. Existing `valid()` returns **True** and `dispatch(..., 'member-a')` returns **DISPATCH_ONCE**, rather than the required RECONCILE/zero-dispatch trace. Deleting P returns RECONCILE as expected. This is a synthetic regression false-positive/coverage defect, not an executable backend validator and not an observed hosted dispatch defect. Current pilot publication is independently consistent; do not confuse it with this negative-case gap.
+
+**Smallest in-contract correction:** a separate fixer augments the existing source-bound synthesis fixture with independently captured current Task/C/P observations; covers changed-but-present/stale source pins with RECONCILE and zero dispatch before explicit delta reconciliation/new-revision admission. Include a valid reconciled revision/import control. Distinguish immutable pre-marker input pins from expected publication/current observations and authorized routine QC/evidence updates, so legitimate marker/report updates do not spuriously demand a new synthesis revision. Keep all fixed semantics, source/generated/hosted distinctions and repair history. No new runtime/backend schema, lock/store, product rule, permission mechanism or whole-member replay is needed. If only tests change, no companion-source revision/bundle change is implied; any actual shipped-rule delta must follow the established version/build process.
+
+Package owner classifies/reserves a bounded separate-fixer action under the existing history-based loop; minimal scoped regression/integration records a new exact subject, followed by **renewed separate independent full-candidate QC**. Reviewer performs no fix. F1 remains CLOSED/PASS on its exact historical subject and unchanged current field; it is not reopened by F2.
+
+### External PENDING, informational evidence and handoff
+
+Required release-blocking PENDING retained: actual imported r33-or-corrected skill/revision/model behavior; authorized activation/discovery of journal-capable connector and new prompt; hosted Work model/apps/single-flight/Setup Receipt plus normal-chat routing, wrong-surface handling, fresh canonical cross-chat Resume, stale/wrong/newer-conflict negatives, exact uncertain/admitted receipt/no double dispatch, dual escalation and cadence through park/PASS/work-stop/expiry/explicit scheduler stop; actual durable manager restart/reserved repairs/older history; journal mount/lifecycle/pinned-upstream/long elapsed and remaining Unicode/size/disk/flush/cursor/replacement/transfer/fault boundaries; required native macOS/Lima/operator acceptance. No external schedule/runtime/native test was created or altered. The optional second pilot and historical source/test counts are supporting evidence, not release-capable hosted proof.
+
+Fresh read of separate host/security dependency **`task_ce242aa5-b674-5c39-b722-aa69228d3b06`** confirms **todo**, revision **`2026-10-02T11:18:01.450480089+02:00`**, unchanged investigation/acceptance. It remains a separate release-readiness dependency, not an admitted member or a product failure found here. No root cause or bypass asserted.
+
+Informational/non-blocking observations: historical member Status/Board and pre-synthesis next-step prose explicitly carries parent-supersession pointers; those snapshots are not current dispatch orders. Existing ShellCheck baseline findings were not modified or reclassified. Pre-existing untracked dist archives are preserved old evidence, not newly verified release artifacts. Mandatory future local release-preparation checks were not started and are not represented as PASS.
+
+**Preservation:** pre-test inventory six modified/24 untracked (30 paths), index SHA-256 `16c3e5c9e9cf1ab72baddf725e994b265ae2b15839c6e5c6d837aec862a9c152`; bindings metadata `602e318194bf719765a01d80a13ca667169f8bfe6f07bf661fe8508549aa681b`. Immediately before QC maintenance, all 30 content hashes, exact HEAD, index bytes, metadata and all six read Board tasks matched preflight. Only this QC pair is authorized to change; 28 other dirty/untracked records including parent/member/dist and all retained worktrees are preserved. QC maintenance is a routine evidence update under active revision 1, not an implicit revision/membership/acceptance change. No stage/reset/stash/commit, product/bundle edit, Board mutation, runtime restart/cleanup or release/tag/push/publish/deploy.
+
+**Exact next step:** package master records this full-candidate FAIL and routes **F2 only** to a separate bounded fixer, preserving historical attempt/reservation/receipt evidence. After exact scoped correction and serial integration, arrange renewed independent full-candidate QC at the new HEAD/current revision/publication. Retained external acceptance still must be obtained separately; no local test can promote it. **LOCAL_RELEASE_PREP may not proceed.** No new business decision is required by this finding; genuine later scope/architecture/security decisions use INPUT_REQUIRED. Parent/member documents and Board state were not updated by this review.
+
+## 1. Authority, exact subject and review boundary
+
+Current targeted independent rerun subject is exactly **main@e9dbe7b10a3e979662aa8738f75ea818b306b401**, with both main/HEAD verified. Prior full source/local review at `4db0ace8864684202337963d32cb6e63168b062f` remains historical baseline evidence. The targeted rerun closes its F1 correction, not synthesis FINAL QC. Stage 1 `task_1bb4d21a-364c-5b28-88e5-4f503071e387` integrated at `a72ab008dfea2ea592e7656fbf8457b8435c0ce5`; `4db0ace...` is Stage-2 integration for `task_6ac65bfd-ca45-5eaa-b100-b282d9761eaa`. Journal foundation Task A `task_a73131d9-b3c3-57e2-b1aa-582204f248e0` at `62869f68fc2ccbea302d34c2bd39900dbc813090` remains prerequisite evidence. Completed implementation is not replayed.
+
+Current effective package sequence replaces the former baseline-QC→release end: finish Stage-1/Stage-2 QC/fix cycle on stable integrated main → initialize/implement/test/local-commit/integrate required `task_0e9a2768-8e3e-5ea7-8966-902b2769b2f9` (Synthesized Work Package Execution Contract) → synthesize the existing package as pilot `SYNTHESIS_REVISION 1`, importing completed evidence → additional independent FINAL QC of the full combined candidate → bounded unequivocally in-contract corrections with renewed independent QC if needed → only release-capable FINAL QC permits LOCAL_RELEASE_PREP → OPERATOR_HANDOFF. Actual release/tag/remote push/publish/deploy remains operator-only. Detailed contract/state machine is in package P; §6 below defines additional synthesis QC gates.
+
+Historical baseline review Board readback (not current status claims):
+
+| Task | Observed state | Updated revision |
+|---|---|---|
+| QC / MCP-16 | in_progress, high | `2026-10-03T02:57:34.469858483+02:00` |
+| Stage 1 / MCP-19 | done, high | `2026-10-03T02:18:59.829579283+02:00` |
+| Stage 2 / MCP-21 | done, high | `2026-10-03T02:49:45.312691883+02:00` |
+
+All three C/P pairs were read completely, and live `get_task_documents` returned all six exact registered paths as `available`. QC C/P are `.opencode/tasks/task-task_160e0556-f3a8-5e12-a877-ed22e7bb2360.compact.md` and this plan. Stage-1/2 paths are the corresponding supplied task-ID-named C/P files. At admission, QC C/P hashes were `3ccc7d11166286d3599d4dcc1a9a3a05fc9fbb993048df03a0251e8ab0f9f8d5` / `413289dc5bcd607118129cd91acc0f940e503bbe2027fdb0f16286a847655300`; this report intentionally renews those content revisions. Stage-1 C/P hashes were `dec4982458b68f62b139b1bf29df657add43f8fda712f49f834594ba10b82bfc` / `596d4b4094ef096a707a3d0716cc1b197c0d50949184ad73f34b02866fe0f22d`; Stage-2 C/P hashes were `76b98c3356a4d5cdd3a9880dcce5f2ecbebb8c4e028d6430a8f004de4b12ab15` / `145453b4dd1b381f642cd61d4eee9d37ffa3c196d424a8f219959c1e7a87adea`.
+
+Preceding package planning read full package/QC/new-member and Stage-1/2 Board descriptions including appended notes. Master revision `2026-10-03T03:35:53.227290975+02:00`, QC `2026-10-03T03:35:55.221097301+02:00`, new member MCP-23 `todo`/high `2026-10-03T03:35:24.227574982+02:00`; Stage 1 `in_progress` for correction (`2026-10-03T03:19:10.458255467+02:00`), Stage 2 `done`. This rerun rechecked status/latest notes for QC/package/Stage-1/Stage-2 only; new-member context is retained from package planning, not independently reviewed. Same-title MCP-22 is not the specified member. These observations do not activate synthesis revision 1.
+
+Board owns outcome/scope, P criteria/decisions/evidence, C terse state; original commands/results own execution evidence. Board Done and implementer PASS are not independent acceptance. Reviewer performed neither implementation nor F1 correction. This turn authorizes targeted independent source/existing-test review and writes only to QC C/P. Package/Stage-1/Stage-2 C/P were read and preserved; current Board statuses/latest notes confirm the sequence above. No synthesis-member review/implementation, product fixes, new tests, Board/status writes, commit/integration, runtime restart, cleanup or publication.
+
+### Effective semantic decisions
+
+- **Stage 2:** current MCP-21 and operator instruction supersede the QC Board's historical Git-vs-OCI note. Remove all Git-specific prohibition/publish/push/remote/ref/tag/branch/LFS or equivalent special rules from the owned injected managed system and shared Bash/tool-description text. No replacement rule, exception, allowlist, generic substitute or session-aware replacement policy. Git is an ordinary available tool within task scope; actual technical capability/permission/authorization enforcement stays unchanged and authoritative. No Docker/OCI/Test-Proxmox/general-test special prompt rule. Resolved Option 1 removes the shared manual-session commit-confirmation clause too. Prompt becomes shorter.
+- **Stage 1 / QC-5:** registered Stage-1 P §8 and C record the settled 2026-10-03 operator product decision: canonical current content of the correct task/master anchor is the authoritative work instruction, including persisted cross-chat Resume. No additional cryptographic, separate or technically authenticated provenance channel is required. Correct anchor, newest non-superseded bounded decision, no contradictory newer decision, exact receipt reconciliation and live revalidation remain consistency gates, not identity attestation. Historical r27/r28 provenance deferral is superseded; the reviewer does not reopen it as INPUT_REQUIRED.
+- The cadence/Resume supplement from `msg_0fc1c85cb0010NMdGTNnoxrUWk` remains binding under QC-1/2/4/5 as interpreted by that settled decision. No scheduler stop from work park/escalation/PASS/STOPPED; no silent history reset or double-dispatch. Source/bundle/imported-skill/discovered-connector/hosted acceptance remain separate.
+
+## 2. Executive verdict and traceability
+
+**Targeted F1 verdict: PASS. Prior QC-4 local blocker cleared.** The pre-synthesis local QC/fix cycle is complete enough for the package to advance to `task_0e9a2768-8e3e-5ea7-8966-902b2769b2f9` through separate admission/readiness. **Release readiness remains NOT_READY.** No new external/live evidence was obtained; all such PENDINGs carry forward. Additional independent FINAL QC after synthesis remains mandatory. No new defect or product/architecture/security/scope decision was found in the narrow correction.
+
+| Point | Current overall (`e9dbe7b...`) | Independently observed evidence and limits |
+|---|---|---|
+| QC-1 — persistent management memory / resumption | **PENDING — unchanged** | Source/serialized-local subchecks PASS: `monitor-tasks.md:89–101,126,137–139` requires current master, retained canonical decision, checkpoint/newer decisions, head refresh, exact delivery and silent cadence-preserving no-op. Existing Stage-1 source/paging/fresh-wake cases rerun in 28/28 suite. Actual scheduled fresh-context recovery/cadence not observed. F1 template mismatch is now closed. |
+| QC-2 — historical loop guard | **PENDING** | Source and synthetic subchecks PASS: `integration-test-monitor.md:17–25` specifies equivalence, reserve-on-admission, two-cycle cap, A→B→A, material progress and one transient continuation. Existing fixtures reject a third repair and retain serialized counts. They do not reconstruct the full repair episode from the actual journal across manager-process restarts. End-to-end persistent/hosted acceptance pending. |
+| QC-3 — journal capacity / long history / fail-safe errors | **PENDING** | Real local storage/process subchecks PASS: five targeted `taskboard.test.ts:67–298` cases; local public MCP transport/schema case PASS (`http.test.ts:736–894`). Normal task JSON stays stable across 64 large entries; latest/read budgets, captured-head walk, legacy ranges, child-process append and selected faults pass. Live connector lacks journal reads; mount/elapsed-time/pinned-upstream and remaining fault-boundary acceptance not established. |
+| QC-4 — concept ↔ skill/workflow ↔ implementation ↔ tests | **PENDING overall; local PASS** | F1 independently closed (§4): canonical decision field corrected and existing source-contract test covers it. r32 source/generated/bundle checks PASS; Stage-2 A–G preserved. No remaining local blocker in this cycle. Imported-skill and live runtime alignment remain PENDING, so this is not an overall release-capable QC-4 PASS. |
+| QC-5 — correct-master Operator Override/Resume | **PENDING** | Canonical authority decision/source consistency gates and positive/negative serialized simulations PASS locally. Another-chat canonical decision triggers one simulated revalidated step; stale/wrong-anchor/newer-stop/uncertain/admitted receipt cases block/resume appropriately. Real hosted fresh wake, dual escalation persistence and no-double-dispatch acceptance unavailable. No separate authentication requirement remains. |
+
+QC-2/3/5 PENDINGs above are carried forward unchanged; QC-3 local journal/transport evidence is retained from the earlier review, not rerun in this narrow turn. PENDING is not a product failure. Historical QC-4 FAIL remains valid for `4db0ace...`/r31 only; the correction clears that local blocker on the renewed subject. No live dispatch behavior is inferred from the source/template correction.
+
+### Targeted rerun execution evidence — `e9dbe7b...` / r32
+
+- Both correction source `04af3ba1769d6352ee3d75311c5c9bf5879dff56` and integrated `e9dbe7b10a3e979662aa8738f75ea818b306b401` have parent `4db0ace8864684202337963d32cb6e63168b062f`; `git diff --exit-code <source> <integrated>` PASS and both tree IDs equal **`ea55dd7920e49979d1093d50b034d02505bada28`**. Correct integration independently verified.
+- Full eight-file correction diff inspected: one template-line correction, seven lines added to the existing source-contract test, companion marker/changelog/inventory/latest/ZIP/checksum update. No unrelated workflow/enforcement edits. Actual working product paths are clean.
+- `python3 -B scripts/build-chatgpt-skill.py --check` **PASS**: r32 inventory/ZIP/checksum matches without artifact writes. `python3 -B tests/chatgpt_skill_test.py` **28/28 PASS**, including updated F1 source-contract assertions and existing Stage-1 paging, escalation, serialized fresh-wake/cadence/receipt/history cases. These remain source/synthetic evidence, not hosted behavior.
+- `python3 -B scripts/build-managed-runtime.py --check` **PASS**; `node --test tests/managed_policy_test.mjs` **4/4 PASS**; `python3 -B tests/managed_lifecycle_test.py` **5/5 PASS**; `bash -n opencode-vm.sh` **PASS**. Fixtures are disposable; no active runtime state changed.
+- Exact `git diff --exit-code 4db0ace... HEAD -- runtime opencode-vm.sh adapters scripts docs AGENTS.md README.md integrations/chatgpt/opencode-session-orchestrator/references/worktree-ownership.md` **PASS**. Core skill body differs only in release marker. This reconfirms Stage-2 A–G on unchanged prompt/enforcement bytes, including the prior actual-hook and fixed-tokenizer evidence; those one-off checks were not needlessly repeated.
+- Current companion **2026-10-03-r32**, independently hashed ZIP **`6c2c8a6922f61e790ce4a499969047e27bc6a4ec1b0973ae1858d60188e764cd`**. Source script **0.7.3**, managed core revision **1**, adapter **0.1.22** unchanged. No new imported-skill, live connector/runtime or hosted scheduler evidence; previously observed OpenCode 1.18.33/MCP 0.1.21 remains historical evidence, not fresh discovery.
+
+## 3. Stage-2 semantic subchecks A–G
+
+All A–G remain PASS: prior source/generated/local-hook evidence below is preserved by exact Stage-2 byte equivalence and fresh policy/lifecycle/generated checks on `e9dbe7b...`. This is not a claim that the running session has activated the new prompt or that arbitrary project/user instructions are rewritten.
+
+| Subcheck | Verdict | Exact evidence |
+|---|---|---|
+| A — special Git rules removed | PASS | `runtime/managed-core.mjs:4–7` reduced PRIMER; `runtime/managed-policy.mjs:228–235` replaces the upstream match with empty text. Executed those actual extracted hook bodies with canonical constants: managed system and shared Bash outputs contain no owned Git-specific rule. Generated embedded parity passes. `COMMIT_SENTENCE` is a non-emitted matcher, not a residual injection. |
+| B — no equivalent replacement or session-aware policy | PASS | Entire Stage-1-base→final core/plugin diff inspected. Only deletions, unused import removal and empty-string substitutions; no new policy. Retained text is general task scope and INPUT_REQUIRED handback. Full normalized plugin equality proves no additional hook mechanism. |
+| C — ordinary tool treatment within scope | PASS | Removed both positive Git carve-out and restrictive paragraph; no prompt-side Git class remains. General scope/read-only/review text unchanged. |
+| D — technical enforcement unchanged | PASS | Core from `LEGACY_VM_ASK` onward byte-identical to exact Stage-1 base. Full plugin identical after normalizing only unused import and two replacement operands. Entire shell identical after normalizing version and generated block. Existing policy 4/4 and lifecycle 5/5 pass, including independent-deny preservation. |
+| E — no Docker/OCI/Test-Proxmox/test replacement | PASS | Semantic review and actual emitted managed output show no replacement of this kind. No added prompt text or technical policy. |
+| F — shared manual commit-confirmation gone | PASS | `CONDITIONAL_COMMIT` deleted, shared Bash output for the old upstream sentence is empty. No session discriminator/new replacement. Existing non-managed system gating and non-Bash description behavior remain unchanged in the hook check. |
+| G — prompt/token reduction | PASS | Independent same-encoding `tiktoken/o200k_base`: PRIMER 877→421 UTF-8 bytes, 156→81 tokens; former shared replacement 348→0 bytes, 57→0 tokens. Savings 456 bytes/75 tokens plus 348 bytes/57 tokens per replaced occurrence. Not a claim about every model tokenizer or whole-request size. |
+
+## 4. Findings, ordered by severity
+
+### F1 — historical Medium/QC-4 FAIL; independently CLOSED / PASS on `e9dbe7b...`
+
+**Original finding subject:** `4db0ace8864684202337963d32cb6e63168b062f`, bundled r31. The following mismatch is historical, not a current-source finding.
+
+**Evidence:** `integrations/chatgpt/opencode-session-orchestrator/references/monitor-tasks.md:126` emits the template field `decision_ref=<current interactive source or none>`. The same file at lines 89 and 91 requires current canonical master decisions, including cross-chat decisions, and says a routine checkpoint must not erase a decision. Lines 97–101 then rely on latest-checkpoint and newer-history reconstruction. Stage-1 canonical P §8.2 likewise requires later checkpoints to retain the applied decision reference.
+
+**Mismatch/impact:** the template only names a current interactive source or `none`, omitting an applied canonical persisted decision from an earlier/other chat. Literal use in a fresh scheduled context can produce `none` even though a decision applies, losing the cheap checkpoint recovery reference. The surrounding prose is correct; this is a contradictory instruction surface, not an observed runtime dispatch failure.
+
+**Why tests did not catch it:** `tests/chatgpt_skill_test.py:1448–1465` models retention by manually assigning `decision: "stop-3"` to a synthetic checkpoint, independent of the shipped template. The source-contract test at lines 1422–1446 does not validate this field. All 28 tests can pass with this contradiction intact.
+
+**Original smallest recommendation:** retain current applied canonical decision reference/revision (interactive or persisted cross-chat), `none` only without an applicable decision; align existing source-contract check and regenerate/version companion. No new provenance system/runtime/policy/schema.
+
+**Independent closure:** actual `monitor-tasks.md:126` now reads `decision_ref=<current applied canonical decision reference/revision, interactive or persisted cross-chat; none only when no canonical decision applies>`, consistent with surrounding rules and Stage-1 P §8. Old `current interactive source or none` is absent from shipped skill Markdown. `tests/chatgpt_skill_test.py:1426–1432` extracts the real checkpoint block, asserts the new field and rejects the old phrase; that intentional negative assertion is not shipped instruction text. The full 28-test suite and r32 bundle check independently PASS; source/integrated trees match (§2). **F1 PASS; no corrective recommendation remains for this finding.** No new tests, fixes or hosted acceptance performed by the reviewer.
+
+### Acceptance observations (not product defects)
+
+- Live authenticated MCP health/catalog reports **0.1.21**, absent `get_task_management_history`, while reviewed source is **0.1.22**. This is an activation/evidence gap, not failure of the tested source. No restart or update was attempted.
+- Current QC Board history still contains the superseded Git-vs-OCI note; current Stage-2 Board/operator semantics take precedence. Stage-1/2 C/P also contain historical integration-time state snapshots. Those are not reopened as implementation obligations or independent acceptance. This QC P now explicitly incorporates the settled canonical-master authority decision instead of the former provenance question.
+- Local Stage-1 fixtures are deliberately synthetic. Source assertions prove the bootstrap/escalation instructions exist; they do not prove Chat/Work surface behavior or a model's compliance. No external failure is inferred from lack of hosted evidence.
+
+## 5. Historical baseline independent commands, results and observed revisions
+
+The following commands/identities belong to the earlier `4db0ace...`/r31 independent review. Fresh `e9dbe7b...`/r32 rerun results are in §2. Existing tests use disposable fixtures, not the active project's Board/journal. No new tests were added by either review.
+
+| Command / check | Result / evidence level |
+|---|---|
+| `python3 -B scripts/build-managed-runtime.py --check` | PASS; deterministic embedded managed-runtime/source parity |
+| `node --test tests/managed_policy_test.mjs` | **4/4 PASS**; pure enforcement composition/parser/handback checks |
+| `python3 -B tests/managed_lifecycle_test.py` | **5/5 PASS**; temporary source/standalone installer fixtures, idempotence and permission preservation; no live install |
+| `bash -n opencode-vm.sh` | PASS; syntax |
+| `python3 -B scripts/build-chatgpt-skill.py --check` | PASS; r31 inventory/ZIP/checksum equality without rewriting artifacts |
+| `python3 -B tests/chatgpt_skill_test.py` | **28/28 PASS**; source/scenario, synthetic decision/cadence and disposable local Git fixture coverage |
+| `npm run check && npm run build` in `adapters/mcp` | PASS; TypeScript check/compile of reviewed 0.1.22 sources into ignored build output |
+| `node --test --test-name-pattern='management journal\|cooperating writer processes\|journal uncertainty\|journal appends' dist/taskboard.test.js` in `adapters/mcp` | **5/5 PASS**; real local journal filesystem and process tests, mocked/temporary Board |
+| `node --test --test-name-pattern='MCP board search' dist/http.test.js` in `adapters/mcp` | **1/1 PASS**; temporary MCP HTTP service and official client, journal tool discovery/append/history/strict-schema failures; no active-project writes |
+| One-off actual extracted system/Bash hook execution (no file added) | PASS; canonical hook bodies/constants with stub managed predicate; managed primer/handback, empty shared replacement, unchanged manual system/non-Bash gating |
+| One-off exact Stage-1-base equivalence / fixed-tokenizer comparison | PASS; normalized full plugin/shell and unchanged technical core; counts in §3 |
+| `git diff --check`, `git diff --cached --check`, `git diff --cached --exit-code` | PASS; whitespace/index checks; no stage/reset/stash |
+| Read-only live `/global/health`, authenticated MCP `/healthz`, `tools/list`, `get_task_documents` | OpenCode 1.18.33; MCP 0.1.21; journal-read tool absent; all six task-document bindings available |
+
+The journal tests concretely assert: 64 checkpoint entries with ~16-KiB payloads; latest checkpoint read work <64 KiB; recent read work ≤1,100 KiB; a cursor walk delivers all 64 captured entries while a 65th is appended; ordinary serialized task JSON is unchanged; legacy Description is revision/range-readable; four child processes each append eight entries yielding 32 unique contiguous sequences. Selected faults cover uncertain head publication and readback without duplicates, missing head reconstruction without read-side publication, malformed head, partial suffix, unsafe journal-directory symlink and unsafe cooperating lock. These checks do not exercise every disk/flush/Unicode/cursor/transfer boundary listed in §6.
+
+Observed identities:
+
+- Main/source commit `4db0ace8864684202337963d32cb6e63168b062f`; Stage-1 base `a72ab008dfea2ea592e7656fbf8457b8435c0ce5`.
+- Script `opencode-vm.sh:290` **0.7.3**; managed core `REVISION` **1** (not a unique content hash).
+- Source MCP `adapters/mcp/package.json` **0.1.22**; SDK dependency pins 1.30.1 (MCP) / 1.18.21 (OpenCode).
+- Companion source/inventory/bundle **2026-10-03-r31**; checked ZIP SHA-256 **`59992936ab89ab929bae9d8240b75420180ff4d24774c2c2d1370e2276399687`**.
+- Active OpenCode **1.18.33**, MCP **0.1.21**, runtime generation `oc-20260930-011215-attach-1790807165-14654`, from live health plus session `mcp/runtime.json`/`ready.json`. These are live identity observations, not evidence of current-source activation. Imported ChatGPT skill revision and external scheduler/model/Setup Receipt were not available.
+
+Evidence levels stay separate: (1) source/static inspection, (2) deterministic synthetic traces, (3) real local storage/process/MCP transport, (4) reproducible generated bundle, (5) actually imported skill, (6) discovered active connector/runtime, (7) authorized hosted/scheduled/live behavior. No earlier level substitutes for a later required gate. Original command output is in this review session; no full logs or credentials are copied here.
+
+## 6. Retained canonical QC criteria and acceptance matrix
+
+These requirements remain the acceptance target, not statements that every case passed. PASS/FAIL/PENDING must be recorded per point and material subcheck with exact subject, source/command/result, history coverage and gaps. FAIL requires affected rule/test and smallest correction; missing required evidence stays PENDING. Genuine new product/architecture/data/schema/security decisions require terminal INPUT_REQUIRED to the orchestrator, not reviewer implementation. Findings grant no fix or Board-Done authority.
+
+### QC-1 — persistent memory and correct resumption
+
+1. Every wake reads exact canonical master/order, relevant checkpoint/history and newer effective canonical decisions before deriving action or returning parked/terminal no-op. Efficient latest-checkpoint lookup must not hide newer decisions; compare checkpoint/generation across pages, recover intervening coverage, refresh the head before action. A tail cannot prove older history absent. Include revision-bound legacy notes when relevant.
+2. Preserve source/revision, exact superseded park, bounded released step and applied decision reference through subsequent checkpoints. Another-chat decision on the correct canonical master is eligible under §1; text elsewhere is not automatically authoritative.
+3. Live state takes precedence over stale management intent: distinguish Board, work lifecycle, runtime busy/idle, pending security input, exact user-message receipt/original terminal result, process state, owner/base/integration and external acceptance. Missing/corrupt/partial/conflicting coverage blocks dependent work, not cadence.
+4. After one permitted substantive management action, persist at most one compact checkpoint containing actual action/result/receipt, next allowed step and park reason. No notes for repeated unchanged running or parked observations. A failed/uncertain write cannot claim durable park: reconcile exact action key/entry/receipt, never resend or append blindly.
+5. Work park/escalation/COMPLETE_PASS/work-STOPPED and exhausted work/repair/storage budgets never cancel/disable/delete the scheduler. Keep configured cadence until configured expiry or explicit SCHEDULER-stop, with actual platform stop readback. Work horizon is not scheduler expiry. Unchanged park is silent: no deep worker scan, repeated escalation, send or note.
+6. Acceptance includes fresh context with no chat memory; newer decision versus older park/checkpoint; worker changed since checkpoint; partial/corrupt/changed coverage; lost post-action checkpoint; multiple hourly ticks across park/escalation/PASS/work-stop; explicit scheduler-stop versus expiry. Record actual IDs, range/head coverage and ordered trace. Synthetic 48 ticks are not 48 elapsed hours.
+
+### QC-2 — durable historical loop guard
+
+1. Default at most two autonomous no-progress repair cycles for the same/practically-equivalent failure fingerprint; diagnosis alone is not a cycle. Reserve at admission, including uncertain admission; release only proven non-admission. A failed regression/checkpoint or process restart cannot erase an attempted fix.
+2. Fingerprint uses stable test/harness/assertion/error/config/environment components. Wording/time/model changes or the repair's own harness revision do not reset an episode. Preserve A→B→A history and fetch older records beyond latest-N when needed; missing coverage cannot become zero attempts.
+3. Material progress requires attributable resolution/narrowing of the original failure under unchanged acceptance, not unrelated PASS or weakened assertion. Focused PASS permits continuation but does not erase the original history when the full run repeats the failure. No silent cap/reset extension; one transient continuation remains separately bounded.
+4. At the cap park/report, prohibit the third autonomous fix, preserve ticks and suppress repetitive reports. A new bounded canonical decision requires live revalidation and correct-master persistence, not implicit counter reset or safety bypass.
+5. Acceptance: first repair/failure → manager restart → second equivalent repair/failure → park/no third; old history beyond tail; A→B→A; uncertain repair interrupted before checkpoint; repeated capped wakeups; bounded continuation and receipt reconciliation. Demonstrate real durable reconstruction, not just in-memory increments or a prefilled serialized count.
+
+### QC-3 — capacity, long history and fail-safe errors
+
+1. Journal foundation remains integrated; review combined-source behavior, not predecessor PASS. Exercise at least 48 logical cycles, bounded append/read/recovery and no native Description growth. Distinguish simulation from elapsed-time scheduler acceptance.
+2. Ordinary task/list reads must not embed all notes; measure actual bytes/read work and serialized response sizes. Existing Description/comment/link/unpaginated-scan limits remain; do not claim unlimited task/search capacity.
+3. Full small history, bounded recent/cursor reads, efficient latest checkpoint and newer entries must have honest coverage; older fingerprint history remains recoverable. Check captured head versus current head and current generation; no silent partial-success conclusion.
+4. Unicode/JSON escaping, long individual notes and response budgets must not silently truncate successful records. Preserve and page legacy-only/mixed histories under revision; journal absence is not history absence.
+5. Cooperating append processes, restart, read-during-append and transfer/reclassification preserve task/order/history identity. Process locks serialize adapter writers, not UI/filesystem writers or schedulers; do not infer cross-client CAS.
+6. I/O/permission/disk/partial-write/flush/head-publication faults, malformed JSON/UTF-8/schema, inconsistent boundaries, replacement/truncation and wrong/expired read context fail safe. Preserve bytes; reconcile uncertainty without blind retry, pruning or Description fallback.
+7. Post-worker-action checkpoint failure stops dependent action while retaining/recovering exact receipt; no false durable checkpoint claim. Live mount persistence, hosted journal access and actual long elapsed operation require their own evidence.
+
+### QC-4 — concept, skill/workflow, implementation, tests and package alignment
+
+1. Trace each requirement from current Board/operator/P to shipped rule/path and meaningful test/trace. Record contradictions instead of silently declaring alignment. Verify C/P identities/current dependency/revisions and actual canonical file targets.
+2. Stage-1 normal Chat/Voice only prepares a complete Work/Worker bootstrap: no self-create capability probe, no creation even if capable, no execution fallback. Wrong/unknown surface redirects/clarifies without invented UI detection. Inside established Work/Worker retain actual capability/single-flight/Setup Receipt gates.
+3. Bootstrap includes master/project/C/P, objective/unchanged PASS, task/session/message recovery, recurrence/time-zone/start/end/finite horizon, confirmed supervisor model separate from worker profile, scheduled connection/tools, one-owner single-flight, bounded actions/forbidden decisions, loop/transient/note budgets, cadence separation, canonical Resume/receipt rules and final configuration readback.
+4. Operator-required escalation must produce terminal **and** correct-master checkpoint: system/infrastructure, process phase, problem location and impact; then ≥2 concrete operational examples; then technical evidence/fingerprint/attempts/uncertainty/question. Persist same context/examples/reason/next step; unknown cause stays unknown. Ambiguous anchor means report gap, never arbitrary/member-card write; uncertain persistence is reported unverified, not blindly retried. Unchanged park remains silent.
+5. Journal APIs must actually be registered/dispatched with strict schemas, metadata-only diagnostics, response bounds and legacy behavior. Check source versus installed/discovered capability separately; no connector restart merely to manufacture evidence.
+6. Preserve at-most-one action, full original/result coverage, no blind retry, loop reservations, focused regression, sequential monitored Waves and actual delta/JIT base/integration readiness. Do not weaken Safety/Scope/Readiness/permissions or add policy machinery.
+7. Stage-2 A–G in §3 are the current contract, not the superseded Git-vs-OCI distinction. Preserve executable enforcement while deleting owned special prompt text; no replacement mechanism or tests solely for removal.
+8. Reproducibly match companion marker/changelog/inventory/ZIP/SHA/latest and relevant release metadata/artifact pins. A source/build PASS does not identify an imported skill or active connector. Meaningful ordered/forbidden-side-effect traces are distinguished from keyword assertions, disk/process/wire tests and hosted model behavior.
+9. CONCEPT_READY, registration, Board move, WORK_PACKAGE_READY, local implementation/integration and external acceptance remain distinct. LOCAL_RELEASE_PREP stays NOT_READY until full combined candidate including synthesis/pilot has release-capable independent FINAL QC and all retained gates; baseline green status alone cannot suffice.
+
+### QC-5 — correct-master durable Resume after interactive unpark
+
+1. Resolve the unique correct package/monitor master from established bindings and original decision context. Worker/member is not automatically master; ambiguity/missing/conflicting anchor blocks dependent work, not a guess/write elsewhere.
+2. Persist current operator fix/decision/continuation on that canonical master, recording source/revision, exact superseded park, bounded permitted step and existing follow-up receipt. Preserve through later checkpoints/restarts. Do not expand product/deployment/remote/schema/security scope.
+3. A fresh wake recognizes the newest non-superseded canonical decision, including from another chat, under the settled authority contract. No extra authentication channel is required; marker/timestamp/client flag or text outside the correct canonical anchor alone is insufficient. Newer conflict/stale park/incomplete context blocks work while ticks continue.
+4. Before one released step reconcile prior admission/result, live busy/input/process/owner/base/connection/single-flight and remaining budgets. Observe already-admitted work; unknown delivery means exact-ID/history reconciliation, never resend. Resume preserves historical reservations/caps and independent permissions.
+5. Positive acceptance: park → current interactive fix/decision → correct-master durable decision + exact follow-up reconciliation → next fresh scheduled wake → one bounded live-revalidated step, without repeating the resolved old question. Negative cases: wrong master, stale/superseded park, newer conflicting stop, text outside anchor, pending permissions and uncertain worker/journal state. A genuinely new coverage gap is distinct from re-asking the old decision.
+6. Independently evidence interactive persistence/no double-send, negative consistency cases and positive scheduled cross-chat behavior; a boolean/serialized fake is not hosted acceptance. The Board's 2026-10-01 package reproduction is historical acceptance input, not a reproduction performed by this review.
+
+### Synthesis-specific independent FINAL QC gates
+
+All additional gates are **PENDING / outside this targeted pre-synthesis rerun**. Freeze exact full candidate HEAD, companion revision, active synthesis revision and referenced task/C/P revisions at later FINAL QC; review actual rules/scenarios and pilot evidence, not merely this design text. Baseline review and F1 closure never substitute for the mandatory additional review. No synthesis-member review or implementation was performed here.
+
+1. **Sole dispatch owner / no double dispatch:** active-revision members explicitly carry package ID + SYNTHESIS_REVISION + `execution_owner=package` in existing C/P. Package master alone dispatches; other managers/schedulers consume package state and do not separately start members. Reconcile prior uncertain/admitted receipts and verify no duplicate continuation.
+2. **Completed evidence, no replay:** revision 1 imports completed Stage-1/2 (and completed synthesis-member) commits/integration/tests/original results with distinct acceptance states. No redispatch/reimplementation of completed members; later independent candidate checks are review gates, not replayed member work.
+3. **Revision integrity:** pin exact IDs/source task/C/P revisions and completed evidence; later new unsynthesized members cannot silently change an active revision. Explicit new revision names sources/evidence/supersession and revalidates base/ownership/readiness. No new Board `synthesized` status or MCP/backend schema in this iteration.
+4. **Correction loop:** unequivocally in-contract finding may enter authorized bounded correction/test/local-commit/integration, then renewed independent QC on the exact changed subject. Preserve historical reservations, equivalent fingerprints, two no-progress cycle cap, A→B→A and uncertainty across restarts/revisions; no blind retries, acceptance weakening or implementer self-QC. Before synthesis activation, retain existing separately scoped correction authorization.
+5. **Hard stops / INPUT_REQUIRED:** genuine new product/architecture/security/scope (including data/schema) decision, unreconcilable base/ownership, true host/operator permission or exhausted autonomous repair budget stops dependent work with concrete context/options/completed/paused work. Do not reopen settled canonical-master authority or stop scheduler cadence due to work park.
+6. **Internal transitions:** commit ready/integration ready/QC startable/within-contract Board transition and readback do not generate operator handoff. Their readiness/ownership/admission/acceptance gates still apply. Package may autonomously reach READY_FOR_LOCAL_RELEASE_PREP only when all full-candidate release gates are satisfied.
+7. **Distinct acceptance:** member scope/evidence/acceptance/Board state remains separate from package acceptance, active synthesis state, local-preparation readiness and actual publication. Existing Board states suffice; neither completed turn nor Done substitutes for package FINAL QC.
+8. **Unchanged boundaries:** actual release/tag/remote push/publish/upload/deploy/productive restart and other excluded/operator-only actions remain excluded; no technical enforcement changes or policy replacement. Existing scheduler/cadence/Resume/authority/receipt/loop gates, Stage-2 A–G and source/generated/imported/runtime/hosted evidence distinctions remain binding.
+
+Required review traces include separate manager dispatch attempt for a synthesized member, completed-member import, new unsynthesized addition, explicit new revision, in-scope fix→integration→renewed independent QC, genuine out-of-contract decision, pure technical milestone without handoff and distinct member/package acceptance. Report PASS/FAIL/PENDING per gate with source/revision/trace/coverage. Missing hosted/import/runtime acceptance remains named PENDING; synthesis cannot launder it into PASS.
+
+## 7. Preservation and historical evidence
+
+Historical baseline review preservation remains recorded above. Current targeted rerun main/HEAD remains exactly `e9dbe7b10a3e979662aa8738f75ea818b306b401` at final readback; index empty and `git diff --check` / cached diff checks PASS. Path inventory remains six modified C/P and 22 untracked files. All 26 unrelated dirty/untracked SHA-256 values match pre-test inventory, including Stage-1/2/package/Monitor C/P and dist artifacts. Only the two QC files changed; no new tracked product delta or untracked review output. Tests ran only existing disposable fixtures. No product fixes, new tests, staging/reset/stash, Board/runtime changes, cleanup or publication. Repository-wide cleanliness is not claimed.
+
+Historical foundation evidence remains available in Task A's canonical P §10 and original session: adapter suite 106 PASS / two optional pinned-upstream skips, release metadata five tests, VM configuration and prior r28 skill tests. This review independently reran the selected journal/transport cases above, not the full former suite; historical results do not count as current independent verdicts. The old 0.1.21/r28 observations, former A→B-only order and provenance deferral remain historical evidence superseded by §1. No removed historical note is treated as a current instruction.
+
+## 8. Retained external PENDING / historical pre-synthesis readiness and next action
+
+1. **Imported skill:** provide actual hosted import/revision evidence for the reviewed or later corrected bundle. Checked ZIP bytes alone are insufficient.
+2. **Live connector/runtime activation:** current MCP 0.1.21 lacks `get_task_management_history`; require separately authorized normal activation/discovery and project-scoped journal capability/behavior evidence. Source 0.1.22 and temporary transport tests do not upgrade the running connector. New prompt activation is likewise unverified. No change authorized by this QC.
+3. **Hosted scheduler pilot:** actual configured Work model/connection/single-flight/Setup Receipt; normal-Chat-only handoff and wrong/unknown-surface behavior; correct-master cross-chat Resume, stale/wrong-anchor/newer-stop negatives, exact uncertain/already-admitted receipt handling, dual escalation output, silent repeated cadence across park/escalation/PASS/work-stop, expiry versus explicit scheduler stop. No external schedule was created or altered here.
+4. **Durable end-to-end loop reconstruction:** actual manager restart/reserved-attempt and A→B→A history retrieval, not only isolated journal persistence plus synthetic counters. Keep overall QC-2 PENDING.
+5. **Journal remaining acceptance:** real mount/lifecycle persistence, pinned-upstream integration, long elapsed run and unexecuted boundary/fault cases (full storage cap, disk/flush faults, broader Unicode/cursor/replacement/transfer/read-during-append combinations). Existing static guards and selected local tests pass; no failure is inferred for unrun cases.
+6. **Adjacent dependency:** current Board task `task_ce242aa5-b674-5c39-b722-aa69228d3b06`, “Scheduled Tasks – Host-/Security-Blockings vor Connector untersuchen,” was reread: `todo`, updated `2026-10-02T11:18:01.450480089+02:00`. It remains separate; no host-block cause, fix or policy bypass is asserted by this QC.
+
+7. **Post-synthesis FINAL QC:** after current cycle and required synthesis-member integration, persist pilot SYNTHESIS_REVISION 1 with pinned sources/completed evidence, then additional independent FINAL QC under retained QC-1–QC-5 and synthesis gates above. Its subject is full Stage 1 + Stage 2 + integrated synthesis implementation/pilot, not the pre-synthesis baseline. Correction deltas require renewed independent review.
+
+**Pre-synthesis local QC/fix cycle complete; package may advance to `task_0e9a2768-8e3e-5ea7-8966-902b2769b2f9` under the current sequence and separate admission/ownership/readiness.** F1 PASS and no new local blocker; all external PENDINGs remain. Next safe management action is that member's own authorized initialization/C/P and later implementation/integration, then package pilot revision 1 and mandatory full-candidate independent FINAL QC. That member was not reviewed or implemented here. Release remains **NOT_READY**, not READY_FOR_LOCAL_RELEASE_PREP. Genuine new decisions require INPUT_REQUIRED; technical milestones remain internal transitions. This review performs no dispatch, Board move or QC Done and begins no release preparation. Only release-capable post-synthesis FINAL QC and retained acceptance gates can establish final local-release-preparation readiness.
+
+Maintenance: preserve both exact first-line Task-IDs and registered paths. C remains one terse current-state file; P remains canonical criteria/decisions/evidence/next-step index. Keep complete logs in original session evidence; no duplication of whole histories. Size policy: C ~5k target/~7.5k warning/condense before ~10k tokens; P ~20k target/~30k warning/split by ~40k if needed. Future review results must name exact subject and coverage rather than inherit these verdicts blindly.
