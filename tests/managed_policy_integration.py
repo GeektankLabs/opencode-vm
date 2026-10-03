@@ -30,7 +30,11 @@ def check(binary=None, sdk="@ai-sdk/openai-compatible"):
         assert "agent-managed by its backend ingress" in system
         assert "surface them and ask before implementing" not in system
         shell = next(t.get("function", t)["description"] for t in request["tools"] if t.get("function", t)["name"] == "bash")
-        assert "ordinary local commits are already authorized" in shell
+        # Stage 2 removes the shared Git-specific prompt replacement entirely;
+        # local commit authority is verified through actual execution below.
+        assert "Only commit, amend, push, or create PRs when explicitly requested." not in shell
+        assert "ordinary local commits are already authorized" not in shell
+        assert "In manual sessions only commit when explicitly requested." not in shell
         print("PASS real terminal handback and same-session follow-up", flush=True)
         (fixture.project / "work.txt").write_text("authorized local work\n")
         fixture.finish(fixture.prompt(managed, "commit", [("bash", {"command": "git add work.txt && git commit -m 'managed local work'", "description": "Authorized local fixture commit"}), "Committed locally"]), managed)
