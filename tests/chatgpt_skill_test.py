@@ -1805,6 +1805,9 @@ class SynthesizedContractTest(unittest.TestCase):
         template = self.packages.split("Synthesized Execution Contract\n", 1)[1].split("```", 1)[0]
         self.fields = set(re.findall(r"\b([A-Za-z_]+)=", template))
         self.trace = []
+        # Independent observations of current synthesis inputs, not copies of pins.
+        # Publication readback and authorized routine evidence updates are separate.
+        self.observed_sources = {}
 
     @staticmethod
     def table(text, header):
@@ -1823,6 +1826,8 @@ class SynthesizedContractTest(unittest.TestCase):
         for member in members.values():
             member["marker"] = {"package_id": "package-a", "SYNTHESIS_REVISION": revision,
                                 "execution_owner": "package"}
+        for key in members:
+            self.observed_sources.setdefault(key, {"task": "board-r1", "C": "context-r1", "P": "plan-r1"})
         result = {
             "package_id": "package-a", "SYNTHESIS_REVISION": revision,
             "revision_state": "active", "supersedes": prior["SYNTHESIS_REVISION"] if prior else "none",
@@ -1850,6 +1855,7 @@ class SynthesizedContractTest(unittest.TestCase):
         for key, member in members.items():
             if (set(contract["sources"][key]) != {"task", "C", "P"} or
                     not all(contract["sources"][key].values()) or
+                    contract["sources"][key] != self.observed_sources.get(key) or
                     member["marker"] != {"package_id": contract["package_id"],
                                          "SYNTHESIS_REVISION": contract["SYNTHESIS_REVISION"],
                                          "execution_owner": "package"} or
@@ -1954,6 +1960,8 @@ class SynthesizedContractTest(unittest.TestCase):
         saved = json.dumps((old, members), sort_keys=True)
         restored, restored_members = json.loads(saved)
         new, imported = self.contract(2, restored_members, restored)
+        self.observed_sources["completed"]["C"] = "current-context-r2"
+        self.assertEqual(self.dispatch(new, imported, "completed"), "RECONCILE")
         new["sources"]["completed"]["C"] = "current-context-r2"
         self.assertEqual(new["supersedes"], 1)
         self.assertEqual(new["completed_evidence"], old["completed_evidence"])
@@ -1961,6 +1969,49 @@ class SynthesizedContractTest(unittest.TestCase):
         self.assertEqual(imported["completed"]["marker"]["SYNTHESIS_REVISION"], 2)
         self.assertEqual(self.dispatch(new, imported, "completed"), "IMPORT_COMPLETED_EVIDENCE")
         self.assertEqual(json.dumps((old, members), sort_keys=True), saved)
+        self.assertNotIn("DISPATCH_ONCE", self.trace)
+
+    def test_synthesis_changed_present_or_stale_pins_reconcile_without_dispatch(self):
+        contract, members = self.contract()
+        for field in ("task", "C", "P"):
+            for changed in ("pin", "observation"):
+                with self.subTest(field=field, changed=changed):
+                    self.trace = []
+                    broken = copy.deepcopy(contract)
+                    observed = copy.deepcopy(self.observed_sources)
+                    if changed == "pin":
+                        broken["sources"]["member-a"][field] = "stale-present-r0"
+                    else:
+                        self.observed_sources["member-a"][field] = "changed-present-r2"
+                    self.assertFalse(self.valid(broken, members))
+                    self.assertEqual(self.dispatch(broken, members, "member-a"), "RECONCILE")
+                    self.assertEqual(self.trace, ["RECONCILE"])
+                    self.assertEqual(self.trace.count("DISPATCH_ONCE"), 0)
+                    self.observed_sources = observed
+        reconciled, rows = self.contract(2, members, contract)
+        self.observed_sources["member-a"] = {"task": "board-r2", "C": "context-r2", "P": "plan-r2"}
+        self.assertEqual(self.dispatch(reconciled, rows, "member-a"), "RECONCILE")
+        reconciled["sources"]["member-a"] = {"task": "board-r2", "C": "context-r2", "P": "plan-r2"}
+        self.trace = []
+        self.assertTrue(self.valid(reconciled, rows))
+        self.assertEqual(self.dispatch(reconciled, rows, "member-a"), "DISPATCH_ONCE")
+        self.assertEqual(self.trace, ["DISPATCH_ONCE"])
+        self.assertEqual(contract["sources"]["member-a"],
+                         {"task": "board-r1", "C": "context-r1", "P": "plan-r1"})
+
+    def test_synthesis_publication_and_routine_evidence_do_not_rewrite_input_pins(self):
+        contract, members = self.contract()
+        frozen = copy.deepcopy(contract["sources"])
+        publication_readback = {"member-a": {"C": "context-with-marker", "P": "plan-with-marker"}}
+        self.assertNotEqual(publication_readback["member-a"]["C"], frozen["member-a"]["C"])
+        # An authorized QC report/current HEAD update is not a changed input scope.
+        publication_readback["member-a"]["C"] = "context-with-qc-evidence"
+        contract["candidate_HEAD"] = "d" * 40
+        contract["test_integration_QC_gates"]["local"] = "PASS"
+        self.assertEqual(self.dispatch(contract, members, "member-a"), "DISPATCH_ONCE")
+        self.assertEqual(contract["sources"], frozen)
+        self.assertEqual(self.observed_sources, frozen)
+        self.assertEqual(contract["SYNTHESIS_REVISION"], 1)
 
     def test_synthesis_new_unsynthesized_member_does_not_mutate_active_revision(self):
         contract, members = self.contract()
