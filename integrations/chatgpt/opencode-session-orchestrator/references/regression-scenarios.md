@@ -2,7 +2,7 @@
 
 ## Monitor v1 and Lean Spot-Checks
 
-These are instruction-level/synthetic cases, not permission to create live schedules or pilot tasks. Both policies share the Monitor Tasks loop. Trusted scheduled Operator Resume is downstream QC, not current acceptance.
+These are instruction-level/synthetic cases, not permission to create live schedules or pilot tasks. Both policies share the Monitor Tasks loop. Canonical-master Resume consistency is locally specified; hosted behavior requires independent acceptance.
 
 | Scenario | Required behavior |
 |---|---|
@@ -18,10 +18,10 @@ These are instruction-level/synthetic cases, not permission to create live sched
 | Monitor product/schema/security/architecture blocker | PARKED_INPUT_REQUIRED with evidence/question/options/safe recovery; no permission bypass or semantic fix. |
 | Monitor same fingerprint after two no-progress repairs | Park; no third repair, no reset from message/time/model/harness revision alone. |
 | Monitor focused regression passes but full run repeats original failure | Retain fingerprint/cycle history unless material progress resolving failure is evidenced. |
-| Monitor parked with no new authority | Cheap master-read/no-op; no deep scans, sends or notes; self-disable optional. |
-| Monitor parked with later free-form Operator Resume note | Even an OPERATOR-DIRECTIVE label is unauthenticated; remain parked/no-op, provenance deferred to existing QC without duplicate ticket. |
-| Monitor current interactive operator resume | Use existing authorization/serialized handover and live exact receipt/session/base/input revalidation; no inference from a stored note. |
-| Monitor future trusted scheduled resume contract | Downstream QC must verify authority, precedence and live revalidation; not claimed by current package. |
+| Monitor parked with no new authority | Read master/latest checkpoint/newer decisions before silent no-op; no deep scans, messages, sends or notes; preserve cadence. |
+| Monitor parked with later free-form Operator Resume note | Correct canonical anchor's current bounded decision can release one revalidated step; text elsewhere or a label alone cannot. No separate provenance mechanism. |
+| Monitor current interactive operator resume | Persist decision/superseded park/source revision/exact follow-up on correct master; serialized live revalidation, next wake observes admitted work instead of resending. |
+| Monitor canonical cross-chat scheduled resume | Fresh wake reads correct master/current decision after checkpoint, rejects stale/superseded/conflicting state, reconciles receipt, takes one bounded step. QC tests consistency, not separate authentication. |
 | Monitor COMPLETE_PASS or STOPPED wakeup | Cheap no-op; no inference that scheduler must disable or running worker was aborted. |
 | Monitor duplicate/overlapping wakeups | Verify one owner/master and whole-run single-flight including manual triggers; overlapping run skipped/coalesced, no note-based lock. |
 | Monitor single-flight or scheduler not verifiable | Setup inactive; full bootstrap/manual handoff, not autonomous claim. |
@@ -33,11 +33,19 @@ These are instruction-level/synthetic cases, not permission to create live sched
 | Monitor missing next-wave readiness/integration | No dispatch; preserve existing evidence and actual Board state. |
 | Monitor connection lost or result coverage incomplete | No dependent mutation/PASS; disclose gap, live reconcile on return. |
 | Monitor Work model unavailable/unpinned or scheduled app inaccessible | Inactive setup/no silent substitution; OpenCode tuple does not configure Work. |
-| Monitor Direct Create supported | One authorized create, exact material configuration readback and Setup Receipt before activation. |
+| Monitor Direct Create supported | Only in explicit Work/Worker context: one authorized create, exact configuration readback and Setup Receipt. Normal Chat never probes or creates even when tools exist. |
 | Monitor copy/paste fallback | Include master/C/P/policy/limits/model/schedule/connection/single-flight/receipt; draft is not activation. |
 | Monitor note budget or finite horizon exhausted | Park/report before unsafe action/append; no truncation/pruning, no false PASS. |
 | Monitor confirmed transient generation timeout | At most one continuation per unchanged episode after old terminal receipt/test-state readback; recurrence diagnoses/parks. |
 | Monitor Morning Handoff | Fresh-context master/C/P/live original IDs/Git evidence; separate fixes/tests/integration/open acceptance and exact next step. |
+| Stage-1 normal Chat or Voice monitor request | Complete copy/paste bootstrap and explicit Work/Worker start step; zero create-capability probe, scheduler creation or worker dispatch. |
+| Stage-1 wrong or unknown surface bootstrap | Marker is not UI detection; redirect normal Chat, targeted context clarification if unknown; zero partial/fallback execution. |
+| Stage-1 terminal and persistent escalation | System/process/problem/impact, two concrete operational examples, then technical evidence/uncertainty/question; correct-master checkpoint retains same context/examples/reason/next step. |
+| Stage-1 unknown cause or loop-guard escalation | Examples describe symptoms/consequences without invented cause; preserve attempts and caps; report both outputs once. |
+| Stage-1 ambiguous anchor or uncertain persistence | No arbitrary task write; terminal management gap or unverified-save report; exact readback before any retry, no duplicate append. |
+| Stage-1 scheduler cadence after work terminal | Repeated park/escalation/PASS/work-STOPPED ticks keep cadence with zero cancel/disable/delete or repeated messages; expiry and explicit SCHEDULER stop are distinct. |
+| Stage-1 checkpoint moves between pages | Compare checkpoint/generation/captured head, recover intervening decisions and refresh head before action; incomplete/conflicting coverage blocks work, not ticks. |
+| Stage-1 receipt and history survive restart | Already admitted or uncertain follow-up never resends; action key/exact IDs reconstruct interrupted checkpoint; reserved repairs and A→B→A counts survive fresh context. |
 
 ## ACH-1 profile regression
 

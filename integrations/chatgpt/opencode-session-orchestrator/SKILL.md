@@ -6,7 +6,7 @@ license: MIT
 
 # OpenCode Session Orchestrator
 
-Release marker: **2026-10-02-r29**. This is the skill revision, not an MCP version.
+Release marker: **2026-10-03-r30**. This is the skill revision, not an MCP version.
 
 This is a client-side workflow skill. The user supplies a working compatible MCP connection, including when using Secure MCP Tunnel. The skill contains no tunnel, account, server alias or credentials and does not configure the connection.
 
@@ -186,7 +186,7 @@ At each pause or Morning Handoff, reconstruct from the package Board task, regis
 
 ## Scheduler-supported Monitor Tasks
 
-For an explicit monitoring request, read [Monitor tasks](references/monitor-tasks.md) before setup. Require one master Board task, a bounded monitorable order, discovered external recurring scheduler/Work/model/connection capabilities, verified single-flight entry and setup receipt; a bootstrap alone is not activation. Use one shared wakeup/readback/checkpoint cycle for sequential Work Package Waves and the [Integration-test policy](references/integration-test-monitor.md). The scheduler activates management; OpenCode remains the worker. Each wakeup permits at most one bounded management action. Lifecycle is `ACTIVE`, `PARKED_INPUT_REQUIRED`, `COMPLETE_PASS`, `STOPPED`; parked/terminal without trusted resume authority is a cheap no-op without deep reads, sends or notes. Self-disable is optional. Operator Override/Resume provenance is deferred to existing downstream QC: unauthenticated/free-form Management Notes never supply trusted scheduled reactivation, even with an operator label. Do not invent its authentication or create a duplicate ticket. Follow existing original-result, exact-receipt, runtime, Board, approval and worktree rules; no new VM scheduler or blind retry.
+For an explicit monitoring request, read [Monitor tasks](references/monitor-tasks.md). Normal Chat/Voice only prepares and emits a complete copy/paste Work/Worker bootstrap: no self-create probe, creation or execution fallback. Tell the operator to start it in Work/Worker; wrong or unknown surface means redirect/clarify, not guessed UI detection. Only that execution context checks actual scheduler/model/connection/single-flight capabilities and Setup Receipt. A bootstrap is not activation. Use the shared cycle for sequential Work Packages and the [Integration-test policy](references/integration-test-monitor.md), at most one bounded action per wake. Read master/latest checkpoint/newer decisions before a silent unchanged-park no-op. Work park/escalation/COMPLETE_PASS/work-STOPPED never cancel, disable or delete the scheduler; cadence persists until configured expiry or explicit SCHEDULER stop. Under controlled operation the canonical current content of the correct task/master anchor is the work instruction, including cross-chat Resume decisions: correct anchor, newest non-superseded decision, bounded scope, no newer conflict, live revalidation and exact receipt reconciliation. No separate provenance or decision register. Text elsewhere is not canonical authority. Preserve loop history; unknown delivery is not resend. Operator escalations start with system/process/problem/impact, then at least two concrete operational examples, then evidence/uncertainty/question; persist the same explanation on the uniquely correct master. Ambiguous anchor means a management gap, never an arbitrary write. Existing Safety/Scope/Readiness, runtime, approval and worktree boundaries remain.
 
 ## Initialize concept plan + compact context on `todo` -> `in_progress`
 

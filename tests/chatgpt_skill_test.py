@@ -1371,7 +1371,7 @@ class SkillPackageTest(unittest.TestCase):
             self.assertIn(f"references/{name}.md", manifest["files"])
             self.assertIn(f"references/{name}.md", skill)
         for term in ("simple first / complexity on evidence", "Operator Spot-Check",
-                     "downstream QC", "unauthenticated/free-form"):
+                     "canonical current content", "No separate provenance"):
             self.assertIn(term.lower(), skill.lower())
         for term in ("strictly sequential", "delta/JIT", "only human owner",
                      "one coordinated writing agent/monitor strand", "anomaly signal"):
@@ -1419,6 +1419,140 @@ class SkillPackageTest(unittest.TestCase):
             self.assertIn(name, rows)
             self.assertTrue(rows[name])
 
+    def test_stage1_handoff_escalation_source_contract(self):
+        source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
+        monitor = (source / "references/monitor-tasks.md").read_text()
+        bootstrap = monitor.split("```text", 1)[1].split("```", 1)[0]
+        for term in ("Work/Worker", "Normal Chat/Voice", "Unknown surface", "master",
+                     "C:", "P:", "Schedule:", "model", "Single-flight", "Repair limit",
+                     "two concrete operational examples", "persist", "receipt/result",
+                     "SCHEDULER stop", "configured cadence", "canonical"):
+            self.assertIn(term.lower(), bootstrap.lower())
+        for term in ("Never probe", "newest non-superseded", "captured head",
+                     "checkpoint identity/generation", "Refresh the head", "Already-admitted",
+                     "not identity attestation", "same two examples", "persistence unverified"):
+            self.assertIn(term, monitor)
+        for name in ("SKILL.md", "references/monitor-tasks.md",
+                     "references/integration-test-monitor.md", "references/work-packages.md",
+                     "references/board-workflow.md", "references/regression-scenarios.md"):
+            text = (source / name).read_text().lower()
+            self.assertNotIn("self-disable is optional", text)
+            self.assertNotIn("provenance is deferred", text)
+        example = monitor.split("Example shape", 1)[1].split("Fixed Description", 1)[0]
+        positions = [example.index(term) for term in
+                     ("test supervisor", "Example 1:", "Example 2:", "Evidence:", "Operator question:")]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("Cause remains unknown", example)
+        self.assertIn("Next permissible step", example)
+
+    def test_stage1_decision_paging_and_uncertain_escalation(self):
+        """Captured-head and append-loss fixtures; no live journal or platform claim."""
+        entries = [{"kind": "checkpoint", "id": "park-1"},
+                   {"kind": "decision", "id": "resume-2"}]
+        captured = len(entries)
+        first_page = entries[:1]
+        entries.append({"kind": "decision", "id": "stop-3"})
+        second_page = entries[1:captured]
+        # Captured pagination is internally complete but cannot authorize an action
+        # until the refreshed head's newer entries have also been considered.
+        covered = first_page + second_page
+        self.assertEqual(covered[-1]["id"], "resume-2")
+        self.assertNotEqual(captured, len(entries))
+        covered += entries[captured:]
+        self.assertEqual(covered[-1]["id"], "stop-3")
+        # Moving latest-checkpoint shortcuts cannot erase a preceding decision.
+        entries.append({"kind": "checkpoint", "id": "waiting-4", "decision": "stop-3"})
+        self.assertEqual(entries[-1]["decision"], covered[-1]["id"])
+
+        context = "Test supervisor: regression-to-resume blocked by unknown delivery."
+        examples = ["A second command could duplicate the retained test run.",
+                    "The next member could consume unfinished results."]
+        terminal = {"context": context, "examples": examples, "cause": "unknown",
+                    "reason": "delivery unresolved", "next": "reconcile original receipt"}
+        store = []
+        for anchor in (None, "ambiguous"):
+            if anchor == "master":
+                store.append(terminal)
+        self.assertEqual(store, [])
+        # Commit succeeded, response lost: recover exact entry, never append again.
+        store.append({"entry_id": "entry-1", "master": "master", **terminal})
+        readback = [e for e in store if e["entry_id"] == "entry-1" and e["master"] == "master"]
+        self.assertEqual(len(readback), 1)
+        for key in ("context", "examples", "cause", "reason", "next"):
+            self.assertEqual(readback[0][key], terminal[key])
+        self.assertEqual(len(store), 1)
+
+    def test_stage1_fresh_wake_receipt_cadence_and_history(self):
+        """Synthetic serialized snapshots, not hosted scheduler/model acceptance."""
+        import json
+
+        state = {"master": "master", "park": "park-1", "work": "PARKED_INPUT_REQUIRED",
+                 "entries": [], "receipts": {}, "repairs": {"A": 2, "B": 1},
+                 "scheduler": "hourly", "sends": [], "notes": []}
+
+        def wake(saved, *, live=True, complete=True, conflict=False, scheduler_stop=False,
+                 expired=False, lose_checkpoint=False):
+            s = json.loads(saved)
+            trace = ["master", "latest_checkpoint", "newer_decisions", "refresh_head"]
+            if scheduler_stop or expired:
+                s["scheduler"] = "stopped" if scheduler_stop else "expired"
+                return json.dumps(s), trace
+            if not complete or conflict:
+                return json.dumps(s), trace
+            decisions = [e for e in s["entries"] if e["master"] == s["master"]]
+            d = decisions[-1] if decisions else None
+            if not d or d["park"] != s["park"] or d["step"] not in ("regression", "repair"):
+                return json.dumps(s), trace
+            trace.append("exact_receipt")
+            if d["id"] in s["receipts"]:
+                trace.append("observe_or_reconcile")
+                return json.dumps(s), trace
+            trace.append("live_revalidate")
+            if not live or (d["step"] == "repair" and s["repairs"].get("A", 0) >= 2):
+                return json.dumps(s), trace
+            s["sends"].append(d["id"])
+            s["receipts"][d["id"]] = "uncertain" if lose_checkpoint else "admitted"
+            if not lose_checkpoint:
+                s["notes"].append(d["id"])
+            return json.dumps(s), trace + ["send"]
+
+        for lifecycle in ("PARKED_INPUT_REQUIRED", "COMPLETE_PASS", "STOPPED"):
+            state["work"] = lifecycle
+            saved = json.dumps(state)
+            for _ in range(48):
+                saved, trace = wake(saved)
+                self.assertEqual(len(trace), 4)
+            self.assertEqual(json.loads(saved), state)
+        decision = {"master": "master", "park": "park-1", "id": "decision-1",
+                    "step": "regression", "source_revision": "another-chat-record-2"}
+        for change in ({"master": "other"}, {"park": "old-park"}, {"step": "deploy"}):
+            saved, _ = wake(json.dumps(dict(state, entries=[dict(decision, **change)])))
+            self.assertEqual(json.loads(saved)["sends"], [])
+        snapshot = dict(state, entries=[decision])
+        for guards in ({"live": False}, {"complete": False}, {"conflict": True}):
+            saved, _ = wake(json.dumps(snapshot), **guards)
+            self.assertEqual(json.loads(saved)["sends"], [])
+            self.assertEqual(json.loads(saved)["scheduler"], "hourly")
+        stopped = dict(snapshot, entries=[decision, dict(decision, id="stop-2", step="stop")])
+        saved, _ = wake(json.dumps(stopped))
+        self.assertEqual(json.loads(saved)["sends"], [])
+        for lost in (False, True):
+            saved, trace = wake(json.dumps(snapshot), lose_checkpoint=lost)
+            self.assertLess(trace.index("exact_receipt"), trace.index("send"))
+            for _ in range(3):
+                saved, trace = wake(saved)
+                self.assertNotIn("send", trace)
+            recovered = json.loads(saved)
+            self.assertEqual(recovered["sends"], ["decision-1"])
+            self.assertEqual(recovered["repairs"], {"A": 2, "B": 1})
+            self.assertEqual(recovered["scheduler"], "hourly")
+        snapshot["entries"] = [dict(decision, step="repair")]
+        saved, _ = wake(json.dumps(snapshot))
+        self.assertEqual(json.loads(saved)["sends"], [])
+        for kwargs, expected in (({"scheduler_stop": True}, "stopped"), ({"expired": True}, "expired")):
+            saved, _ = wake(json.dumps(state), **kwargs)
+            self.assertEqual(json.loads(saved)["scheduler"], expected)
+
     def test_monitor_scripted_action_traces_and_fail_closed_boundaries(self):
         """Synthetic client contract walks; no scheduler/authentication implementation.
 
@@ -1443,7 +1577,7 @@ class SkillPackageTest(unittest.TestCase):
                     return "no_action"
                 if self.lifecycle != "ACTIVE":
                     if not interactive:
-                        return "no_action"  # A note labeled operator is not authentication.
+                        return "no_action"  # This legacy trace has no canonical Resume decision.
                     self.calls.append("live_revalidate")
                     if not live or self.in_flight or self.uncertain:
                         return "no_action"

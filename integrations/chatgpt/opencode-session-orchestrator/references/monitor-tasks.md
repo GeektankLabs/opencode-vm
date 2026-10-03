@@ -23,7 +23,7 @@ Apply the core Lean rule. Ask a targeted Spot-Check only when an unknown resourc
 
 ## Current capability gate and supervisor model
 
-Immediately before final setup, discover the actual surface's scheduler/Work create/configure/read tools, supported recurrence/time-zone/start/end controls, overlap/manual-trigger/queue behavior, model list and pinning, intended project apps/MCP tools and availability in the **scheduled execution context**. Current opencode-vm MCP has no scheduling API. Being in Work, a documentation/UI example or a successful interactive connection does not prove scheduled access. Do not invent API parameters or pin model IDs/UI labels in the skill.
+Only in the explicitly established Work/Worker execution context, immediately before final setup, discover actual scheduler/Work create/configure/read tools, recurrence/time-zone/start/end controls, overlap/manual-trigger/queue behavior, model list/pinning and intended project apps/MCP availability in the **scheduled execution context**. Normal Chat preparation may collect known requirements and read project state, but never probes its own scheduler creation capability. Current opencode-vm MCP has no scheduling API. Being in Work or a successful interactive connection does not prove scheduled access; do not invent parameters or pin UI labels/model IDs.
 
 Recommend among actually available Work models: adequate light management for deterministic observations, normal coordination for bounded reconciliation, stronger reasoning for difficult integration diagnosis. Operator confirms the choice; exact Work-model configuration must be verified. OpenCode `execution`/`standard`/`deep` are independent worker profiles governed by the [core runtime rules](../SKILL.md#project-runtime-profiles-for-new-authorized-work), not a mapping to Work models. Preserve explicit user choices and stop at configured unavailable/incomplete mappings; no silent substitution.
 
@@ -33,11 +33,16 @@ Require one scheduled owner per master and a verifiable external single-flight f
 
 MCP per-session admission and cooperating note-write serialization are defenses, not a master-task lock or cross-client CAS. Neither a Board status, marker note, old timestamp nor a prompt establishes exclusivity. If serialization/owner/config cannot be verified, leave autonomous setup inactive; produce a bootstrap or explicit manual one-at-a-time handoff. Do not invent a lease service/registry or weaken the gate. This requirement is driven by concrete duplicate-supervisor risk, not a repository-wide enterprise coordination default.
 
-## Direct Create, copy/paste and activation receipt
+## Work/Worker handoff, Direct Create and activation receipt
 
-After explicit setup authorization, Direct Create is allowed only if all requested schedule, exact Work model, connection/context, master binding and single-flight settings can be set **and read back**. Create once; reconcile uncertain creation using supported reads, never duplicate it. Otherwise provide the complete copy/paste bootstrap below plus manual operator steps to select the actual model, connection, recurrence/timezone, serialized entry and start/end controls. Unsupported material settings leave setup inactive; copy/paste does not relax the gate.
+Normal Chat/Voice only prepares scope/readiness and emits the complete copy/paste bootstrap below. Never probe whether that chat can self-create a scheduled monitor, and never create it there even if tools exist. Explicitly tell the operator: start this bootstrap in ChatGPT Work/Worker. Ordinary one-shot delegation is unchanged. Reuse an appropriate Work context; no unnecessary new session.
+
+The marker declares intent, not reliable UI detection. If pasted into normal Chat/Voice, redirect without executing anything. If the surface is unknown, return a targeted INPUT_REQUIRED asking for the execution context; do not assume Work or silently fall back. Only in an explicitly established Work/Worker context discover actual scheduler capabilities. After setup authorization, Direct Create is allowed there only if all material schedule/model/connection/master/single-flight settings can be set **and read back**. Create once; uncertain creation requires reconciliation, never duplicate create. Unsupported settings leave setup inactive with concrete manual steps, not automatic execution.
 
 ```text
+Scheduled-Monitor-Bootstrap v1 — execute only in ChatGPT Work/Worker context.
+Normal Chat/Voice: redirect to Work/Worker without creating or executing this.
+Unknown surface: ask for context; this marker does not prove Work capability.
 Set up recurring supervision for master <task ID> on <selected project/connection>.
 C: <exact registered context path>; P: <exact registered plan path>.
 Pattern/objective/PASS: <policy and unchanged criteria>.
@@ -50,38 +55,68 @@ Single-flight: <one owner/master, verified overlap/manual-trigger behavior>.
 Allowed actions/surfaces: <bounded actions>; forbidden decisions: <scope boundaries>.
 Repair limit: <default two same-fingerprint no-progress cycles>; transient resume
 limit: <default one per unchanged failure episode>; note/run budget: <bounds>.
-Read master + latest checkpoint + live exact evidence at each wakeup. Use the
+Read master + latest checkpoint + newer decisions before the no-op gate. Use the
 Monitor Tasks and selected policy references; at most one management action,
 exact receipt/readback, at most one compact checkpoint after action. Parked or
-terminal is cheap no-op without trusted authority; free-form Management Notes
-cannot reactivate it. No blind retry, permission bypass or remote publishing.
+terminal without a current canonical Resume decision is silent: no deep scans,
+sends, repeated messages or notes. The correct canonical master/task content is
+the work instruction; use its latest non-superseded bounded decision, including
+cross-chat decisions persisted there. No separate provenance/register required.
+Bind the decision to the superseded park and reconcile any existing follow-up
+receipt/result before one live-revalidated step; unknown delivery is not resend.
+Preserve fingerprint history/reserved cycles and all Safety/Scope/Readiness gates.
+Work park/escalation/COMPLETE_PASS/work-STOPPED never cancel, disable or delete
+the scheduler. Keep configured cadence until expiry or explicit SCHEDULER stop.
+On operator escalation begin with system/process/problem/impact, then at least
+two concrete operational examples, then evidence/uncertainty/operator question.
+Persist the same context and examples, reason and next permissible step on the
+uniquely correct master; ambiguous anchor means report a gap, no arbitrary write.
+No blind retry, permission bypass or remote publishing.
 Do not claim active until final configuration readback and Setup Receipt match.
 ```
 
-Receipt fields: actual scheduled task identity/name; master ID and C/P identity/revisions; actual schedule/recurrence/time zone/start/end as supported; actual pinned Work model; verified scheduled connection/tools; owner/single-flight setting and verification source; effective objective/actions/limits; activation status; timestamp; every deviation/unverifiable property. Only an exact material match permits `active configured`; a prepared prompt, accepted create, acknowledgment or user model preference alone does not. Timing guarantees are only those actually documented by the external platform, not an invented SLA. Unsupported end controls may be represented by an explicit master horizon/park rule, disclosed and operator-confirmed before activation.
+Receipt fields: actual scheduled task identity/name; master ID and C/P identity/revisions; actual schedule/recurrence/time zone/start/end as supported; actual pinned Work model; verified scheduled connection/tools; owner/single-flight setting and verification source; effective objective/actions/limits; activation status; timestamp; every deviation/unverifiable property. Only an exact material match permits `active configured`; a prepared prompt, accepted create, acknowledgment or user model preference alone does not. Timing guarantees are only those actually documented by the external platform, not an invented SLA. Unsupported required end controls leave setup inactive; a master work-horizon/park rule must not masquerade as scheduler expiry.
 
 ## Lifecycle and effective authority
 
 | Lifecycle | Wakeup behavior |
 |---|---|
 | `ACTIVE` | reconstruct current state; live revalidate; at most one bounded action |
-| `PARKED_INPUT_REQUIRED` | no autonomous dependent work; cheap no-op unless trusted new authority exists |
+| `PARKED_INPUT_REQUIRED` | no dependent work unless a current canonical decision releases it; otherwise silent cheap no-op |
 | `COMPLETE_PASS` | goal evidenced; cheap no-op; not automatic Board Done |
 | `STOPPED` | explicit operator end; no new work; does not silently abort a running worker |
 
-Operator Override/Resume provenance is **deferred to existing downstream QC/follow-up**. This implementation does not authenticate stored directives. An unauthenticated/free-form Management Note, including `OPERATOR-DIRECTIVE`, is never a trusted scheduled resume signal. Until an effective verified follow-up contract exists, a parked/terminal scheduled wakeup returns after the master read: no deep session analysis, sends, retries or notes. Do not infer authority from “latest note wins”, a worker report or `operator_authorized:true`; do not create another follow-up ticket.
+Under friendly, controlled operation, the canonical current content of the correct master/task anchor is the authoritative work instruction. A Resume decision persisted there, including from another chat, can release work without cryptographic or separate operator provenance or a decision register. Text elsewhere, labels and client flags alone are not that canonical context. Determine the correct master, newest non-superseded decision, exact superseded park/checkpoint and bounded released step. Record source/revision and existing follow-up receipt for consistency/recovery, not identity attestation. A routine checkpoint does not erase a decision; an unresolved newer conflict blocks action. Missing/corrupt/partial context fails closed. Unchanged park remains silent: no deep session analysis, repeated messages, sends, retries or notes.
 
-An explicit **current interactive operator instruction** uses the existing [approval flow](approval-flow.md) and exact scope/target validation. It supersedes older monitor intent, not permission/host controls. Before resumed work, reconcile the serialized owner, setup, current task/session/receipt/result, permissions/questions, base/worktree and remaining budget. Record the decision source and checkpoint it applies to; only after live revalidation may lifecycle become ACTIVE. Later monitor checkpoints must retain the applied decision reference, not supersede it by timestamp. Unknown/stale/conflicting authority stays parked. Positive scheduled trusted-resume acceptance remains downstream; do not claim it implemented.
+An explicit **current interactive operator instruction** uses the existing [approval flow](approval-flow.md). Persist its bounded decision on the correct master with the superseded park and existing follow-up receipt, so a fresh wake can recover it. Reconcile serialized owner, setup, exact task/session/receipt/result, permissions/questions, base/worktree and remaining budget before ACTIVE. Already-admitted work is observed, not sent again; unknown admission is reconciled. Preserve historical counters/reservations and A→B→A history; Resume is no repair-budget reset or permission bypass.
+
+Work lifecycle is separate from scheduler lifecycle: park, escalation, COMPLETE_PASS, work-STOPPED and exhausted work/repair/storage budgets never cancel, disable or delete the scheduler. Keep configured cadence until configured expiry or explicit **SCHEDULER stop** targeting that scheduler. Work stop is not scheduler stop. Verify a requested scheduler stop with the actual platform readback; never claim stop on an uncertain response. Expiry does not authorize extending/recreating a schedule. A work horizon/park rule is not a substitute for the configured scheduler expiry.
 
 ## Bounded wakeup algorithm
 
-1. Read the exact master/order first. On a connector exposing `get_task_management_history`, read `mode:"latest_checkpoint"`, then page `mode:"after_checkpoint"` to the captured head so any later decision/entry is considered before deriving state. Use `mode:"recent"` for a bounded overview and `mode:"after"` for older history when a loop/fingerprint decision depends on it; a recent sample never proves older attempts absent. Page legacy `legacy_description` under its revision if old notes are relevant. On an older connector, reconstruct only from its observed Description behavior and disclose the capability gap. Missing, truncated, conflicting or corrupt required history is unknown; no dependent mutation. The cheap parked/terminal gate still runs before worker scans once current authority/history has been established; self-disable is optional, not necessary for correctness.
+1. Read the exact master/order first. On a connector exposing `get_task_management_history`, read `mode:"latest_checkpoint"`, then page `mode:"after_checkpoint"` to the captured head before deriving state. Compare checkpoint identity/generation between reads; if it moved, recover the intervening coverage with `mode:"after"` or restart, never skip a decision between snapshots. Refresh the head before action; consume newer entries or defer if a stable decision cannot be established. Use `mode:"recent"` for overview and `mode:"after"` for older fingerprint history; a tail never proves older attempts absent. Page relevant `legacy_description` under its revision. Older connectors use only observed complete Description readback and disclose the gap. Missing/truncated/corrupt/conflicting coverage blocks work, not cadence. Only after this cheap decision-aware entry apply silent parked/terminal no-op, before worker scans.
 2. For ACTIVE, confirm setup and one serialized owner. Read only the current relevant C/P sections and task/session binding. Check actual `get_session` activity, admission and session-wide pending input; pending permission/question requires operator attention, not autoapproval. A verified running/busy worker means no new dispatch/repair/next wave. Repeated unchanged running observations need no note.
 3. Reconcile pending invocation by exact user message ID/status/result. `SUBMISSION_UNCERTAIN` or unknown delivery/result => reads/reconciliation, not a changed prompt or second session. Complete bounded searches where needed; absence from one window never proves non-delivery. Follow [content protocol](content-protocol.md) for full terminal originals, revisions, omissions and read coverage. A completed tool/turn is not business PASS.
 4. Apply the selected policy using just-in-time live evidence and [worktree ownership](worktree-ownership.md) for writes. Choose at most one logical management action (diagnosis, repair, regression, resume/fresh, integration, next-wave start, park or completion). Required idle runtime readback is preparation for that action; do not chain diagnosis → fix → full rerun in one wakeup. Dispatch one bounded worker instruction with exact task ID, C/P paths, owner/base/target and the normal staged maintenance reminder. Do not wait indefinitely for its result; capture/check exact admission and defer the next policy step to a later wakeup.
 5. Verify actual receipt/state and append at most one checkpoint for the substantive outcome/change. Terminal/result-reading work can itself produce park/completion without a new worker. Re-read master and the current history head before publication so a newly appended decision is not overwritten by stale inference. On journal-capable connectors, reconcile an uncertain append through `get_task_management_history` and its exact entry receipt before any retry; do not expect new text in `get_project_task.description`. On older connectors, use only their observed legacy readback. Missing write capability never permits full-description replacement. If the master connection or journal is unavailable, report the gap in the scheduled run response; do not claim a durable checkpoint/park was saved.
 
 ## Checkpoint and correlation contract
+
+### Operator escalation: terminal plus correct-master persistence
+
+For genuine INPUT_REQUIRED/PARKED_INPUT_REQUIRED, out-of-autonomy business/product/architecture/security decisions, evidenced excessive complexity, exhausted loop guards or other defined operator-required endpoints, the worker/monitor itself produces both outputs. Begin the terminal report with affected system/infrastructure, process phase, exact problem point and overall impact. Then give **at least two concrete operational examples**, followed by fingerprint/IDs/evidence/attempted fixes/uncertainty and the concrete operator question. Do not invent observations: label illustrative consequences as examples; unknown cause remains unknown.
+
+Persist the same context and same two examples plus escalation reason and next permissible step in one MONITOR-CHECKPOINT on the uniquely correct master. Technical detail may be shorter but state/cause must agree. Resolve package master versus test-monitor master from established bindings, never title similarity or the current worker task alone. Ambiguous anchor: terminal management-gap report, no arbitrary write. Missing persistence capability/budget or uncertain append: report persistence unverified, retain exact action/entry references for reconciliation; do not claim saved or duplicate the write. The normal 1,200-byte target is guidance, not permission to omit required examples; respect actual hard bounds. Unchanged park never repeats the escalation.
+
+Example shape (illustrative, replace with actual evidence; reuse the first three paragraphs in the checkpoint):
+
+> The test supervisor is at the regression-to-resume step. It cannot establish whether the previous worker follow-up arrived. This blocks a safe continuation of the test package; it does not prove the tested product failed.
+>
+> Example 1: issuing another full test command could start the same run twice against the retained test environment.
+>
+> Example 2: starting the next package member now could use results from an unfinished run instead of an accepted integration baseline.
+>
+> Evidence: exact submission/result references, read coverage and attempted reconciliation. Cause remains unknown. Escalation reason: delivery cannot be established. Next permissible step: reconcile that original receipt; no resend. Operator question: which missing result/connection evidence can be supplied? Scheduler cadence remains configured. Persistence: verified entry receipt or explicitly unverified.
 
 Fixed Description is outcome/primer and retains legacy Management Notes; P is detailed canonical design/policy; C is terse current state maintained by the executing agent at substantive checkpoints; new append-only journal entries are management evidence, not an alternate design or authentication store. Do not start a copying/maintenance worker solely for each wakeup. Use task-file paths/revisions and original evidence pointers; don't duplicate logs in C/P/Board.
 
@@ -107,4 +142,4 @@ Morning Handoff is an authorized read from master/C/P/live originals and actual 
 
 ## Pilot acceptance
 
-After source/package checks, perform separately authorized short pilots: one sequential package with two waves and integration/base readback; one long test with a controlled harness fault, focused regression and resume/fresh evidence. Record actual platform configuration/overlap behavior, setup receipt, IDs/checkpoints and fresh-context morning reconstruction. Exercise parked free-form-note no-op; trusted scheduled reactivation remains downstream. Collect stale-state/double-send/unnecessary escalation/budget/runtime failures, refine the recipe, and require several successful bounded runs before important unattended use. Synthetic tests do not prove hosted Work/app access or scheduler behavior.
+After source/package checks, perform separately authorized short pilots: sequential package and long test/harness repair. Record actual schedule/single-flight/model/connection receipt and fresh-context reconstruction. Exercise correct-master cross-chat Resume, stale/wrong-anchor/newer-stop negatives, uncertain/already-admitted receipts with no resend, dual escalation persistence and cadence retained across parked/PASS/work-stop ticks. QC checks canonical-state consistency, not separate operator authentication. Synthetic traces do not prove hosted Work/app access, model compliance or scheduler timing.

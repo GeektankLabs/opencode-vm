@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-10-03-r30
+
+- Route Chat/Voice scheduled-monitor requests through a complete Work/Worker bootstrap, with wrong-surface redirection and no self-create probe.
+- Require terminal and correct-master persisted escalation context, two operational examples, then technical evidence/uncertainty/question.
+- Keep cadence through work park/PASS/STOPPED until expiry or explicit SCHEDULER stop; recover canonical cross-chat Resume decisions without a separate provenance/register, preserving exact receipts and loop history.
+- Add source contracts and synthetic restart/receipt/cadence regressions; hosted model/scheduler acceptance remains separate.
+
 ## 2026-10-02-r29
 
 - Add generic release-gate guidance that discovers and follows the target repository's policy, keeps operator-only publication separate from local work, and verifies CI/release evidence against the exact candidate commit.
