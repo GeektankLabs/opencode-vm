@@ -1,13 +1,25 @@
 Task-ID: task_160e0556-f3a8-5e12-a877-ed22e7bb2360
 Title: Orchestrator – Quality-Control-Sammel- und Abnahmetask
-Status: F2 CLOSED; prior QC operator-accepted; no renewed QC; LOCAL_RELEASE_PREP_READY; external PENDING
-Last-concept-update: 2026-10-03T10:19:59Z (completed local preparation)
+Status: F2 CLOSED; v0.7.5 patch candidate locally ready; no renewed QC; external PENDING
+Last-concept-update: 2026-10-03 (operator-authorized patch candidate)
 
 # Canonical Concept Plan and Independent QC Record
 
-## Current local release-preparation result — not an independent QC rerun
+## Current v0.7.5 patch-release candidate — metadata only
+
+Explicit operator bump on verified `main@66c0cab220c4a92f7b071cb49ab97a934a40e9f8` after regression repair. Patch 0.7.5 and three asset tags v0.7.5 follow existing docs/RELEASING.md; no new version mechanism or runtime/adapter/skill change. Previous task-owned readback/repair facts are reconciled in these same canonical files, unrelated dirty state preserved. Exact final scoped local commit SHA/tree belongs to original result/postcommit readback, avoiding self-hashes.
+
+Checks PASS: metadata five tests (actual workflow shell main/matching v0.7.5 tag); state five local fixture tests; actionlint; script syntax/ShellCheck error gate; embedded/runtime/r33 parity; actual retained archive checksum verification; only-four-assignment full-script equivalence, whitespace/index/preservation. Adapter/package-lock/runtime versions, filenames/digests and r33 unchanged because build inputs unchanged. No required managed integration rerun for version-only delta; its completed eleven-group PASS at 66c0cab fixture `/tmp/opencode/ocvm-managed-0dn8xny6` remains evidence, not fresh hosted acceptance.
+
+Existing workflow main+opencode-vm.sh path trigger matches this change; metadata resolves v0.7.5 and version-keyed release job/state, so next host push targets the new v0.7.5 candidate. This is verified trigger/metadata semantics, not remote tag/release availability. User/host pushes exact final main; CI must validate/create tag/publish assets for that exact SHA, then release-completion gate is independently verified. No local tag, remote query/write/publish, deploy, restart or cleanup.
+
+F2/prior QC acceptance/no-renewed-QC unchanged; external hosted/import/runtime/journal/native/macOS/Lima/host-security remains PENDING. Old v0.7.4 subjects/hashes/commands below are historical evidence, superseded for current push/tag. Final candidate script digest `f1651237758acbeb3695a864bcb62d12e9dfaad932e370ead057adcbda7fa8d4`; three archive pins unchanged and actual bytes verified. No evidence/repair history reset or automatic Board transition.
+
+## Historical v0.7.4 local release-preparation result — not an independent QC rerun
 
 Continuation starts at exact prep base `main@eb2b94f9740d43fb6649042a5e1fd018005cbd42`, tree `9f20d351aa8e774cff849503e3dc97daab10d476`. F2/prior QC acceptance/no-renewed-QC settled. Fresh branch/index/owner/document/Board readback unchanged, all 26 unrelated records preserved. Final scoped release candidate/publication SHA is recorded in original result/HANDOFF after local commit, avoiding self-hashes.
+
+Final exact publication `main@a2106aa853f126ba3ac82a2d74d5dc152fb9788b`, tree `178cbb89dc7e56c20b0e48a58de8d58b09e8cd92`; one five-file continuation commit. Actual postcommit metadata/pins/locked versions/asset-source equality/parity/whitespace/empty index and 26 unrelated-record preservation PASS. Four canonical C/P final-SHA facts are routine uncommitted readback; no uncommitted release-input/code delta, no new QC or acceptance promotion.
 
 **LOCAL_RELEASE_PREP_READY — explicit continuation completes the run.** Correct-directory `shasum -a 256 -c SHA256SUMS` PASS; prior wrong-cwd invocation was not an artifact/product defect. All remaining locally applicable integration/workflow/production-package checks now PASS on the same release inputs. Final temporary helper parser initially omitted digits in SHA256 key names; corrected helper verifies actual pins/metadata/manifest, with both outcomes logged and no product edit. Scoped local candidate publication and cheap exact-commit/readback pin final SHA in original result/HANDOFF; no renewed independent QC or external acceptance inferred.
 
