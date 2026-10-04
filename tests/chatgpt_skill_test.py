@@ -196,6 +196,101 @@ class SkillPackageTest(unittest.TestCase):
         self.assertIn("UNVERIFIED until observed", section)
         self.assertIn("no synthetic/package PASS", section)
 
+    def test_long_active_text_contract_preserves_defaults_and_receipt_recovery(self):
+        source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
+        skill = (source / "SKILL.md").read_text()
+        attention = (source / "references/events-attention.md").read_text()
+        activity = (source / "references/progress-activity.md").read_text()
+        pilot = attention.split("## Long active TEXT pilot\n", 1)[1].split("## Honest monitoring communication", 1)[0]
+        for text in (skill, activity):
+            self.assertIn("events-attention.md#long-active-text-pilot", text)
+        for required in (
+            "explicitly longer active TEXT task contract", "Retain finite defaults",
+            "no blanket three-minute stop", "approximately 30 seconds between rounds",
+            "also while the worker is running", "actual host execution limit",
+            "before every page/read/wait/admission", "five-page round budget",
+            "never invented session/message filter inputs", "older sequences",
+            "not after_cursor-only", "exact admitted task/session/message binding",
+            "not the whole multi-step contract", "designated integrator",
+            "before any next admission", "Reserve once", "persist the actual receipt",
+            "not MCP idempotency", "SUBMISSION_UNCERTAIN", "never blindly send again",
+            "a new event ID for the same result", "not replay dispatch",
+            "two recoverable errors total per active run", "does not reset it",
+            "at most two repairs for the same error without evidenced progress",
+            "New message, model, clock or Resume alone never resets",
+            "resume checkpoint unverified", "remaining budgets", "Verify entry readback",
+            "transport PASS / steering FAIL", "one-action-per-wake/cadence rules remain unchanged",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, pilot)
+        self.assertIn("offered before discussed", attention)
+        self.assertIn("known task contract", skill)
+        for state in ("CURRENT_TURN_WAIT", "PROACTIVE_MONITORING", "ON_DEMAND_STATUS"):
+            self.assertIn(state, attention)
+        self.assertIn("Unknown/unconfigured independent recovery stays on-demand after turn end", attention)
+
+    def test_selected_optimistic_mvp_requires_durable_evidence_and_hard_boundaries(self):
+        source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
+        skill = (source / "SKILL.md").read_text()
+        policy = (source / "references/optimistic-mvp.md").read_text()
+        manifest, _ = BUILDER.package_content(ROOT)
+        self.assertIn("references/optimistic-mvp.md", manifest["files"])
+        self.assertIn("[Optimistic MVP](references/optimistic-mvp.md)", skill)
+        for required in (
+            "does not activate OID", "never self-upgrade conservative",
+            "functional additive reversible variant", "moderate local rework",
+            "Security/Trust", "regulatory/compliance", "data-sovereignty",
+            "irreversible data/state/schema", "public/external API/contract",
+            "core product semantics/architecture", "INPUT_REQUIRED",
+            "safe independent steps already authorized", "clean PRE_DECISION_HEAD",
+            "clean existing commit suffices", "Never reset/stash/overwrite",
+            "AUTONOMOUS_MVP_DECISION", "Before implementing", "strategy_source",
+            "question", "alternatives", "choice/rationale", "uncertainty",
+            "reversibility/rework", "implementation_commits", "components",
+            "tests/acceptance", "change_path", "cumulative_drift",
+            "combined effect of all OIDs", "at most two repairs",
+            "not progress or a budget reset", "No automatic hard reset/rebase",
+            "OID_COUNT=0 / OID_UNTESTED (policy-only)", "not fabricated OIDs",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, policy)
+
+    def test_text_and_oid_forward_negative_instruction_scenarios(self):
+        source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
+        scenarios = (source / "references/regression-scenarios.md").read_text()
+        section = scenarios.split("## Active TEXT contract and selected Optimistic MVP\n", 1)[1].split("## Optional read-only smoke test", 1)[0]
+        rows = {row.split("|")[1].strip(): row.split("|")[2].strip()
+                for row in section.splitlines() if row.startswith("| ") and row.count("|") >= 3}
+        cases = {
+            "Explicit long TEXT contract still running after three minutes": ("Continue silent", "no blanket three-minute cutoff", "no post-turn timer"),
+            "No explicit long waiting request": ("finite defaults", "no implied long TEXT mode"),
+            "First worker complete but known contract has remaining steps": ("next-step gates", "contract-authorized admission", "nor expand scope"),
+            "Queue capability absent on selected connection": ("Park", "foreign project queue"),
+            "Host execution/wait limit reached during long TEXT pilot": ("exact resume checkpoint", "unverified", "no continuing timer"),
+            "Subscription delivered HTTP 200 but steering failed": ("transport PASS / steering FAIL", "cause unverified"),
+            "Event and pull repeat a result with changed event ID or summary revision": ("durable action_key", "zero duplicate logical dispatch"),
+            "Post-send checkpoint interrupted or SUBMISSION_UNCERTAIN": ("before any next admission", "no blind resend"),
+            "Queue hierarchy unlinked but receipt identifies exact task": ("submitted-message binding", "never title heuristic"),
+            "User asks for automatic notice without independent mechanism": ("CURRENT_TURN_WAIT", "ON_DEMAND_STATUS", "verified surface/runtime"),
+            "Two same-error no-progress repairs or restored run budget": ("Park", "no reset", "third repair"),
+            "Newer cancel or scope decision appears during active polling": ("canonical head before action", "no automatic worker abort"),
+            "Offered receipt missing before discussed": ("verify offered before discussed", "never treated as a send receipt"),
+            "Explicit Optimistic MVP selected and one real reversible choice arises": ("functional additive", "before implementation", "PRE_DECISION_HEAD", "commits/tests/change path"),
+            "Free-form “finish independently” without selected strategy": ("known authorized contract", "do not activate OID"),
+            "Small OID changes Security/Trust/API/product architecture/regulation/data sovereignty": ("INPUT_REQUIRED", "no implementation"),
+            "Individually small OIDs cumulatively change product/API architecture": ("combined drift", "park"),
+            "OID anchor dirty or decision persistence unavailable": ("gate before decision implementation", "no reset/stash/overwrite"),
+            "Selected MVP is a deliberately broken dummy": ("Reject", "functional useful"),
+            "No actual decision arose during policy implementation/pilot": ("OID_COUNT=0", "no fabricated OID"),
+            "Later operator supersedes implemented OID": ("Preserve prior", "reconcile receipts", "no automatic hard reset/rebase"),
+        }
+        for scenario, markers in cases.items():
+            with self.subTest(scenario=scenario):
+                for marker in markers:
+                    self.assertIn(marker, rows[scenario])
+        self.assertIn("synthetic PASS is not a long-run PASS", section)
+        self.assertIn("Active-turn polling never proves idle wakeup", section)
+
     def test_task_compact_context_convention(self):
         source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
         skill = (source / "SKILL.md").read_text()

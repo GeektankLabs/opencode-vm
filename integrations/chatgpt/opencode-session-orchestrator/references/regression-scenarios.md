@@ -201,6 +201,36 @@ These are instruction-contract forward/negative cases, not executed host accepta
 
 For authorized external acceptance, retain read/admission/completion/presentation times, exact receipt/event/source revision and gaps. Exercise normal Chat with/without tools, real active Voice short and explicitly longer windows, cancel/timeout/interruption-resume, push preferences and simultaneous event+poll delivery. Separate text/mobile push, active-turn spoken result and autonomous idle Voice wakeup; no synthetic/package PASS substitutes for these observations.
 
+## Active TEXT contract and selected Optimistic MVP
+
+Instruction-contract cases only. Hosted duration/cadence, multi-step continuation, recovery/cancel/restart and real OID decisions remain independent acceptance; synthetic PASS is not a long-run PASS.
+
+| Scenario | Required behavior |
+|---|---|
+| Explicit long TEXT contract still running after three minutes | Continue silent prepared queue rounds about every 30 seconds while actual host execution supports them; no blanket three-minute cutoff, no post-turn timer. |
+| No explicit long waiting request | Preserve finite defaults; no implied long TEXT mode from an ordinary send or “do it independently”. |
+| First worker complete but known contract has remaining steps | Validate result/coverage and next-step gates, then one separately contract-authorized admission; neither stop at a convenient partial result nor expand scope. |
+| Queue capability absent on selected connection | Park that pilot; do not substitute a foreign project queue, activity/status or fake execution as queue PASS. |
+| Host execution/wait limit reached during long TEXT pilot | Stop and persist exact resume checkpoint/receipt/next step/budgets with readback; unavailable persistence stays unverified, no continuing timer claim. |
+| Subscription delivered HTTP 200 but steering failed | Keep transport PASS / steering FAIL for that run, cause unverified; subscription supplementary, pull uptake/decision/admission evidenced separately. |
+| Event and pull repeat a result with changed event ID or summary revision | Reconcile receipt/result identity plus source revision and durable action_key; zero duplicate logical dispatch, no ACK-as-authorization. |
+| Post-send checkpoint interrupted or SUBMISSION_UNCERTAIN | Reconcile exact stored action/receipt before any next admission; observe already-admitted work, no blind resend or second session. |
+| Queue hierarchy unlinked but receipt identifies exact task | Use established connector/task/session/submitted-message binding, never title heuristic or unlinked-as-proven-failure-cause. |
+| User asks for automatic notice without independent mechanism | State CURRENT_TURN_WAIT only during actual active execution, then ON_DEMAND_STATUS; PROACTIVE_MONITORING needs named verified surface/runtime mechanism. |
+| Two same-error no-progress repairs or restored run budget | Park dependent work; preserve fingerprint/reservations/counters, no reset from Resume/new message/model/time or a third repair. |
+| Newer cancel or scope decision appears during active polling | Re-read canonical head before action; stop affected continuation, retain receipt and original evidence, no automatic worker abort or subscription deletion. |
+| Offered receipt missing before discussed | Present once and verify offered before discussed when required; lost ACK reconciled by readback, never treated as a send receipt. |
+| Explicit Optimistic MVP selected and one real reversible choice arises | Smallest functional additive variant inside architecture; durable AUTONOMOUS_MVP_DECISION before implementation with clean PRE_DECISION_HEAD, alternatives/cost/uncertainty and scoped commits/tests/change path afterward. |
+| Free-form “finish independently” without selected strategy | Complete known authorized contract, but do not activate OID or invent broader business authority. |
+| Small OID changes Security/Trust/API/product architecture/regulation/data sovereignty | INPUT_REQUIRED despite local reversibility; no implementation of dependent choice or autoapproval. |
+| Individually small OIDs cumulatively change product/API architecture | Review combined drift and park at hard boundary; cannot evade gate by splitting decisions. |
+| OID anchor dirty or decision persistence unavailable | No clean safe PRE_DECISION_HEAD/readback means gate before decision implementation; no reset/stash/overwrite or false saved claim. |
+| Selected MVP is a deliberately broken dummy | Reject it; functional useful variant required, not a shortcut that weakens acceptance. |
+| No actual decision arose during policy implementation/pilot | OID_COUNT=0 / OID_UNTESTED (policy-only); no fabricated OID for test score. |
+| Later operator supersedes implemented OID | Preserve prior decision/commit history, reread current revision and reconcile receipts; scoped authorized rework or operator-chosen boundary, no automatic hard reset/rebase. |
+
+Manual TEXT acceptance records actual start/end/read gaps (>3 minutes when duration permits), each admitted worker/result and exactly one permissible next action, independently of event delivery. Exercise missed continuation, duplicate event/pull, partial pages/older preparation, disconnect/cancel/host limit/checkpoint resume and actual OID cases; absent OID means UNTESTED. Active-turn polling never proves idle wakeup or installed skill behavior.
+
 ## Optional read-only smoke test
 
 This tests retrieval of existing content, not a new remote read-only assignment. When a live read test is explicitly requested or appropriate for validation:

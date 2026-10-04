@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-04-r36
+
+- Preserve finite Voice/default waits; add explicitly longer active TEXT queue reconciliation and serial contract follow-through, ending at completion/cancel/gate/error budget/real host limit rather than a blanket three-minute cutoff.
+- Separate active-turn observation, independently verified recovery and on-demand communication; subscription is a supplementary accelerator, not proof of reliable long-run management continuation.
+- Add explicitly selected Optimistic MVP policy with durable decision/Git evidence and cumulative-drift/hard-stop checks. Extend receipt recovery, presentation/dispatch dedup and non-resetting repair budgets with positive/negative instruction regressions; hosted timing, recovery and actual OID cases remain external acceptance.
+
 ## 2026-10-04-r35
 
 - Add explicitly authorized, bounded active Voice waiting on the prefetched MCP attention queue: three minutes by default, approximate 30-second silent reads, exact receipt/revision correlation and finite page/error budgets. No independent timer after turn completion or idle Voice wakeup claim.
