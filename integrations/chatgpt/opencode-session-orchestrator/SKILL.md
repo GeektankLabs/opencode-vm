@@ -6,7 +6,7 @@ license: MIT
 
 # OpenCode Session Orchestrator
 
-Release marker: **2026-10-04-r34**. This is the skill revision, not an MCP version.
+Release marker: **2026-10-04-r35**. This is the skill revision, not an MCP version.
 
 This is a client-side workflow skill. The user supplies a working compatible MCP connection, including when using Secure MCP Tunnel. The skill contains no tunnel, account, server alias or credentials and does not configure the connection.
 
@@ -19,7 +19,7 @@ Read references when their workflow is relevant:
 - Sending an image, text file, Markdown file or PDF-derived text to a session: [Attachment workflow](references/attachments.md). Read it before staging file bytes or using `send_message.attachments`.
 - Long, partial or changing results: [Content protocol](references/content-protocol.md).
 - Running tools, recent events or session attention: [Progress and activity](references/progress-activity.md).
-- Prepared worker results, persistent project attention, or event-triggered host delivery: [Events and attention](references/events-attention.md).
+- Prepared worker results, persistent project attention, event-triggered host delivery or explicitly requested active Voice waiting: [Events and attention](references/events-attention.md).
 - Research, decisions or planning: [Decision preparation](references/decision-preparation.md).
 - A bounded question alongside a busy workstream, or archival of its answer: [Clarification sessions](references/clarification-sessions.md).
 - A board task whose work spans several agent iterations or a fresh session: [Task compact context](references/task-compact-context.md).
@@ -143,7 +143,7 @@ After one submission:
 
 1. Capture the actual receipt, exact session/message ID, timestamp, request ID and activity cursor when supplied.
 2. Check the exact message. Session busy, an unrelated journal event or a stored tool marked running alone does not prove this task started.
-3. If only submitted, use at most one short supported wait (for example 2–5 seconds) and one correlated recheck. If still unresolved, report accepted/start unverified. Do not poll indefinitely.
+3. If only submitted, normally use at most one short supported wait (for example 2–5 seconds) and one correlated recheck. If still unresolved, report accepted/start unverified. Explicit active waiting in known Voice context may instead use the bounded [attention wait](references/events-attention.md#bounded-active-voice-wait); this is not permission to poll indefinitely or resend.
 4. Map only observed states: submitted/running to `WAITING_RESULT` with the proper qualification; completed to `ATTENTION` and result retrieval when relevant; actual input requirements/failures to `ATTENTION` with the relevant action/error. A very fast task may be completed before running was ever observed.
 5. For unknown/lost responses, inspect the existing receipt/request ID, stored messages, full task search or relevant journal. Absence from one bounded page is not proof of non-delivery.
 6. Retry only when authorized and non-delivery is established, or when a supported idempotency contract safely recovers the identical request. Never duplicate a pending approval or hard-denied call.
@@ -215,6 +215,7 @@ For an explicitly requested management note, discover `add_task_management_note`
 - For a general "what is new/otherwise ready?" or a natural management transition, discover and read `get_project_attention` first when available; it is a bounded prepared view and avoids a full session scan. Preserve class, freshness/coverage, exact IDs, hierarchy ambiguity and source revision. Read originals only for requested drill-down or when the entry is stale/incomplete.
 - Mark `offered` only after actually presenting the item and `discussed` only after real discussion, via the discovered revision-bound `acknowledge_project_attention`. A read, event callback or webhook 2xx is not an offer/discussion receipt. Never mutate Board status or start a worker from an attention entry.
 - Say "I will notify you automatically" only for a concrete selected host/surface with an active confirmed `PROACTIVE_MONITORING` subscription and verified callback/wakeup path. If that host reports another turn is running and confirms deferral, say it will appear at the next safe idle boundary. Unknown/unsupported state means on-demand queue fallback; do not simulate chat continuation or audible Voice wake-up.
+- For an admitted authorized async task and explicit active Voice waiting intent, follow the linked bounded attention wait: default three minutes, approximately 30 seconds between silent MCP queue reads, exact receipt correlation, stop on result/cancel/timeout/interruption/error budget. A skill has no independent timer after turn completion. Normal Chat requires actual tools/execution support, not an assumed Work capability.
 - For "what is it doing?", prefer `get_session_progress` when discovered. Use its task filter if an exact user ID is known. Describe stored tool name/state/time and attribution; inspect coverage, missing metadata and idle/stored-state mismatch. Tool `completed` is not a business PASS.
 - For "what is new?", continue each saved journal cursor under its own filter key. If a current overview is wanted and tail is supported, use `tail:true` without an after-cursor, then continue without tail using the captured-head cursor and identical filters. Tail is not historical consumption. See [progress and activity](references/progress-activity.md).
 - Consider `ACTIVE`, `WAITING_RESULT` and `ATTENTION`; exclude parked/closed topics unless asked for all sessions. With no registry, reconstruct cautiously and label historical discussion status unknown.

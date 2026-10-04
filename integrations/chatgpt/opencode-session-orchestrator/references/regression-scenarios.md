@@ -172,10 +172,34 @@ These cases review instructions only; they do not authorize or perform live uplo
 | No confirmed host wake-up/idle capability | Use on-demand prepared queue; never say "I will notify you automatically." |
 | Event summary recommends a next step | Treat it as evidence-bound presentation only; no worker, retry, permission answer, Board Done, integration, release or deployment follows automatically. |
 | E2E observes webhook 2xx but no same-context response | Mark transport only PASS; Work/Chat continuation remains pending/fail independently. |
-| No audible output is observed on the selected Voice surface | Keep Voice evidence pending/unsupported even if event delivery and Work continuation pass. |
+| No audible output is observed on the selected Voice surface | Record that run's observation window/failure; idle Voice remains unresolved even if text continuation passes. Do not generalize to universal unsupported Voice. |
 | Empty ordinary page has `has_more=true` | Continue pagination with its returned cursor. |
 | User requests complete retained history | Do not substitute a tail sample. |
 | Selected Voice surface has no connector tools | Report that limitation; do not claim the skill can enable them. |
+
+## Bounded active attention wait
+
+These are instruction-contract forward/negative cases, not executed host acceptance. Manual normal Chat, precise cadence, long-run, interruption/resume, timeout, push and combined dedup acceptance are **UNVERIFIED until observed**.
+
+| Scenario | Required behavior |
+|---|---|
+| Active Voice short wait with admitted async receipt | One acknowledgement after actual admission; default three minutes, approximately 30 seconds between silent MCP queue rounds. Match connector/project, session and submitted user message; present complete current result once, then stop. No new subscription is required for queue retrieval. |
+| Send is uncertain or not admitted | No accepted acknowledgement, no replacement worker; reconcile the original invocation before a wait promise. |
+| Normal Chat lacks attention tools or sustained execution | Report missing capability; no fake polling, Work assumption or timer. Equivalent active waiting requires explicit intent and actual tools/execution support. |
+| Queue limit 100 rejected before execution | Correct once within discovered maximum 50; record cadence gap, no worker resend or exact 30-second claim. Repeated/fatal errors stop within budget. |
+| Target is on a later queue page | Follow has_more with opaque next_cursor and matching filters/project in the discovered before_cursor direction; never fabricate session/message input filters. Five-page budget/deadline exhaustion means partial coverage, not absence. |
+| Older new entry prepares after head cursor advanced | Fresh latest read each round revisits preparation; after_cursor-only continuation cannot prove no result. Changed/stale revisions and superseded entries are not completion. |
+| Unrelated session or wrong submitted user message is ready | Stay silent; exact correlation is mandatory, no false completion or acknowledgement. |
+| Matching error or input-required evidence arrives | Give concise truthful problem/question, stop waiting; no permission answer, further worker or Board Done. |
+| Event and polling return the same result | Deduplicate event/session/submitted message/source revision plus result identity; present once. Offered only after presentation, discussed only after discussion; callback 2xx is not either. |
+| Supported subscription exists before new work | Reuse one scoped authorized subscription; discover task_id/session_id filters, correlate payload message_id, no message_id subscription filter. Push/email preferences remain separate and unchanged. |
+| Explicit cancel during active waiting | Stop local reads/waits immediately; do not cancel remote worker/subscription or claim completion. |
+| Host interruption or different topic mid-sentence | Park receipt/cursors/revisions/last observation; no READY interruption. Resume only on renewed intent and live revalidation, no silent post-turn restart. |
+| Deadline with no matching complete evidence | Stop at timeout; no completion/failure claim or continued polling promise. Preserve last observed state and any coverage gap. |
+| Host turn ends or wait primitive is unavailable | No independent timer after assistant turn completion, daemon, scheduler or high-frequency automation. One-shot read/fallback only when available; do not fabricate continued execution. |
+| Explicit 30-minute request without execution evidence | No long-run promise; longer window needs explicit request plus demonstrated duration support. Manual long-run stability remains UNVERIFIED. |
+
+For authorized external acceptance, retain read/admission/completion/presentation times, exact receipt/event/source revision and gaps. Exercise normal Chat with/without tools, real active Voice short and explicitly longer windows, cancel/timeout/interruption-resume, push preferences and simultaneous event+poll delivery. Separate text/mobile push, active-turn spoken result and autonomous idle Voice wakeup; no synthetic/package PASS substitutes for these observations.
 
 ## Optional read-only smoke test
 

@@ -123,8 +123,8 @@ class SkillPackageTest(unittest.TestCase):
         changelog = (source / "CHANGELOG.md").read_text()
         manifest, _ = BUILDER.package_content(ROOT)
         self.assertIn("references/events-attention.md", manifest["files"])
-        self.assertIn("2026-10-04-r34", skill)
-        self.assertIn("## 2026-10-04-r34", changelog)
+        self.assertIn(manifest["revision"], skill)
+        self.assertIn(f'## {manifest["revision"]}', changelog)
         for text in (skill, attention, activity):
             self.assertIn("get_project_attention", text)
         for marker in ("PROACTIVE_MONITORING", "on_demand_fallback", "deferred_to_next_idle_boundary",
@@ -133,6 +133,68 @@ class SkillPackageTest(unittest.TestCase):
         self.assertIn("authorizes no prompt", attention)
         self.assertIn("Board Done", attention)
         self.assertIn("no-user-turn Work/Chat continuation", attention)
+
+    def test_active_voice_wait_contract_is_bounded_and_receipt_correlated(self):
+        """Guard shipped instructions, not an invented polling implementation or host PASS."""
+        source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
+        skill = (source / "SKILL.md").read_text()
+        attention = (source / "references/events-attention.md").read_text()
+        activity = (source / "references/progress-activity.md").read_text()
+        wait = attention.split("## Bounded active Voice wait\n", 1)[1].split("## Manual surface acceptance", 1)[0]
+        for text in (skill, activity):
+            self.assertIn("events-attention.md#bounded-active-voice-wait", text)
+        for required in (
+            "explicit active waiting intent", "actual receipt", "After actual admission",
+            "three minutes", "approximately 30 seconds", "before every page/read/wait",
+            "five pages per round", "two recoverable read errors total",
+            "second recoverable error exhausts", "no independent timer after assistant turn completion",
+            "connector/project + `session_id` + `submitted_message_id`",
+            "Do **not add session_id or message_id input filters**",
+            "`before_cursor`", "`after_cursor`", "never both", "opaque `next_cursor`",
+            "fresh latest read", "without a new sequence", "partial coverage",
+            "complete `visible_original` evidence", "`source_revision`", "supersession",
+            "no repetitive speech", "explicit cancel", "host interruption/execution termination",
+            "No matching complete result observed", "renewed active waiting intent",
+            "not autonomous idle Voice wakeup", "no tight loop, daemon, scheduler",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, wait)
+        self.assertIn("one appropriately scoped authorized subscription before new work admission", attention)
+        self.assertIn("no message_id subscription filter", attention)
+        self.assertIn("Personal push/email preferences are separate; do not modify them", attention)
+        self.assertIn("Same event/revision/result is presented once", wait)
+        self.assertIn("acknowledge offered only after actual presentation", wait)
+        self.assertIn("Unknown audio delivery is not audible presentation", wait)
+
+    def test_active_wait_forward_and_negative_scenarios_remain_manual_acceptance(self):
+        source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
+        scenarios = (source / "references/regression-scenarios.md").read_text()
+        section = scenarios.split("## Bounded active attention wait\n", 1)[1].split("## Optional read-only smoke test", 1)[0]
+        rows = {row.split("|")[1].strip(): row.split("|")[2].strip()
+                for row in section.splitlines() if row.startswith("| ") and row.count("|") >= 3}
+        cases = {
+            "Active Voice short wait with admitted async receipt": ("after actual admission", "present complete current result once", "then stop"),
+            "Send is uncertain or not admitted": ("No accepted acknowledgement", "no replacement worker"),
+            "Normal Chat lacks attention tools or sustained execution": ("no fake polling", "actual tools/execution support"),
+            "Queue limit 100 rejected before execution": ("maximum 50", "cadence gap", "no worker resend"),
+            "Target is on a later queue page": ("has_more", "before_cursor", "partial coverage, not absence"),
+            "Older new entry prepares after head cursor advanced": ("Fresh latest read", "after_cursor-only", "not completion"),
+            "Unrelated session or wrong submitted user message is ready": ("Stay silent", "exact correlation"),
+            "Matching error or input-required evidence arrives": ("stop waiting", "no permission answer"),
+            "Event and polling return the same result": ("Deduplicate", "present once", "callback 2xx is not either"),
+            "Supported subscription exists before new work": ("Reuse", "no message_id subscription filter", "unchanged"),
+            "Explicit cancel during active waiting": ("Stop local reads/waits immediately", "do not cancel remote"),
+            "Host interruption or different topic mid-sentence": ("Park receipt/cursors/revisions", "no READY interruption", "renewed intent"),
+            "Deadline with no matching complete evidence": ("Stop at timeout", "no completion/failure claim"),
+            "Host turn ends or wait primitive is unavailable": ("No independent timer", "One-shot read/fallback", "do not fabricate"),
+            "Explicit 30-minute request without execution evidence": ("No long-run promise", "UNVERIFIED"),
+        }
+        for scenario, markers in cases.items():
+            with self.subTest(scenario=scenario):
+                for marker in markers:
+                    self.assertIn(marker, rows[scenario])
+        self.assertIn("UNVERIFIED until observed", section)
+        self.assertIn("no synthetic/package PASS", section)
 
     def test_task_compact_context_convention(self):
         source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"

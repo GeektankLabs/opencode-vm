@@ -63,4 +63,4 @@ An idle event does not by itself establish a new result. Use correlated completi
 
 When progress or tail is absent, use the available compact status and journal/history paths. Empty tool-call messages establish activity only, not the tool's action or success. State the missing capability; do not invent an API or request a new agent summary merely to conceal an observation limit.
 
-Use short waits only during active interaction and within the discovered timeout limit. No continuous background monitoring, future dispatch or unsolicited notification is implied by this skill.
+Normally use short waits only during active interaction and within the discovered timeout limit. For an admitted authorized async task and explicit active Voice waiting intent, the [bounded active Voice wait](events-attention.md#bounded-active-voice-wait) permits a default three-minute silent attention-queue wait with approximately 30 seconds between reads, only while the host actually sustains execution. This exception creates no post-turn timer, scheduler, future dispatch or autonomous idle Voice wakeup.

@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-04-r35
+
+- Add explicitly authorized, bounded active Voice waiting on the prefetched MCP attention queue: three minutes by default, approximate 30-second silent reads, exact receipt/revision correlation and finite page/error budgets. No independent timer after turn completion or idle Voice wakeup claim.
+- Prefer/reuse one appropriately scoped authorized subscription on supported surfaces; deduplicate event and polling presentation, preserve safe topic boundaries and separate personal push preferences.
+- Add instruction-contract regressions and manual acceptance cases for limits/pagination, missing Chat tools, cancellation, interruption, timeout and delivery dedup. Active Voice retrieval has operator evidence; precise cadence, normal Chat, long runs and idle Voice remain separate external gates.
+
 ## 2026-10-04-r34
 
 - Prefer the persistent prepared attention view for cross-session status questions and natural handoffs; acknowledge presentation/discussion only against the exact source revision.
