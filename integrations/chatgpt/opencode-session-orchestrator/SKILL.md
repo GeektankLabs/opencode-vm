@@ -6,7 +6,7 @@ license: MIT
 
 # OpenCode Session Orchestrator
 
-Release marker: **2026-10-04-r37**. This is the skill revision, not an MCP version.
+Release marker: **2026-10-04-r38**. This is the skill revision, not an MCP version.
 
 This is a client-side workflow skill. The user supplies a working compatible MCP connection, including when using Secure MCP Tunnel. The skill contains no tunnel, account, server alias or credentials and does not configure the connection.
 
@@ -19,8 +19,8 @@ Read references when their workflow is relevant:
 - Sending an image, text file, Markdown file or PDF-derived text to a session: [Attachment workflow](references/attachments.md). Read it before staging file bytes or using `send_message.attachments`.
 - Long, partial or changing results: [Content protocol](references/content-protocol.md).
 - Running tools, recent events or session attention: [Progress and activity](references/progress-activity.md).
-- Prepared worker results, persistent project attention, delivery promises or active Text/Voice completion: [Events and attention](references/events-attention.md).
-- Semantic completion defaults, explicit overrides or reversible domain-detail decisions: [Optimistic MVP and defaults](references/optimistic-mvp.md).
+- Prepared worker results, selected multi-project/VM channels, fair active polls, delivery promises or Text/Voice completion: [Events and attention](references/events-attention.md).
+- Semantic completion defaults, overrides, genuine MVP choices or their pre-dispatch explanation: [Optimistic MVP and defaults](references/optimistic-mvp.md).
 - Research, decisions or planning: [Decision preparation](references/decision-preparation.md).
 - A bounded question alongside a busy workstream, or archival of its answer: [Clarification sessions](references/clarification-sessions.md).
 - A board task whose work spans several agent iterations or a fresh session: [Task compact context](references/task-compact-context.md).
@@ -73,6 +73,7 @@ Track a lightweight registry keyed by **connector/project + session_id**:
 - Authorized task/environment boundary; pending invocation/receipt; permission observations with their source and scope.
 - Activity cursors **separately per filter_key** when provided, otherwise per exact filter combination; last discussed result ID/revision.
 - Prepared attention event IDs, exact source revisions, presentation lifecycle and whether a concrete host wake-up subscription was confirmed; webhook receipt is not a conversation receipt.
+- Only operator-selected/established active management connections: isolate project/task/receipt, contract/decision strategy, filter/cursor/read coverage, presentation/action reservations, error/repair budgets, owner/stage/next prepared step. Normally one authorized strand per distinct VM; no assumed shared repository or activation of every installed app. Follow the [fair channel cycle](references/events-attention.md#selected-project-channels-and-fair-rounds).
 
 | Work status | Meaning |
 |---|---|
@@ -122,6 +123,8 @@ Use the [approval reference](references/approval-flow.md) for edge cases. Produc
 Clear authorized substantive implementation/completion intent selects **active Attention Queue polling + Optimistic MVP by default**: e.g. “Setze diesen Task um” or “Erledige dieses Arbeitspaket bis zum geprüften lokalen Abschluss”. Resolve meaning/context, **not literal keywords**; the user need not name a strategy or cadence. “Selbstständig erledigen” means finish the **known task contract**, not unrestricted authority. Explain the effective scope/strategies briefly once and persist them in the authorized canonical contract/checkpoint before dependent dispatch. Keep going through evidenced internal steps, subject to gates and actual capabilities.
 
 **Overrides win:** start-only (“starte nur”, “danach nicht warten”) means submit only, no completion wait or integration; status/read/connection-check/planning-only/prepare-but-wait/Go-pending activate no worker, long wait or mutation through these defaults. Explicit conservative/MVP-off/no-poll/shorter/deadline/local-only and existing stricter canonical task/package/scheduler contracts take precedence. No retroactive widening or implicit live scheduler modification. Local-only completion excludes integration; other integration still needs actual scope/owner/gates, never inferred from a default. Follow [default resolution](references/optimistic-mvp.md#resolve-the-effective-contract) and [active completion](references/events-attention.md#long-active-text-pilot).
+
+For a **genuine optimistic domain choice**, explain question/options/chosen functional reversible variant/reason and next admitted step in commentary **before dispatch**; use natural substantial Voice wording (roughly 40–60 useful words where appropriate, not a duration guarantee) or brief Text equivalent. Existing contract authorizes autonomy, not silence. Observed “Moment”/objection before admission parks/revises and revalidates the prepared action; after acceptance never claim un-send/rollback without an authorized supported path. No permission bypass, artificial OID or extra approval ceremony. Follow [pre-dispatch explanation](references/optimistic-mvp.md#explain-a-genuine-choice-before-dispatch).
 
 ## Submit authorized tasks and verify exact delivery
 
@@ -224,6 +227,7 @@ For an explicitly requested management note, discover `add_task_management_note`
 - Say "I will notify you automatically" only for a concrete selected host/surface with an active confirmed `PROACTIVE_MONITORING` subscription and verified callback/wakeup path. If that host reports another turn is running and confirms deferral, say it will appear at the next safe idle boundary. Unknown/unsupported state means on-demand queue fallback; do not simulate chat continuation or audible Voice wake-up.
 - Standalone Voice WAIT-only (no completion intent) retains a finite three-minute default unless an explicit longer/shorter/deadline instruction applies. Completion intent instead uses the protocol below. A skill has no independent timer after turn completion; tools/execution must be real, not assumed from the surface.
 - For clear authorized substantive completion on supported Text **or Voice**, quietly reconcile the prepared queue about every 30 seconds even while workers run; no blanket three-minute stop. Cadence is best-effort, not a hard SLA; processing gaps are reported honestly and short updates only cover material findings. Reconcile durable dispatch/receipts before each authorized next admission, preserving repair history. Stop/checkpoint at verified completion, cancel, blocker, error/repair budget or actual host limit; missing queue/tools/runtime support means an explicit limitation/checkpoint, not an invented process. Respect overrides. Distinguish `CURRENT_TURN_WAIT`, verified independent recovery and `ON_DEMAND_STATUS`. See [active completion](references/events-attention.md#long-active-text-pilot).
+- During already active authorized management, the quiet state uses **one shared fair round over selected channels**, not a global project queue or duplicate per-task loops. Reconstruct exact existing receipts/contracts at first interaction/reentry; availability never authorizes resend or new work. Each channel keeps its own cursor/budgets and faults; healthy independent channels continue. Topic/Voice/tool processing may delay reads—record gaps, reconcile at a safe management boundary and claim no post-turn timer. Pure status may bounded-read existing watched work but activates no future monitor. See the [channel protocol](references/events-attention.md#selected-project-channels-and-fair-rounds).
 - For "what is it doing?", prefer `get_session_progress` when discovered. Use its task filter if an exact user ID is known. Describe stored tool name/state/time and attribution; inspect coverage, missing metadata and idle/stored-state mismatch. Tool `completed` is not a business PASS.
 - For "what is new?", continue each saved journal cursor under its own filter key. If a current overview is wanted and tail is supported, use `tail:true` without an after-cursor, then continue without tail using the captured-head cursor and identical filters. Tail is not historical consumption. See [progress and activity](references/progress-activity.md).
 - Consider `ACTIVE`, `WAITING_RESULT` and `ATTENTION`; exclude parked/closed topics unless asked for all sessions. With no registry, reconstruct cautiously and label historical discussion status unknown.

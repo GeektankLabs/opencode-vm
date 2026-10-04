@@ -356,6 +356,93 @@ class SkillPackageTest(unittest.TestCase):
                     self.assertIn(marker, rows[scenario])
         self.assertIn("not a model-behavior or host-duration test", section)
 
+    def test_r38_selected_channels_are_isolated_fair_and_authority_bound(self):
+        source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
+        skill = (source / "SKILL.md").read_text()
+        attention = (source / "references/events-attention.md").read_text()
+        activity = (source / "references/progress-activity.md").read_text()
+        channel = attention.split("## Selected project channels and fair rounds\n", 1)[1].split("## Honest monitoring communication", 1)[0]
+        for text in (skill, activity):
+            self.assertIn("events-attention.md#selected-project-channels-and-fair-rounds", text)
+        for marker in (
+            "only operator-selected or already established active management connections",
+            "one authorized strand per VM", "aliases, not independent dispatch owners",
+            "not one shared repository or one global queue", "exact connector + project",
+            "task_id + session_id + submitted user receipt", "event/source revision",
+            "result identity", "contract revision", "filter_key", "opaque cursors",
+            "presentation/ACK state", "action_key reservations", "error/repair",
+            "owner/current stage/next prepared step", "No cross-channel cursor",
+            "first interaction/reentry", "not resend/start/new monitor",
+            "one bounded page per eligible channel before extra pages or deep result processing",
+            "five-page per-channel round cap", "older pending preparation",
+            "one logical action at a time serially", "other due eligible channels",
+            "that channel's dependent actions", "Healthy independent channels continue",
+            "never resets budgets or admitted work", "no global reset or retry storm",
+            "natural management boundary/active execution reentry", "not post-turn/background monitoring",
+            "workstop is not schedulerstop", "unverified, never “timer still running”",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, channel)
+        self.assertIn("UNVERIFIED until observed", channel)
+
+    def test_r38_genuine_oid_explanation_precedes_send_without_silence_permission(self):
+        source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
+        skill = (source / "SKILL.md").read_text()
+        policy = (source / "references/optimistic-mvp.md").read_text()
+        explanation = policy.split("## Explain a genuine choice before dispatch\n", 1)[1].split("## Drift, repair and recovery", 1)[0]
+        self.assertIn("references/optimistic-mvp.md#explain-a-genuine-choice-before-dispatch", skill)
+        for marker in (
+            "genuine optimistic domain-detail decision", "before the authorized send",
+            "decision question", "alternatives", "functional reversible option",
+            "precise next step to be admitted", "roughly 40–60 useful words where appropriate",
+            "not a mandatory word count", "guaranteed speech duration",
+            "prior contract supplies execution authority; silence/no objection is NOT fresh permission",
+            "no extra confirmation ceremony", "no native permission/question answer",
+            "hard gate exists", "observed “Moment”/objection before admission",
+            "parks the unsent prepared action", "A reservation is not admission",
+            "possibly admitted", "After actual accepted receipt",
+            "never claim un-send, cancel or rollback", "separately authorized",
+            "speech-completion/interrupt signals", "UNVERIFIED", "do not claim the user heard",
+            "Do not sleep for ten seconds", "backend walltime/text word count",
+            "independent hosted acceptance",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, explanation)
+
+    def test_r38_multi_vm_and_explanation_forward_negative_scenarios(self):
+        source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
+        scenarios = (source / "references/regression-scenarios.md").read_text()
+        section = scenarios.split("## r38 selected channels and pre-dispatch explanation\n", 1)[1].split("## Optional read-only smoke test", 1)[0]
+        rows = {row.split("|")[1].strip(): row.split("|")[2].strip()
+                for row in section.splitlines() if row.startswith("| ") and row.count("|") >= 3}
+        cases = {
+            "Two selected distinct VM projects with authorized workers": ("one strand per VM", "may run concurrently", "serial logical decisions/admissions"),
+            "Unrelated installed app or available connector": ("not watched/activated", "no task authority"),
+            "Two connector aliases expose the same VM/project": ("actual identity/owner/receipt", "not two independent strands"),
+            "Session IDs or titles coincide on channel A and B": ("exact connector/project/task/session/submitted receipt", "no cross-project"),
+            "Channel A has many pages or a long result": ("One bounded page each", "rotate order", "visit B", "no hard30s promise"),
+            "One channel's old pending entry becomes prepared later": ("Fresh latest", "no after_cursor-only miss"),
+            "First interaction/reentry has an uncertain prior send": ("exact stored action/receipt", "no blind resend/new worker/new monitor"),
+            "Topic or Voice discussion delays reads": ("safe management boundary", "no fabricated post-turn timer"),
+            "Pure status/start-only/plan/Go-pending with existing watched tasks": ("Bounded permitted reconciliation only", "no indefinite watch", "overrides remain"),
+            "Channel A loses capability/auth/cursor or exhausts budget": ("Park A", "healthy independent B continues", "No foreign-queue fallback"),
+            "User stops A or global management; worker still running": ("actual stop scope", "does not abort worker", "schedulerstop"),
+            "Host execution ends mid-round": ("per-channel next visit/coverage/receipt", "unverified", "never timer-still-running"),
+            "Genuine optimistic detail is ready for authorized dispatch": ("Before send", "question/options", "current contract/gates"),
+            "Voice OID pre-explanation": ("roughly40–60 useful words", "no filler", "UNVERIFIED"),
+            "Routine implementation or no actual OID": ("No artificial OID", "OID_COUNT=0", "silent"),
+            "User “Moment”/objection observed before admission": ("Park unsent", "revalidate", "no automatic send"),
+            "Objection arrives after accepted or uncertain send": ("cannot be claimed un-sent", "possibly admitted", "separately authorized supported"),
+            "User is silent after explanation": ("not new permission", "prior authorized contract", "hard-gate bypass"),
+            "Backend clock or text word count reaches ten seconds/words": ("Not audible/host-interrupt PASS", "no sleep timer"),
+            "Pre-explained option crosses security/core API/architecture/irreversible/scope/owner gate": ("INPUT_REQUIRED", "no dependent dispatch"),
+        }
+        for scenario, markers in cases.items():
+            with self.subTest(scenario=scenario):
+                for marker in markers:
+                    self.assertIn(marker, rows[scenario])
+        self.assertIn("not hosted multi-VM or Voice acceptance", section)
+
     def test_task_compact_context_convention(self):
         source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
         skill = (source / "SKILL.md").read_text()

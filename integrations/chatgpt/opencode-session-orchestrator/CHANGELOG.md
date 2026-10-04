@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-04-r38
+
+- Describe one fair active management cycle for operator-selected distinct VM/project channels, with isolated identity/cursors/receipts/budgets and bounded reentry recovery. One strand per VM normally; separate authorized VM workers may run concurrently, controller admissions remain serial.
+- Explain genuine optimistic domain choices before dispatch, with natural Voice/Text alternatives/rationale/next-action notice and observed-objection handling. Silence grants no authority; text length or backend walltime proves no spoken window, interruption or un-send.
+- Add multi-channel and pre-dispatch forward/negative instruction cases while preserving r37 scope/default overrides, receipt dedup/recovery and no post-turn timer. Hosted multi-VM and Voice acceptance remain separate.
+
 ## 2026-10-04-r37
 
 - Resolve clear authorized substantive implementation/completion intent semantically to active queue polling and bounded Optimistic MVP defaults; explain once and persist the effective scoped contract, no strategy/cadence keywords required.
