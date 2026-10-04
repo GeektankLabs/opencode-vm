@@ -22,6 +22,7 @@ import {
   DEFAULT_CONTENT_BYTES,
   MAX_CONTENT_BYTES,
   READ_PAYLOAD_BYTES,
+  READ_RESPONSE_BYTES,
   describeMessage,
   digest,
   fitPreviews,
@@ -273,13 +274,21 @@ export class OpenCodeGateway implements SessionGateway {
   }
 
   async getProjectAttention(query: AttentionQuery = {}): Promise<AttentionResult> {
-    return this.requireJournal().listAttention(query, async (id) => {
+    const visible = async (id: string) => {
       try { await this.requireExposedSession(id); return true; }
       catch (error) {
         if (error instanceof AdapterError && error.code === "SESSION_NOT_FOUND") return false;
         throw error;
       }
-    });
+    };
+    const journal = this.requireJournal();
+    let limit = query.limit ?? 25;
+    for (;;) {
+      const result = await journal.listAttention({ ...query, limit }, visible);
+      if (jsonBytes(result) <= READ_RESPONSE_BYTES - 2048) return result;
+      if (limit === 1) throw new AdapterError("RESPONSE_BUDGET_EXCEEDED", "One prepared attention entry exceeds the bounded read response budget.");
+      limit = Math.max(1, Math.floor(limit / 2));
+    }
   }
 
   async acknowledgeProjectAttention(input: AttentionReceipt): Promise<AttentionEntry> {
