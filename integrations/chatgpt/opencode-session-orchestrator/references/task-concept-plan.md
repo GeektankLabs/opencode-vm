@@ -4,6 +4,8 @@ Use this convention for a known project-board task that warrants a deeper, durab
 
 ## Roles in the persistent store
 
+Initializing or maintaining these files is authorized persistence: follow [Build-first agent preparation](agent-preparation.md) before the work prompt, even when the topic is called planning. Deliberate Plan-only clarification cannot persist C/P until scope authorization and idle Build/tuple readback are verified. Reading stored task documents remains a pure read with no agent/runtime switch.
+
 - **Board title/description** — concise outcome, scope and acceptance criteria. The board is the durable task card; the orchestrator may briefly reference the concept plan from it, but does not duplicate the concept into the description.
 - **Task Concept Plan** — single complete, authoritative concept and planning document for the task: problem, target outcome, requirements, assumptions, architecture/design, alternatives, decisions with rationale, interfaces/data flow, risks and constraints, implementation plan, test/acceptance plan, open concept questions. It evolves as work deepens.
 - **Task Compact Context** — short, current working state. Cites the concept plan path as the authoritative reference and may cite the latest message/result IDs and artifacts. It does not duplicate the plan; if a stable decision appears in both, the concept plan is canonical.

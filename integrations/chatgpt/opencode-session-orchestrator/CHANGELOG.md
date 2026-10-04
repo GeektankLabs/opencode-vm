@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-04-r40
+
+- Prepare the available primary Build agent before authorized new/prepared work that can persist files, including concept/context/plan work and checks. Keep deliberate small strictly read-only Plan exceptions and explicit user-agent conflicts visible before writing.
+- Reuse suitable sessions; discover creation/catalog/idle/update/readback capabilities, preserve the full provider/model/variant tuple and separate five-role profile resolution. No global agent/permission/model-policy change or invented creation arguments.
+- Link the same preparation through clarification, initialization, Board/package handoffs and project setup notes. Add source-bound scripted tool-call traces for Build selection, no-switch reads, override conflicts, unavailable tools, busy/input and uncertain/partial updates; hosted behavior remains separate acceptance.
+
 ## 2026-10-04-r39
 
 - Require concise completion/decision/escalation notices to name the MCP project, verified workstream when present, and descriptive task title; short keys supplement titles and unknown hierarchy remains explicit.

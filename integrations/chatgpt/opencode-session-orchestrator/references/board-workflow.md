@@ -6,6 +6,8 @@ Read the [task compact context](task-compact-context.md) convention when a known
 
 Read the [task concept plan](task-concept-plan.md) convention for complex or conceptually rich board tasks that need a persistent concept and planning document alongside the compact context.
 
+When a confirmed Board action delegates concept/context persistence or implementation, apply [agent preparation](agent-preparation.md) before its one prompt: verify available primary Build, idle/input and full runtime readback; explicit Plan/persistence conflict is not silently overridden. A Board/status/document read itself starts no agent turn or runtime switch. This changes no Board-completion/archive authority.
+
 For multiple tasks requiring persistent wave planning or any parallel repository writes, also read [Worktree ownership](worktree-ownership.md) and [Persistent Work Packages](work-packages.md). A session does not isolate a Git working tree.
 
 ## Find before creating

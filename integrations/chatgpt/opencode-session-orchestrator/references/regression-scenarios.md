@@ -287,6 +287,28 @@ Forward/negative instruction-contract cases, not hosted multi-VM or Voice accept
 
 Hosted acceptance must observe selected distinct VM queues, fair progress without duplicate admissions, topic/error/reentry/stop/recovery and actual Voice playback/interrupt events before vs after admission. Retain actual receipts/timestamps/gaps/source revisions; local policy/package checks prove neither cross-project execution nor spoken duration. Subscription remains supplemental and no idle Voice wakeup is inferred.
 
+## Build-first agent preparation
+
+These source-bound scripted fake-connector traces check selected agent, exact tool arguments/order/readback and zero-send gates; they are not live model or permission enforcement tests.
+
+| Scenario | Required behavior |
+|---|---|
+| Concept/plan/context task may persist now or later | Select available primary Build before one prompt; not Plan because title says planning. |
+| Creation configured to Plan, available Build | Create empty once using discovered fields only, idle/input check, partial agent Build update, exact agent and original full tuple readback then one send. |
+| Appropriate existing Build session | Reuse exact identity/tuple; no redundant creation or agent/model update. |
+| Explicit Plan with persistence/test scope | Explain conflict before create/update/send/write; no silent Build override or failed Plan write. |
+| Deliberate small strictly read-only Plan clarification | Supported Plan usable, no runtime churn when already matching, preserve explicit tuple and remote scope. |
+| Plan clarification gains persistence | Require new write authorization, idle/no pending and Build/full tuple readback before first write-capable follow-up. |
+| Pure stored status/result/document/connection read | Supported reads only, no create/update/send/model turn. |
+| Build agent missing, disabled, subagent-only or catalog incomplete | Concrete availability prerequisite; zero prompts, no guessed primary agent/permission/restart workaround. |
+| Missing creation/switch/readback capability | Do not invent fields/tools or use another session to bypass; existing correct agent may proceed only with real sufficient evidence. |
+| Session busy, permission/question pending or concurrent write | No runtime change or prompt; preserve original receipt, no force/override. |
+| Agent-only update changes provider/model/variant | Fresh exact readback detects drift; AGENT_PREPARATION_UNVERIFIED, zero prompts, no rollback/blind retry. |
+| Runtime update uncertain, exact desired state persisted | Read actual state once; if chosen agent/full tuple/idle verified proceed without repeating update. |
+| Runtime update partial/unknown or readback failure | Readback/reconciliation only; zero prompts or duplicate update/creation. |
+| Explicit tuple/profile or configured unavailable mapping | Agent preparation preserves tuple; configured profile unavailable/incomplete still stops, null-only fallback unchanged. |
+| Send receipt lost after successful preparation | One send only; reconcile exact original, not prepare/create/send another task. |
+
 ## Optional read-only smoke test
 
 This tests retrieval of existing content, not a new remote read-only assignment. When a live read test is explicitly requested or appropriate for validation:

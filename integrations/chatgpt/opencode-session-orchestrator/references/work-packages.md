@@ -35,6 +35,8 @@ No package-specific MCP fields are needed: use task description for stable outco
 
 ## Synthesize before autonomous execution
 
+For each authorized file-capable member or package-document assignment, use [Build-first agent preparation](agent-preparation.md), independent of the semantic model profile. Preserve explicit agent/tuple overrides, idle/input/full readback before one send and pure-read no-switch semantics. This is not permission to alter backend defaults, member scope, package gates or current runtime policy.
+
 Before autonomous execution, reconcile the confirmed package into one **Synthesized Execution Contract** section in its canonical P. C carries the active `SYNTHESIS_REVISION`, phase, current candidate HEAD, receipt/evidence, blockers and next safe action. Existing members keep stable scope/evidence/acceptance and Board states. No new MCP/backend schema, contract store, execution engine or Board status is introduced; `synthesized` is document state.
 
 Fill this minimum contract from actual current sources, not title matches or chat memory:

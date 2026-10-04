@@ -1,13 +1,14 @@
 {
   "schema": 1,
   "name": "opencode-session-orchestrator",
-  "revision": "2026-10-04-r39",
+  "revision": "2026-10-04-r40",
   "files": [
     "SKILL.md",
     "CHANGELOG.md",
     "agents/openai.yaml",
     "assets/icon.svg",
     "references/approval-flow.md",
+    "references/agent-preparation.md",
     "references/approval-sources.md",
     "references/attachments.md",
     "references/board-workflow.md",

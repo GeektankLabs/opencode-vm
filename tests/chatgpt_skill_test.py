@@ -2528,5 +2528,251 @@ class SynthesizedContractTest(unittest.TestCase):
         self.assertIn("synthesis cannot turn PENDING into PASS", self.packages)
 
 
+class AgentPreparationTraceTest(unittest.TestCase):
+    """Interpret shipped gate order against independent fake tool evidence.
+
+    Test-only contract walks, not a deployed client/runtime or hosted model test.
+    Expected call traces and source-mutation controls detect absent/reordered gates.
+    """
+
+    class Connector:
+        def __init__(self, *, existing=True, agent="plan", variant="effort", **flags):
+            self.existing = existing
+            self.state = {"agent": agent, "provider_id": "provider-current",
+                          "model_id": "model-current", "variant": variant,
+                          "idle": True, "permissions": 0, "questions": 0, "write": False}
+            self.state.update(flags.pop("state", {}))
+            self.catalog = {"build": {"primary": True, "available": True},
+                            "plan": {"primary": True, "available": True}}
+            self.flags = flags
+            self.calls = []
+
+        def call(self, name, **args):
+            self.calls.append((name, args))
+            if name == "create_session":
+                self.existing = True
+                return "session-target"
+            if name == "get_runtime_options":
+                return self.catalog
+            if name == "get_session":
+                if self.flags.get("read_failure") or (self.flags.get("readback_failure") and
+                        any(call == "update_session_runtime" for call, _ in self.calls)):
+                    raise RuntimeError("read unavailable")
+                return copy.deepcopy(self.state)
+            if name == "update_session_runtime":
+                if not self.flags.get("partial"):
+                    self.state.update({key: value for key, value in args.items() if key != "session_id"})
+                if self.flags.get("drift"):
+                    self.state[self.flags["drift"]] = "unexpected"
+                if self.flags.get("after_update_busy"):
+                    self.state["idle"] = False
+                if self.flags.get("uncertain") or self.flags.get("partial"):
+                    raise RuntimeError("update uncertain")
+            if name == "send_message" and self.flags.get("send_uncertain"):
+                raise RuntimeError("send uncertain")
+
+    def setUp(self):
+        self.source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
+        self.policy = (self.source / "references/agent-preparation.md").read_text()
+
+    @staticmethod
+    def tuple_of(state):
+        return tuple(state.get(key) for key in ("provider_id", "model_id", "variant"))
+
+    def walk(self, connector, *, scope="file_work", explicit_agent=None,
+             plan_exception=False, authorized=True, profile_state="unconfigured",
+             profile_tuple=None, policy=None):
+        policy = self.policy if policy is None else policy
+        rules = set(re.findall(r"\*\*([A-Z_]+):\*\*", policy))
+        if scope == "stored_read" and "PURE_STORED_READ" in rules:
+            connector.call("read_message_content")
+            return "STORED_READ"
+        if not authorized:
+            return "NOT_AUTHORIZED"
+        if (scope == "file_work" and explicit_agent == "plan" and
+                "PLAN_WRITE_CONFLICT" in rules):
+            return "PLAN_WRITE_CONFLICT"
+        if profile_state in ("unavailable", "incomplete", "uncheckable"):
+            return "PROFILE_BLOCKED"
+        desired_agent = explicit_agent or ("plan" if plan_exception and scope == "read_only_new"
+                                           else "build" if "DEFAULT_BUILD" in rules
+                                           else connector.state["agent"])
+        steps = re.findall(r"^\d+\. \*\*([A-Z_]+):\*\*", policy, re.M)
+        observed = copy.deepcopy(connector.state)
+        expected_tuple = self.tuple_of(observed)
+        try:
+            for step in steps:
+                if step == "SCOPE_GATE" and not connector.existing:
+                    if connector.flags.get("no_create"):
+                        return "CAPABILITY_BLOCKED"
+                    connector.call("create_session", title="Authorized task")
+                elif step == "AVAILABILITY_GATE":
+                    if connector.flags.get("no_catalog"):
+                        return "CAPABILITY_BLOCKED"
+                    agent = connector.call("get_runtime_options").get(desired_agent, {})
+                    if not agent.get("primary") or not agent.get("available"):
+                        return "AGENT_UNAVAILABLE"
+                elif step == "IDLE_GATE":
+                    if connector.flags.get("no_readback"):
+                        return "CAPABILITY_BLOCKED"
+                    observed = connector.call("get_session", session_id="session-target")
+                    if not observed.get("agent") or not observed.get("provider_id") or not observed.get("model_id"):
+                        return "AGENT_PREPARATION_UNVERIFIED"
+                    if (not observed["idle"] or observed["permissions"] or
+                            observed["questions"] or observed["write"]):
+                        return "SESSION_BLOCKED"
+                    expected_tuple = self.tuple_of(observed)
+                elif step == "AGENT_UPDATE":
+                    patches = []
+                    if observed["agent"] != desired_agent:
+                        patches.append({"agent": desired_agent})
+                    if profile_tuple and profile_tuple != expected_tuple:
+                        patches.append(dict(zip(("provider_id", "model_id", "variant"), profile_tuple)))
+                        expected_tuple = profile_tuple
+                    if patches and connector.flags.get("no_update"):
+                        return "CAPABILITY_BLOCKED"
+                    for patch in patches:
+                        try:
+                            connector.call("update_session_runtime", session_id="session-target", **patch)
+                        except RuntimeError:
+                            # One exact readback may establish success; no retry/rollback.
+                            break
+                elif step == "READBACK_GATE":
+                    actual = connector.call("get_session", session_id="session-target")
+                    if (actual["agent"] != desired_agent or self.tuple_of(actual) != expected_tuple or
+                            not actual["idle"] or actual["permissions"] or actual["questions"] or actual["write"]):
+                        return "AGENT_PREPARATION_UNVERIFIED"
+                elif step == "SEND_ONCE":
+                    try:
+                        connector.call("send_message", session_id="session-target", message="Authorized bounded task")
+                    except RuntimeError:
+                        return "SUBMISSION_UNCERTAIN"
+            return "PREPARED_AND_SENT"
+        except RuntimeError:
+            return "AGENT_PREPARATION_UNVERIFIED"
+
+    @staticmethod
+    def names(connector):
+        return [name for name, _ in connector.calls]
+
+    def assert_no_mutating_calls(self, connector):
+        self.assertFalse(set(self.names(connector)) & {"create_session", "update_session_runtime", "send_message"})
+
+    def test_file_capable_concept_and_create_default_plan_switch_before_single_send(self):
+        for title in ("Concept with later persistence", "Implementation", "Context initialization"):
+            with self.subTest(title=title):
+                connector = self.Connector(existing=False)
+                before = self.tuple_of(connector.state)
+                self.assertEqual(self.walk(connector), "PREPARED_AND_SENT")
+                self.assertEqual(self.names(connector), ["create_session", "get_runtime_options", "get_session",
+                                                         "update_session_runtime", "get_session", "send_message"])
+                self.assertEqual(connector.calls[0][1], {"title": "Authorized task"})
+                self.assertEqual(connector.calls[3][1], {"session_id": "session-target", "agent": "build"})
+                self.assertEqual(self.tuple_of(connector.state), before)
+
+    def test_existing_build_reuse_and_explicit_read_only_plan_need_no_churn(self):
+        for agent, scope, exception in (("build", "file_work", False), ("plan", "read_only_new", True)):
+            connector = self.Connector(agent=agent)
+            self.assertEqual(self.walk(connector, scope=scope, plan_exception=exception,
+                                       explicit_agent="plan" if exception else None), "PREPARED_AND_SENT")
+            self.assertEqual(self.names(connector), ["get_runtime_options", "get_session", "get_session", "send_message"])
+            self.assertEqual(connector.state["agent"], agent)
+
+    def test_explicit_plan_conflict_pure_reads_and_scope_growth_authorization(self):
+        connector = self.Connector(existing=False)
+        self.assertEqual(self.walk(connector, explicit_agent="plan"), "PLAN_WRITE_CONFLICT")
+        self.assert_no_mutating_calls(connector)
+        connector = self.Connector()
+        self.assertEqual(self.walk(connector, scope="stored_read"), "STORED_READ")
+        self.assertEqual(self.names(connector), ["read_message_content"])
+        self.assertEqual(self.walk(connector, authorized=False), "NOT_AUTHORIZED")
+        self.assert_no_mutating_calls(connector)
+        connector.calls.clear()
+        self.assertEqual(self.walk(connector), "PREPARED_AND_SENT")
+        self.assertEqual(connector.state["agent"], "build")
+
+    def test_missing_or_nonprimary_build_and_missing_tools_block_send(self):
+        for broken in ("missing", "disabled", "subagent"):
+            connector = self.Connector()
+            if broken == "missing":
+                connector.catalog.pop("build")
+            else:
+                connector.catalog["build"]["available" if broken == "disabled" else "primary"] = False
+            self.assertEqual(self.walk(connector), "AGENT_UNAVAILABLE")
+            self.assert_no_mutating_calls(connector)
+        for tool in ("no_create", "no_catalog", "no_update", "no_readback"):
+            connector = self.Connector(existing=False if tool == "no_create" else True, **{tool: True})
+            self.assertEqual(self.walk(connector), "CAPABILITY_BLOCKED")
+            self.assertNotIn("send_message", self.names(connector))
+        # Missing update is immaterial when correct Build and tuple are already verified.
+        self.assertEqual(self.walk(self.Connector(agent="build", no_update=True)), "PREPARED_AND_SENT")
+
+    def test_busy_permissions_questions_and_concurrent_write_block_update_and_send(self):
+        for state in ({"idle": False}, {"permissions": 1}, {"questions": 1}, {"write": True}):
+            connector = self.Connector(state=state)
+            self.assertEqual(self.walk(connector), "SESSION_BLOCKED")
+            self.assert_no_mutating_calls(connector)
+        connector = self.Connector(after_update_busy=True)
+        self.assertEqual(self.walk(connector), "AGENT_PREPARATION_UNVERIFIED")
+        self.assertNotIn("send_message", self.names(connector))
+
+    def test_exact_tuple_and_profile_preservation_and_unavailable_stop(self):
+        for variant in ("explicit-effort", None):
+            connector = self.Connector(variant=variant)
+            original = self.tuple_of(connector.state)
+            self.assertEqual(self.walk(connector), "PREPARED_AND_SENT")
+            self.assertEqual(self.tuple_of(connector.state), original)
+        requested = ("provider-explicit", "model-explicit", "variant-explicit")
+        connector = self.Connector()
+        self.assertEqual(self.walk(connector, profile_state="available", profile_tuple=requested), "PREPARED_AND_SENT")
+        self.assertEqual(self.tuple_of(connector.state), requested)
+        self.assertEqual(self.names(connector).count("send_message"), 1)
+        for status in ("unavailable", "incomplete", "uncheckable"):
+            connector = self.Connector(existing=False)
+            self.assertEqual(self.walk(connector, profile_state=status), "PROFILE_BLOCKED")
+            self.assert_no_mutating_calls(connector)
+
+    def test_uncertain_partial_update_and_readback_drift_never_retry_or_send_unverified(self):
+        connector = self.Connector(uncertain=True)
+        self.assertEqual(self.walk(connector), "PREPARED_AND_SENT")
+        self.assertEqual(self.names(connector).count("update_session_runtime"), 1)
+        for flags in ({"partial": True}, {"read_failure": True}, {"readback_failure": True},
+                      {"state": {"provider_id": None}}, {"state": {"model_id": None}},
+                      {"drift": "provider_id"}, {"drift": "model_id"}, {"drift": "variant"}):
+            connector = self.Connector(**flags)
+            self.assertEqual(self.walk(connector), "AGENT_PREPARATION_UNVERIFIED")
+            self.assertNotIn("send_message", self.names(connector))
+            self.assertLessEqual(self.names(connector).count("update_session_runtime"), 1)
+        connector = self.Connector(send_uncertain=True)
+        self.assertEqual(self.walk(connector), "SUBMISSION_UNCERTAIN")
+        self.assertEqual(self.names(connector).count("send_message"), 1)
+
+    def test_shipped_gate_mutations_expose_unsafe_flows_and_reference_links_are_present(self):
+        # Negative controls execute modified source order/rules, independent expectations.
+        connector = self.Connector(drift="variant")
+        without_readback = self.policy.replace("5. **READBACK_GATE:**", "5. **REMOVED:**")
+        self.assertEqual(self.walk(connector, policy=without_readback), "PREPARED_AND_SENT")
+        self.assertIn("send_message", self.names(connector))  # Unsafe trace rejected by intact gate above.
+        connector = self.Connector(drift="variant")
+        early_send = self.policy.replace("5. **READBACK_GATE:**", "5. **SEND_ONCE:**").replace(
+            "6. **SEND_ONCE:**", "6. **READBACK_GATE:**")
+        self.assertEqual(self.walk(connector, policy=early_send), "AGENT_PREPARATION_UNVERIFIED")
+        self.assertLess(self.names(connector).index("send_message"), len(connector.calls) - 1)
+        self.assertEqual(self.names(connector)[-1], "get_session")  # Too-late read cannot undo admitted prompt.
+        connector = self.Connector(state={"idle": False})
+        without_idle = self.policy.replace("3. **IDLE_GATE:**", "3. **REMOVED:**")
+        self.assertEqual(self.walk(connector, policy=without_idle), "AGENT_PREPARATION_UNVERIFIED")
+        self.assertIn("update_session_runtime", self.names(connector))  # Intact policy prevents even switch.
+        connector = self.Connector()
+        no_conflict = self.policy.replace("**PLAN_WRITE_CONFLICT:**", "**REMOVED:**")
+        self.assertEqual(self.walk(connector, explicit_agent="plan", policy=no_conflict), "PREPARED_AND_SENT")
+        self.assertEqual(connector.state["agent"], "plan")
+        for path in ("SKILL.md", "references/clarification-sessions.md", "references/task-concept-plan.md",
+                     "references/board-workflow.md", "references/work-packages.md"):
+            self.assertIn("agent-preparation.md", (self.source / path).read_text())
+        self.assertIn("first configured unavailable/incomplete stop", self.policy)
+        self.assertIn("Never invent create_session agent/worktree parameters", self.policy)
+
+
 if __name__ == "__main__":
     unittest.main()
