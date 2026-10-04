@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-04-r39
+
+- Require concise completion/decision/escalation notices to name the MCP project, verified workstream when present, and descriptive task title; short keys supplement titles and unknown hierarchy remains explicit.
+- Add a brief user-facing MVP completion notice separating newly implemented decisions from inherited and pending ones, with actual product/schema/architecture effects, added complexity and a pointer to practical correction options. Incomplete coverage never becomes a zero count.
+- Clarify useful progress updates during active unfinished work, without repetitive polling speech or a post-turn timer claim.
+
 ## 2026-10-04-r38
 
 - Describe one fair active management cycle for operator-selected distinct VM/project channels, with isolated identity/cursors/receipts/budgets and bounded reentry recovery. One strand per VM normally; separate authorized VM workers may run concurrently, controller admissions remain serial.

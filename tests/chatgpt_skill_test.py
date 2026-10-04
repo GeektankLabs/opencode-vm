@@ -443,6 +443,47 @@ class SkillPackageTest(unittest.TestCase):
                     self.assertIn(marker, rows[scenario])
         self.assertIn("not hosted multi-VM or Voice acceptance", section)
 
+    def test_r39_contextual_notices_preserve_verified_hierarchy_and_active_progress(self):
+        source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
+        skill = (source / "SKILL.md").read_text()
+        attention = (source / "references/events-attention.md").read_text()
+        notice = attention.split("## Context in user-facing notices\n", 1)[1].split("## Delivery claims", 1)[0]
+        self.assertIn("references/events-attention.md#context-in-user-facing-notices", skill)
+        for marker in (
+            "MCP project/channel name -> verified workstream, when present -> descriptive task title -> result or attention needed",
+            "never substitute a number or opaque ID", "each distinct item in a mixed-project report",
+            "actual task's Board Project binding or established canonical task context",
+            "another task's hierarchy are not evidence", "genuinely does not exist (e.g. Inbox)",
+            "unknown or ambiguous", "without inventing a parent", "creates no new Board entity",
+            "routine progress pings may use shorter context", "about once a minute",
+            "next available tool/conversation boundary", "including failed reads",
+            "Do not repeat checking-only filler", "not a new timer",
+            "post-turn notification promise",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, notice)
+
+    def test_r39_mvp_completion_notice_separates_new_inherited_pending_and_unknown(self):
+        source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
+        skill = (source / "SKILL.md").read_text()
+        policy = (source / "references/optimistic-mvp.md").read_text()
+        notice = policy.split("## Brief user-facing completion notice\n", 1)[1]
+        self.assertIn("references/optimistic-mvp.md#brief-user-facing-completion-notice", skill)
+        for marker in (
+            "new implemented domain decisions in this run", "inherited cumulative decisions and pending proposals",
+            "starting decision baseline from the actual canonical records before admission",
+            "stable decision IDs and implementation evidence", "does not count the same decision twice",
+            "cumulative `OID_COUNT` semantics", "`OID_NEW_COUNT`", "without creating a separate registry",
+            "product code, database schema and established architecture",
+            "do not infer such effects merely from policy coverage", "practical correction/reversal paths and Git anchors",
+            "without making it a prerequisite", "do not automatically dump the decision log",
+            "No new domain MVP decisions in this run", "count is unverified",
+            "never report zero from absence of evidence", "Report pending proposals separately",
+            "does not authorize new core architecture or irreversible migrations",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, notice)
+
     def test_task_compact_context_convention(self):
         source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
         skill = (source / "SKILL.md").read_text()
