@@ -237,7 +237,7 @@ class SkillPackageTest(unittest.TestCase):
         self.assertIn("references/optimistic-mvp.md", manifest["files"])
         self.assertIn("[Optimistic MVP](references/optimistic-mvp.md)", skill)
         for required in (
-            "does not activate OID", "never self-upgrade conservative",
+            "does not activate OID", "Never self-upgrade conservative",
             "functional additive reversible variant", "moderate local rework",
             "Security/Trust", "regulatory/compliance", "data-sovereignty",
             "irreversible data/state/schema", "public/external API/contract",
@@ -263,7 +263,7 @@ class SkillPackageTest(unittest.TestCase):
                 for row in section.splitlines() if row.startswith("| ") and row.count("|") >= 3}
         cases = {
             "Explicit long TEXT contract still running after three minutes": ("Continue silent", "no blanket three-minute cutoff", "no post-turn timer"),
-            "No explicit long waiting request": ("finite defaults", "no implied long TEXT mode"),
+            "Standalone wait without completion intent": ("finite defaults", "no implied long completion mode"),
             "First worker complete but known contract has remaining steps": ("next-step gates", "contract-authorized admission", "nor expand scope"),
             "Queue capability absent on selected connection": ("Park", "foreign project queue"),
             "Host execution/wait limit reached during long TEXT pilot": ("exact resume checkpoint", "unverified", "no continuing timer"),
@@ -276,7 +276,7 @@ class SkillPackageTest(unittest.TestCase):
             "Newer cancel or scope decision appears during active polling": ("canonical head before action", "no automatic worker abort"),
             "Offered receipt missing before discussed": ("verify offered before discussed", "never treated as a send receipt"),
             "Explicit Optimistic MVP selected and one real reversible choice arises": ("functional additive", "before implementation", "PRE_DECISION_HEAD", "commits/tests/change path"),
-            "Free-form “finish independently” without selected strategy": ("known authorized contract", "do not activate OID"),
+            "Generic finish request under established conservative contract": ("known authorized contract", "conservative override", "do not activate OID"),
             "Small OID changes Security/Trust/API/product architecture/regulation/data sovereignty": ("INPUT_REQUIRED", "no implementation"),
             "Individually small OIDs cumulatively change product/API architecture": ("combined drift", "park"),
             "OID anchor dirty or decision persistence unavailable": ("gate before decision implementation", "no reset/stash/overwrite"),
@@ -290,6 +290,71 @@ class SkillPackageTest(unittest.TestCase):
                     self.assertIn(marker, rows[scenario])
         self.assertIn("synthetic PASS is not a long-run PASS", section)
         self.assertIn("Active-turn polling never proves idle wakeup", section)
+
+    def test_r37_semantic_completion_defaults_have_scope_and_contract_precedence(self):
+        source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
+        skill = (source / "SKILL.md").read_text()
+        policy = (source / "references/optimistic-mvp.md").read_text()
+        attention = (source / "references/events-attention.md").read_text()
+        activity = (source / "references/progress-activity.md").read_text()
+        defaults = skill.split("### Completion defaults and overrides\n", 1)[1].split("## Submit authorized tasks", 1)[0]
+        for marker in (
+            "Clear authorized substantive implementation/completion intent",
+            "active Attention Queue polling + Optimistic MVP by default",
+            "not literal keywords", "need not name a strategy or cadence",
+            "Explain the effective scope/strategies briefly once", "persist",
+            "before dependent dispatch", "Overrides win", "start-only",
+            "status/read/connection-check/planning-only/prepare-but-wait/Go-pending",
+            "conservative/MVP-off/no-poll/shorter/deadline/local-only",
+            "existing stricter canonical task/package/scheduler contracts",
+            "No retroactive widening or implicit live scheduler modification",
+            "Local-only completion excludes integration",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, defaults)
+        self.assertIn("Resolve the effective contract", policy)
+        self.assertIn("before admission", policy)
+        self.assertIn("strategy_source", policy)
+        self.assertIn("genuine new domain-detail decision", policy)
+        self.assertIn("Default strategy selection is policy, not itself a domain OID", policy)
+        self.assertIn("no blanket three-minute stop", attention)
+        self.assertIn("default to clear authorized substantive implementation/completion intent on supported Text or Voice", attention)
+        self.assertIn("best-effort about 30 seconds, not a hard SLA", attention)
+        self.assertIn("standalone WAIT-only", attention)
+        self.assertIn("short updates only for material findings", activity)
+        self.assertNotIn("Apply only when the user explicitly selected", policy)
+
+    def test_r37_default_resolution_forward_and_negative_cases(self):
+        source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
+        scenarios = (source / "references/regression-scenarios.md").read_text()
+        section = scenarios.split("## r37 semantic completion defaults and overrides\n", 1)[1].split("## Optional read-only smoke test", 1)[0]
+        rows = {row.split("|")[1].strip(): row.split("|")[2].strip()
+                for row in section.splitlines() if row.startswith("| ") and row.count("|") >= 3}
+        cases = {
+            "Natural “Setze diesen Task um” without strategy names": ("active queue polling + Optimistic MVP defaults", "explain once", "persist effective contract/readback"),
+            "Natural work-package request to checked local completion": ("semantic completion intent", "local-only excludes integration"),
+            "Equivalent implementation wording contains none of the example phrases": ("not literal keyword match", "clear authorized completion"),
+            "“Starte nur” or “danach nicht warten”": ("Submit only", "no completion wait", "full-delivery expansion"),
+            "Status/read/connection-check request": ("Only scoped reads", "no workers, long waits or mutations"),
+            "Planning-only or preparation with Go pending": ("No implementation worker", "preserve waiting gate"),
+            "Explicit conservative or MVP-off": ("OID off", "INPUT_REQUIRED"),
+            "Explicit no-poll": ("No completion polling loop", "no invented recovery"),
+            "Explicit shorter wait or deadline during completion": ("Honor actual window/deadline", "no silent extension"),
+            "Existing canonical contract stricter than r37": ("Preserve strategy/scope/cadence/horizon/budgets", "no retroactive widening"),
+            "Supported Voice request to implement and complete a task": ("Default active completion beyond three minutes", "real execution", "no post-turn timer"),
+            "Voice request only to wait for an existing result": ("three-minute finite default", "no new worker", "explicit duration wins"),
+            "Default completion lacks queue/tools/runtime support": ("Disclose limitation", "unverified save", "no fabricated process"),
+            "Genuine domain-detail choice under default Optimistic MVP": ("functional additive reversible", "PRE_DECISION_HEAD", "before implementation"),
+            "Default OID touches core contract/security/trust/regulation/data sovereignty/irreversible state": ("INPUT_REQUIRED", "no permission bypass"),
+            "Default completion finishes locally": ("no automatic Board Done/push/release/deploy", "actual contract/owner/gates"),
+            "Material-free rounds with processing gaps": ("Stay quiet", "not a hard SLA", "actual gaps recorded"),
+            "Default policy selected but no genuine decision arose": ("OID_COUNT=0", "not itself a domain OID"),
+        }
+        for scenario, markers in cases.items():
+            with self.subTest(scenario=scenario):
+                for marker in markers:
+                    self.assertIn(marker, rows[scenario])
+        self.assertIn("not a model-behavior or host-duration test", section)
 
     def test_task_compact_context_convention(self):
         source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"

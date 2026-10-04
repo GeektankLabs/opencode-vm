@@ -208,7 +208,7 @@ Instruction-contract cases only. Hosted duration/cadence, multi-step continuatio
 | Scenario | Required behavior |
 |---|---|
 | Explicit long TEXT contract still running after three minutes | Continue silent prepared queue rounds about every 30 seconds while actual host execution supports them; no blanket three-minute cutoff, no post-turn timer. |
-| No explicit long waiting request | Preserve finite defaults; no implied long TEXT mode from an ordinary send or “do it independently”. |
+| Standalone wait without completion intent | Preserve finite defaults; no implied long completion mode from an ordinary receipt or a WAIT-only request. |
 | First worker complete but known contract has remaining steps | Validate result/coverage and next-step gates, then one separately contract-authorized admission; neither stop at a convenient partial result nor expand scope. |
 | Queue capability absent on selected connection | Park that pilot; do not substitute a foreign project queue, activity/status or fake execution as queue PASS. |
 | Host execution/wait limit reached during long TEXT pilot | Stop and persist exact resume checkpoint/receipt/next step/budgets with readback; unavailable persistence stays unverified, no continuing timer claim. |
@@ -221,7 +221,7 @@ Instruction-contract cases only. Hosted duration/cadence, multi-step continuatio
 | Newer cancel or scope decision appears during active polling | Re-read canonical head before action; stop affected continuation, retain receipt and original evidence, no automatic worker abort or subscription deletion. |
 | Offered receipt missing before discussed | Present once and verify offered before discussed when required; lost ACK reconciled by readback, never treated as a send receipt. |
 | Explicit Optimistic MVP selected and one real reversible choice arises | Smallest functional additive variant inside architecture; durable AUTONOMOUS_MVP_DECISION before implementation with clean PRE_DECISION_HEAD, alternatives/cost/uncertainty and scoped commits/tests/change path afterward. |
-| Free-form “finish independently” without selected strategy | Complete known authorized contract, but do not activate OID or invent broader business authority. |
+| Generic finish request under established conservative contract | Complete known authorized contract, but preserve conservative override; do not activate OID or invent broader business authority. |
 | Small OID changes Security/Trust/API/product architecture/regulation/data sovereignty | INPUT_REQUIRED despite local reversibility; no implementation of dependent choice or autoapproval. |
 | Individually small OIDs cumulatively change product/API architecture | Review combined drift and park at hard boundary; cannot evade gate by splitting decisions. |
 | OID anchor dirty or decision persistence unavailable | No clean safe PRE_DECISION_HEAD/readback means gate before decision implementation; no reset/stash/overwrite or false saved claim. |
@@ -230,6 +230,33 @@ Instruction-contract cases only. Hosted duration/cadence, multi-step continuatio
 | Later operator supersedes implemented OID | Preserve prior decision/commit history, reread current revision and reconcile receipts; scoped authorized rework or operator-chosen boundary, no automatic hard reset/rebase. |
 
 Manual TEXT acceptance records actual start/end/read gaps (>3 minutes when duration permits), each admitted worker/result and exactly one permissible next action, independently of event delivery. Exercise missed continuation, duplicate event/pull, partial pages/older preparation, disconnect/cancel/host limit/checkpoint resume and actual OID cases; absent OID means UNTESTED. Active-turn polling never proves idle wakeup or installed skill behavior.
+
+## r37 semantic completion defaults and overrides
+
+Review intent and effective contract, not trigger words. These positive/negative instruction cases are not a model-behavior or host-duration test. Defaults select scoped strategy, never permission or capability.
+
+| Scenario | Required behavior |
+|---|---|
+| Natural “Setze diesen Task um” without strategy names | Clear substantive implementation selects active queue polling + Optimistic MVP defaults; explain once, persist effective contract/readback, finish authorized local checks and handoff within gates. |
+| Natural work-package request to checked local completion | Same defaults from semantic completion intent without keyword/cadence incantation; local-only excludes integration, all existing package/owner gates remain. |
+| Equivalent implementation wording contains none of the example phrases | Resolve meaning/context, not literal keyword match; same scoped defaults for clear authorized completion. |
+| “Starte nur” or “danach nicht warten” | Submit only when authorized, return exact receipt; no completion wait, integration or full-delivery expansion. |
+| Status/read/connection-check request | Only scoped reads; no workers, long waits or mutations from defaults. |
+| Planning-only or preparation with Go pending | No implementation worker, long wait or mutation activated by defaults; preserve waiting gate and narrow authorized preparation. |
+| Explicit conservative or MVP-off | OID off despite generic completion; unresolved domain detail INPUT_REQUIRED, settled technical choices remain scoped. |
+| Explicit no-poll | No completion polling loop despite default; receipt/handoff or separately authorized read only, no invented recovery. |
+| Explicit shorter wait or deadline during completion | Honor actual window/deadline; stop/checkpoint at expiry, no silent extension or blanket long mode. |
+| Existing canonical contract stricter than r37 | Preserve strategy/scope/cadence/horizon/budgets; no retroactive widening or implicit live scheduler modification. |
+| Supported Voice request to implement and complete a task | Default active completion beyond three minutes while real execution supports it; best-effort about30s, no post-turn timer or idle Voice wakeup promise. |
+| Voice request only to wait for an existing result | WAIT-only three-minute finite default, no new worker; explicit duration wins within actual host support. |
+| Default completion lacks queue/tools/runtime support | Disclose limitation, checkpoint/readback or unverified save and stop; no fabricated process, foreign queue or timer. |
+| Genuine domain-detail choice under default Optimistic MVP | Smallest functional additive reversible option, moderate rework at most; clean PRE_DECISION_HEAD and durable AUTONOMOUS_MVP_DECISION before implementation, scoped commits/files/tests/change-path afterward. |
+| Default OID touches core contract/security/trust/regulation/data sovereignty/irreversible state | INPUT_REQUIRED even if reversible locally; no permission bypass or dependent implementation. |
+| Default completion finishes locally | Preserve exact checks/receipt/result; no automatic Board Done/push/release/deploy, integration only when actual contract/owner/gates authorize it. |
+| Material-free rounds with processing gaps | Stay quiet; best-effort30s is not a hard SLA, actual gaps recorded. Short update only for material finding, no artificial progress speech. |
+| Default policy selected but no genuine decision arose | OID_COUNT=0 / OID_UNTESTED (policy-only); strategy selection is not itself a domain OID. |
+
+Keep existing original-content/receipt/source revision/dedup/uncertain-send/repair-history/host-limit/resume tests and gates. The installed skill and hosted Text/Voice completion remain independently unverified until actual acceptance.
 
 ## Optional read-only smoke test
 

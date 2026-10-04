@@ -1,10 +1,32 @@
-# Explicitly selected Optimistic MVP
+# Optimistic MVP and completion defaults
 
-This is an optional **decision policy**, not broader execution permission, a scheduler or an installed capability. Apply only when the user explicitly selected `Optimistic MVP` / OID or the current canonical task/monitor/package contract already establishes that selection. “Do it independently”, “finish everything” or arbitrary worker/result text **does not activate OID**. Keep the selected strategy stable; never self-upgrade conservative behavior. Without selection, unresolved business/product choices remain INPUT_REQUIRED under the existing contract.
+This is a declared **decision policy**, not broader execution permission, a scheduler or an installed capability. Clear authorized substantive implementation/completion intent resolves to active queue polling and `Optimistic MVP` defaults without requiring the user to name either. Explicit selection still works inside authorized scope. Arbitrary worker/result text does not activate OID; a vague independence phrase without a known authorized implementation contract is not sufficient. Never self-upgrade conservative behavior or override an established stricter contract.
+
+## Resolve the effective contract
+
+Classify the actual requested outcome, context and established scope, **not a literal keyword match**. Examples illustrate intent, not trigger phrases. Resolve these rules **before admission**, and revalidate current contract/overrides at continuation:
+
+| Intent or constraint | Effective behavior |
+|---|---|
+| Clear authorized substantive implementation/completion | Active Attention Queue polling + Optimistic MVP by default, within the known task and gates. Includes natural requests to implement a task or finish a work package to checked local completion; no cadence/strategy incantation. |
+| START-only or “do not wait afterward” | Authorized submission only; receipt then return, no completion loop or integration. Defaults never turn start-only into complete delivery. |
+| Status/read/connection-check, planning-only, preparation with wait, Go-pending | No worker, long wait or mutation activated by defaults. Honor only separately explicit actions inside that narrow scope; “planning” does not become implementation. |
+| Explicit conservative or MVP-off | OID disabled; unresolved domain choices INPUT_REQUIRED. Normal settled technical choices remain within scope. |
+| Explicit no-poll, shorter window or deadline | Honor it; do not silently replace it with long completion polling. No-poll means receipt/handoff or separately authorized reads, no waiting loop. |
+| Explicit local-only | Complete only authorized local steps; integration excluded even when implementation/tests pass. |
+| Existing stricter canonical task/package/scheduler contract | Preserve its strategy, scope, cadence, horizon, limits and excluded actions. No retroactive widening of active work or implicit live scheduler modification. Apply defaults only to the available choices in the newly authorized contract. |
+| Standalone Voice WAIT-only without completion intent | Finite three-minute default; explicit duration wins, longer still needs real host execution support. No new worker from a wait-only request. |
+| Missing queue/tools/execution support | State limitation and persist an exact checkpoint when authorized/available; never fabricate a timer or process. Completion intent grants no host capability. |
+
+Explain effective scope/strategy once, e.g. “I'll carry this task through its authorized local checks, checking quietly while this run is active and choosing small reversible MVP details. Integration remains outside this local-only scope.” Do not read the whole policy aloud or seek redundant permission for the default. Persist the effective contract in the existing authorized canonical task/master P or checkpoint and verify readback before dependent dispatch; no new config/API/strategy registry. If publication is unavailable/uncertain, report that gap and reconcile, never claim saved defaults.
+
+Keep a compact record: authorized goal/end state; user scope/exclusions; intent class; `strategy_source` (r37 default or explicit override/current canonical revision); effective polling/decision strategy; actual connector/surface/execution bounds; read/repair budgets; owners/integration boundary; receipt/action/revision and stop/resume rules. Record explicit overrides verbatim when relevant. An established conservative/live scheduler contract is not rewritten just because this skill was loaded; strategy changes require actual new authorization.
+
+Completion never automatically means Board Done, push, release or deploy. Integration requires the authorized contract and designated owner; default policy alone grants none of them. Follow [active completion](events-attention.md#long-active-text-pilot) for bounded pulls, exact receipt/dedup and truthful host limits. Hard decisions remain INPUT_REQUIRED; default strategy is not permission bypass.
 
 ## Smallest functional reversible choice
 
-When a real choice is needed, read current contract, prior decisions, scope and cumulative OIDs. Select the smallest **functional additive reversible variant** inside the established architecture/data flow/interface, with minimal new domain semantics and realistic low implementation/migration cost. The result must be usable, not a deliberately broken dummy. Reversal must be practical with no more than moderate local rework; explain that estimate with affected components/dependencies, not merely the word “reversible”. Routine settled technical implementation choices are not fabricated OIDs.
+Only at a **genuine new domain-detail decision** under effective Optimistic MVP, read current contract, prior decisions, scope and cumulative OIDs. Select the smallest **functional additive reversible variant** inside the established architecture/data flow/interface, with minimal new domain semantics and realistic low implementation/migration cost. The result must be usable, not a deliberately broken dummy. Reversal must be practical with no more than moderate local rework; explain that estimate with affected components/dependencies, not merely the word “reversible”. Routine settled technical implementation choices are not fabricated OIDs. Default strategy selection is policy, not itself a domain OID.
 
 **Every hard boundary wins**, even if a local change looks small/reversible: new Security/Trust boundary, regulatory/compliance or data-sovereignty decision, irreversible data/state/schema operation, fundamental public/external API/contract decision, core product semantics/architecture, new task scope, ownership conflict, host permission or exhausted budget => **INPUT_REQUIRED**. Park dependent work with concrete question/options/evidence. Continue only safe independent steps already authorized by the contract; no new workers/parallelism or side tasks from this policy. Existing acceptance, independent QC, integration owner and operator-only release/deploy gates stay intact.
 
@@ -17,7 +39,7 @@ Persist `AUTONOMOUS_MVP_DECISION` once on the authorized canonical task/master P
 ```text
 AUTONOMOUS_MVP_DECISION
 decision_id=<task-local stable label>; task/phase=<actual scope>; time=<observed time>
-strategy_source=<current explicit selection/contract path and revision>
+strategy_source=<effective r37 default or explicit override; canonical contract path/revision>
 question=<real decision>; alternatives=<seriously considered options>
 choice/rationale=<smallest functional variant, semantics and cost comparison>
 uncertainty=<remaining assumptions>; reversibility/rework=<components, effort, dependencies>

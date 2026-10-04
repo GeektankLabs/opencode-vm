@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-04-r37
+
+- Resolve clear authorized substantive implementation/completion intent semantically to active queue polling and bounded Optimistic MVP defaults; explain once and persist the effective scoped contract, no strategy/cadence keywords required.
+- Give start-only, reads/planning/preparation/Go-pending and explicit or canonical stricter overrides precedence; never widen a live scheduler or infer integration/release authority from defaults.
+- Use the active completion protocol on supported Text/Voice without a blanket three-minute cutoff, keeping finite standalone WAIT-only behavior, best-effort cadence, real host limits, receipt recovery and hard decision gates. Add positive/negative default-resolution regressions; no installed or hosted behavior claim.
+
 ## 2026-10-04-r36
 
 - Preserve finite Voice/default waits; add explicitly longer active TEXT queue reconciliation and serial contract follow-through, ending at completion/cancel/gate/error budget/real host limit rather than a blanket three-minute cutoff.
