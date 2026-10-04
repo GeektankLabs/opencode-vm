@@ -2828,5 +2828,276 @@ class AgentPreparationTraceTest(unittest.TestCase):
         self.assertIn("Never invent create_session agent/worktree parameters", self.policy)
 
 
+class TaskDoneArchiveTraceTest(unittest.TestCase):
+    """Source-ordered synthetic connector flow; never calls a real archive endpoint."""
+
+    class Connector:
+        def __init__(self, links=("session-a",), **flags):
+            self.flags = flags
+            self.calls = []
+            self.task_reads = 0
+            self.scan_reads = {}
+            self.session_reads = {}
+            self.task = {"task_id": "closed-task", "status": "done",
+                         "links": [{"session_id": s, "message_id": "submitted-original"} for s in links]}
+            self.refs = {s: [{"task_id": "closed-task", "status": "done", "board_project_id": "stream-a"}]
+                         for s in set(links)}
+            self.sessions = {s: {"id": s, "root": True, "idle": True, "permissions": 0,
+                                 "questions": 0, "write": False, "admission_known": True,
+                                 "guard": None, "unresolved": False, "archived_at": None}
+                             for s in set(links)}
+
+        def call(self, name, **args):
+            self.calls.append((name, copy.deepcopy(args)))
+            if name == "get_project_task":
+                self.task_reads += 1
+                task = copy.deepcopy(self.task)
+                if self.task_reads > 1 and self.flags.get("reopened"):
+                    task["status"] = "in_progress"
+                if self.task_reads > 1 and self.flags.get("link_removed"):
+                    task["links"] = []
+                return task
+            sid = args["session_id"]
+            if name == "list_project_tasks":
+                self.scan_reads[sid] = self.scan_reads.get(sid, 0) + 1
+                if self.flags.get("scan_error"):
+                    raise RuntimeError("TASK_SEARCH_INCOMPLETE")
+                refs = copy.deepcopy(self.refs[sid])
+                if self.scan_reads[sid] > 1 and self.flags.get("late_open"):
+                    refs.append({"task_id": "master-open", "status": "in_progress", "board_project_id": "stream-b"})
+                # A narrowed successful scan can truthfully be complete within
+                # that stream and still omit the other stream's open reference.
+                if args.get("board_project_id"):
+                    refs = [r for r in refs if r["board_project_id"] == args["board_project_id"]]
+                return {"tasks": refs, "complete": not self.flags.get("incomplete")}
+            if name == "get_session":
+                self.session_reads[sid] = self.session_reads.get(sid, 0) + 1
+                if self.flags.get("post_archive_read_error") and any(
+                        call == "archive_session" and params["session_id"] == sid for call, params in self.calls):
+                    raise RuntimeError("archive readback unavailable")
+                state = copy.deepcopy(self.sessions[sid])
+                if self.session_reads[sid] > 1 and self.flags.get("late_busy"):
+                    state["idle"] = False
+                if self.session_reads[sid] > 1 and self.flags.get("late_archived"):
+                    state["archived_at"] = 98765
+                return state
+            if name == "archive_session":
+                if self.flags.get("no_archive_tool"):
+                    raise RuntimeError("unsupported archive")
+                if not self.flags.get("uncertain_not_applied"):
+                    self.sessions[sid]["archived_at"] = 123456
+                if self.flags.get("uncertain_applied") or self.flags.get("uncertain_not_applied"):
+                    raise RuntimeError("ARCHIVE_UNCERTAIN")
+                return {"session_id": sid, "archived_at": 123456}
+            raise AssertionError("Unexpected mutation/tool: " + name)
+
+    def setUp(self):
+        self.source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
+        self.policy = (self.source / "references/task-done-archive.md").read_text()
+
+    def run_flow(self, connector, *, authorized=True, result_secured=True, handback=True,
+                 policy=None, lookup=None):
+        policy = self.policy if policy is None else policy
+        steps = re.findall(r"^\d+\. \*\*([A-Z_]+):\*\*", policy, re.M)
+        lookup = lookup if lookup is not None else json.loads(policy.split("```json\n", 1)[1].split("```", 1)[0])
+        closed = None
+        targets = []
+        for step in steps:
+            if step == "DONE_AUTHORITY" and not (authorized and result_secured and handback):
+                return {"workflow": "AUTHORITY_OR_HANDBACK_MISSING"}
+            if step == "DONE_READBACK":
+                closed = connector.call("get_project_task", task_id="closed-task")
+                if closed["status"] != "done":
+                    return {"workflow": "DONE_UNVERIFIED"}
+            if step == "EXACT_LINKS":
+                targets = list(dict.fromkeys(link["session_id"] for link in closed["links"] if link.get("session_id")))
+                if not targets:
+                    return {"workflow": "NO_LINKED_TARGETS"}
+
+        def references(sid):
+            args = copy.deepcopy(lookup)
+            args["session_id"] = sid
+            evidence = connector.call("list_project_tasks", **args)
+            if not evidence["complete"]:
+                return "COVERAGE_UNKNOWN"
+            if any(r["status"] not in ("todo", "in_progress", "done") for r in evidence["tasks"]):
+                return "STATUS_UNKNOWN"
+            if any(r["status"] in ("todo", "in_progress") for r in evidence["tasks"]):
+                return "OPEN_REFERENCE"
+
+        def eligible(sid, state):
+            return (state["id"] == sid and state["root"] and state["idle"] and
+                    not state["permissions"] and not state["questions"] and not state["write"] and
+                    state["admission_known"] and not state["guard"] and not state["unresolved"])
+
+        results = {}
+        for sid in targets:
+            outcome = "NOT_ARCHIVED"
+            try:
+                for step in steps:
+                    if step == "REFERENCE_COVERAGE":
+                        blocker = references(sid)
+                        if blocker:
+                            outcome = blocker
+                            break
+                    elif step == "SESSION_ELIGIBILITY":
+                        state = connector.call("get_session", session_id=sid, include_archived=True)
+                        if state["id"] == sid and state["archived_at"]:
+                            outcome = "ALREADY_ARCHIVED"
+                            break
+                        if connector.flags.get("no_archive_tool"):
+                            outcome = "ARCHIVE_CAPABILITY_MISSING"
+                            break
+                        if not eligible(sid, state):
+                            outcome = "INELIGIBLE"
+                            break
+                    elif step == "FRESH_RECHECK":
+                        task = connector.call("get_project_task", task_id="closed-task")
+                        if task["status"] != "done" or sid not in [r["session_id"] for r in task["links"]]:
+                            outcome = "DONE_OR_LINK_DRIFT"
+                            break
+                        blocker = references(sid)
+                        state = connector.call("get_session", session_id=sid, include_archived=True)
+                        if state["id"] == sid and state["archived_at"]:
+                            outcome = "ALREADY_ARCHIVED"
+                            break
+                        if blocker or not eligible(sid, state):
+                            outcome = blocker or "INELIGIBLE"
+                            break
+                    elif step == "ARCHIVE_ONCE":
+                        uncertain = False
+                        try:
+                            connector.call("archive_session", session_id=sid)
+                        except RuntimeError:
+                            uncertain = True
+                        try:
+                            state = connector.call("get_session", session_id=sid, include_archived=True)
+                        except RuntimeError:
+                            outcome = "ARCHIVE_UNVERIFIED"
+                            break
+                        if state["id"] != sid or not state["archived_at"]:
+                            outcome = "ARCHIVE_UNVERIFIED"
+                        else:
+                            outcome = "ARCHIVED_RECONCILED" if uncertain else "ARCHIVED"
+            except RuntimeError:
+                outcome = "COVERAGE_OR_SOURCE_UNKNOWN"
+            results[sid] = outcome
+        return results
+
+    @staticmethod
+    def archives(connector):
+        return [args["session_id"] for name, args in connector.calls if name == "archive_session"]
+
+    def test_last_task_archives_once_with_unfiltered_coverage_and_timestamp_readback(self):
+        connector = self.Connector()
+        self.assertEqual(self.run_flow(connector), {"session-a": "ARCHIVED"})
+        self.assertEqual(self.archives(connector), ["session-a"])
+        scans = [args for name, args in connector.calls if name == "list_project_tasks"]
+        self.assertEqual(scans, [{"session_id": "session-a", "include_terminal": True}] * 2)
+        self.assertEqual(connector.calls[-1], ("get_session", {"session_id": "session-a", "include_archived": True}))
+        self.assertGreater(connector.sessions["session-a"]["archived_at"], 0)
+        self.assertEqual(connector.task["status"], "done")
+
+    def test_first_task_and_cross_workstream_open_master_block_archive(self):
+        for status in ("todo", "in_progress"):
+            connector = self.Connector()
+            connector.refs["session-a"].append({"task_id": "other-task-or-package", "status": status,
+                                                "board_project_id": "stream-b"})
+            self.assertEqual(self.run_flow(connector), {"session-a": "OPEN_REFERENCE"})
+            self.assertEqual(self.archives(connector), [])
+            self.assertEqual(connector.task["status"], "done")
+
+    def test_duplicate_multiple_and_missing_explicit_links(self):
+        connector = self.Connector(links=("session-a", "session-a", "session-b"))
+        connector.sessions["session-b"]["idle"] = False
+        self.assertEqual(self.run_flow(connector), {"session-a": "ARCHIVED", "session-b": "INELIGIBLE"})
+        self.assertEqual(self.archives(connector), ["session-a"])
+        connector = self.Connector(links=())
+        self.assertEqual(self.run_flow(connector), {"workflow": "NO_LINKED_TARGETS"})
+        self.assertEqual(self.archives(connector), [])
+
+    def test_partial_failed_coverage_and_unknown_status_are_not_empty_eligibility(self):
+        for flags, result in (({"incomplete": True}, "COVERAGE_UNKNOWN"),
+                              ({"scan_error": True}, "COVERAGE_OR_SOURCE_UNKNOWN")):
+            connector = self.Connector(**flags)
+            self.assertEqual(self.run_flow(connector), {"session-a": result})
+            self.assertEqual(self.archives(connector), [])
+        connector = self.Connector()
+        connector.refs["session-a"][0]["status"] = "transfer-pending"
+        self.assertEqual(self.run_flow(connector), {"session-a": "STATUS_UNKNOWN"})
+        self.assertEqual(self.archives(connector), [])
+
+    def test_busy_input_write_guard_unknown_admission_and_wrong_root_are_skips(self):
+        for changes in ({"idle": False}, {"permissions": 1}, {"questions": 1}, {"write": True},
+                        {"guard": "historic-user"}, {"unresolved": True}, {"admission_known": False},
+                        {"root": False}, {"id": "wrong-session"}):
+            connector = self.Connector()
+            connector.sessions["session-a"].update(changes)
+            self.assertEqual(self.run_flow(connector), {"session-a": "INELIGIBLE"})
+            self.assertEqual(self.archives(connector), [])
+        connector = self.Connector(no_archive_tool=True)
+        self.assertEqual(self.run_flow(connector), {"session-a": "ARCHIVE_CAPABILITY_MISSING"})
+        self.assertEqual(self.archives(connector), [])
+
+    def test_missing_authority_handback_or_done_readback_never_archives(self):
+        for args in ({"authorized": False}, {"result_secured": False}, {"handback": False}):
+            connector = self.Connector()
+            self.assertEqual(self.run_flow(connector, **args), {"workflow": "AUTHORITY_OR_HANDBACK_MISSING"})
+            self.assertEqual(self.archives(connector), [])
+        connector = self.Connector()
+        connector.task["status"] = "in_progress"
+        self.assertEqual(self.run_flow(connector), {"workflow": "DONE_UNVERIFIED"})
+        self.assertEqual(self.archives(connector), [])
+
+    def test_fresh_done_links_reverse_references_and_session_drift_block_mutation(self):
+        for flag in ("reopened", "link_removed", "late_open", "late_busy"):
+            connector = self.Connector(**{flag: True})
+            self.assertNotEqual(self.run_flow(connector)["session-a"], "ARCHIVED")
+            self.assertEqual(self.archives(connector), [])
+        connector = self.Connector(late_archived=True)
+        self.assertEqual(self.run_flow(connector), {"session-a": "ALREADY_ARCHIVED"})
+        self.assertEqual(self.archives(connector), [])
+
+    def test_uncertain_archive_reconciles_same_id_without_retry_and_reports_existing(self):
+        for flags, expected in (({"uncertain_applied": True}, "ARCHIVED_RECONCILED"),
+                                ({"uncertain_not_applied": True}, "ARCHIVE_UNVERIFIED"),
+                                ({"uncertain_applied": True, "post_archive_read_error": True}, "ARCHIVE_UNVERIFIED")):
+            connector = self.Connector(**flags)
+            self.assertEqual(self.run_flow(connector), {"session-a": expected})
+            self.assertEqual(self.archives(connector), ["session-a"])
+            self.assertEqual(connector.task["status"], "done")
+        connector = self.Connector()
+        connector.sessions["session-a"]["archived_at"] = 98765
+        self.assertEqual(self.run_flow(connector), {"session-a": "ALREADY_ARCHIVED"})
+        self.assertEqual(self.archives(connector), [])
+
+    def test_source_mutations_expose_narrowed_lookup_missing_authority_and_late_recheck(self):
+        # Source query narrowing hides stream-b despite successful stream-a scan.
+        connector = self.Connector()
+        connector.refs["session-a"].append({"task_id": "package-open", "status": "in_progress",
+                                            "board_project_id": "stream-b"})
+        narrowed = {"session_id": "<linked_session_id>", "include_terminal": True,
+                    "board_project_id": "stream-a"}
+        self.assertEqual(self.run_flow(connector, lookup=narrowed), {"session-a": "ARCHIVED"})
+        with self.assertRaises(AssertionError):
+            self.assertEqual(self.archives(connector), [])
+        connector = self.Connector()
+        absent = self.policy.replace("1. **DONE_AUTHORITY:**", "1. **REMOVED:**")
+        self.assertEqual(self.run_flow(connector, handback=False, policy=absent), {"session-a": "ARCHIVED"})
+        with self.assertRaises(AssertionError):
+            self.assertEqual(self.archives(connector), [])
+        connector = self.Connector(late_busy=True)
+        late = self.policy.replace("6. **FRESH_RECHECK:**", "6. **ARCHIVE_ONCE:**").replace(
+            "7. **ARCHIVE_ONCE:**", "7. **FRESH_RECHECK:**")
+        self.assertEqual(self.run_flow(connector, policy=late), {"session-a": "ALREADY_ARCHIVED"})
+        with self.assertRaises(AssertionError):
+            self.assertEqual(self.archives(connector), [])  # Late blocker cannot undo an earlier archive.
+        for path in ("SKILL.md", "references/board-workflow.md", "references/clarification-sessions.md",
+                     "references/work-packages.md"):
+            self.assertIn("task-done-archive.md", (self.source / path).read_text())
+        self.assertIn("separate **explicitly requested** operation", self.policy)
+        self.assertIn("non-atomic boundary", self.policy)
+
+
 if __name__ == "__main__":
     unittest.main()

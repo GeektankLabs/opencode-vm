@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-04-r41
+
+- Add narrow task-Done archive follow-through after secured result/handback and independently verified authorized Done: exact linked sessions, complete all-workstream/all-status reverse coverage, current eligibility and fresh recheck before archive once/readback.
+- Keep unknown coverage, busy/input/guard/unresolved evidence and uncertain replies conservative per session; no force, blind retry, Done rollback, watcher or backend transaction. Standalone explicit manual archive and r40 Build preparation remain unchanged.
+- Add source-bound fake-connector traces and mutation controls for last/open task references, cross-workstream blockers, dedup, handback, eligibility, races and uncertain/already archived state. No live session archives or hosted behavior acceptance from packaging.
+
 ## 2026-10-04-r40
 
 - Unreleased-candidate F1 correction: check clarification scope/explicit Plan-persistence conflict before any session creation, then prepare/read back runtime and send once. Add a source-bound cross-reference ordering regression with a create-before-scope mutation control.

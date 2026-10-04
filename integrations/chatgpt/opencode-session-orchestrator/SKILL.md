@@ -6,7 +6,7 @@ license: MIT
 
 # OpenCode Session Orchestrator
 
-Release marker: **2026-10-04-r40**. This is the skill revision, not an MCP version.
+Release marker: **2026-10-04-r41**. This is the skill revision, not an MCP version.
 
 This is a client-side workflow skill. The user supplies a working compatible MCP connection, including when using Secure MCP Tunnel. The skill contains no tunnel, account, server alias or credentials and does not configure the connection.
 
@@ -35,6 +35,7 @@ Read references when their workflow is relevant:
 - Post-`CONCEPT_READY` follow-through on a confirmed `todo` -> `in_progress` transition: [Initialization follow-through](references/initialization-follow-through.md).
 - Behavior review or an authorized smoke test: [Regression scenarios](references/regression-scenarios.md).
 - Existing project tasks, proposed classification, board links, or consolidation of remaining work: [Board workflow](references/board-workflow.md).
+- Verified authorized task-Done follow-through and eligible last-open-linked-task session archive: [Task Done and archive](references/task-done-archive.md).
 
 ## Discover capabilities and respect scope
 
@@ -225,6 +226,10 @@ The **executing agent** maintains both files; the **orchestrator** samples quali
 ## Read task documents for management questions
 
 For an Executive Summary, current progress, blockers/open points, next step or concept status of a known board task, prefer **read-only** `get_project_task` + `get_task_documents`/`read_task_document`; do not start an agent merely to copy a file. Read `compact_context` first for the current state; add `concept_plan` only for target/design/implementation/test depth, then only relevant `concept_detail` documents indicated by its main index. Read bounded pages with stable revisions, not entire plans by default. For claims about work actually performed, verify linked original results/tests; a plan or context is not execution evidence. If the connector lacks these tools, use only available stored reads and disclose the gap; a fresh agent investigation needs its own authorization. See [board workflow](references/board-workflow.md).
+
+## Follow through after a verified task Done
+
+Only within an authorized Board-Done workflow, after reading the outcome and securing the original result/handback, independently read back that exact task's native `done` state. Then [check its explicitly linked sessions](references/task-done-archive.md): deduplicate exact IDs, require complete unfiltered repository-wide reverse coverage across every workstream/status, no other `todo`/`in_progress` reference (including an open package), and fresh idle/no-input/no-write/no guarded-unresolved evidence before one archive/readback. Unknown/incomplete/busy cases skip per session; keep task Done, no force/retry/watcher or rollback. This is not automatic Board Done from a turn/review/idle event or arbitrary UI monitoring. Outside this narrow verified flow, manual archive still requires its explicit authorization. Actual host/security controls and package/permission gates stay separate.
 
 ## Append an authorized management note
 

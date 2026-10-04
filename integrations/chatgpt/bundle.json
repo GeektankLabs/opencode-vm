@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "name": "opencode-session-orchestrator",
-  "revision": "2026-10-04-r40",
+  "revision": "2026-10-04-r41",
   "files": [
     "SKILL.md",
     "CHANGELOG.md",
@@ -24,6 +24,7 @@
     "references/release-gates.md",
     "references/regression-scenarios.md",
     "references/task-compact-context.md",
+    "references/task-done-archive.md",
     "references/task-concept-plan.md",
     "references/work-packages.md",
     "references/worktree-ownership.md"

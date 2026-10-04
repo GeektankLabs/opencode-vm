@@ -38,6 +38,10 @@ Before autonomous package execution, use the [Synthesized Execution Contract](wo
 
 ## Task compact context in board work
 
+### Authorized Done follow-through
+
+After secured outcome/original/handback and independently verified authorized native Done readback, apply [Task Done and archive](task-done-archive.md) to this task's explicit session links: complete all-status/all-workstream reverse lookup, fresh session/receipt eligibility, then one archive/readback only if no other open reference. Unknown/incomplete/guarded/busy evidence skips per session and leaves Done intact. No auto-Done from session idle, generic Board UI watcher, CAS or backend coupling. Standalone manual archive still has its separate explicit authorization; keep package master references and security/host exclusions.
+
 A board task with a maintained compact context (see the [task compact context](task-compact-context.md) convention) integrates as follows:
 
 - **Before the status transition**: propose the compact context for a multi-iteration task and confirm its first write before assigning creation to the executing agent. No file is created on a board read; a declined offer leaves `todo` work unchanged. A later user-confirmed transition into `in_progress` invokes the combined-file rule below; do not silently waive it because of that earlier decline.

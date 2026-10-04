@@ -164,6 +164,8 @@ When a genuine decision exceeds the plan, the member worker must:
 
 ## Morning Handoff without prior chat context
 
+After a separately contract-authorized member Done transition, [archive follow-through](task-done-archive.md) checks all current repository references; an open master/package or another member still linked to that session blocks automatic archive. Secure result/handoff before eligibility/readback. No package/member Done from technical finish, no actual archive from this planning or implementation policy, and no exception to unresolved receipt/host/security guards. Keep member, package, archive and release states independent.
+
 On return, start from the selected connector/project, package Board task, registered package C/P and exact member IDs. Read package C first and the plan only for needed dependency, design or integration detail. Re-read the live Board states and task document bindings; inspect required original session messages/results under the normal content protocol. Then verify each relevant worktree's physical path, Git root/common-dir, starting base, HEAD, branch, dirty/untracked state and owner, plus the actual integration target `HEAD`.
 
 Summarize separately:

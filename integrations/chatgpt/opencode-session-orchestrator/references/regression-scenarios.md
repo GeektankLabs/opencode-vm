@@ -309,6 +309,25 @@ These source-bound scripted fake-connector traces check selected agent, exact to
 | Explicit tuple/profile or configured unavailable mapping | Agent preparation preserves tuple; configured profile unavailable/incomplete still stops, null-only fallback unchanged. |
 | Send receipt lost after successful preparation | One send only; reconcile exact original, not prepare/create/send another task. |
 
+## Task Done and eligible archive
+
+Source-bound fake-connector traces only; no actual session archive or backend/CAS implementation is tested here.
+
+| Scenario | Required behavior |
+|---|---|
+| Authorized last task Done with secured handback | Independently verify Done; exact explicit-link session, full reverse coverage done-only, fresh eligibility/recheck, one archive and exact archived timestamp readback. |
+| First of two open tasks closes or package still open | Any todo/in_progress reference across any workstream blocks archive; no filtered empty list or Done rollback. |
+| Duplicate links or multiple sessions | Deduplicate exact IDs; independent blockers/outcomes per session, no guessed manager/title/parent target. |
+| Missing links or unsecured result/handback | No inferred target or archive; report no targets/coverage gap. |
+| Reverse scan incomplete/failed/unknown status | TASK_SEARCH_INCOMPLETE/partial/unknown/transfer state skips, zero archives, no scope narrowing. |
+| Busy/question/permission/write/guarded unknown evidence | Skip session; no force/supersede/abort/security answer or new watcher. |
+| Done or links/session/open refs change before mutation | Fresh exact recheck blocks stale action; best-effort non-atomic boundary disclosed, no CAS claim. |
+| Done move uncertain or not read back | No autoarchive; reconcile exact native task, no rollback/blind move repeat. |
+| Archive reply uncertain, persisted state archived | Read same session with include_archived opt-in/timestamp, reconcile without second archive. |
+| Archive reply uncertain, archive not verified | Report uncertain, preserve Done/session evidence, no blind retry. |
+| Already archived known ID | Report existing timestamp/state; zero new archives, preserve IDs for history. |
+| Standalone explicit manual archive outside Done flow | Existing separately authorized manual workflow unchanged; pure reads/start-only/planning don't activate automatic closure. |
+
 ## Optional read-only smoke test
 
 This tests retrieval of existing content, not a new remote read-only assignment. When a live read test is explicitly requested or appropriate for validation:
