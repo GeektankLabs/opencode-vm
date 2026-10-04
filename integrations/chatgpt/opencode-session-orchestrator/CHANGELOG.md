@@ -2,6 +2,7 @@
 
 ## 2026-10-04-r40
 
+- Unreleased-candidate F1 correction: check clarification scope/explicit Plan-persistence conflict before any session creation, then prepare/read back runtime and send once. Add a source-bound cross-reference ordering regression with a create-before-scope mutation control.
 - Prepare the available primary Build agent before authorized new/prepared work that can persist files, including concept/context/plan work and checks. Keep deliberate small strictly read-only Plan exceptions and explicit user-agent conflicts visible before writing.
 - Reuse suitable sessions; discover creation/catalog/idle/update/readback capabilities, preserve the full provider/model/variant tuple and separate five-role profile resolution. No global agent/permission/model-policy change or invented creation arguments.
 - Link the same preparation through clarification, initialization, Board/package handoffs and project setup notes. Add source-bound scripted tool-call traces for Build selection, no-switch reads, override conflicts, unavailable tools, busy/input and uncertain/partial updates; hosted behavior remains separate acceptance.

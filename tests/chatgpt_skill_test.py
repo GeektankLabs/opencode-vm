@@ -2678,6 +2678,60 @@ class AgentPreparationTraceTest(unittest.TestCase):
             self.assertEqual(self.names(connector), ["get_runtime_options", "get_session", "get_session", "send_message"])
             self.assertEqual(connector.state["agent"], agent)
 
+    def test_clarification_cross_reference_checks_scope_before_create(self):
+        """Walk the actual local Start sequence, not merely its central link.
+
+        A creation before the linked central scope gate is already a mutation,
+        even if the central workflow would subsequently stop correctly.
+        """
+        text = (self.source / "references/clarification-sessions.md").read_text()
+
+        def clarification_walk(connector, *, text=text, scope="file_work", explicit_agent=None):
+            start = text.split("## Start\n", 1)[1].split("## Return or branch", 1)[0]
+            for step in re.findall(r"^\d+\. (.+)$", start, re.M):
+                if "**SCOPE_GATE:**" in step:
+                    if scope == "file_work" and explicit_agent == "plan":
+                        return "PLAN_WRITE_CONFLICT"
+                elif "create one empty root session" in step:
+                    if not connector.existing:
+                        connector.call("create_session", title="[KLÄRUNG] Authorized question")
+                elif "Send **one** bounded handoff" in step:
+                    return self.walk(connector, scope=scope, explicit_agent=explicit_agent)
+            return "INCOMPLETE_WORKFLOW"
+
+        # Independent negative expectation: no tool mutation before scope conflict.
+        connector = self.Connector(existing=False)
+        self.assertEqual(clarification_walk(connector, explicit_agent="plan"), "PLAN_WRITE_CONFLICT")
+        self.assert_no_mutating_calls(connector)
+        self.assertEqual(connector.calls, [])
+
+        # Valid Plan-only clarification and default Build persistence still work.
+        for scope, explicit_agent, final_agent, update_count in (
+                ("read_only_new", "plan", "plan", 0), ("file_work", None, "build", 1)):
+            connector = self.Connector(existing=False)
+            original_tuple = self.tuple_of(connector.state)
+            self.assertEqual(clarification_walk(connector, scope=scope, explicit_agent=explicit_agent),
+                             "PREPARED_AND_SENT")
+            self.assertEqual(self.names(connector).count("create_session"), 1)
+            self.assertEqual(self.names(connector).count("update_session_runtime"), update_count)
+            self.assertEqual(self.names(connector).count("send_message"), 1)
+            self.assertEqual(connector.state["agent"], final_agent)
+            self.assertEqual(self.tuple_of(connector.state), original_tuple)
+            self.assertEqual(self.names(connector)[-2:], ["get_session", "send_message"])
+
+        # Reorder actual local instructions to recreate F1. Even an eventual
+        # conflict result must fail the independent zero-mutation expectation.
+        lines = text.splitlines()
+        scope_index = next(i for i, line in enumerate(lines) if "4. **SCOPE_GATE:**" in line)
+        create_index = next(i for i, line in enumerate(lines) if line.startswith("5. If session creation"))
+        lines[scope_index], lines[create_index] = lines[create_index], lines[scope_index]
+        mutated = "\n".join(lines) + "\n"
+        connector = self.Connector(existing=False)
+        self.assertEqual(clarification_walk(connector, text=mutated, explicit_agent="plan"), "PLAN_WRITE_CONFLICT")
+        self.assertEqual(self.names(connector), ["create_session"])
+        with self.assertRaises(AssertionError):
+            self.assert_no_mutating_calls(connector)
+
     def test_explicit_plan_conflict_pure_reads_and_scope_growth_authorization(self):
         connector = self.Connector(existing=False)
         self.assertEqual(self.walk(connector, explicit_agent="plan"), "PLAN_WRITE_CONFLICT")
