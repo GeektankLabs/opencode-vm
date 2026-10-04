@@ -560,6 +560,41 @@ const activityOutput = z
 const waitActivityOutput = activityOutput
   .extend({ timeout: z.boolean() })
   .strict();
+const attentionInput = z.object({
+  after_cursor: z.string().min(1).max(128).optional(),
+  before_cursor: z.string().min(1).max(128).optional(),
+  limit: z.number().int().min(1).max(50).default(25),
+  lifecycle: z.array(z.enum(["new", "ready", "offered", "discussed", "superseded"])).min(1).max(5).optional(),
+  classification: z.array(z.enum(["ready", "attention", "action_required"])).min(1).max(3).optional(),
+}).strict().refine((value) => value.after_cursor === undefined || value.before_cursor === undefined,
+  "Use either after_cursor or before_cursor, not both.");
+const attentionEntryOutput = z.object({
+  event_id: z.string(), activity_cursor: z.string(), event_sequence: z.number().int(), event_type: z.enum(ACTIVITY_TYPES),
+  classification: z.enum(["ready", "attention", "action_required"]),
+  lifecycle: z.enum(["new", "ready", "offered", "discussed", "superseded"]),
+  session_id: z.string(), session_title: z.string(), submitted_message_id: z.string().optional(),
+  assistant_message_ids: z.array(z.string()), occurred_at: z.string(), observed_at: z.string(), prepared_at: z.string().optional(),
+  source_revision: z.string().optional(), result_sha256: z.string().optional(), prepared_summary: z.string(), next_safe_step: z.string(),
+  task_id: z.string().optional(), task_title: z.string().optional(), task_status: z.string().optional(), task_updated_at: z.string().optional(),
+  master_task_id: z.string().optional(), master_task_title: z.string().optional(), master_task_status: z.string().optional(),
+  work_package_id: z.string().optional(), work_package_title: z.string().optional(), work_package_status: z.string().optional(),
+  hierarchy_status: z.enum(["pending", "resolved", "unlinked", "ambiguous", "unavailable"]),
+  hierarchy_summary: z.string().optional(),
+  management_checkpoints: z.array(z.object({ task_id: z.string(), state: z.enum(["absent", "available"]),
+    consistency: z.enum(["current", "rebuilt_index", "recovered_suffix"]).optional(), generation: z.string().optional(),
+    head_sequence: z.number().int().optional(), latest_checkpoint: z.object({ sequence: z.number().int(), entry_id: z.string(), appended_at: z.string() }).strict().optional(),
+    lifecycle: z.string().optional(), operator_attention: z.string().optional(), next_allowed_action: z.string().optional() }).strict()).optional(),
+  superseded_by: z.string().optional(),
+  delivery_policy: z.enum(["immediate_proactive_wakeup", "deferred_to_next_idle_boundary", "on_demand_fallback"]),
+  evidence: z.object({ source: z.enum(["visible_original", "pending_input"]), source_revision: z.string().optional(), sha256: z.string().optional(),
+    assistant_message_ids: z.array(z.string()), complete: z.boolean() }).strict().optional(),
+  deliveries: z.record(z.string(), z.object({ state: z.enum(["pending", "delivered", "failed", "abandoned"]), attempts: z.number().int(),
+    next_attempt_at: z.string().optional(), http_status: z.number().int().optional(), updated_at: z.string() }).strict()),
+}).strict();
+const attentionOutput = z.object({ entries: z.array(attentionEntryOutput), next_cursor: z.string(), has_more: z.boolean(), current_cursor: z.string() }).strict();
+const attentionReceiptInput = z.object({ event_id: z.string().min(1).max(256), source_revision: z.string().min(1).max(256),
+  lifecycle: z.enum(["offered", "discussed"]) }).strict();
+const attentionReceiptOutput = z.object({ event_id: z.string(), source_revision: z.string(), lifecycle: z.enum(["new", "ready", "offered", "discussed", "superseded"]) }).strict();
 
 const listSessionsOutputSchema = z
   .object({
@@ -1377,6 +1412,17 @@ export function createMcpServer(
       );
     },
   );
+  const attentionHandler = safeHandler(async (input: z.output<typeof attentionInput>) => {
+    if (!gateway.getProjectAttention) throw new AdapterError("UNSUPPORTED_CONFIGURATION", "Persistent attention is not available on this connector.");
+    const result = await gateway.getProjectAttention(input);
+    return success(result, `Returned ${result.entries.length} prepared project attention entr${result.entries.length === 1 ? "y" : "ies"}; reading does not mark any entry offered or discussed.`);
+  });
+  const acknowledgeAttentionHandler = safeHandler(async (input: z.output<typeof attentionReceiptInput>) => {
+    if (!gateway.acknowledgeProjectAttention) throw new AdapterError("UNSUPPORTED_CONFIGURATION", "Attention receipts are not available on this connector.");
+    const entry = await gateway.acknowledgeProjectAttention(input);
+    return success({ event_id: entry.event_id, source_revision: input.source_revision, lifecycle: entry.lifecycle },
+      `Recorded ${entry.lifecycle} for ${entry.event_id}; this receipt does not authorize execution or change Board state.`);
+  });
   server.registerTool(
     "get_session_runtime_options",
     {
@@ -1451,6 +1497,17 @@ export function createMcpServer(
     },
     waitHandler,
   );
+  server.registerTool("get_project_attention", {
+    title: "Get Prepared Project Attention",
+    description: "Read the bounded, persistent prefetched attention view before scanning sessions for a general status/what-is-new question. Includes task hierarchy where exact existing links and registered C/P markers resolve. A read does not mark an item offered/discussed, prove host continuation, or authorize any follow-up action. Use source_revision-bound acknowledge_project_attention only after actually presenting/discussing it.",
+    inputSchema: attentionInput, outputSchema: attentionOutput, annotations: readOnlyAnnotations,
+  }, attentionHandler);
+  server.registerTool("acknowledge_project_attention", {
+    title: "Acknowledge Project Attention",
+    description: "Record only an actually presented (offered) or discussed attention item, bound to event_id and source_revision. This is not a webhook receipt, host-continuation receipt, Board update, execution request or permission answer; stale revisions are rejected.",
+    inputSchema: attentionReceiptInput, outputSchema: attentionReceiptOutput,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  }, acknowledgeAttentionHandler);
 
   server.registerTool(
     "create_session",
@@ -1670,6 +1727,10 @@ export function createMcpServer(
               input,
               waitHandler,
             );
+          case "get_project_attention":
+            return validatedToolCall(attentionInput, attentionOutput, input, attentionHandler);
+          case "acknowledge_project_attention":
+            return validatedToolCall(attentionReceiptInput, attentionReceiptOutput, input, acknowledgeAttentionHandler);
           case "create_session":
             return validatedToolCall(
               createSessionInputSchema,
@@ -2018,6 +2079,32 @@ export function createMcpServer(
   );
 
   return server;
+}
+
+/** Dispatch MCP 2026 tool requests through the same registered handlers while
+ * the pinned SDK transport remains on the legacy 2025 protocol baseline. */
+export async function dispatchMcp2ToolMethod(
+  gateway: SessionGateway,
+  runtime: RuntimeDescriptor,
+  method: "tools/list" | "tools/call",
+  id: string | number,
+  params: Record<string, unknown>,
+): Promise<unknown> {
+  const server = createMcpServer(gateway, runtime);
+  try {
+    type Handler = (request: unknown, extra: unknown) => Promise<unknown>;
+    const handlers = (server.server as unknown as { _requestHandlers?: Map<string, Handler> })._requestHandlers;
+    const handler = handlers?.get(method);
+    if (!handler) throw new AdapterError("UNSUPPORTED_CONFIGURATION", `MCP 2026 ${method} handler is unavailable.`);
+    const legacyParams = { ...params };
+    delete legacyParams._meta;
+    return await handler({ jsonrpc: "2.0", id, method, params: legacyParams }, {
+      requestId: id,
+      signal: AbortSignal.timeout(20_000),
+    });
+  } finally {
+    await server.close().catch(() => undefined);
+  }
 }
 
 async function validatedToolCall<Input>(

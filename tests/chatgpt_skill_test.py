@@ -114,6 +114,26 @@ class SkillPackageTest(unittest.TestCase):
         self.assertNotIn("variant:xhigh", clarification)
         self.assertIn("unavailable configured mapping", scenarios)
 
+    def test_prepared_attention_and_event_delivery_claims_are_evidence_bound(self):
+        source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
+        skill = (source / "SKILL.md").read_text()
+        attention = (source / "references/events-attention.md").read_text()
+        activity = (source / "references/progress-activity.md").read_text()
+        scenarios = (source / "references/regression-scenarios.md").read_text()
+        changelog = (source / "CHANGELOG.md").read_text()
+        manifest, _ = BUILDER.package_content(ROOT)
+        self.assertIn("references/events-attention.md", manifest["files"])
+        self.assertIn("2026-10-04-r34", skill)
+        self.assertIn("## 2026-10-04-r34", changelog)
+        for text in (skill, attention, activity):
+            self.assertIn("get_project_attention", text)
+        for marker in ("PROACTIVE_MONITORING", "on_demand_fallback", "deferred_to_next_idle_boundary",
+                       "webhook 2xx is only", "without a user turn", "audible Voice"):
+            self.assertIn(marker.lower(), (skill + attention + scenarios).lower())
+        self.assertIn("authorizes no prompt", attention)
+        self.assertIn("Board Done", attention)
+        self.assertIn("no-user-turn Work/Chat continuation", attention)
+
     def test_task_compact_context_convention(self):
         source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
         skill = (source / "SKILL.md").read_text()

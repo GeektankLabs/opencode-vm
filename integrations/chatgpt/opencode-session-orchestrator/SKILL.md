@@ -6,7 +6,7 @@ license: MIT
 
 # OpenCode Session Orchestrator
 
-Release marker: **2026-10-03-r33**. This is the skill revision, not an MCP version.
+Release marker: **2026-10-04-r34**. This is the skill revision, not an MCP version.
 
 This is a client-side workflow skill. The user supplies a working compatible MCP connection, including when using Secure MCP Tunnel. The skill contains no tunnel, account, server alias or credentials and does not configure the connection.
 
@@ -19,6 +19,7 @@ Read references when their workflow is relevant:
 - Sending an image, text file, Markdown file or PDF-derived text to a session: [Attachment workflow](references/attachments.md). Read it before staging file bytes or using `send_message.attachments`.
 - Long, partial or changing results: [Content protocol](references/content-protocol.md).
 - Running tools, recent events or session attention: [Progress and activity](references/progress-activity.md).
+- Prepared worker results, persistent project attention, or event-triggered host delivery: [Events and attention](references/events-attention.md).
 - Research, decisions or planning: [Decision preparation](references/decision-preparation.md).
 - A bounded question alongside a busy workstream, or archival of its answer: [Clarification sessions](references/clarification-sessions.md).
 - A board task whose work spans several agent iterations or a fresh session: [Task compact context](references/task-compact-context.md).
@@ -70,6 +71,7 @@ Track a lightweight registry keyed by **connector/project + session_id**:
 - For a board task with a concept plan, its `task_id`, exact plan path, last reported `Status`/`Last-concept-update`, last quality check and any pending correction; keep both references distinct. A conversational registry is not a durable board reference.
 - Authorized task/environment boundary; pending invocation/receipt; permission observations with their source and scope.
 - Activity cursors **separately per filter_key** when provided, otherwise per exact filter combination; last discussed result ID/revision.
+- Prepared attention event IDs, exact source revisions, presentation lifecycle and whether a concrete host wake-up subscription was confirmed; webhook receipt is not a conversation receipt.
 
 | Work status | Meaning |
 |---|---|
@@ -210,6 +212,9 @@ For an explicitly requested management note, discover `add_task_management_note`
 
 ## Observe progress and sessions needing attention
 
+- For a general "what is new/otherwise ready?" or a natural management transition, discover and read `get_project_attention` first when available; it is a bounded prepared view and avoids a full session scan. Preserve class, freshness/coverage, exact IDs, hierarchy ambiguity and source revision. Read originals only for requested drill-down or when the entry is stale/incomplete.
+- Mark `offered` only after actually presenting the item and `discussed` only after real discussion, via the discovered revision-bound `acknowledge_project_attention`. A read, event callback or webhook 2xx is not an offer/discussion receipt. Never mutate Board status or start a worker from an attention entry.
+- Say "I will notify you automatically" only for a concrete selected host/surface with an active confirmed `PROACTIVE_MONITORING` subscription and verified callback/wakeup path. If that host reports another turn is running and confirms deferral, say it will appear at the next safe idle boundary. Unknown/unsupported state means on-demand queue fallback; do not simulate chat continuation or audible Voice wake-up.
 - For "what is it doing?", prefer `get_session_progress` when discovered. Use its task filter if an exact user ID is known. Describe stored tool name/state/time and attribution; inspect coverage, missing metadata and idle/stored-state mismatch. Tool `completed` is not a business PASS.
 - For "what is new?", continue each saved journal cursor under its own filter key. If a current overview is wanted and tail is supported, use `tail:true` without an after-cursor, then continue without tail using the captured-head cursor and identical filters. Tail is not historical consumption. See [progress and activity](references/progress-activity.md).
 - Consider `ACTIVE`, `WAITING_RESULT` and `ATTENTION`; exclude parked/closed topics unless asked for all sessions. With no registry, reconstruct cautiously and label historical discussion status unknown.
@@ -237,4 +242,4 @@ Use compact session metadata for the current runtime. Change only requested or n
 
 Report specific conditions rather than "the lookup is stuck": preview limit, unavailable content, transport error, uncertain delivery, pending approval, search incomplete or stale observation. Never announce outcomes before responses, fabricate citations, or treat a permission prompt as an outage.
 
-Do not promise continuous monitoring, unsolicited notifications or automatic later follow-ups without a separately available and authorized scheduling mechanism. The skill cannot enable MCP tools in an unsupported voice surface; report missing capabilities and use an available user-approved surface. Packaging/installation is not proof of model behavior, suppressed prompts or product acceptance.
+Do not promise continuous monitoring, unsolicited notifications or automatic later follow-ups without a separately available and authorized event subscription or scheduling mechanism. An MCP webhook receipt is only event delivery; separately verify no-user-turn Work/Chat continuation, and claim audible Voice wake-up only when observed on that exact surface. The skill cannot enable MCP tools in an unsupported voice surface; report missing capabilities and use an available user-approved surface. Packaging/installation is not proof of model behavior, suppressed prompts or product acceptance.

@@ -16,6 +16,8 @@ const tools = new Set([
   "get_session_runtime_options",
   "update_session_runtime",
   "get_project_activity",
+  "get_project_attention",
+  "acknowledge_project_attention",
   "wait_for_project_activity",
   "get_task_result",
   "get_message",

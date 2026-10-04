@@ -1,7 +1,7 @@
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { dirname, isAbsolute } from "node:path";
 
-export const ADAPTER_VERSION = "0.1.22";
+export const ADAPTER_VERSION = "0.1.23";
 export const MCP_TRANSPORT = "streamable-http-stateless";
 
 export type RuntimeDescriptor = {
@@ -363,6 +363,100 @@ export type ActivitySnapshot = {
   messages: SessionStatusResult[];
 };
 
+export type AttentionClass = "ready" | "attention" | "action_required";
+export type AttentionLifecycle = "new" | "ready" | "offered" | "discussed" | "superseded";
+export type DeliveryPolicy = "immediate_proactive_wakeup" | "deferred_to_next_idle_boundary" | "on_demand_fallback";
+export type AttentionEntry = {
+  event_id: string;
+  activity_cursor: string;
+  event_sequence: number;
+  event_type: ActivityType;
+  classification: AttentionClass;
+  lifecycle: AttentionLifecycle;
+  session_id: string;
+  session_title: string;
+  submitted_message_id?: string;
+  assistant_message_ids: string[];
+  occurred_at: string;
+  observed_at: string;
+  prepared_at?: string;
+  source_revision?: string;
+  result_sha256?: string;
+  prepared_summary: string;
+  next_safe_step: string;
+  task_id?: string;
+  task_title?: string;
+  task_status?: string;
+  task_updated_at?: string;
+  master_task_id?: string;
+  master_task_title?: string;
+  master_task_status?: string;
+  work_package_id?: string;
+  work_package_title?: string;
+  work_package_status?: string;
+  hierarchy_status: "pending" | "resolved" | "unlinked" | "ambiguous" | "unavailable";
+  hierarchy_summary?: string;
+  management_checkpoints?: Array<{
+    task_id: string;
+    state: "absent" | "available";
+    consistency?: "current" | "rebuilt_index" | "recovered_suffix";
+    generation?: string | null;
+    head_sequence?: number;
+    latest_checkpoint?: { sequence: number; entry_id: string; appended_at: string } | null;
+    lifecycle?: string;
+    operator_attention?: string;
+    next_allowed_action?: string;
+  }>;
+  superseded_by?: string;
+  delivery_policy: DeliveryPolicy;
+  evidence?: {
+    source: "visible_original" | "pending_input";
+    source_revision?: string;
+    sha256?: string;
+    assistant_message_ids: string[];
+    complete: boolean;
+  };
+  deliveries: Record<string, AttentionDelivery>;
+};
+export type AttentionDelivery = {
+  state: "pending" | "delivered" | "failed" | "abandoned";
+  attempts: number;
+  next_attempt_at?: string;
+  http_status?: number;
+  updated_at: string;
+};
+export type AttentionQuery = {
+  after_cursor?: string;
+  before_cursor?: string;
+  limit?: number;
+  lifecycle?: AttentionLifecycle[];
+  classification?: AttentionClass[];
+};
+export type AttentionResult = {
+  entries: AttentionEntry[];
+  next_cursor: string;
+  has_more: boolean;
+  current_cursor: string;
+};
+export type AttentionReceipt = {
+  event_id: string;
+  source_revision: string;
+  lifecycle: "offered" | "discussed";
+};
+export type EventSubscription = {
+  id: string;
+  event_name: string;
+  arguments: { task_id?: string; session_id?: string };
+  callback_url: string;
+  secret: string;
+  previous_secret?: string;
+  previous_secret_expires_at?: string;
+  expires_at: string | null;
+  last_cursor: string | null;
+  created_at: string;
+  active: boolean;
+};
+
 export type CreateSessionResult = {
   project: ProjectIdentity;
   session_id: string;
@@ -445,6 +539,12 @@ export const ADAPTER_ERROR_CODES = [
   "TASK_MANAGEMENT_JOURNAL_UNCERTAIN",
   "TASK_MANAGEMENT_JOURNAL_LIMIT",
   "TASK_MANAGEMENT_JOURNAL_CHANGED",
+  "ATTENTION_NOT_FOUND",
+  "ATTENTION_CHANGED",
+  "ATTENTION_STATE_CONFLICT",
+  "EVENT_CALLBACK_ERROR",
+  "EVENT_SUBSCRIPTION_NOT_FOUND",
+  "EVENT_SUBSCRIPTION_LIMIT",
 ] as const;
 
 export type AdapterErrorCode = (typeof ADAPTER_ERROR_CODES)[number];

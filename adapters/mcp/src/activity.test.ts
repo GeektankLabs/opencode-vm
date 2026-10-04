@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  mkdir,
   mkdtemp,
   readFile,
   rm,
@@ -72,6 +73,31 @@ test("journal cursors persist, paginate and expire explicitly after retention/re
     (error) => error instanceof AdapterError && error.code === "CURSOR_EXPIRED",
   );
   await journal.close();
+});
+
+test("project-persistent journal adopts the prior session journal once without replacing later project state", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "ocvm-journal-migration-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const legacyDirectory = join(directory, "session-mcp");
+  const projectDirectory = join(directory, "project-mcp");
+  await mkdir(legacyDirectory, { mode: 0o700 });
+  await mkdir(projectDirectory, { mode: 0o700 });
+  const legacyPath = join(legacyDirectory, "activity.json");
+  const source = await ActivityJournal.open(legacyPath, "project");
+  await source.signal("ses", "Worker", "busy");
+  const cursor = source.cursor;
+  await source.close();
+  const targetPath = join(projectDirectory, "activity.json");
+  const migrated = await ActivityJournal.open(targetPath, "project", 5000, legacyPath);
+  assert.equal(migrated.cursor, cursor);
+  assert.equal((await migrated.read({}, async () => true)).events[0]?.session_id, "ses");
+  await migrated.signal("ses", "Worker", "idle");
+  await migrated.close();
+  const later = await ActivityJournal.open(targetPath, "project", 5000, legacyPath);
+  assert.notEqual(later.cursor, cursor);
+  assert.equal((await later.read({}, async () => true)).events.at(-1)?.state, "idle");
+  await later.close();
+  assert.equal((await readFile(legacyPath, "utf8")).includes('"state":"busy"'), true, "migration leaves old bytes intact");
 });
 
 test("filters advance over skipped events, recheck visibility and support bounded waits", async (t) => {

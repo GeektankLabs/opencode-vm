@@ -1,4 +1,4 @@
-import { readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
@@ -24,7 +24,8 @@ export async function main(): Promise<void> {
   const token = await loadCredential(runtime.credentialFile);
   const gateway = new OpenCodeGateway(runtime);
   await gateway.compatibilityCheck();
-  await gateway.enableActivity(join(dirname(runtimePath), "activity.json"));
+  const legacyJournal = join(dirname(runtimePath), "activity.json");
+  await gateway.enableActivity(await projectActivityJournalPath(runtime.project), legacyJournal);
 
   const server = new McpHttpServer(runtime, token, gateway);
   const readyPath = join(dirname(runtimePath), "ready.json");
@@ -67,6 +68,26 @@ export async function main(): Promise<void> {
   };
   process.once("SIGINT", onSignal);
   process.once("SIGTERM", onSignal);
+}
+
+export async function projectActivityJournalPath(project: string): Promise<string> {
+  const root = await lstat(project);
+  if (!root.isDirectory() || root.isSymbolicLink())
+    throw new Error("The project root for persistent MCP activity is unsafe.");
+  const state = join(project, ".opencode-vm");
+  try { await mkdir(state, { mode: 0o700 }); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+  const stateInfo = await lstat(state);
+  if (!stateInfo.isDirectory() || stateInfo.isSymbolicLink())
+    throw new Error("Project .opencode-vm state must be a real directory.");
+  const directory = join(state, "mcp");
+  try { await mkdir(directory, { mode: 0o700 }); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+  const directoryInfo = await lstat(directory);
+  if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink() ||
+    directoryInfo.uid !== process.getuid?.() || (directoryInfo.mode & 0o777) !== 0o700)
+    throw new Error("Project MCP journal directory must be private and user-owned.");
+  return join(directory, "activity.json");
 }
 
 export async function writeReadyFile(

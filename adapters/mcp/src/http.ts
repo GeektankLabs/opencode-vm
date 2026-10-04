@@ -8,7 +8,7 @@ import {
   SUPPORTED_PROTOCOL_VERSIONS,
 } from "@modelcontextprotocol/sdk/types.js";
 import type { SessionGateway } from "./opencode.js";
-import { createMcpServer } from "./tools.js";
+import { createMcpServer, dispatchMcp2ToolMethod } from "./tools.js";
 import { ADAPTER_VERSION, MCP_TRANSPORT, isRecord } from "./types.js";
 import type { RuntimeDescriptor } from "./types.js";
 
@@ -169,6 +169,19 @@ export class McpHttpServer {
         }
         return;
       }
+      const requestProtocol = request.headers["mcp-protocol-version"];
+      if (typeof requestProtocol === "string" && requestProtocol !== "2026-07-28" &&
+        !SUPPORTED_PROTOCOL_VERSIONS.includes(requestProtocol)) {
+        writeJson(response, 400, { jsonrpc: "2.0", id: isRecord(body) ? body.id ?? null : null,
+          error: { code: -32022, message: "Unsupported protocol version.", data: { requested: requestProtocol, supported: [...SUPPORTED_PROTOCOL_VERSIONS, "2026-07-28"] } } });
+        return;
+      }
+      if (requestProtocol === "2026-07-28" &&
+        isRecord(body) && typeof body.method === "string" && !validModernRequestHeaders(request, body)) {
+        writeJson(response, 400, { jsonrpc: "2.0", id: body.id ?? null,
+          error: { code: -32020, message: "Header mismatch: standard MCP request headers must match the request metadata." } });
+        return;
+      }
 
       // A reflected, arbitrarily large JSON-RPC ID would defeat bounded read
       // responses even if their content is empty. Reject without reflecting it.
@@ -185,6 +198,19 @@ export class McpHttpServer {
             message: "Request ID exceeds 1024 serialized bytes.",
           },
         });
+        return;
+      }
+      if (pathname === "/mcp" && isRecord(body) && typeof body.method === "string" &&
+        (body.method === "server/discover" || body.method.startsWith("events/"))) {
+        await this.handleEventRequest(request, response, body);
+        return;
+      }
+      if (pathname === "/mcp" && request.headers["mcp-protocol-version"] === "2026-07-28" &&
+        isRecord(body) && typeof body.method === "string") {
+        if ((body.method === "tools/list" || body.method === "tools/call") && isRecord(body.params))
+          await this.handleModernToolRequest(response, body);
+        else
+          writeJson(response, 404, { jsonrpc: "2.0", id: body.id ?? null, error: { code: -32601, message: "Method not found." } });
         return;
       }
       const transport = new StreamableHTTPServerTransport({
@@ -220,6 +246,93 @@ export class McpHttpServer {
     }
   }
 
+  private async handleEventRequest(
+    request: IncomingMessage,
+    response: ServerResponse,
+    body: Record<string, unknown>,
+  ): Promise<void> {
+    const method = body.method as string;
+    const id = body.id;
+    if (id === undefined || id === null || (typeof id !== "string" && typeof id !== "number") ||
+      (typeof id === "number" && !Number.isFinite(id)) || body.jsonrpc !== "2.0" ||
+      (body.params !== undefined && !isRecord(body.params))) {
+      writeJson(response, 200, { jsonrpc: "2.0", id: id ?? null, error: { code: -32600, message: "Invalid JSON-RPC request." } });
+      return;
+    }
+    const methodHeader = request.headers["mcp-method"];
+    const protocolHeader = request.headers["mcp-protocol-version"];
+    const metadata = isRecord(body.params) && isRecord(body.params._meta) ? body.params._meta : undefined;
+    const bodyVersion = metadata?.["io.modelcontextprotocol/protocolVersion"];
+    if (typeof methodHeader !== "string" || methodHeader !== method ||
+      typeof protocolHeader !== "string" || bodyVersion !== protocolHeader) {
+      writeJson(response, 400, { jsonrpc: "2.0", id, error: { code: -32020, message: "Header mismatch: Mcp-Method and MCP-Protocol-Version must match the request metadata." } });
+      return;
+    }
+    if (protocolHeader !== "2026-07-28") {
+      writeJson(response, 400, { jsonrpc: "2.0", id, error: {
+        code: -32022,
+        message: "Unsupported protocol version.",
+        data: { requested: protocolHeader, supported: ["2026-07-28"] },
+      } });
+      return;
+    }
+    if (method === "server/discover") {
+      writeJson(response, 200, { jsonrpc: "2.0", id, result: {
+        resultType: "complete",
+        supportedVersions: ["2026-07-28"],
+        capabilities: { tools: {}, events: {} },
+      } });
+      return;
+    }
+    if (!this.gateway.handleMcpEventMethod) {
+      writeJson(response, 200, { jsonrpc: "2.0", id, error: { code: -32014, message: "MCP Events are unavailable." } });
+      return;
+    }
+    try {
+      const result = await this.gateway.handleMcpEventMethod(method, body.params ?? {});
+      writeJson(response, 200, { jsonrpc: "2.0", id, result });
+    } catch (error) {
+      if (error instanceof Error && "code" in error) {
+        const code = String((error as { code: unknown }).code);
+        if (code === "INVALID_ARGUMENT") {
+          writeJson(response, 200, { jsonrpc: "2.0", id, error: { code: -32602, message: error.message } });
+          return;
+        }
+        if (code === "EVENT_CALLBACK_ERROR") {
+          const reason = "callbackReason" in error && typeof (error as { callbackReason?: unknown }).callbackReason === "string"
+            ? (error as { callbackReason: string }).callbackReason : "challenge_failed";
+          writeJson(response, 200, { jsonrpc: "2.0", id, error: { code: -32015, message: "CallbackEndpointError", data: { reason } } });
+          return;
+        }
+        if (code === "EVENT_SUBSCRIPTION_NOT_FOUND") {
+          writeJson(response, 200, { jsonrpc: "2.0", id, error: { code: -32011, message: "NotFound", data: { kind: "subscription" } } });
+          return;
+        }
+        if (code === "EVENT_SUBSCRIPTION_LIMIT") {
+          writeJson(response, 200, { jsonrpc: "2.0", id, error: { code: -32013, message: "ResourceExhausted", data: { limit: "subscriptions", max: 32 } } });
+          return;
+        }
+        if (code === "UNSUPPORTED_CONFIGURATION") {
+          writeJson(response, 200, { jsonrpc: "2.0", id, error: { code: -32014, message: "Unsupported", data: { feature: "event_method", method } } });
+          return;
+        }
+      }
+      writeJson(response, 200, { jsonrpc: "2.0", id, error: { code: -32603, message: "Internal server error." } });
+    }
+  }
+
+  private async handleModernToolRequest(response: ServerResponse, body: Record<string, unknown>): Promise<void> {
+    const id = body.id as string | number;
+    const method = body.method as "tools/list" | "tools/call";
+    try {
+      const result = await dispatchMcp2ToolMethod(this.gateway, this.runtime, method, id, body.params as Record<string, unknown>);
+      if (!isRecord(result)) throw new Error("MCP tool handler returned an invalid result.");
+      writeJson(response, 200, { jsonrpc: "2.0", id, result: { resultType: "complete", ...result } });
+    } catch {
+      writeJson(response, 200, { jsonrpc: "2.0", id, error: { code: -32603, message: "Internal server error." } });
+    }
+  }
+
   private validToken(request: IncomingMessage): boolean {
     const supplied = request.headers["x-ocvm-mcp-token"];
     if (typeof supplied !== "string") return false;
@@ -251,6 +364,20 @@ function requestLocation(request: IncomingMessage): URL {
   const host =
     typeof request.headers.host === "string" ? request.headers.host : "invalid";
   return new URL(request.url ?? "", `http://${host}`);
+}
+
+function validModernRequestHeaders(request: IncomingMessage, body: Record<string, unknown>): boolean {
+  const method = request.headers["mcp-method"];
+  const version = request.headers["mcp-protocol-version"];
+  const params = isRecord(body.params) ? body.params : undefined;
+  const metadata = params && isRecord(params._meta) ? params._meta : undefined;
+  if (method !== body.method || version !== metadata?.["io.modelcontextprotocol/protocolVersion"]) return false;
+  if (["tools/call", "resources/read", "prompts/get"].includes(String(body.method))) {
+    const nameHeader = request.headers["mcp-name"];
+    const name = body.method === "resources/read" ? params?.uri : params?.name;
+    if (typeof nameHeader !== "string" || nameHeader !== name) return false;
+  }
+  return true;
 }
 
 function readJsonBody(request: IncomingMessage): Promise<unknown> {

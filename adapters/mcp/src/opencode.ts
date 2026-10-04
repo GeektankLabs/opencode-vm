@@ -1,9 +1,12 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { request as httpRequest } from "node:http";
 import { lstat, readFile } from "node:fs/promises";
 import { createOpencodeClient } from "@opencode-ai/sdk/v2";
 import type { FilePartInput, TextPartInput } from "@opencode-ai/sdk/v2";
 import { ActivityJournal } from "./activity.js";
+import { McpEventBridge } from "./events.js";
+import { sanitizeSummary, summarizeAttention } from "./attention.js";
+import { ProjectBoardService } from "./taskboard.js";
 import { AttachmentStore, submittedAttachment } from "./attachments.js";
 import type { AttachmentDescriptor } from "./attachments.js";
 import type {
@@ -30,6 +33,10 @@ import type { ContentReference } from "./content.js";
 import type {
   ActivityQuery,
   ActivityResult,
+  AttentionQuery,
+  AttentionResult,
+  AttentionReceipt,
+  AttentionEntry,
   ActivitySnapshot,
   RuntimeOptions,
   RuntimePatch,
@@ -169,6 +176,9 @@ export interface SessionGateway {
   supersedeUnresolvedSubmission(
     input: SubmissionGuardOverrideInput,
   ): Promise<SubmissionGuardOverrideResult>;
+  getProjectAttention?(query?: AttentionQuery): Promise<AttentionResult>;
+  acknowledgeProjectAttention?(input: AttentionReceipt): Promise<AttentionEntry>;
+  handleMcpEventMethod?(method: string, params: unknown): Promise<unknown>;
 }
 
 export class OpenCodeGateway implements SessionGateway {
@@ -184,6 +194,8 @@ export class OpenCodeGateway implements SessionGateway {
   private readonly readReferences = new ReadReferences();
   private readonly attachments = new AttachmentStore();
   private journal?: ActivityJournal;
+  private eventBridge?: McpEventBridge;
+  private attentionProcessing?: Promise<void>;
   private readonly collectorStop = new AbortController();
   private collector?: Promise<void>;
   private sweeper?: Promise<void>;
@@ -248,14 +260,282 @@ export class OpenCodeGateway implements SessionGateway {
     }).catch(error => { if (error instanceof AdapterError) throw error; throw new AdapterError("BACKEND_INCOMPATIBLE", "Agent-managed policy adoption could not be verified; no work prompt was submitted."); });
   }
 
-  async enableActivity(path: string): Promise<void> {
-    this.journal = await ActivityJournal.open(path, this.runtime.projectHash);
+  async enableActivity(path: string, legacyPath?: string): Promise<void> {
+    this.journal = await ActivityJournal.open(path, this.runtime.projectHash, 5000, legacyPath);
+    this.eventBridge = new McpEventBridge(this.journal, this.runtime.projectHash);
   }
 
   startActivityCollection(): void {
     if (!this.journal || this.collector) return;
+    void this.processPendingAttention().catch(() => { this.tracking.partial = true; });
     this.collector = this.collectEvents();
     this.sweeper = this.sweepActivity();
+  }
+
+  async getProjectAttention(query: AttentionQuery = {}): Promise<AttentionResult> {
+    return this.requireJournal().listAttention(query, async (id) => {
+      try { await this.requireExposedSession(id); return true; }
+      catch (error) {
+        if (error instanceof AdapterError && error.code === "SESSION_NOT_FOUND") return false;
+        throw error;
+      }
+    });
+  }
+
+  async acknowledgeProjectAttention(input: AttentionReceipt): Promise<AttentionEntry> {
+    const journal = this.requireJournal();
+    const entry = await journal.attention(input.event_id);
+    if (!entry) throw new AdapterError("ATTENTION_NOT_FOUND", "Prepared attention entry is unavailable.");
+    await this.requireExposedSession(entry.session_id);
+    return journal.attentionReceipt(input);
+  }
+
+  async handleMcpEventMethod(method: string, params: unknown): Promise<unknown> {
+    if (!this.eventBridge) throw new AdapterError("ACTIVITY_UNAVAILABLE", "MCP Events are not initialized.");
+    return this.eventBridge.handle(method, params);
+  }
+
+  private processPendingAttention(): Promise<void> {
+    if (this.attentionProcessing) return this.attentionProcessing;
+    const operation = this.drainPendingAttention();
+    this.attentionProcessing = operation.finally(() => {
+      this.attentionProcessing = undefined;
+    });
+    return this.attentionProcessing;
+  }
+
+  private async drainPendingAttention(): Promise<void> {
+    if (!this.journal || !this.eventBridge) return;
+    for (const entry of await this.journal.pendingAttention()) {
+      try {
+        if (entry.event_type === "session.input_required") {
+          const status = await this.getSessionStatus(entry.session_id, entry.submitted_message_id);
+          if (status.pending_input.permissions + status.pending_input.questions === 0) {
+            await this.journal.supersedeAttention(entry.event_id, "Pending input was resolved before prefetch; this notification is stale.");
+            continue;
+          }
+          const context = await this.resolveAttentionTask(entry);
+          const sourceRevision = `pending-input-v1:${createHash("sha256").update(JSON.stringify({
+            session_id: entry.session_id,
+            message_id: entry.submitted_message_id ?? null,
+            pending_input: status.pending_input,
+            observed_at: status.observed_at,
+            task_id: context.task?.task_id ?? null,
+            task_updated_at: context.task?.updated_at ?? null,
+            documents: context.documentRevisions,
+          })).digest("hex")}`;
+          await this.journal.prepareAttention({
+            ...entry,
+            lifecycle: "ready",
+            source_revision: sourceRevision,
+            prepared_at: new Date().toISOString(),
+            prepared_summary: `${context.task ? `${context.task.title}: ` : `Session ${entry.session_title}: `}operator input is required (${status.pending_input.permissions} permission(s), ${status.pending_input.questions} question(s)); pending-input scope is session-wide.`,
+            next_safe_step: "Review and resolve the exact pending input in the host UI; the adapter did not answer or approve it.",
+            ...(context.task ? { task_id: context.task.task_id, task_title: context.task.title, task_status: context.task.status,
+              ...(context.task.updated_at ? { task_updated_at: context.task.updated_at } : {}) } : {}),
+            ...(context.hierarchy?.master_task_id ? { master_task_id: context.hierarchy.master_task_id } : {}),
+            ...(context.hierarchy?.work_package_id ? { work_package_id: context.hierarchy.work_package_id } : {}),
+            hierarchy_status: context.hierarchy_status,
+            evidence: { source: "pending_input", source_revision: sourceRevision, assistant_message_ids: [], complete: true },
+          });
+          continue;
+        }
+        await this.prefetchTerminalAttention(entry);
+      } catch (error) {
+        this.tracking.partial = true;
+        process.stderr.write(`[mcp] attention prefetch pending event=${entry.event_id.slice(0, 72)} code=${error instanceof AdapterError ? error.code : "unavailable"}\n`);
+      }
+    }
+    await this.eventBridge.deliverPending();
+  }
+
+  private async prefetchTerminalAttention(entry: AttentionEntry): Promise<void> {
+    if (!entry.submitted_message_id) throw new AdapterError("CONTENT_UNAVAILABLE", "Terminal event has no correlated submitted message ID.");
+    const messages: TaskResult["messages"] = [];
+    let cursor: string | undefined;
+    let result: TaskResult | undefined;
+    for (let page = 0; page < 25; page++) {
+      result = await this.getTaskResult(entry.session_id, entry.submitted_message_id, cursor, 20);
+      messages.push(...result.messages);
+      if (result.search_complete) break;
+      if (!result.next_cursor) throw new AdapterError("SEARCH_CHANGED", "Terminal result search was incomplete without a continuation cursor.");
+      cursor = result.next_cursor;
+    }
+    if (!result?.search_complete) throw new AdapterError("TASK_SEARCH_INCOMPLETE", "Terminal result prefetch exceeded its bounded page budget.");
+    const expected = entry.event_type === "message.completed" ? "completed" :
+      entry.event_type === "message.failed" ? "failed" : "aborted";
+    if (result.state !== expected) {
+      if (result.state === "input_required") {
+        await this.journal!.supersedeAttention(entry.event_id, "A newer correlated read shows pending operator input; re-read the current session before presenting this terminal event.");
+        return;
+      }
+      if (result.state === "running" || result.state === "submitted" || result.state === "unknown")
+        throw new AdapterError("CONTENT_UNAVAILABLE", "Current correlated receipt does not confirm the terminal event.");
+      await this.journal!.supersedeAttention(entry.event_id, "A newer correlated terminal state superseded this event.");
+      return;
+    }
+    const terminalMessages = messages.filter((item) => item.role === "assistant" && item.result_kind === "terminal");
+    if (!terminalMessages.length)
+      throw new AdapterError("CONTENT_UNAVAILABLE", "No terminal visible assistant result was exposed by this connector.");
+    const reports: string[] = [];
+    const messageRevisions: Array<{ id: string; revision: string }> = [];
+    let totalBytes = 0;
+    for (const report of terminalMessages) {
+      if (!report.content || report.content.availability === "not_exposed")
+        throw new AdapterError("CONTENT_UNAVAILABLE", "Complete visible terminal result text is not exposed by this connector.");
+      const chunks: string[] = [];
+      let contentCursor: string | undefined;
+      let offset = 0;
+      let complete = false;
+      for (let page = 0; page < 128; page++) {
+        const content = await this.readMessageContent(report.content.content_ref, contentCursor, 16_384);
+        if (content.revision !== report.content.revision || content.range.start !== offset)
+          throw new AdapterError("CONTENT_CHANGED", "Visible result changed or has a discontinuous UTF-8 range during prefetch.");
+        offset = content.range.end;
+        totalBytes += Buffer.byteLength(content.text, "utf8");
+        if (totalBytes > 512 * 1024) throw new AdapterError("RESPONSE_BUDGET_EXCEEDED", "Visible result exceeds the bounded attention prefetch size.");
+        chunks.push(content.text);
+        if (!content.has_more) { complete = true; break; }
+        if (!content.next_cursor) throw new AdapterError("CONTENT_UNAVAILABLE", "Visible result page is incomplete without a cursor.");
+        contentCursor = content.next_cursor;
+      }
+      if (!complete) throw new AdapterError("CONTENT_UNAVAILABLE", "Visible result prefetch exceeded its bounded page budget.");
+      const verified = await this.getMessage(entry.session_id, report.id);
+      if (verified.message.content?.revision !== report.content.revision)
+        throw new AdapterError("CONTENT_CHANGED", "Visible result changed before attention publication.");
+      reports.push(chunks.join(""));
+      messageRevisions.push({ id: report.id, revision: report.content.revision });
+    }
+    const visibleResult = reports.join("\n\n");
+    const context = await this.resolveAttentionTask(entry);
+    const sha256 = digest(visibleResult);
+    const sourceRevision = `attention-v1:${digest(JSON.stringify({
+      messages: messageRevisions,
+      sha256,
+      event_cursor: entry.activity_cursor,
+      task_id: context.task?.task_id ?? null,
+      task_updated_at: context.task?.updated_at ?? null,
+      documents: context.documentRevisions,
+    }))}`;
+    const prepared = summarizeAttention(
+      entry,
+      visibleResult,
+      sourceRevision,
+      sha256,
+      messageRevisions.map((message) => message.id),
+      context.task,
+      context.hierarchy,
+      context.hierarchy_status,
+    );
+    await this.journal!.prepareAttention({ ...prepared, deliveries: entry.deliveries });
+  }
+
+  private async resolveAttentionTask(entry: AttentionEntry): Promise<{
+    task?: { task_id: string; title: string; status: string; updated_at?: string };
+    hierarchy?: {
+      master_task_id?: string; master_task_title?: string; master_task_status?: string;
+      work_package_id?: string; work_package_title?: string; work_package_status?: string;
+      summary?: string; management_checkpoints?: AttentionEntry["management_checkpoints"];
+    };
+    documentRevisions: string[];
+    hierarchy_status: AttentionEntry["hierarchy_status"];
+  }> {
+    if (!this.runtime.taskboardUrl || !this.runtime.taskboardMetadataFile)
+      return { documentRevisions: [], hierarchy_status: "unavailable" };
+    try {
+      const board = new ProjectBoardService(this.runtime as RuntimeDescriptor & { taskboardUrl: string; taskboardMetadataFile: string });
+      const linked = await board.listTasks({ sessionId: entry.session_id });
+      const exact = entry.submitted_message_id
+        ? linked.filter((task) => task.links?.some((link) => link.message_id === entry.submitted_message_id))
+        : [];
+      const candidates = exact.length ? exact : linked.length === 1 ? linked : [];
+      if (candidates.length !== 1)
+        return { documentRevisions: [], hierarchy_status: linked.length > 1 || exact.length > 1 ? "ambiguous" : "unlinked" };
+      const selected = await board.getTask(candidates[0]!.task_id);
+      const documentRevisions: string[] = [];
+      const checkpoints: NonNullable<AttentionEntry["management_checkpoints"]> = [];
+      const readTaskContext = async (taskId: string) => {
+        const docs = await board.getDocuments(taskId);
+        let text = "";
+        const revisions: string[] = [];
+        for (const document of docs.documents) {
+          if (document.state !== "available" || (document.role !== "compact_context" && document.role !== "concept_plan")) continue;
+          if (document.revision) revisions.push(`${document.path}:${document.revision}`);
+          let offset = 0;
+          for (let page = 0; page < 64; page++) {
+            const part = await board.readDocument(taskId, document.role, document.path, offset, 8192,
+              offset ? document.revision : undefined);
+            text += part.text;
+            offset = part.range.end;
+            if (!part.has_more) break;
+            if (page === 63) throw new AdapterError("TASK_DOCUMENT_LIMIT", "Task relation document exceeded its bounded read limit.");
+          }
+        }
+        const history = await board.getManagementHistory(taskId, { mode: "latest_checkpoint", limit: 1 }, 0, undefined, 0);
+        const checkpoint = history.entries[0];
+        documentRevisions.push(...revisions);
+        documentRevisions.push(`management:${taskId}:${history.generation ?? "absent"}:${history.head_sequence}`);
+        checkpoints.push({
+          task_id: taskId,
+          state: history.state,
+          ...(history.consistency ? { consistency: history.consistency } : {}),
+          ...(history.generation ? { generation: history.generation } : {}),
+          head_sequence: history.head_sequence,
+          ...(history.latest_checkpoint ? { latest_checkpoint: {
+            sequence: history.latest_checkpoint.sequence,
+            entry_id: history.latest_checkpoint.entry_id,
+            appended_at: history.latest_checkpoint.appended_at,
+          } } : {}),
+          ...(checkpoint ? {
+            ...(relationField(checkpoint.text, "lifecycle") ? { lifecycle: relationField(checkpoint.text, "lifecycle") } : {}),
+            ...(relationField(checkpoint.text, "operator_attention") ? { operator_attention: relationField(checkpoint.text, "operator_attention") } : {}),
+            ...(relationField(checkpoint.text, "next_allowed_action") ? { next_allowed_action: relationField(checkpoint.text, "next_allowed_action") } : {}),
+          } : {}),
+        });
+        return text;
+      };
+      const markers = await readTaskContext(selected.task_id);
+      const packageId = relationId(markers, ["package_id", "work_package_id"]);
+      let masterId = relationId(markers, ["master_task_id", "control_task_id"]);
+      let packageTask: Awaited<ReturnType<typeof board.getTask>> | undefined;
+      if (packageId && packageId !== selected.task_id) {
+        packageTask = await board.getTask(packageId);
+        const packageMarkers = await readTaskContext(packageId);
+        masterId ??= relationId(packageMarkers, ["master_task_id", "control_task_id"]);
+      }
+      let masterTask: Awaited<ReturnType<typeof board.getTask>> | undefined;
+      if (masterId && masterId !== selected.task_id && masterId !== packageId) {
+        masterTask = await board.getTask(masterId);
+        await readTaskContext(masterId);
+      }
+      const checkpointFacts = checkpoints.map((item) => item.latest_checkpoint
+        ? `${item.task_id} checkpoint#${item.latest_checkpoint.sequence}`
+        : `${item.task_id} checkpoint:none`).join("; ");
+      const hierarchySummary = [
+        `Task ${selected.title} [${selected.status}]`,
+        ...(masterTask ? [`Master ${masterTask.title} [${masterTask.status}]`] : []),
+        ...(packageTask ? [`Work Package ${packageTask.title} [${packageTask.status}]`] : []),
+        ...(checkpointFacts ? [checkpointFacts] : []),
+      ].join("; ");
+      return {
+        task: { task_id: selected.task_id, title: selected.title, status: selected.status,
+          ...(selected.updated_at ? { updated_at: selected.updated_at } : {}) },
+        hierarchy: {
+          ...(masterId ? { master_task_id: masterId } : {}),
+          ...(masterTask ? { master_task_title: masterTask.title, master_task_status: masterTask.status } : {}),
+          ...(packageId ? { work_package_id: packageId } : {}),
+          ...(packageTask ? { work_package_title: packageTask.title, work_package_status: packageTask.status } : {}),
+          summary: hierarchySummary,
+          management_checkpoints: checkpoints,
+        },
+        documentRevisions,
+        hierarchy_status: "resolved",
+      };
+    } catch (error) {
+      if (error instanceof AdapterError && ["TASK_SEARCH_INCOMPLETE", "TASKBOARD_UNAVAILABLE", "TASKBOARD_ERROR", "TASK_NOT_FOUND", "TASK_DOCUMENT_LIMIT", "TASK_MANAGEMENT_JOURNAL_ERROR", "TASK_MANAGEMENT_JOURNAL_LIMIT"].includes(error.code))
+        return { documentRevisions: [], hierarchy_status: "unavailable" };
+      throw error;
+    }
   }
 
   async close(): Promise<void> {
@@ -2474,8 +2754,10 @@ export class OpenCodeGateway implements SessionGateway {
     this.collecting.set(id, marker);
     try {
       const snapshot = await this.activitySnapshot(id);
-      if (this.collecting.get(id) === marker && !this.submissionLocks.has(id))
-        await this.journal.observe(snapshot, source);
+      if (this.collecting.get(id) === marker && !this.submissionLocks.has(id)) {
+        const changed = await this.journal.observe(snapshot, source);
+        if (changed) await this.processPendingAttention();
+      }
     } catch (error) {
       if (!(
         error instanceof AdapterError && error.code === "SESSION_NOT_FOUND"
@@ -2576,6 +2858,7 @@ export class OpenCodeGateway implements SessionGateway {
           await this.captureActivity(id);
         this.tracking.partial = Boolean(cursor);
         this.tracking.last_reconciled_at = new Date().toISOString();
+        await this.processPendingAttention();
       } catch {
         this.tracking.partial = true;
       }
@@ -2637,6 +2920,21 @@ function toSummary(
     updated: session.time.updated,
     activity,
   };
+}
+
+function relationId(text: string, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const expression = new RegExp(`^\\s*${key}\\s*[:=]\\s*(task_[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\\s*$`, "imu");
+    const match = expression.exec(text);
+    if (match?.[1]) return match[1];
+  }
+  return undefined;
+}
+
+function relationField(text: string, key: string): string | undefined {
+  const expression = new RegExp(`^\\s*${key}\\s*[:=]\\s*(.{1,200})\\s*$`, "imu");
+  const match = expression.exec(text);
+  return match?.[1] ? sanitizeSummary(match[1]).slice(0, 160).trim() : undefined;
 }
 
 function pendingCounts(pending: PendingDetails): PendingInput {

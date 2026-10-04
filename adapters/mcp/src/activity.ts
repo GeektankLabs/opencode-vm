@@ -1,10 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, open, rename, unlink } from "node:fs/promises";
+import { link, lstat, open, rename, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
 import { AdapterError, ACTIVITY_TYPES, isRecord } from "./types.js";
 import type {
   ActivityEvent,
+  AttentionEntry,
+  AttentionQuery,
+  AttentionResult,
+  AttentionReceipt,
+  EventSubscription,
   ActivityQuery,
   ActivitySnapshot,
   ActivityType,
@@ -14,6 +19,7 @@ import type {
   SubmissionGuardOverrideResult,
   SubmissionGuardSnapshot,
 } from "./types.js";
+import { initialAttention } from "./attention.js";
 
 type GuardOverrideRecord = {
   request_id: string;
@@ -38,6 +44,9 @@ type Store = {
   watched: Record<string, string[]>;
   guardOverrides?: Record<string, GuardOverrideRecord>;
   resolutions?: Record<string, ReceiptResolution>;
+  attention?: Record<string, AttentionEntry>;
+  attentionNext?: number;
+  subscriptions?: Record<string, EventSubscription>;
 };
 type EventInput = Omit<ActivityEvent, "event_id" | "cursor" | "timestamp">;
 const terminal = new Set(["completed", "failed", "aborted"]);
@@ -60,6 +69,7 @@ export class ActivityJournal {
     path: string,
     project: string,
     maximum = 5000,
+    legacyPath?: string,
   ): Promise<ActivityJournal> {
     const parent = await lstat(dirname(path));
     if (
@@ -100,7 +110,11 @@ export class ActivityJournal {
           !isRecord(store.watched) ||
           (store.guardOverrides !== undefined &&
             !isRecord(store.guardOverrides)) ||
-          (store.resolutions !== undefined && !isRecord(store.resolutions))
+           (store.resolutions !== undefined && !isRecord(store.resolutions)) ||
+           (store.attention !== undefined && !isRecord(store.attention)) ||
+           (store.attentionNext !== undefined && (!Number.isSafeInteger(store.attentionNext) || store.attentionNext < 1)) ||
+           (store.subscriptions !== undefined && !isRecord(store.subscriptions)) ||
+           !validAttentionState(store)
         )
           throw new Error();
         let previous = 0;
@@ -125,20 +139,30 @@ export class ActivityJournal {
           "ACTIVITY_UNAVAILABLE",
           "Activity journal is invalid or unsafe; it was not reset.",
         );
-      store = {
-        schema: 1,
-        project,
-        epoch: randomUUID(),
-        next: 1,
-        events: [],
-        observations: {},
-        watched: {},
-        guardOverrides: {},
-        resolutions: {},
-      };
+      if (legacyPath) await adoptLegacyJournal(path, legacyPath, project);
+      try {
+        const adopted = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+        try {
+          const stat = await adopted.stat();
+          if (!stat.isFile() || stat.uid !== process.getuid?.() || (stat.mode & 0o777) !== 0o600 || stat.size > 32 * 1024 * 1024) throw new Error();
+          const legacy = JSON.parse(await adopted.readFile("utf8")) as Store;
+          if (legacy.schema !== 1 || legacy.project !== project || !Array.isArray(legacy.events)) throw new Error();
+          store = legacy;
+        } finally { await adopted.close(); }
+      } catch (adoptError) {
+        if ((adoptError as NodeJS.ErrnoException).code !== "ENOENT")
+          throw new AdapterError("ACTIVITY_UNAVAILABLE", "Legacy activity journal is invalid or unsafe; it was not reset.");
+        store = {
+          schema: 1, project, epoch: randomUUID(), next: 1, events: [], observations: {}, watched: {},
+          guardOverrides: {}, resolutions: {}, attention: {}, attentionNext: 1, subscriptions: {},
+        };
+      }
     }
     store.guardOverrides ??= {};
     store.resolutions ??= {};
+    store.attention ??= {};
+    store.attentionNext ??= Math.max(1, ...Object.values(store.attention).map((entry) => entry.event_sequence + 1));
+    store.subscriptions ??= {};
     const journal = new ActivityJournal(path, store, maximum);
     await journal.commit(() => true);
     return journal;
@@ -152,6 +176,227 @@ export class ActivityJournal {
   }
   trackedMessages(id: string): string[] {
     return [...(this.store.watched[id] ?? [])];
+  }
+
+  async listAttention(query: AttentionQuery = {}, visible: (sessionId: string) => Promise<boolean> = async () => true): Promise<AttentionResult> {
+    await this.tail;
+    this.check();
+    const limit = query.limit ?? 25;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50)
+      throw new AdapterError("INVALID_ARGUMENT", "Attention limit must be between 1 and 50.");
+    const head = (this.store.attentionNext ?? 1) - 1;
+    const after = this.attentionSequence(query.after_cursor);
+    const before = query.before_cursor === undefined ? head + 1 : this.attentionSequence(query.before_cursor);
+    if (query.after_cursor !== undefined && query.before_cursor !== undefined)
+      throw new AdapterError("INVALID_ARGUMENT", "Attention cursors are mutually exclusive.");
+    const lifecycle = new Set(query.lifecycle ?? ["ready", "offered"]);
+    const classification = query.classification ? new Set(query.classification) : undefined;
+    const candidates = Object.values(this.store.attention ?? {})
+      .filter((entry) => entry.event_sequence > after && entry.event_sequence < before && lifecycle.has(entry.lifecycle) &&
+        (!classification || classification.has(entry.classification)))
+      .sort((a, b) => query.after_cursor ? a.event_sequence - b.event_sequence : b.event_sequence - a.event_sequence);
+    const entries: AttentionEntry[] = [];
+    let scanned = 0;
+    const deadline = Date.now() + 1000;
+    for (const entry of candidates) {
+      if (entries.length >= limit || Date.now() >= deadline) break;
+      scanned++;
+      if (await visible(entry.session_id)) entries.push(entry);
+    }
+    return {
+      entries: structuredClone(entries),
+      next_cursor: this.attentionCursor(entries.at(-1)?.event_sequence ?? head),
+      has_more: scanned < candidates.length,
+      current_cursor: this.attentionCursor(head),
+    };
+  }
+
+  async pendingAttention(limit = 25): Promise<AttentionEntry[]> {
+    await this.tail;
+    this.check();
+    return structuredClone(Object.values(this.store.attention ?? {})
+      .filter((entry) => entry.lifecycle === "new")
+      .sort((a, b) => a.event_sequence - b.event_sequence)
+      .slice(0, limit));
+  }
+
+  async attention(eventId: string): Promise<AttentionEntry | undefined> {
+    await this.tail;
+    this.check();
+    const entry = this.store.attention?.[eventId];
+    return entry ? structuredClone(entry) : undefined;
+  }
+
+  async prepareAttention(entry: AttentionEntry): Promise<boolean> {
+    let prepared = false;
+    await this.commit((draft) => {
+      const current = draft.attention![entry.event_id];
+      if (!current || current.lifecycle === "superseded") return false;
+      if (current.lifecycle !== "new" && current.source_revision === entry.source_revision) return false;
+      const hasNewer = Object.values(draft.attention!).some((candidate) =>
+        candidate.event_id !== entry.event_id && candidate.lifecycle !== "discussed" &&
+        candidate.session_id === entry.session_id &&
+        ((entry.submitted_message_id && candidate.submitted_message_id === entry.submitted_message_id) ||
+          (entry.task_id && candidate.task_id === entry.task_id)) &&
+        candidate.event_sequence > entry.event_sequence);
+      if (hasNewer) {
+        current.lifecycle = "superseded";
+        current.prepared_summary = "Superseded by newer correlated activity; reconcile the current result.";
+        current.superseded_by = Object.values(draft.attention!).find((candidate) =>
+          candidate.session_id === entry.session_id && candidate.event_sequence > entry.event_sequence &&
+          ((entry.submitted_message_id && candidate.submitted_message_id === entry.submitted_message_id) ||
+            (entry.task_id && candidate.task_id === entry.task_id)))?.event_id;
+        return true;
+      }
+      for (const candidate of Object.values(draft.attention!)) {
+        if (candidate.event_id === entry.event_id || candidate.lifecycle === "discussed" ||
+          candidate.event_sequence >= entry.event_sequence || candidate.session_id !== entry.session_id) continue;
+        if ((entry.submitted_message_id && candidate.submitted_message_id === entry.submitted_message_id) ||
+            (entry.task_id && candidate.task_id === entry.task_id)) {
+          candidate.lifecycle = "superseded";
+          candidate.superseded_by = entry.event_id;
+        }
+      }
+      entry.deliveries = current.deliveries;
+      entry.lifecycle = "ready";
+      for (const subscription of Object.values(draft.subscriptions ?? {})) {
+        if (!subscription.active || (subscription.expires_at !== null && Date.parse(subscription.expires_at) <= Date.now()) ||
+          subscription.event_name !== eventName(entry.event_type) ||
+          (subscription.arguments.session_id && subscription.arguments.session_id !== entry.session_id) ||
+          (subscription.arguments.task_id && subscription.arguments.task_id !== entry.task_id)) continue;
+        entry.deliveries[subscription.id] ??= {
+          state: "pending", attempts: 0, updated_at: new Date().toISOString(),
+        };
+      }
+      draft.attention![entry.event_id] = structuredClone(entry);
+      prepared = true;
+      return true;
+    });
+    return prepared;
+  }
+
+  async attentionReceipt(input: AttentionReceipt): Promise<AttentionEntry> {
+    let result: AttentionEntry | undefined;
+    await this.commit((draft) => {
+      const entry = draft.attention![input.event_id];
+      if (!entry || entry.lifecycle === "new" || entry.lifecycle === "superseded")
+        throw new AdapterError("ATTENTION_NOT_FOUND", "Prepared attention entry is unavailable.");
+      if (!entry.source_revision || entry.source_revision !== input.source_revision)
+        throw new AdapterError("ATTENTION_CHANGED", "Attention source revision changed; read the current entry before acknowledging it.");
+      if (entry.lifecycle === "discussed" || entry.lifecycle === input.lifecycle) {
+        result = entry;
+        return false;
+      }
+      if (input.lifecycle === "discussed" && entry.lifecycle !== "offered")
+        throw new AdapterError("ATTENTION_STATE_CONFLICT", "An entry must be offered before it can be marked discussed.");
+      if (input.lifecycle === "offered" && entry.lifecycle !== "ready")
+        throw new AdapterError("ATTENTION_STATE_CONFLICT", "Only a ready entry can be offered.");
+      entry.lifecycle = input.lifecycle;
+      result = entry;
+      return true;
+    });
+    if (!result) throw new AdapterError("ACTIVITY_UNAVAILABLE", "Attention receipt was not persisted.");
+    return structuredClone(result);
+  }
+
+  async upsertSubscription(subscription: EventSubscription): Promise<EventSubscription> {
+    let result: EventSubscription | undefined;
+    await this.commit((draft) => {
+      const existing = draft.subscriptions![subscription.id];
+      if (!existing && Object.values(draft.subscriptions!).filter((item) => item.active &&
+        (item.expires_at === null || Date.parse(item.expires_at) > Date.now())).length >= 32)
+        throw new AdapterError("EVENT_SUBSCRIPTION_LIMIT", "The project event subscription limit is 32.");
+      const next = existing
+        ? { ...existing, ...subscription, created_at: existing.created_at }
+        : subscription;
+      draft.subscriptions![subscription.id] = next;
+      result = next;
+      return JSON.stringify(existing) !== JSON.stringify(next);
+    });
+    if (!result) throw new AdapterError("ACTIVITY_UNAVAILABLE", "Event subscription was not persisted.");
+    return structuredClone(result);
+  }
+
+  async removeSubscription(id: string): Promise<boolean> {
+    let removed = false;
+    await this.commit((draft) => {
+      if (!draft.subscriptions![id]) return false;
+      delete draft.subscriptions![id];
+      for (const entry of Object.values(draft.attention!)) delete entry.deliveries[id];
+      removed = true;
+      return true;
+    });
+    return removed;
+  }
+
+  async subscriptions(): Promise<EventSubscription[]> {
+    await this.tail;
+    this.check();
+    const now = Date.now();
+    return structuredClone(Object.values(this.store.subscriptions ?? {}).filter((item) =>
+      item.active && (item.expires_at === null || Date.parse(item.expires_at) > now)));
+  }
+
+  async subscription(id: string): Promise<EventSubscription | undefined> {
+    await this.tail;
+    this.check();
+    const value = this.store.subscriptions?.[id];
+    return value ? structuredClone(value) : undefined;
+  }
+
+  async supersedeAttention(eventId: string, reason: string): Promise<void> {
+    await this.commit((draft) => {
+      const entry = draft.attention![eventId];
+      if (!entry || entry.lifecycle === "discussed" || entry.lifecycle === "superseded") return false;
+      entry.lifecycle = "superseded";
+      entry.prepared_summary = reason.slice(0, 420);
+      return true;
+    });
+  }
+
+  async pendingDeliveries(limit = 50): Promise<Array<{ entry: AttentionEntry; subscription: EventSubscription }>> {
+    await this.tail;
+    this.check();
+    const now = Date.now();
+    const result: Array<{ entry: AttentionEntry; subscription: EventSubscription }> = [];
+    for (const entry of Object.values(this.store.attention ?? {}).sort((a, b) => a.event_sequence - b.event_sequence)) {
+      if (entry.lifecycle !== "ready" && entry.lifecycle !== "offered") continue;
+      for (const subscription of Object.values(this.store.subscriptions ?? {})) {
+        const receipt = entry.deliveries[subscription.id];
+        if (!receipt || (receipt.state !== "pending" && !(receipt.state === "failed" && receipt.next_attempt_at)) ||
+          (receipt.next_attempt_at && Date.parse(receipt.next_attempt_at) > now) ||
+          !subscription.active || (subscription.expires_at !== null && Date.parse(subscription.expires_at) <= now)) continue;
+        result.push({ entry: structuredClone(entry), subscription: structuredClone(subscription) });
+        if (result.length >= limit) return result;
+      }
+    }
+    return result;
+  }
+
+  async recordDelivery(eventId: string, subscriptionId: string, result: {
+    state: "delivered" | "failed" | "abandoned";
+    http_status?: number;
+    retry_at?: string;
+  }): Promise<void> {
+    await this.commit((draft) => {
+      const entry = draft.attention![eventId];
+      const subscription = draft.subscriptions![subscriptionId];
+      if (!entry || !subscription) return false;
+      const previous = entry.deliveries[subscriptionId];
+      if (previous?.state === "delivered" || previous?.state === "abandoned") return false;
+      entry.deliveries[subscriptionId] = {
+        state: result.state,
+        attempts: (previous?.attempts ?? 0) + 1,
+        ...(result.retry_at ? { next_attempt_at: result.retry_at } : {}),
+        ...(result.http_status !== undefined ? { http_status: result.http_status } : {}),
+        updated_at: new Date().toISOString(),
+      };
+      if (result.state === "delivered") {
+        entry.delivery_policy = "immediate_proactive_wakeup";
+        subscription.last_cursor = entry.activity_cursor;
+      }
+      return true;
+    });
   }
 
   async guardOverride(requestId: string): Promise<GuardOverrideRecord | undefined> {
@@ -338,10 +583,13 @@ export class ActivityJournal {
   async observe(
     snapshot: ActivitySnapshot,
     source: ActivityEvent["source"],
-  ): Promise<void> {
-    await this.commit((draft) =>
-      this.applyObservation(draft, snapshot, source),
-    );
+  ): Promise<boolean> {
+    let changed = false;
+    await this.commit((draft) => {
+      changed = this.applyObservation(draft, snapshot, source);
+      return changed;
+    });
+    return changed;
   }
 
   private applyObservation(
@@ -658,12 +906,18 @@ export class ActivityJournal {
   }
   private push(draft: Store, value: EventInput): void {
     const sequence = draft.next++;
-    draft.events.push({
+    const event: ActivityEvent = {
       ...value,
       event_id: `evt_${draft.epoch}_${sequence}`,
       cursor: this.cursorFor(sequence),
       timestamp: new Date().toISOString(),
-    });
+    };
+    draft.events.push(event);
+    const attention = initialAttention(event, draft.attentionNext ?? 1);
+    if (attention) {
+      draft.attentionNext = attention.event_sequence + 1;
+      draft.attention![event.event_id] = attention;
+    }
     if (draft.events.length > this.maximum)
       draft.events.splice(0, draft.events.length - this.maximum);
   }
@@ -689,6 +943,22 @@ export class ActivityJournal {
         "INVALID_ARGUMENT",
         "Activity cursor is ahead of this journal.",
       );
+    return sequence;
+  }
+  private attentionCursor(sequence: number): string {
+    return `${this.store.epoch}:attention:${String(sequence).padStart(16, "0")}`;
+  }
+  private attentionSequence(cursor: string | undefined): number {
+    if (cursor === undefined) return 0;
+    const match = /^([a-f0-9-]{36}):attention:(\d{16})$/u.exec(cursor);
+    if (!match || match[1] !== this.store.epoch)
+      throw new AdapterError("INVALID_ARGUMENT", "Invalid attention cursor.");
+    const sequence = Number(match[2]);
+    if (!Number.isSafeInteger(sequence) || sequence >= (this.store.attentionNext ?? 1))
+      throw new AdapterError("INVALID_ARGUMENT", "Attention cursor is ahead of this journal.");
+    const oldest = Math.min(...Object.values(this.store.attention ?? {}).map((entry) => entry.event_sequence));
+    if (Number.isFinite(oldest) && sequence < oldest - 1)
+      throw new AdapterError("CURSOR_EXPIRED", "Attention cursor predates retained entries; read the current bounded queue and reconcile current state.");
     return sequence;
   }
   private check(): void {
@@ -719,6 +989,14 @@ export class ActivityJournal {
       for (const [key, resolution] of Object.entries(draft.resolutions ?? {}))
         if (!draft.guardOverrides?.[resolution.superseded_by_request_id])
           delete draft.resolutions![key];
+      const retainedAttention = Object.values(draft.attention ?? {}).sort((a, b) => a.event_sequence - b.event_sequence);
+      while (retainedAttention.length > this.maximum) {
+        const removable = retainedAttention.find((entry) => entry.lifecycle === "discussed" || entry.lifecycle === "superseded");
+        if (!removable)
+          throw new AdapterError("ACTIVITY_UNAVAILABLE", "Persistent attention reached its bounded retention limit; unresolved entries were preserved.");
+        delete draft.attention![removable.event_id];
+        retainedAttention.splice(retainedAttention.indexOf(removable), 1);
+      }
       const temporary = `${this.path}.${randomUUID()}.tmp`;
       try {
         const file = await open(temporary, "wx", 0o600);
@@ -744,6 +1022,78 @@ export class ActivityJournal {
     this.tail = operation.catch(() => undefined);
     return operation;
   }
+}
+
+function eventName(type: ActivityEvent["type"]): string | undefined {
+  switch (type) {
+    case "message.completed": return "worker.completed";
+    case "message.failed": return "worker.failed";
+    case "message.aborted": return "worker.aborted";
+    case "session.input_required": return "worker.input_required";
+    default: return undefined;
+  }
+}
+
+function validAttentionState(store: Store): boolean {
+  for (const [id, value] of Object.entries(store.attention ?? {})) {
+    if (!isRecord(value) || value.event_id !== id || !Number.isSafeInteger(value.event_sequence) ||
+      (value.event_sequence as number) < 1 || (value.event_sequence as number) >= (store.attentionNext ?? Number.MAX_SAFE_INTEGER) ||
+      !ACTIVITY_TYPES.includes(value.event_type as ActivityType) ||
+      !["ready", "attention", "action_required"].includes(String(value.classification)) ||
+      !["new", "ready", "offered", "discussed", "superseded"].includes(String(value.lifecycle)) ||
+      !["pending", "resolved", "unlinked", "ambiguous", "unavailable"].includes(String(value.hierarchy_status)) ||
+      typeof value.session_id !== "string" || typeof value.prepared_summary !== "string" ||
+      typeof value.next_safe_step !== "string" || !Array.isArray(value.assistant_message_ids) ||
+      !isRecord(value.deliveries)) return false;
+    for (const delivery of Object.values(value.deliveries)) {
+      if (!isRecord(delivery) || !["pending", "delivered", "failed", "abandoned"].includes(String(delivery.state)) ||
+        !Number.isSafeInteger(delivery.attempts) || typeof delivery.updated_at !== "string") return false;
+    }
+  }
+  for (const [id, subscription] of Object.entries(store.subscriptions ?? {})) {
+    if (!isRecord(subscription) || subscription.id !== id ||
+      !["worker.completed", "worker.failed", "worker.aborted", "worker.input_required"].includes(String(subscription.event_name)) ||
+      typeof subscription.callback_url !== "string" || !subscription.callback_url.startsWith("https://") ||
+      typeof subscription.secret !== "string" || !subscription.secret.startsWith("whsec_") ||
+      typeof subscription.active !== "boolean" || typeof subscription.created_at !== "string" ||
+      !(subscription.expires_at === null || typeof subscription.expires_at === "string") ||
+      !(subscription.last_cursor === null || typeof subscription.last_cursor === "string") ||
+      !isRecord(subscription.arguments)) return false;
+  }
+  return true;
+}
+
+async function adoptLegacyJournal(target: string, legacyPath: string, project: string): Promise<void> {
+  let parent;
+  try { parent = await lstat(dirname(legacyPath)); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
+  if (!parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== process.getuid?.() || (parent.mode & 0o777) !== 0o700)
+    throw new AdapterError("ACTIVITY_UNAVAILABLE", "Legacy activity directory is unsafe; the journal was not migrated.");
+  let source;
+  try { source = await open(legacyPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
+  let raw: string;
+  try {
+    const stat = await source.stat();
+    if (!stat.isFile() || stat.uid !== process.getuid?.() || (stat.mode & 0o777) !== 0o600 || stat.size > 32 * 1024 * 1024)
+      throw new AdapterError("ACTIVITY_UNAVAILABLE", "Legacy activity file is unsafe; the journal was not migrated.");
+    raw = await source.readFile("utf8");
+  } finally { await source.close(); }
+  let value: unknown;
+  try { value = JSON.parse(raw); } catch {
+    throw new AdapterError("ACTIVITY_UNAVAILABLE", "Legacy activity file is invalid; the journal was not migrated.");
+  }
+  if (!isRecord(value) || value.schema !== 1 || value.project !== project || !Array.isArray(value.events) ||
+    typeof value.epoch !== "string" || !Number.isSafeInteger(value.next))
+    throw new AdapterError("ACTIVITY_UNAVAILABLE", "Legacy activity identity is invalid; the journal was not migrated.");
+  const temporary = `${target}.${randomUUID()}.tmp`;
+  try {
+    const file = await open(temporary, "wx", 0o600);
+    try { await file.writeFile(raw); await file.sync(); }
+    finally { await file.close(); }
+    try { await link(temporary, target); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+  } finally { await unlink(temporary).catch(() => undefined); }
 }
 
 function resolutionKey(sessionId: string, messageId: string): string {

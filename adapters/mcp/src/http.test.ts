@@ -7,10 +7,12 @@ import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { McpHttpServer, MAX_REQUEST_BODY_BYTES } from "./http.js";
+import { MCP_EVENT_DEFINITIONS } from "./events.js";
 import type { SessionGateway } from "./opencode.js";
 import type { AttachmentDescriptor } from "./attachments.js";
 import { AdapterError } from "./types.js";
 import type {
+  AttentionResult,
   ActivityQuery,
   ActivityResult,
   RuntimeOptions,
@@ -94,6 +96,15 @@ function runtime(): RuntimeDescriptor {
 }
 
 class FakeGateway implements SessionGateway {
+  async getProjectAttention(): Promise<AttentionResult> {
+    return { entries: [], next_cursor: "attention", current_cursor: "attention", has_more: false };
+  }
+  async handleMcpEventMethod(method: string): Promise<unknown> {
+    if (method === "events/list") return { events: MCP_EVENT_DEFINITIONS };
+    if (method === "events/subscribe") return { id: "sub_test" };
+    if (method === "events/unsubscribe") return {};
+    throw new Error("unsupported event method");
+  }
   updateCalls: Array<{ id: string; patch: RuntimePatch }> = [];
   async getSessionProgress(sessionId: string): Promise<SessionProgressResult> {
     return {
@@ -350,7 +361,50 @@ class FakeGateway implements SessionGateway {
   }
 }
 
-test("official MCP client discovers twenty stateless HTTP tools and invokes session tools by ID", async () => {
+test("MCP 2.0 discovery and Events methods stay on the authenticated loopback endpoint", async (t) => {
+  const adapter = new McpHttpServer(runtime(), token, new FakeGateway());
+  const port = await adapter.start();
+  t.after(() => adapter.close());
+  const post = async (method: string, requestMethod = method, authenticated = true, protocolVersion = "2026-07-28", params: Record<string, unknown> = {}) => fetch(`http://127.0.0.1:${port}/mcp`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      ...(authenticated ? { "X-OCVM-MCP-Token": token } : {}),
+      "Mcp-Method": requestMethod,
+      "MCP-Protocol-Version": protocolVersion,
+      ...(typeof params.name === "string" ? { "Mcp-Name": params.name } : {}),
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params: { ...params, _meta: { "io.modelcontextprotocol/protocolVersion": protocolVersion } } }),
+  });
+  const discovery = await post("server/discover");
+  assert.equal(discovery.status, 200);
+  const discoveryBody = await discovery.json() as { result: { supportedVersions: string[]; capabilities: { events?: object } } };
+  assert.ok(discoveryBody.result.supportedVersions.includes("2026-07-28"));
+  assert.deepEqual(discoveryBody.result.capabilities.events, {});
+  const listed = await post("events/list");
+  const listBody = await listed.json() as { result: { events: Array<{ name: string; delivery: string[] }> } };
+  assert.equal(listBody.result.events.length, 4);
+  assert.ok(listBody.result.events.every((event) => event.delivery.includes("webhook")));
+  const mismatch = await post("events/list", "events/subscribe");
+  assert.equal(mismatch.status, 400);
+  assert.equal(((await mismatch.json()) as { error: { code: number } }).error.code, -32020);
+  const unsupported = await post("events/list", "events/list", true, "2025-11-25");
+  assert.equal(unsupported.status, 400);
+  assert.equal(((await unsupported.json()) as { error: { code: number } }).error.code, -32022);
+  const tools = await post("tools/list");
+  const toolList = await tools.json() as { result?: { resultType?: string; tools?: Array<{ name: string }> }; error?: unknown };
+  assert.equal(toolList.result?.resultType, "complete");
+  assert.ok(toolList.result?.tools?.some((tool) => tool.name === "get_project_attention"), JSON.stringify(toolList.error));
+  const called = await post("tools/call", "tools/call", true, "2026-07-28", { name: "get_project_attention", arguments: {} });
+  assert.equal(called.status, 200);
+  const callBody = await called.json() as { result?: { resultType?: string; structuredContent?: { entries?: unknown[] } }; error?: unknown };
+  assert.equal(callBody.result?.resultType, "complete");
+  assert.deepEqual(callBody.result?.structuredContent?.entries, [], JSON.stringify(callBody.error));
+  assert.equal((await post("events/list", "events/list", false)).status, 401);
+});
+
+test("official MCP client discovers twenty-two stateless HTTP tools and invokes session tools by ID", async () => {
   const gateway = new FakeGateway();
   const server = new McpHttpServer(runtime(), token, gateway);
   const port = await server.start();
@@ -363,10 +417,12 @@ test("official MCP client discovers twenty stateless HTTP tools and invokes sess
     await client.connect(transport);
     const listed = await client.listTools();
     assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), [
+      "acknowledge_project_attention",
       "archive_session",
       "create_session",
       "get_message",
       "get_project_activity",
+      "get_project_attention",
       "get_project_model_policy",
       "get_recommended_runtime",
       "get_session",

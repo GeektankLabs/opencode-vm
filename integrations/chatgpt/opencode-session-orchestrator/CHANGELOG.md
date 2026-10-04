@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-04-r34
+
+- Prefer the persistent prepared attention view for cross-session status questions and natural handoffs; acknowledge presentation/discussion only against the exact source revision.
+- Define honest event-delivery promises: automatic notice requires confirmed host monitoring/wakeup, safe-boundary deferral requires host confirmation, and otherwise use on-demand fallback. Keep event receipt, same-context continuation and audible Voice evidence separate.
+- Add source-contract coverage for queue-first behavior, lifecycle receipts and no follow-up authorization. Hosted Work/Voice behavior remains external acceptance.
+
 ## 2026-10-03-r33
 
 - Synthesize autonomous Work Packages into one revisioned canonical package-P execution contract with source/completed-evidence pins, sole package dispatch ownership and member C/P markers; retain stable tasks and separate acceptance, no new backend schema or Board status.

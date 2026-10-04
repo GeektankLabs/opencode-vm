@@ -157,6 +157,22 @@ These cases review instructions only; they do not authorize or perform live uplo
 | Tail returns a captured-head cursor | Continue without tail and with the same filters. |
 | Tail selection is budget-limited | Report partial selection; use smaller tail or ordinary retained-history reads as appropriate. |
 | User switches session/event filters | Store and restore separate cursors per connector/project/filter key. |
+
+## MCP Events and prepared attention
+
+| Scenario | Required behavior |
+|---|---|
+| User asks "what is new/otherwise ready?" and `get_project_attention` is available | Read the bounded prepared queue first; do not begin with a full session/result scan. |
+| Queue has ready, failed/aborted and action-required entries | Present the strongest actual class with exact source revision, preserving partial/ambiguous hierarchy and pending-input scope. |
+| Queue read or webhook arrives | Do not mark offered/discussed until actual presentation/discussion; webhook 2xx is only delivery receipt. |
+| Prepared result is stale or source revision changed | Reconcile the exact original, never present mixed revisions; preserve cursor/coverage gaps. |
+| Older event arrives after newer correlated task/session evidence | Keep the newer projection authoritative and mark the old entry superseded. |
+| Active event subscription has verified callback and its actual host wake-up path is confirmed | A proactive monitoring promise may be made only for that concrete host/surface. |
+| A turn is busy and the host confirms deferral | Say next safe idle-boundary; do not interrupt or infer Chat/Voice activity from OpenCode worker state. |
+| No confirmed host wake-up/idle capability | Use on-demand prepared queue; never say "I will notify you automatically." |
+| Event summary recommends a next step | Treat it as evidence-bound presentation only; no worker, retry, permission answer, Board Done, integration, release or deployment follows automatically. |
+| E2E observes webhook 2xx but no same-context response | Mark transport only PASS; Work/Chat continuation remains pending/fail independently. |
+| No audible output is observed on the selected Voice surface | Keep Voice evidence pending/unsupported even if event delivery and Work continuation pass. |
 | Empty ordinary page has `has_more=true` | Continue pagination with its returned cursor. |
 | User requests complete retained history | Do not substitute a tail sample. |
 | Selected Voice surface has no connector tools | Report that limitation; do not claim the skill can enable them. |

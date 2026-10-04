@@ -2259,6 +2259,7 @@ test("E-I: activity correlates parallel receipts, pending input and restart with
   };
   await gateway.captureActivity("ses_a");
   await gateway.captureActivity("ses_b");
+  const submittedPrompts = state.promptCalls.length;
   await finish("ses_a", a.message_id, "reply_a");
   const first = await gateway.getProjectActivity({
     after_cursor: anchor,
@@ -2268,6 +2269,15 @@ test("E-I: activity correlates parallel receipts, pending input and restart with
   assert.equal(first.events[0]?.session_id, "ses_a");
   assert.equal(first.events[0]?.message_id, a.message_id);
   assert.deepEqual(first.events[0]?.assistant_message_ids, ["msg_reply_a"]);
+  const prepared = (await gateway.getProjectAttention()).entries.find((entry) => entry.event_id === first.events[0]?.event_id);
+  assert.equal(prepared?.lifecycle, "ready");
+  assert.equal(prepared?.submitted_message_id, a.message_id);
+  assert.deepEqual(prepared?.assistant_message_ids, ["msg_reply_a"]);
+  assert.equal(prepared?.evidence?.complete, true);
+  assert.match(prepared?.prepared_summary ?? "", /Worker result is available/u);
+  assert.match(prepared?.next_safe_step ?? "", /no follow-up was started/u);
+  assert.doesNotMatch(prepared?.prepared_summary ?? "", /SECRET_RESPONSE/u);
+  assert.equal(state.promptCalls.length, submittedPrompts, "prefetch must never submit a follow-up worker");
   await finish("ses_b", b.message_id, "reply_b");
   const second = await gateway.getProjectActivity({
     after_cursor: first.next_cursor,

@@ -6,10 +6,12 @@ Use these capabilities only when the selected connector actually exposes them. D
 
 - **What is this session doing?** Prefer a compact tool-progress snapshot.
 - **Has this exact task finished?** Use correlated task status/result search with the submitted user ID.
-- **What happened recently across sessions?** Use the activity journal, optionally its tail entry.
+- **What is newly ready for the operator across sessions?** Prefer `get_project_attention` and its prepared queue when exposed; use the activity journal for raw event history/reconciliation.
 - **What did the completed task conclude?** Read the original report through the [content protocol](content-protocol.md).
 
 These are different observations; do not substitute one for another.
+
+For the queue-first presentation, event subscriptions and lifecycle receipts, follow [MCP Events and prepared attention](events-attention.md). A webhook delivery receipt is not a conversation-presentation receipt.
 
 ## Observe tool progress
 
