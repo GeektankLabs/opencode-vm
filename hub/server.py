@@ -1,41 +1,44 @@
 #!/usr/bin/env python3
 """Project-scoped Agent Control Hub for opencode-vm.
 
-The service intentionally uses only the Python standard library. It reads a
-small allowlist of host/session files and never returns credentials or raw
-configuration blobs.
+The service intentionally uses only the Python standard library. It reads one
+admitted guest runtime input and never returns credentials or raw configuration
+blobs.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
+import hmac
 import ipaddress
 import json
 import os
 import re
-import socket
-import subprocess
+import ssl
+import stat
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.error import URLError
 from urllib.parse import urlsplit
-from urllib.request import Request, urlopen
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 try:
     from .policy import PolicyStore, PolicyError, PolicyConflict, PolicyCapabilityError, PROFILES, FALLBACKS, check_selection, validate_selection, resolve_profile
     from .catalog import read_catalog, mcp_connection, read_capabilities
-except ImportError:  # Executed directly as hub/server.py by the host launcher.
+except ImportError:  # Executed directly as hub/server.py by the guest service.
     from policy import PolicyStore, PolicyError, PolicyConflict, PolicyCapabilityError, PROFILES, FALLBACKS, check_selection, validate_selection, resolve_profile
     from catalog import read_catalog, mcp_connection, read_capabilities
 
 
 ROOT = Path(__file__).resolve().parent
-SHARE_ROOT = Path(os.environ.get("OCVM_SHARE_ROOT", Path.home() / ".opencode-vm"))
-PROJECT = Path(os.environ.get("HUB_PROJECT", os.getcwd())).resolve()
+PROJECT = Path.cwd().resolve()
+SESSION_ROOT: Path | None = None
+RUNTIME: dict[str, Any] = {}
+AUTH_CREDENTIALS: tuple[str, str] | None = None
+REQUEST_SCHEME = "https"
 MAX_LOG_BYTES = 64 * 1024
 MAX_EVENTS = 12
 SECRET_PATTERNS = [
@@ -51,6 +54,9 @@ def now() -> str:
 
 
 def project_hash() -> str:
+    configured = RUNTIME.get("projectHash")
+    if isinstance(configured, str) and re.fullmatch(r"[0-9a-f]{32}", configured):
+        return configured
     return hashlib.md5(os.fsencode(PROJECT)).hexdigest()
 
 
@@ -58,18 +64,80 @@ def safe_id(value: str, length: int = 12) -> str:
     return value[:length] if value else "unknown"
 
 
-def parse_env(path: Path) -> dict[str, str]:
-    result: dict[str, str] = {}
-    if not path.is_file() or path.is_symlink():
-        return result
+def read_private_json(path: Path, limit: int) -> Any:
     try:
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            match = re.match(r"\s*(?:export\s+)?([A-Z][A-Z0-9_]*)=(?:\"([^\"]*)\"|'([^']*)'|([^#]*))", line)
-            if match:
-                result[match.group(1)] = next((part for part in match.groups()[1:] if part is not None), "").strip()
-    except OSError:
-        return {}
-    return result
+        info = path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_mode & 0o077 or info.st_size > limit or path.is_symlink()):
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def configure_runtime(runtime_path: Path, project: Path, expected_project_hash: str) -> None:
+    """Admit one private guest runtime descriptor before opening a listener."""
+    global PROJECT, SESSION_ROOT, RUNTIME, AUTH_CREDENTIALS
+
+    runtime_path = Path(runtime_path)
+    if not runtime_path.is_absolute():
+        runtime_path = Path.cwd() / runtime_path
+    if runtime_path.name != "runtime-input.json" or runtime_path.parent.name != "hub":
+        raise ValueError("Hub runtime input has an invalid location")
+    session_root = runtime_path.parent.parent
+    try:
+        directory = session_root.lstat()
+        hub_directory = runtime_path.parent.lstat()
+    except OSError as error:
+        raise ValueError("Hub runtime directory is unavailable") from error
+    if (not stat.S_ISDIR(directory.st_mode) or directory.st_uid != os.getuid() or directory.st_mode & 0o077
+            or not stat.S_ISDIR(hub_directory.st_mode) or hub_directory.st_uid != os.getuid() or hub_directory.st_mode & 0o077
+            or session_root.is_symlink() or runtime_path.parent.is_symlink()):
+        raise ValueError("Hub runtime directory is unsafe")
+    runtime = read_private_json(runtime_path, 16384)
+    if not isinstance(runtime, dict):
+        raise ValueError("Hub runtime input is unavailable")
+    mcp = runtime.get("mcp")
+    auth = runtime.get("auth")
+    if (runtime.get("schema") != 1 or not isinstance(runtime.get("projectHash"), str)
+            or not re.fullmatch(r"[0-9a-f]{32}", runtime["projectHash"])
+            or not isinstance(runtime.get("generation"), str)
+            or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", runtime["generation"])
+            or not isinstance(runtime.get("hubPort"), int) or isinstance(runtime["hubPort"], bool)
+            or not 1026 <= runtime["hubPort"] <= 65535
+            or not isinstance(runtime.get("authEnabled"), bool)
+            or not isinstance(runtime.get("a2aEnabled"), bool)
+            or not isinstance(runtime.get("tunnelConfigured"), bool)
+            or not isinstance(runtime.get("openliveConfigured"), bool)
+            or not isinstance(mcp, dict) or not isinstance(mcp.get("enabled"), bool)
+            or not isinstance(mcp.get("generation"), str)
+            or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", mcp["generation"])
+            or not isinstance(mcp.get("port"), int) or isinstance(mcp["port"], bool)
+            or not 0 <= mcp["port"] <= 65535):
+        raise ValueError("Hub runtime input is invalid")
+    if mcp["enabled"] and (not 1 <= mcp["port"] <= 65535 or mcp["generation"] != runtime["generation"]):
+        raise ValueError("Hub MCP runtime input is invalid")
+    if runtime["authEnabled"]:
+        if (not isinstance(auth, dict) or set(auth) != {"username", "password"}
+                or not isinstance(auth["username"], str) or not 1 <= len(auth["username"]) <= 255
+                or ":" in auth["username"] or any(ord(char) < 32 for char in auth["username"])
+                or not isinstance(auth["password"], str) or not 1 <= len(auth["password"]) <= 4096):
+            raise ValueError("Hub authentication is unavailable")
+    elif auth is not None:
+        raise ValueError("Hub runtime authentication is invalid")
+    project = project.resolve()
+    if not isinstance(expected_project_hash, str) or not re.fullmatch(r"[0-9a-f]{32}", expected_project_hash):
+        raise ValueError("Hub project identity is invalid")
+    if expected_project_hash != runtime["projectHash"]:
+        raise ValueError("Hub project identity does not match runtime input")
+    if not project.is_dir():
+        raise ValueError("Hub project directory is unavailable")
+    credentials = (auth["username"], auth["password"]) if runtime["authEnabled"] else None
+
+    PROJECT = project
+    SESSION_ROOT = session_root
+    RUNTIME = runtime
+    AUTH_CREDENTIALS = credentials
 
 
 def read_json(path: Path) -> Any:
@@ -110,60 +178,6 @@ def read_events(paths: list[tuple[Path, str]]) -> list[dict[str, str]]:
     return events[-MAX_EVENTS:]
 
 
-def project_assignment() -> dict[str, Any] | None:
-    registry = read_json(SHARE_ROOT / "mcp-tunnel/openai/registry.json")
-    if not isinstance(registry, dict) or not isinstance(registry.get("projects"), dict):
-        return None
-    canonical = str(PROJECT)
-    for value in registry["projects"].values():
-        if isinstance(value, dict) and isinstance(value.get("path"), str) and os.path.realpath(value["path"]) == canonical:
-            return {"id": value.get("id", "unknown"), "keyId": value.get("keyId", "unknown"), "tunnelId": value.get("tunnelId", "unknown")}
-    return None
-
-
-def tracked_sessions() -> list[tuple[Path, dict[str, str]]]:
-    result = []
-    directory = SHARE_ROOT / "sessions"
-    if not directory.is_dir():
-        return result
-    for path in sorted(directory.glob("*.env")):
-        values = parse_env(path)
-        if values.get("SESS_PROJ") and os.path.realpath(values["SESS_PROJ"]) == str(PROJECT):
-            result.append((path, values))
-    return result
-
-
-def probe_http(url: str, secret: str | None = None) -> tuple[bool, dict[str, Any] | None]:
-    headers = {"Authorization": f"Bearer {secret}"} if secret else {}
-    try:
-        with urlopen(Request(url, headers=headers), timeout=1.5) as response:
-            body = response.read(128 * 1024)
-            return 200 <= response.status < 300, json.loads(body.decode("utf-8")) if body else None
-    except (OSError, ValueError, URLError):
-        return False, None
-
-
-def probe_port(port: int) -> bool:
-    try:
-        with socket.create_connection(("127.0.0.1", port), timeout=0.4):
-            return True
-    except OSError:
-        return False
-
-
-def vm_running(name: str) -> bool | None:
-    if os.environ.get("HUB_DISABLE_PROBES") == "1" or not name:
-        return None
-    try:
-        result = subprocess.run(["limactl", "list", name, "--format", "{{.Status}}"], capture_output=True, text=True, timeout=2, check=False)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if result.returncode != 0:
-        return None
-    status = result.stdout.strip().lower()
-    return True if status == "running" else False if status == "stopped" else None
-
-
 def status_card(card_id, name, configured, state, reason, scope="configuration-only", **extra):
     health = {"ready": "active/healthy", "not_ready": "warning/degraded"}.get(state, "unknown/stale")
     return {"id": card_id, "name": name, "type": card_id, "configured": configured, "state": state,
@@ -172,103 +186,43 @@ def status_card(card_id, name, configured, state, reason, scope="configuration-o
             "logCapability": card_id in {"incoming-mcp", "secure-mcp-tunnel"}, **extra}
 
 
-def build_model(*, sessions=None, connection=None) -> dict[str, Any]:
-    sessions = tracked_sessions() if sessions is None else sessions
-    assignment = project_assignment()
-    integrations: list[dict[str, Any]] = []
+def build_model(*, connection=None) -> dict[str, Any]:
+    """Return connectivity facts from this Guest's admitted runtime only."""
+    if SESSION_ROOT is None:
+        raise RuntimeError("Hub runtime is not configured")
+    mcp_runtime = RUNTIME["mcp"]
+    connection = connection if connection is not None else mcp_connection(mcp_runtime, SESSION_ROOT, project_hash())
+    tunnel_configured = RUNTIME["tunnelConfigured"]
+    openlive_configured = RUNTIME["openliveConfigured"]
+    a2a_configured = RUNTIME["a2aEnabled"]
+    integrations = [
+        status_card("secure-mcp-tunnel", "OpenAI Secure MCP Tunnel", tunnel_configured,
+                    "unverified" if tunnel_configured else "not_configured",
+                    "Zuordnung im Guest-Runtimeinput; Tunnelverbindung nicht bestätigt." if tunnel_configured
+                    else "Keine Tunnelzuordnung für diese Session eingerichtet.", setupRef="docs/MCP-TUNNEL.md"),
+        status_card("incoming-mcp", "OpenCode MCP Connector", mcp_runtime["enabled"],
+                    connection["state"], connection["reason"],
+                    "local-mcp-health" if mcp_runtime["enabled"] and connection["state"] in {"ready", "not_ready"}
+                    else "configuration-only", setupRef="docs/MCP-INTERFACE.md"),
+        status_card("a2a", "A2A Agent Interface", a2a_configured,
+                    "unverified" if a2a_configured else "not_configured",
+                    "A2A ist für diese Websession konfiguriert; Clientzugang wurde nicht geprüft." if a2a_configured
+                    else "Nicht aktiviert · benötigt eine Websession.", setupRef="docs/A2A-INTERFACE.md"),
+        status_card("openlive", "OpenLive ACP", openlive_configured,
+                    "unverified" if openlive_configured else "not_configured",
+                    "Bridge für diese Session vorbereitet; kein Voice-Call-Nachweis." if openlive_configured
+                    else "OpenLive-Bridge ist nicht für diese Session eingerichtet.", setupRef="PLAN_OPENLIVE.md"),
+    ]
     log_paths: list[tuple[Path, str]] = []
-
-    session_file, session = sessions[0] if len(sessions) == 1 else (None, {})
-    running = vm_running(session.get("SESS_NAME", "")) if session else None
-    registry_path = SHARE_ROOT / "mcp-tunnel/openai/registry.json"
-    registry = read_json(registry_path)
-    registry_unknown = (registry_path.exists() or registry_path.is_symlink()) and (
-        not isinstance(registry, dict) or not isinstance(registry.get("projects"), dict)
-        or any(not isinstance(value, dict) or not isinstance(value.get("path"), str)
-               for value in registry["projects"].values())
-        or sum(isinstance(value, dict) and isinstance(value.get("path"), str)
-               and os.path.realpath(value["path"]) == str(PROJECT) for value in registry["projects"].values()) > 1)
-    if registry_unknown:
-        assignment = None
-    tunnel_state = "unverified" if assignment or registry_unknown else "not_configured"
-    tunnel_reason = ("Zuordnung vorhanden; Tunnelverbindung nicht bestätigt. Adaptermarker sind kein Tunnel-Health."
-                     if assignment else "Konfiguration nicht lesbar – Status nicht bestätigt." if registry_unknown
-                     else "Keine Tunnelzuordnung für dieses Projekt eingerichtet.")
-    if assignment and running is False:
-        tunnel_state, tunnel_reason = "not_ready", "Projekt-VM ist bestätigt gestoppt; Tunnel benötigt eine laufende Session."
-    integrations.append(status_card("secure-mcp-tunnel", "OpenAI Secure MCP Tunnel", None if registry_unknown else bool(assignment),
-        tunnel_state, tunnel_reason, setupRef="docs/MCP-TUNNEL.md"))
-    for path, values in sessions:
-        share = SHARE_ROOT / "sessions" / path.stem
-        if assignment:
-            log_paths.append((share / "mcp/tunnel.log", "secure-mcp-tunnel"))
-        if values.get("SESS_MCP_ENABLED") == "1":
-            log_paths.append((share / "mcp/backend.log", "incoming-mcp"))
-
-    if sessions:
-        connection = connection if connection is not None else mcp_connection(SHARE_ROOT, sessions, project_hash())
-        configured = session.get("SESS_MCP_ENABLED") == "1" if session else None
-        integrations.append(status_card("incoming-mcp", "OpenCode MCP Connector", configured,
-            connection["state"], connection["reason"], "local-mcp-health" if configured and connection["state"] in {"ready", "not_ready"} else "configuration-only",
-            setupRef="docs/MCP-INTERFACE.md"))
-    else:
-        integrations.append(status_card("incoming-mcp", "OpenCode MCP Connector", False, "not_configured",
-            "Nicht aktiviert · eine Projekt-Session mit MCP ist erforderlich.", setupRef="docs/MCP-INTERFACE.md"))
-
-    a2a_state, a2a_reason = "not_configured", "Nicht aktiviert · benötigt eine Websession."
-    web = session.get("SESS_MODE") == "web"
-    if len(sessions) > 1:
-        a2a_state, a2a_reason = "unverified", "Keine eindeutige Projekt-Session bestätigt."
-    elif web:
-        a2a_state, a2a_reason = "unverified", "A2A-Dienstzuordnung nicht bestätigt."
-        port = session.get("SESS_PORT", "")
-        if port.isdecimal() and 1 <= int(port) <= 65532:
-            ok, card = probe_http(f"http://127.0.0.1:{int(port) + 3}/.well-known/agent-card.json")
-            if not ok:
-                a2a_state, a2a_reason = "not_ready", "Lokale Agent-Card-Probe fehlgeschlagen."
-            elif isinstance(card, dict) and isinstance(card.get("supportedInterfaces"), list):
-                urls = [item.get("url") for item in card["supportedInterfaces"] if isinstance(item, dict)
-                        and item.get("protocolBinding") == "JSONRPC" and isinstance(item.get("url"), str)]
-                if len(urls) == 1:
-                    try:
-                        effective = urlsplit(urls[0])
-                        effective_port = effective.port
-                    except ValueError:
-                        effective, effective_port = None, None
-                    # Use the card's effective port on host loopback, never its host as a credential destination.
-                    if effective and effective.scheme == "http" and private_peer(effective.hostname or "") and effective_port and not effective.username and not effective.password and not effective.query and not effective.fragment and effective.path in {"", "/"}:
-                        auth = parse_env(SHARE_ROOT / "sessions" / session_file.stem / "auth.env")
-                        secret = auth.get("OPENCODE_SERVER_PASSWORD")
-                        if secret:
-                            health_ok, body = probe_http(f"http://127.0.0.1:{effective_port}/health", secret)
-                            if health_ok and isinstance(body, dict) and body.get("status") == "ok" and body.get("service") == "opencode-a2a":
-                                a2a_state, a2a_reason = "ready", "Agent Card und authentifizierter lokaler A2A-Servicehealth bestätigt; kein Client-/LAN-Test."
-                            else:
-                                a2a_state, a2a_reason = "not_ready", "Authentifizierter A2A-Servicehealth fehlgeschlagen."
-    integrations.append(status_card("a2a", "A2A Agent Interface", web if len(sessions) <= 1 else None,
-        a2a_state, a2a_reason, "local-a2a-health" if a2a_state in {"ready", "not_ready"} else "configuration-only", setupRef="docs/A2A-INTERFACE.md"))
-
-    openlive = SHARE_ROOT / "openlive/bin/opencode"
-    installed = openlive.is_file() and not openlive.is_symlink()
-    live_state = "unverified" if installed else "not_configured"
-    live_reason = "Bridge installiert · Projektbereitschaft nicht bestätigt; kein Voice-Call-Nachweis." if installed else "OpenLive-Bridge ist nicht eingerichtet."
-    if openlive.is_symlink() or (openlive.exists() and not installed):
-        installed, live_state, live_reason = None, "unverified", "Bridge-Konfiguration nicht lesbar – Status nicht bestätigt."
-    elif installed and not any(values.get("SESS_MODE") == "web" for _, values in sessions):
-        live_state, live_reason = "not_ready", "Bridge installiert; erforderliche Projekt-Websession fehlt. Voice-Calls werden nicht überwacht."
-    integrations.append(status_card("openlive", "OpenLive ACP", installed, live_state, live_reason, setupRef="PLAN_OPENLIVE.md"))
-
+    if tunnel_configured:
+        log_paths.append((SESSION_ROOT / "mcp/tunnel.log", "secure-mcp-tunnel"))
+    if mcp_runtime["enabled"]:
+        log_paths.append((SESSION_ROOT / "mcp/backend.log", "incoming-mcp"))
     events = read_events(log_paths)
     configured_ids = {item["id"] for item in integrations if item["configured"] is True}
-    notices = []
-    if not integrations:
-        notices.append({"tone": "info", "title": "Keine projektbezogene Verbindung konfiguriert", "body": "Die lokalen Registries und Session-Marker enthalten für dieses Projekt keine aktive Connector-Konfiguration."})
-    for item in integrations:
-        if item["healthStatus"] != "active/healthy":
-            notices.append({"tone": "warning", "title": item["name"], "body": item["statusReason"], "integrationId": item["id"]})
-
-    latest = read_json(ROOT.parent / "integrations/chatgpt/latest.json") or {}
-    return {"schema": 2, "generatedAt": now(), "project": {"name": PROJECT.name, "pathAvailable": True}, "integrations": integrations, "events": events, "notices": notices[:8], "skill": latest, "setupGuides": [
+    notices = [{"tone": "warning", "title": item["name"], "body": item["statusReason"], "integrationId": item["id"]}
+               for item in integrations if item["healthStatus"] != "active/healthy"]
+    return {"schema": 2, "generatedAt": now(), "project": {"name": PROJECT.name, "pathAvailable": True}, "integrations": integrations, "events": events, "notices": notices[:8], "skill": {}, "setupGuides": [
         {"id": "lm-studio", "title": "LM Studio · lokale Modelle", "steps": ["LM Studio auf dem Mac starten und den lokalen Server auf Port 1234 aktivieren.", "Port 1234 ist in der OpenCode-VM-Standardpolicy bereits erlaubt. Bei geänderter Policy mit `opencode-vm ports host add 1234` sicherstellen (mehrfach ausführbar). Die Host-Port-Policy gilt für alle VMs.", "In der OpenCode-Web-UI unter Provider Management den nativen Provider „LM Studio“ verbinden. Bei aktivem Standard-Forwarding erreicht OpenCode ihn im Lima-Gast über `localhost:1234`; eine Custom-Base-URL ist nicht nötig."], "docs": "README.md#network-policy-commands"},
         {"id": "secure-mcp-tunnel", "title": "Secure MCP Tunnel", "when": "not configured or inactive", "steps": ["OpenAI Tunnel und eingeschränkten Tunnel API-Key anlegen.", "opencode-vm provider mcp new openai im Projektverzeichnis ausführen.", "Mit opencode-vm web starten und provider mcp status openai prüfen."], "docs": "docs/MCP-TUNNEL.md"},
         {"id": "a2a", "title": "A2A Agent Interface", "when": "web session required", "steps": ["Eine Web-Session mit opencode-vm web starten.", "Agent Card und /health über den dokumentierten A2A-Port verifizieren.", "Für Diagnose opencode-vm a2a status oder a2a check verwenden."], "docs": "docs/A2A-INTERFACE.md"},
@@ -277,10 +231,11 @@ def build_model(*, sessions=None, connection=None) -> dict[str, Any]:
 
 
 def control_snapshot():
+    if SESSION_ROOT is None:
+        raise RuntimeError("Hub runtime is not configured")
     policy = PolicyStore(PROJECT).read()
-    sessions = tracked_sessions()
-    connection = mcp_connection(SHARE_ROOT, sessions, project_hash())
-    catalog = read_catalog(SHARE_ROOT, sessions, project_hash(), connection=connection)
+    connection = mcp_connection(RUNTIME["mcp"], SESSION_ROOT, project_hash())
+    catalog = read_catalog(RUNTIME["mcp"], SESSION_ROOT, project_hash(), connection=connection)
     return {"policy": policy, "catalog": catalog, "validation": {
         name: check_selection(policy["profiles"][name], catalog) for name in PROFILES
     }, "resolutions": {name: resolve_profile(policy, name, catalog) for name in PROFILES},
@@ -288,7 +243,7 @@ def control_snapshot():
         "capabilities": {"mcp": "supported", "optionalProfiles": read_capabilities(connection),
                          "a2a": "unsupported", "openlive": "unsupported"},
         "catalogStatus": "unavailable" if catalog is None else "incomplete" if catalog["truncated"] else "complete",
-        "readModel": build_model(sessions=sessions, connection=connection)}
+        "readModel": build_model(connection=connection)}
 
 
 def private_peer(address):
@@ -304,18 +259,27 @@ def private_peer(address):
 
 
 class Handler(BaseHTTPRequestHandler):
-    def allowed(self, write=False):
+    def allowed(self, write=False, require_auth=True):
         if not private_peer(self.client_address[0]):
             self.send_error(403)
             return False
+        if require_auth and AUTH_CREDENTIALS is not None:
+            username, password = AUTH_CREDENTIALS
+            expected = "Basic " + base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+            if not hmac.compare_digest(self.headers.get("Authorization", ""), expected):
+                self.send_response(401)
+                self.send_header("WWW-Authenticate", 'Basic realm="opencode-vm Hub", charset="UTF-8"')
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return False
         if write:
             host = self.headers.get("Host", "")
             origin = self.headers.get("Origin", "")
             try:
-                name = urlsplit("http://" + host).hostname
+                name = urlsplit(REQUEST_SCHEME + "://" + host).hostname
             except ValueError:
                 name = None
-            if (not host or not origin or origin != "http://" + host
+            if (not host or not origin or origin != REQUEST_SCHEME + "://" + host
                     or "/" in host or "@" in host or " " in host
                     or (name != "localhost" and not private_peer(name or ""))):
                 self.send_error(403)
@@ -323,14 +287,14 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def do_GET(self) -> None:  # noqa: N802
-        if not self.allowed():
-            return
         path = self.path.split("?", 1)[0]
+        if not self.allowed(require_auth=path != "/healthz"):
+            return
         if path in {"/api/read-model", "/api/status"}:
             self.send_json(200, build_model())
         elif path == "/healthz":
             self.send_json(200, {"status": "ok", "service": "agent-connectivity-hub", "readOnly": False,
-                                  "projectHash": project_hash()})
+                                   "schema": 1, "projectHash": project_hash(), "generation": RUNTIME["generation"]})
         elif path == "/api/control":
             try:
                 self.send_json(200, control_snapshot())
@@ -382,13 +346,17 @@ class Handler(BaseHTTPRequestHandler):
             capable = False
             connection = None
             if selection is not None and (match.group(1) in FALLBACKS or current["schemaVersion"] == 2):
-                connection = mcp_connection(SHARE_ROOT, tracked_sessions(), project_hash())
+                if SESSION_ROOT is None:
+                    raise PolicyError("Hub runtime is not configured")
+                connection = mcp_connection(RUNTIME["mcp"], SESSION_ROOT, project_hash())
                 capable = read_capabilities(connection)
                 if not capable:
                     self.send_json(409, {"code": "POLICY_CAPABILITY_UNAVAILABLE", "error": "Active MCP adapter does not confirm optional profiles and schema 2."})
                     return
             if selection is not None:
-                catalog = read_catalog(SHARE_ROOT, tracked_sessions(), project_hash(), connection=connection)
+                if SESSION_ROOT is None:
+                    raise PolicyError("Hub runtime is not configured")
+                catalog = read_catalog(RUNTIME["mcp"], SESSION_ROOT, project_hash(), connection=connection)
                 if catalog is None or catalog["truncated"]:
                     self.send_json(503, {"code": "CATALOG_UNAVAILABLE", "error": "Complete runtime catalog unavailable; policy unchanged."})
                     return
@@ -423,14 +391,27 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=4180)
-    parser.add_argument("--project-hash", help="Verify the fixed project identity before accepting requests")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, required=True)
+    parser.add_argument("--project", type=Path, required=True)
+    parser.add_argument("--project-hash", required=True)
+    parser.add_argument("--runtime-input", type=Path, required=True)
+    parser.add_argument("--tls-cert", type=Path, required=True)
+    parser.add_argument("--tls-key", type=Path, required=True)
     args = parser.parse_args()
-    if args.project_hash and args.project_hash != project_hash():
-        parser.error("Hub project identity does not match the configured project")
+    if args.host != "127.0.0.1":
+        parser.error("Hub must bind only to 127.0.0.1")
+    try:
+        configure_runtime(args.runtime_input, args.project, args.project_hash)
+        if args.port != RUNTIME["hubPort"]:
+            raise ValueError("Hub port does not match runtime input")
+        tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls.load_cert_chain(args.tls_cert, args.tls_key)
+    except (OSError, ValueError, ssl.SSLError) as error:
+        parser.error(str(error))
     server = ThreadingHTTPServer((args.host, args.port), Handler)
-    print(f"Agent Connectivity Hub: http://{args.host}:{args.port}", flush=True)
+    server.socket = tls.wrap_socket(server.socket, server_side=True)
+    print(f"Agent Connectivity Hub: https://{args.host}:{args.port}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

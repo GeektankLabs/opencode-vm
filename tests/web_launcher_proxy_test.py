@@ -155,13 +155,26 @@ class TLSHealthServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
 
-    def __init__(self, port, context):
+    def __init__(self, port, context, handler=HealthHandler):
         self.context = context
-        super().__init__(("127.0.0.1", port), HealthHandler)
+        super().__init__(("127.0.0.1", port), handler)
 
     def get_request(self):
         sock, address = super().get_request()
         return self.context.wrap_socket(sock, server_side=True), address
+
+
+class HubHealthHandler(socketserver.BaseRequestHandler):
+    def handle(self):
+        request = self.request.recv(4096)
+        if b"GET /healthz " not in request:
+            self.request.sendall(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            return
+        body = json.dumps({"status": "ok", "service": "agent-connectivity-hub", "readOnly": False,
+                           "schema": 1, "projectHash": self.server.project_hash,
+                           "generation": self.server.generation}).encode()
+        self.request.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " +
+                             str(len(body)).encode() + b"\r\nConnection: close\r\n\r\n" + body)
 
 
 class LauncherMarkup(HTMLParser):
@@ -408,7 +421,7 @@ class LauncherProxyTest(unittest.TestCase):
             editor = share / "editor"
             editor.mkdir(parents=True, mode=0o700)
             editor.chmod(0o700)
-            base = free_port_block(6)
+            base = free_port_block(8)
             key = "cHJvamVjdA"
             project_hash = "launcher-test-project"
             taskboard_state = root / "taskboard-state"
@@ -429,7 +442,7 @@ class LauncherProxyTest(unittest.TestCase):
             hub_dir.mkdir(mode=0o700)
             hub_file = hub_dir / "runtime.json"
             hub_runtime = {"schema": 1, "share": str(share), "projectHash": project_hash,
-                           "hubPort": 4182, "ready": True, "heartbeat": time.time()}
+                           "generation": "fixture-generation", "hubPort": base + 7, "ready": True}
 
             certificate = root / "cert.pem"
             private_key = root / "key.pem"
@@ -443,6 +456,11 @@ class LauncherProxyTest(unittest.TestCase):
             health = TLSHealthServer(base + 4, tls_context)
             health_thread = threading.Thread(target=health.serve_forever, daemon=True)
             health_thread.start()
+            hub = TLSHealthServer(base + 7, tls_context, HubHealthHandler)
+            hub.project_hash = project_hash
+            hub.generation = "fixture-generation"
+            hub_thread = threading.Thread(target=hub.serve_forever, daemon=True)
+            hub_thread.start()
             board = socketserver.ThreadingTCPServer(("127.0.0.1", base + 5), BoardHealthHandler)
             board.daemon_threads = True
             board_thread = threading.Thread(target=board.serve_forever, daemon=True)
@@ -458,7 +476,7 @@ class LauncherProxyTest(unittest.TestCase):
             proxy_log = (root / "proxy.log").open("wb")
             proxy = subprocess.Popen([
                 sys.executable, str(proxy_file), str(base), str(backend.server_address[1]), key,
-                "", "", "0", "", "", "ocvm-web-test", str(share), project_hash, "1", "bi-mcrepo", str(taskboard_state),
+                "", "", "0", "", "", "ocvm-web-test", str(share), project_hash, "1", "bi-mcrepo", str(taskboard_state), "fixture-generation",
             ], stdout=subprocess.DEVNULL, stderr=proxy_log)
             other_proxy = None
             plain_proxy = None
@@ -515,21 +533,40 @@ class LauncherProxyTest(unittest.TestCase):
                 self.assertEqual([app["id"] for app in apps], ["editor", "taskboard", "agent-hub"])
                 self.assertEqual([app["label"] for app in apps],
                                  ["Editor", "Project Management", "Agent Control"])
-                self.assertEqual(apps[2]["port"], 4182)
+                self.assertEqual(apps[2]["port"], base + 7)
+                self.assertEqual(apps[2]["scheme"], "https")
+                self.assertTrue(apps[2]["localOnly"])
                 self.assertNotIn("host", apps[2])
-                hub_file.write_text(json.dumps({**hub_runtime, "heartbeat": time.time() - 10}))
+                hub_file.write_text(json.dumps({**hub_runtime, "generation": "stale-generation"}))
                 status, _, stale_hub = http_request(base, PROJECT_PATH, headers=auth)
                 markup = LauncherMarkup()
                 markup.feed(stale_hub.decode("utf-8"))
-                self.assertEqual([app["id"] for app in json.loads(markup.mount["data-apps"])], ["editor", "taskboard"])
+                stale_apps = json.loads(markup.mount["data-apps"])
+                self.assertEqual([app["id"] for app in stale_apps], ["editor", "taskboard", "agent-hub"])
+                self.assertFalse(stale_apps[2]["ready"])
+                self.assertIn("generation", stale_apps[2]["error"])
                 hub_file.unlink()
+                failure_file = hub_dir / "failure.json"
+                failure_file.write_text(json.dumps({"schema": 1, "projectHash": project_hash,
+                                                    "generation": "fixture-generation", "reason": "Assets missing",
+                                                    "log": "/private/hub.log"}))
+                failure_file.chmod(0o600)
+                status, _, failed_hub = http_request(base, PROJECT_PATH, headers=auth)
+                markup = LauncherMarkup()
+                markup.feed(failed_hub.decode("utf-8"))
+                failed_apps = json.loads(markup.mount["data-apps"])
+                self.assertEqual([app["id"] for app in failed_apps], ["editor", "taskboard", "agent-hub"])
+                self.assertFalse(failed_apps[2]["ready"])
+                self.assertTrue(failed_apps[2]["localOnly"])
+                self.assertEqual(failed_apps[2]["error"], "Assets missing")
+                failure_file.unlink()
 
                 # The plain web endpoint listens on P+1 but the app block is based on P.
-                hub_file.write_text(json.dumps({**hub_runtime, "heartbeat": time.time()}))
+                hub_file.write_text(json.dumps(hub_runtime))
                 hub_file.chmod(0o600)
                 plain_proxy = subprocess.Popen([
                     sys.executable, str(proxy_file), str(base + 1), str(backend.server_address[1]), key,
-                    "", "", "0", "", "", "ocvm-proxy-web-plain", str(share), project_hash, "1", "bi-mcrepo", str(taskboard_state),
+                    "", "", "0", "", "", "ocvm-proxy-web-plain", str(share), project_hash, "1", "bi-mcrepo", str(taskboard_state), "fixture-generation",
                 ], stdout=subprocess.DEVNULL, stderr=proxy_log)
                 deadline = time.monotonic() + 4
                 while True:
@@ -540,7 +577,7 @@ class LauncherProxyTest(unittest.TestCase):
                         if plain_proxy.poll() is not None or time.monotonic() > deadline:
                             self.fail("plain web proxy did not start")
                         time.sleep(.02)
-                hub_file.write_text(json.dumps({**hub_runtime, "heartbeat": time.time()}))
+                hub_file.write_text(json.dumps(hub_runtime))
                 status, _, plain_body = http_request(base + 1, PROJECT_PATH, headers=auth)
                 self.assertEqual(status, 200)
                 markup = LauncherMarkup()
@@ -554,7 +591,7 @@ class LauncherProxyTest(unittest.TestCase):
                 plain_proxy = subprocess.Popen([
                     sys.executable, str(proxy_file), str(base + 1), str(backend.server_address[1]), key,
                     str(certificate), str(private_key), "0", "", "", "ocvm-proxy-web-plain",
-                    str(share), project_hash, "1", "bi-mcrepo", str(taskboard_state),
+                    str(share), project_hash, "1", "bi-mcrepo", str(taskboard_state), "fixture-generation",
                 ], stdout=subprocess.DEVNULL, stderr=proxy_log)
                 deadline = time.monotonic() + 4
                 while True:
@@ -565,7 +602,7 @@ class LauncherProxyTest(unittest.TestCase):
                         if plain_proxy.poll() is not None or time.monotonic() > deadline:
                             self.fail("HTTPS proxy did not start")
                         time.sleep(.02)
-                hub_file.write_text(json.dumps({**hub_runtime, "heartbeat": time.time()}))
+                hub_file.write_text(json.dumps(hub_runtime))
                 status, _, tls_body = https_request(base + 1, PROJECT_PATH, headers=auth)
                 self.assertEqual(status, 200)
                 markup = LauncherMarkup()
@@ -800,11 +837,14 @@ class LauncherProxyTest(unittest.TestCase):
                 proxy_log.close()
                 health.shutdown()
                 health.server_close()
+                hub.shutdown()
+                hub.server_close()
                 board.shutdown()
                 board.server_close()
                 backend.shutdown()
                 backend.server_close()
                 health_thread.join(timeout=2)
+                hub_thread.join(timeout=2)
                 board_thread.join(timeout=2)
                 backend_thread.join(timeout=2)
 

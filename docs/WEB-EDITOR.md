@@ -15,7 +15,7 @@ opencode-vm web --reconnect --editor
 
 Web sessions start the editor by default, including reconnecting an older session that has no explicit opt-out. `--no-editor` disables it for the session and that choice is retained by reconnect/attach; `--editor` re-enables it. Fresh web sessions start with the editor again. Switching to a terminal session stops the editor. Its URL appears under **Project editor** in the console service listing after local readiness; startup failures are shown explicitly while OpenCode continues.
 
-The editor uses HTTPS on **P+4**: with an available default base of `4096`, the editor is on `https://<host-ip>:4100`. The host reserves all six public forwards in one SSH process, including Taskboard on `P+5`. Collisions move the entire block through the same incrementing base-port search. Browser-blocked ports, the reserved incoming MCP port and an occupied guest editor port are skipped. A failed LAN tunnel is reported and the banner switches to the host-loopback fallback. Real host reachability still depends on Lima forwarding.
+The editor uses HTTPS on **P+4**: with an available default base of `4096`, the editor is on `https://<host-ip>:4100`. The host reserves all eight service forwards in one SSH process, including Taskboard on `P+5`; the reserved Dashboard and Hub forwards at `P+6`/`P+7` remain host-loopback-only. Collisions move the entire block through the same incrementing base-port search. Browser-blocked ports, the reserved incoming MCP port and an occupied guest editor port are skipped. A failed LAN tunnel is reported and the banner switches to the host-loopback fallback. Real host reachability still depends on Lima forwarding.
 
 The first enabled fresh start installs the SHA-256-pinned ARM64/AMD64 release in the base VM before cloning. Reconnecting an older VM installs it there if needed. Editor installation and startup failures do not stop OpenCode. An owned transient systemd service runs code-server, extensions and terminals under the existing sandbox profile. Reconnect/finalization stops the whole service control group, including its terminals.
 
@@ -55,12 +55,14 @@ and does not change OpenCode-owned nodes. The seed page at `/` still initializes
 the project in localStorage and redirects to OpenCode as before.
 
 The app catalog is ordered **Editor**, **Project Management** (the project-local
-Taskboard), and **Agent Control** (the project-bound Hub). Each
-appears only with a private project-matching runtime descriptor and its own
-readiness check: Editor HTTPS P+4 `/healthz`, Hub a fresh heartbeat backed by
-a host-local `/healthz` with the expected project hash on a free port in
-`4180..4199`, Taskboard HTTP P+5 `/api/projects`. All links use
-the browser's current trusted private/local host, including private overlays. Links open
+Taskboard), and **Agent Control** (the project-bound Hub). Ready entries require
+a private project-matching runtime descriptor and their own readiness check:
+Editor HTTPS P+4 `/healthz`, Hub HTTPS P+7 `/healthz` with
+the expected project hash and generation, Taskboard HTTP P+5 `/api/projects`.
+The Hub's guest listener and host forward are loopback-only by default. Editor and
+Taskboard links use the browser's current trusted private/local host; Agent Control
+opens only from a host-loopback browser page and is shown unavailable to LAN browsers.
+Links open
 in new tabs with `noopener noreferrer`; no credential or project path is placed
 in the URL. The launcher remains available when no app is ready.
 

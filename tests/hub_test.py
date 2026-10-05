@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
-"""Focused read-model and non-exposure tests for the standalone hub."""
+"""Focused guest-runtime and non-exposure checks for the Hub."""
 
+import base64
+import hashlib
 import json
 import tempfile
+import threading
 import unittest
-from unittest.mock import patch
-import subprocess
+from http.server import ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 import hub.server as server
 
@@ -15,121 +20,126 @@ class HubReadModelTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         root = Path(self.temp.name)
-        (root / "mcp-tunnel/openai").mkdir(parents=True)
-        (root / "sessions/demo/mcp").mkdir(parents=True)
-        (root / "sessions/demo").mkdir(exist_ok=True)
+        self.share = root / "share"
+        self.hub = self.share / "hub"
+        self.mcp = self.share / "mcp"
         self.project = root / "project"
-        self.project.mkdir()
-        (root / "mcp-tunnel/openai/registry.json").write_text(json.dumps({"projects": {"p": {"id": "p", "path": str(self.project), "keyId": "key_private", "tunnelId": "tunnel_0123456789abcdef0123456789abcdef"}}}))
-        (root / "sessions/demo.env").write_text(f'SESS_PROJ="{self.project}"\nSESS_NAME="oc-demo"\nSESS_MODE="web"\nSESS_PORT="4555"\nSESS_MCP_ENABLED="1"\nSESS_MCP_PORT="4556"\n')
-        (root / "sessions/demo/auth.env").write_text('OPENCODE_SERVER_PASSWORD="super-secret-token"\n')
-        (root / "sessions/demo/mcp/runtime.json").write_text(json.dumps({"connected": False, "tunnelId": "tunnel_0123456789abcdef0123456789abcdef"}))
-        (root / "sessions/demo/mcp/tunnel.log").write_text("Authorization: Bearer super-secret-token\napi_key=sk-this-must-not-leak\nhealthy probe failed\n")
-        self.old = (server.SHARE_ROOT, server.PROJECT)
-        server.SHARE_ROOT = root
-        server.PROJECT = self.project
+        for directory in (self.share, self.hub, self.mcp, self.project):
+            directory.mkdir(parents=True, exist_ok=True)
+            directory.chmod(0o700)
+        (self.mcp / "credential").write_text("fixture-token\n")
+        (self.mcp / "credential").chmod(0o600)
+        (self.mcp / "tunnel.log").write_text(
+            "Authorization: Bearer super-secret-token\napi_key=sk-this-must-not-leak\nhealthy probe failed\n"
+        )
+        (self.mcp / "tunnel.log").chmod(0o600)
+        self.prior = (server.PROJECT, server.SESSION_ROOT, server.RUNTIME, server.AUTH_CREDENTIALS, server.REQUEST_SCHEME)
+        self.runtime_path = self.hub / "runtime-input.json"
+        self.project_id = hashlib.md5(str(self.project.resolve()).encode()).hexdigest()
+        self.write_runtime()
+        server.configure_runtime(self.runtime_path, self.project, self.project_id)
 
     def tearDown(self):
-        server.SHARE_ROOT, server.PROJECT = self.old
+        server.PROJECT, server.SESSION_ROOT, server.RUNTIME, server.AUTH_CREDENTIALS, server.REQUEST_SCHEME = self.prior
         self.temp.cleanup()
 
-    def test_configuration_and_runtime_are_separate(self):
-        model = server.build_model()
-        tunnel = next(item for item in model["integrations"] if item["id"] == "secure-mcp-tunnel")
-        self.assertTrue(tunnel["configured"])
-        self.assertNotEqual(tunnel["healthStatus"], "active/healthy")
-        self.assertEqual(tunnel["runtimeStatus"], "unknown/stale")
+    def write_runtime(self, **changes):
+        runtime = {
+            "schema": 1,
+            "projectHash": self.project_id,
+            "generation": "fixture-generation",
+            "hubPort": 4567,
+            "authEnabled": False,
+            "auth": None,
+            "a2aEnabled": True,
+            "tunnelConfigured": True,
+            "openliveConfigured": True,
+            "mcp": {"enabled": True, "port": 4568, "generation": "fixture-generation"},
+        }
+        runtime.update(changes)
+        self.runtime_path.write_text(json.dumps(runtime))
+        self.runtime_path.chmod(0o600)
 
-    def test_logs_are_bounded_and_secret_free(self):
+    def test_runtime_input_is_project_bound_and_private(self):
+        self.write_runtime(projectHash="0" * 32)
+        with self.assertRaisesRegex(ValueError, "project identity"):
+            server.configure_runtime(self.runtime_path, self.project, self.project_id)
+        self.write_runtime()
+        self.runtime_path.chmod(0o644)
+        with self.assertRaisesRegex(ValueError, "unavailable"):
+            server.configure_runtime(self.runtime_path, self.project, self.project_id)
+
+    def test_runtime_uses_host_project_identity_for_a_guest_mount_path(self):
+        guest_mount = Path(self.temp.name) / "guest-mount"
+        guest_mount.mkdir()
+        server.configure_runtime(self.runtime_path, guest_mount, self.project_id)
+        self.assertEqual(server.PROJECT, guest_mount.resolve())
+        self.assertEqual(server.project_hash(), self.project_id)
+
+    def test_model_uses_admitted_guest_runtime_and_redacts_logs(self):
         model = server.build_model()
+        by_id = {item["id"]: item for item in model["integrations"]}
+        self.assertEqual(set(by_id), {"secure-mcp-tunnel", "incoming-mcp", "a2a", "openlive"})
+        self.assertTrue(by_id["secure-mcp-tunnel"]["configured"])
+        self.assertEqual(by_id["secure-mcp-tunnel"]["state"], "unverified")
+        self.assertEqual(by_id["a2a"]["state"], "unverified")
+        self.assertEqual(by_id["openlive"]["state"], "unverified")
         encoded = json.dumps(model)
         self.assertNotIn("super-secret-token", encoded)
         self.assertNotIn("sk-this-must-not-leak", encoded)
         self.assertIn("[REDACTED]", encoded)
 
-    def test_no_assignment_means_no_fake_active_card(self):
-        registry = server.SHARE_ROOT / "mcp-tunnel/openai/registry.json"
-        registry.write_text(json.dumps({"projects": {}}))
-        model = server.build_model()
-        tunnel = next(item for item in model["integrations"] if item["id"] == "secure-mcp-tunnel")
-        self.assertFalse(tunnel["configured"])
-        self.assertEqual(tunnel["state"], "not_configured")
-        self.assertEqual(len(model["integrations"]), 4)
-        self.assertTrue(model["setupGuides"])
-
-    def test_lm_studio_guide_uses_native_provider_and_default_forward(self):
-        model = server.build_model()
-        guide = next(item for item in model["setupGuides"] if item["id"] == "lm-studio")
-        text = " ".join(guide["steps"])
-        self.assertIn("bereits erlaubt", text)
-        self.assertIn("opencode-vm ports host add 1234", text)
-        self.assertIn("native", text)
-        self.assertIn("localhost:1234", text)
-        self.assertIn("alle VMs", text)
-        self.assertEqual(guide["docs"], "README.md#network-policy-commands")
-
-    def test_invalid_registry_is_unverified_and_markers_never_prove_ready(self):
-        registry = server.SHARE_ROOT / "mcp-tunnel/openai/registry.json"
-        registry.write_text("invalid")
-        model = server.build_model()
-        self.assertIsNone(model["integrations"][0]["configured"])
-        self.assertEqual(model["integrations"][0]["state"], "unverified")
-        registry.write_text(json.dumps({"projects": {"p": {"path": str(self.project)}, "q": {"path": str(self.project)}}}))
-        self.assertIsNone(server.build_model()["integrations"][0]["configured"])
-        registry.write_text(json.dumps({"projects": {"p": {"path": str(self.project)}}}))
-        (server.SHARE_ROOT / "sessions/demo/mcp/runtime.json").write_text('{"connected":true}')
-        bridge = server.SHARE_ROOT / "openlive/bin/opencode"
-        bridge.parent.mkdir(parents=True); bridge.write_text("shim")
-        runtime = server.SHARE_ROOT / "sessions/demo/openlive/runtime.json"
-        runtime.parent.mkdir(); runtime.write_text('{"pid":123}')
-        with patch.object(server, "vm_running", return_value=True), patch.object(server, "probe_port", return_value=True):
-            model = server.build_model()
-        for name in ("secure-mcp-tunnel", "openlive", "incoming-mcp"):
-            item = next(item for item in model["integrations"] if item["id"] == name)
-            self.assertNotEqual(item["state"], "ready")
-
-    def test_verified_stop_and_unknown_lima_are_distinct(self):
-        with patch.object(server.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "failed")):
-            self.assertIsNone(server.vm_running("demo"))
-        with patch.object(server.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "stopped", "")):
-            self.assertFalse(server.vm_running("demo"))
-            self.assertEqual(server.build_model()["integrations"][0]["state"], "not_ready")
-
-    def test_mcp_health_ready_is_independent_of_catalog_and_no_mcp_is_explained(self):
-        with patch.object(server, "mcp_connection", return_value={"state": "ready", "reason": "project-health"}):
+    def test_mcp_health_ready_is_independent_of_catalog_and_disabled_is_explained(self):
+        connection = {"state": "ready", "reason": "project-health", "base": "http://127.0.0.1:4568", "token": "private"}
+        with patch.object(server, "mcp_connection", return_value=connection):
             card = next(item for item in server.build_model()["integrations"] if item["id"] == "incoming-mcp")
             self.assertEqual(card["state"], "ready")
             self.assertEqual(card["checkScope"], "local-mcp-health")
-        env = server.SHARE_ROOT / "sessions/demo.env"
-        env.write_text(env.read_text().replace('SESS_MCP_ENABLED="1"', 'SESS_MCP_ENABLED="0"'))
+        server.RUNTIME["mcp"] = {"enabled": False, "port": 0, "generation": "fixture-generation"}
         card = next(item for item in server.build_model()["integrations"] if item["id"] == "incoming-mcp")
         self.assertEqual(card["state"], "not_ready")
         self.assertIn("--no-mcp", card["statusReason"])
-        self.assertEqual(card["checkScope"], "configuration-only")
 
-    def test_control_snapshot_reuses_single_health_probe_without_exposing_token(self):
-        with patch.object(server, "mcp_connection", return_value={"state": "ready", "reason": "verified", "token": "PRIVATE-PROBE-TOKEN"}) as probe, \
-             patch.object(server, "read_catalog", return_value=None), patch.object(server, "read_capabilities", return_value=False):
+    def test_control_snapshot_reuses_one_health_probe_without_exposing_token(self):
+        connection = {"state": "ready", "reason": "verified", "base": "http://127.0.0.1:4568", "token": "PRIVATE-PROBE-TOKEN"}
+        with patch.object(server, "mcp_connection", return_value=connection) as probe, \
+             patch.object(server, "read_catalog", return_value=None), \
+             patch.object(server, "read_capabilities", return_value=False):
             snapshot = server.control_snapshot()
         self.assertEqual(probe.call_count, 1)
         self.assertEqual(next(item for item in snapshot["readModel"]["integrations"] if item["id"] == "incoming-mcp")["state"], "ready")
         self.assertNotIn("PRIVATE-PROBE-TOKEN", json.dumps(snapshot))
 
-    def test_a2a_body_and_effective_url_are_validated_no_task_probe(self):
-        card = {"supportedInterfaces": [{"protocolBinding": "JSONRPC", "url": "http://127.0.0.1:4999"}]}
-        for body, expected in (({"status": "ok", "service": "other"}, "not_ready"),
-                               ({"status": "ok", "service": "opencode-a2a"}, "ready")):
-            calls = []
-            def probe(url, secret=None):
-                calls.append((url, secret)); return (True, body if secret else card)
-            with patch.object(server, "probe_http", side_effect=probe):
-                item = next(item for item in server.build_model()["integrations"] if item["id"] == "a2a")
-            self.assertEqual(item["state"], expected)
-            self.assertEqual(calls[-1][0], "http://127.0.0.1:4999/health")
-            self.assertEqual(len(calls), 2)
-        with patch.object(server, "probe_http", return_value=(True, {"supportedInterfaces": []})):
-            item = next(item for item in server.build_model()["integrations"] if item["id"] == "a2a")
-            self.assertEqual(item["state"], "unverified")
+    def test_health_is_public_only_to_private_peers_but_api_uses_existing_auth(self):
+        password = "two words$#'\""
+        self.write_runtime(authEnabled=True, auth={"username": "opencode", "password": password})
+        server.configure_runtime(self.runtime_path, self.project, self.project_id)
+        server.REQUEST_SCHEME = "http"
+        http = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        thread = threading.Thread(target=http.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{http.server_port}"
+        try:
+            with urlopen(base + "/healthz", timeout=3) as response:
+                health = json.load(response)
+            self.assertEqual(health["generation"], "fixture-generation")
+            with self.assertRaises(HTTPError) as refused:
+                urlopen(base + "/api/status", timeout=3)
+            self.assertEqual(refused.exception.code, 401)
+            token = base64.b64encode(f"opencode:{password}".encode()).decode()
+            request = Request(base + "/api/status", headers={"Authorization": "Basic " + token})
+            with urlopen(request, timeout=3) as response:
+                self.assertEqual(response.status, 200)
+        finally:
+            http.shutdown()
+            http.server_close()
+            thread.join()
+
+    def test_private_peer_boundary(self):
+        self.assertTrue(server.private_peer("192.168.3.4"))
+        self.assertTrue(server.private_peer("100.90.1.2"))
+        self.assertFalse(server.private_peer("8.8.8.8"))
+        self.assertFalse(server.private_peer("192.0.2.1"))
 
 
 if __name__ == "__main__":

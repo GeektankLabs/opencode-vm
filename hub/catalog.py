@@ -1,4 +1,4 @@
-"""Bounded, project-bound read of the existing MCP runtime catalog."""
+"""Bounded, project-bound read of the admitted guest MCP runtime."""
 
 import json
 import os
@@ -25,38 +25,40 @@ def _request(url, token, payload=None):
         return json.loads(body)
 
 
-def mcp_connection(share_root, sessions, project_hash):
-    if len(sessions) != 1:
-        return {"state": "unverified", "reason": "Keine eindeutige Projekt-Session bestätigt."}
-    for session_file, values in sessions:
-        if values.get("SESS_MCP_ENABLED") != "1":
-            return {"state": "not_ready", "reason": "MCP ist für diese Session nicht aktiviert (z. B. --no-mcp)."}
-        port_text = values.get("SESS_MCP_PORT", "")
-        if not port_text.isdecimal() or not 1 <= int(port_text) <= 65535:
-            return {"state": "unverified", "reason": "MCP-Port ist nicht prüfbar."}
-        port = int(port_text)
-        credential = Path(share_root) / "sessions" / session_file.stem / "mcp/credential"
-        try:
-            info = credential.lstat()
-            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
-                    or info.st_mode & 0o077 or info.st_size > 512 or credential.parent.is_symlink()):
-                return {"state": "unverified", "reason": "Private MCP-Prüfcredential nicht verfügbar."}
-            token = credential.read_text(encoding="ascii").strip()
-            if not token:
-                return {"state": "unverified", "reason": "Private MCP-Prüfcredential nicht verfügbar."}
-            base = f"http://127.0.0.1:{port}"
-        except (OSError, ValueError):
+def mcp_connection(runtime, session_root, project_hash):
+    """Read the current session's MCP endpoint from admitted guest facts only."""
+    if not isinstance(runtime, dict) or runtime.get("enabled") is not True:
+        return {"state": "not_ready", "reason": "MCP ist für diese Session nicht aktiviert (z. B. --no-mcp)."}
+    port = runtime.get("port")
+    generation = runtime.get("generation")
+    if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535 or not isinstance(generation, str):
+        return {"state": "unverified", "reason": "MCP-Runtimeinput ist nicht prüfbar."}
+    root = Path(session_root)
+    credential = root / "mcp/credential"
+    try:
+        root_info = root.lstat()
+        parent_info = credential.parent.lstat()
+        info = credential.lstat()
+        if (not stat.S_ISDIR(root_info.st_mode) or root_info.st_uid != os.getuid() or root_info.st_mode & 0o077
+                or not stat.S_ISDIR(parent_info.st_mode) or parent_info.st_uid != os.getuid() or parent_info.st_mode & 0o077
+                or not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_mode & 0o077 or info.st_size > 512 or credential.is_symlink()):
             return {"state": "unverified", "reason": "Private MCP-Prüfcredential nicht verfügbar."}
-        try:
-            health = _request(base + "/healthz", token)
-            if (health.get("healthy") is not True or health.get("project", {}).get("id") != project_hash
-                    or health.get("generation") != values.get("SESS_CONTROLLER")):
-                return {"state": "not_ready", "reason": "MCP-Health bestätigt Dienst, Projekt und Generation nicht."}
-            return {"state": "ready", "reason": "Authentifizierter MCP-Health bestätigt Projekt und Generation.",
-                    "base": base, "token": token}
-        except (OSError, ValueError, TypeError, AttributeError, CatalogUnavailable):
-            return {"state": "not_ready", "reason": "Authentifizierter MCP-Healthcheck fehlgeschlagen."}
-    return {"state": "unverified", "reason": "MCP nicht prüfbar."}
+        token = credential.read_text(encoding="ascii").strip()
+        if not token:
+            return {"state": "unverified", "reason": "Private MCP-Prüfcredential nicht verfügbar."}
+        base = f"http://127.0.0.1:{port}"
+    except (OSError, ValueError):
+        return {"state": "unverified", "reason": "Private MCP-Prüfcredential nicht verfügbar."}
+    try:
+        health = _request(base + "/healthz", token)
+        if (health.get("healthy") is not True or health.get("project", {}).get("id") != project_hash
+                or health.get("generation") != generation):
+            return {"state": "not_ready", "reason": "MCP-Health bestätigt Dienst, Projekt und Generation nicht."}
+        return {"state": "ready", "reason": "Authentifizierter MCP-Health bestätigt Projekt und Generation.",
+                "base": base, "token": token}
+    except (OSError, ValueError, TypeError, AttributeError, CatalogUnavailable):
+        return {"state": "not_ready", "reason": "Authentifizierter MCP-Healthcheck fehlgeschlagen."}
 
 
 def read_capabilities(connection):
@@ -80,8 +82,8 @@ def read_capabilities(connection):
         return False
 
 
-def read_catalog(share_root, sessions, project_hash, *, connection=None):
-    connection = connection if connection is not None else mcp_connection(share_root, sessions, project_hash)
+def read_catalog(runtime, session_root, project_hash, *, connection=None):
+    connection = connection if connection is not None else mcp_connection(runtime, session_root, project_hash)
     if connection.get("state") == "ready":
         try:
             base, token = connection["base"], connection["token"]

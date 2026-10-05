@@ -82,7 +82,7 @@ class EditorTest(unittest.TestCase):
 load_session_auth() { :; }
 _stop_legacy_redirector() { :; }
 ensure_web_tls() { OC_TLS_CERT=""; OC_TLS_KEY=""; }
-start_proxy() { printf '%s:%s:%s\\n' "$1" "${12:-unset}" "${13:-unset}" >> "$TEST_OUTPUT"; }
+start_proxy() { printf '%s:%s:%s:%s\\n' "$1" "${12:-unset}" "${13:-unset}" "${15:-unset}" >> "$TEST_OUTPUT"; }
 SESS_SHARE="$1/share"
 PROJ_DIR="$1/bi-mcrepo"
 OC_PROXY_PY="$1/running-proxy.py"
@@ -92,6 +92,7 @@ OC_A2A=0
 OC_OPENLIVE_REMOTE_TARGET=0
 OC_OPENLIVE_PROJECT_HASH=project-hash
 OC_OPENLIVE_REMOTE_GENERATION=""
+OC_HUB_GENERATION=fixture-generation
 TEST_OUTPUT="$1/forwarded"
 OC_LAUNCHER_ENABLED=0
 start_web_proxies
@@ -100,8 +101,8 @@ start_web_proxies
 '''
             shell(web_code, tmp)
             self.assertEqual((Path(tmp) / 'forwarded').read_text().splitlines(),
-                             ['web-tls:0:bi-mcrepo', 'web-plain:0:bi-mcrepo',
-                              'web-tls:1:bi-mcrepo', 'web-plain:1:bi-mcrepo'])
+                              ['web-tls:0:bi-mcrepo:fixture-generation', 'web-plain:0:bi-mcrepo:fixture-generation',
+                               'web-tls:1:bi-mcrepo:fixture-generation', 'web-plain:1:bi-mcrepo:fixture-generation'])
 
     def test_attach_upgrades_old_default_but_retains_explicit_opt_out(self):
         choice = '  local sess_editor_disabled=' + SCRIPT.split('  local sess_editor_disabled=', 1)[1].split('  local prior_mcp_enabled=', 1)[0]
@@ -117,10 +118,10 @@ start_web_proxies
     def test_default_public_port_block_includes_editor(self):
         code = 'BROWSER_UNSAFE_PORTS=(6000)\nis_valid_port() { [[ "$1" =~ ^[0-9]+$ ]] && (( 1 <= 10#$1 && 10#$1 <= 65535 )); }\n'
         code += function('is_browser_unsafe_port') + '\n' + function('validate_web_port') + '\n'
-        shell(code + 'SESSION_EDITOR_MODE=""\nvalidate_web_port 65530')
-        self.assertEqual(shell(code + 'SESSION_EDITOR_MODE=""\nvalidate_web_port 65531', check=False).returncode, 2)
+        shell(code + 'SESSION_EDITOR_MODE=""\nvalidate_web_port 65528')
+        self.assertEqual(shell(code + 'SESSION_EDITOR_MODE=""\nvalidate_web_port 65529', check=False).returncode, 2)
         self.assertEqual(shell(code + 'SESSION_EDITOR_MODE=""\nvalidate_web_port 5996', check=False).returncode, 2)
-        shell(code + 'SESSION_EDITOR_MODE=disable\nvalidate_web_port 65530\nvalidate_web_port 5994')
+        shell(code + 'SESSION_EDITOR_MODE=disable\nvalidate_web_port 65528\nvalidate_web_port 5992')
 
     def test_port_boundaries_and_private_mcp_overlap(self):
         code = 'BROWSER_UNSAFE_PORTS=(6000)\n' + function("is_browser_unsafe_port") + "\n" + function("select_web_guest_base")
@@ -128,9 +129,11 @@ start_web_proxies
         self.assertEqual(shell(code + "\nselect_web_guest_base 4096 4100 0").stdout.strip(), "4103")
         self.assertEqual(shell(code + "\nselect_web_guest_base 5996 '' 1").stdout.strip(), "6001")
         self.assertNotEqual(shell(code + "\nselect_web_guest_base 65532 '' 1", check=False).returncode, 0)
-        self.assertEqual(shell(code + "\nselect_web_guest_base 65530 '' 1").stdout.strip(), "65530")
+        self.assertEqual(shell(code + "\nselect_web_guest_base 65528 '' 1").stdout.strip(), "65528")
+        collision = code + '\nguest_port_available() { [ "$2" != 4103 ]; }\nselect_web_guest_base 4096 "" 0 fixture-vm'
+        self.assertEqual(shell(collision).stdout.strip(), "4097")
 
-    def test_host_collision_moves_entire_five_port_block(self):
+    def test_host_collision_moves_entire_eight_port_block(self):
         code = '\n'.join(function(name) for name in ["start_web_tunnels", "is_browser_unsafe_port"])
         code += r'''
 BROWSER_UNSAFE_PORTS=()
@@ -138,7 +141,7 @@ load_policy() { :; }
 lima_guest_user() { printf guest; }
 limactl() { printf 2222; }
 stop_web_tunnels() { :; }
-editor_guest_port_available() { [ "$2" != 4105 ]; }
+guest_port_available() { [ "$2" != 4105 ]; }
 _port_free_for_bind() { [ "$1" != 4100 ]; }
 pgrep() { printf 12345; }
 ssh() {
@@ -153,6 +156,8 @@ ssh() {
             forwards = (Path(tmp) / "forward").read_text()
             for port in range(4102, 4108):
                 self.assertIn(f"0.0.0.0:{port}:127.0.0.1:{port}", forwards)
+            for port in range(4108, 4110):
+                self.assertIn(f"127.0.0.1:{port}:127.0.0.1:{port}", forwards)
             self.assertNotIn("0.0.0.0:4100:", forwards)
             Path("/tmp/ocvm-tunnel-oc-editor-test-4102.pid").unlink(missing_ok=True)
 
@@ -165,7 +170,7 @@ lima_guest_user() { printf guest; }
 limactl() { printf 2222; }
 stop_web_tunnels() { :; }
 _port_free_for_bind() { return 0; }
-editor_guest_port_available() { [ "$2" != 4100 ]; }
+guest_port_available() { [ "$2" != 4100 ]; }
 pgrep() { printf 12345; }
 ssh() { case " $* " in *" -f -N "*) printf '%s\n' "$@" > "$TEST_DIR/forward" ;; esac; }
 '''
@@ -175,17 +180,40 @@ ssh() { case " $* " in *" -f -N "*) printf '%s\n' "$@" > "$TEST_DIR/forward" ;; 
             forwards = (Path(tmp) / "forward").read_text()
             for port in range(4097, 4103):
                 self.assertIn(f"0.0.0.0:{port}:127.0.0.1:{port}", forwards)
+            for port in range(4103, 4105):
+                self.assertIn(f"127.0.0.1:{port}:127.0.0.1:{port}", forwards)
             self.assertNotIn("0.0.0.0:4096:", forwards)
             Path("/tmp/ocvm-tunnel-oc-editor-guest-test-4097.pid").unlink(missing_ok=True)
 
     def test_guest_probe_detects_an_existing_listener(self):
-        code = 'vm_exec() { bash -c "$2" _ "${@:3}"; }\n' + function("editor_guest_port_available")
+        code = 'vm_exec() { bash -c "$2" _ "${@:3}"; }\n' + function("guest_port_available")
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", 0))
             listener.listen()
             port = listener.getsockname()[1]
-            self.assertNotEqual(shell(code + '\neditor_guest_port_available test "$1"', port, check=False).returncode, 0)
-        shell(code + '\neditor_guest_port_available test "$1"', port)
+            self.assertNotEqual(shell(code + '\nguest_port_available test "$1"', port, check=False).returncode, 0)
+        shell(code + '\nguest_port_available test "$1"', port)
+
+    def test_hub_guest_port_collision_moves_entire_block(self):
+        code = '\n'.join(function(name) for name in ["start_web_tunnels", "is_browser_unsafe_port"])
+        code += r'''
+BROWSER_UNSAFE_PORTS=()
+load_policy() { :; }
+lima_guest_user() { printf guest; }
+limactl() { printf 2222; }
+stop_web_tunnels() { :; }
+_port_free_for_bind() { return 0; }
+guest_port_available() { [ "$2" != 4103 ]; }
+pgrep() { printf 12345; }
+ssh() { case " $* " in *" -f -N "*) printf '%s\n' "$@" > "$TEST_DIR/forward" ;; esac; }
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            result = shell(code + '\nTEST_DIR="$1"\nstart_web_tunnels oc-hub-guest-test 4096 "" 0\nprintf "BASE=%s\\n" "$WEB_PORT_BASE"', tmp)
+            self.assertIn("BASE=4097", result.stdout)
+            forwards = (Path(tmp) / "forward").read_text()
+            self.assertNotIn("0.0.0.0:4096:", forwards)
+            self.assertIn("127.0.0.1:4104:127.0.0.1:4104", forwards)
+            Path("/tmp/ocvm-tunnel-oc-hub-guest-test-4097.pid").unlink(missing_ok=True)
 
     def test_payload_syntax_and_preferences(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -221,8 +249,8 @@ ssh() { case " $* " in *" -f -N "*) printf '%s\n' "$@" > "$TEST_DIR/forward" ;; 
         self.assertIn('"label": "Agent Control"', registry)
         self.assertLess(registry.index('"id": "editor"'), registry.index('"id": "taskboard"'))
         self.assertLess(registry.index('"id": "taskboard"'), registry.index('"id": "agent-hub"'))
-        self.assertIn('"port_min": 4180', registry)
-        self.assertIn('"port_max": 4199', registry)
+        self.assertIn('"port_offset": 7', registry)
+        self.assertIn('"scheme": "https"', registry)
         self.assertIn('for app in LAUNCHER_APP_REGISTRY', redirector)
         self.assertIn('"board"', launcher)
         self.assertIn('link.target = "_blank"', launcher)
