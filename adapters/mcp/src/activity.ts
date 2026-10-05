@@ -2,7 +2,12 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { link, lstat, open, rename, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
-import { AdapterError, ACTIVITY_TYPES, isRecord } from "./types.js";
+import {
+  AdapterError,
+  ACTIVITY_TYPES,
+  isRecord,
+  MAX_CORRELATED_ERROR_DETAILS,
+} from "./types.js";
 import type {
   ActivityEvent,
   AttentionEntry,
@@ -20,6 +25,7 @@ import type {
   SubmissionGuardSnapshot,
 } from "./types.js";
 import { initialAttention } from "./attention.js";
+import { isSafeAssistantErrorDetail } from "./content.js";
 
 type GuardOverrideRecord = {
   request_id: string;
@@ -1042,9 +1048,9 @@ function validAttentionState(store: Store): boolean {
       !["ready", "attention", "action_required"].includes(String(value.classification)) ||
       !["new", "ready", "offered", "discussed", "superseded"].includes(String(value.lifecycle)) ||
       !["pending", "resolved", "unlinked", "ambiguous", "unavailable"].includes(String(value.hierarchy_status)) ||
-      typeof value.session_id !== "string" || typeof value.prepared_summary !== "string" ||
-      typeof value.next_safe_step !== "string" || !Array.isArray(value.assistant_message_ids) ||
-      !isRecord(value.deliveries)) return false;
+       typeof value.session_id !== "string" || typeof value.prepared_summary !== "string" ||
+       typeof value.next_safe_step !== "string" || !Array.isArray(value.assistant_message_ids) ||
+       !isRecord(value.deliveries) || !validAttentionErrorDetails(value)) return false;
     for (const delivery of Object.values(value.deliveries)) {
       if (!isRecord(delivery) || !["pending", "delivered", "failed", "abandoned"].includes(String(delivery.state)) ||
         !Number.isSafeInteger(delivery.attempts) || typeof delivery.updated_at !== "string") return false;
@@ -1061,6 +1067,26 @@ function validAttentionState(store: Store): boolean {
       !isRecord(subscription.arguments)) return false;
   }
   return true;
+}
+
+function validAttentionErrorDetails(value: Record<string, unknown>): boolean {
+  const details = value.error_details;
+  const total = value.error_details_total;
+  const truncated = value.error_details_truncated;
+  if (details === undefined)
+    return total === undefined && truncated === undefined;
+  if (!Array.isArray(details) || details.length > MAX_CORRELATED_ERROR_DETAILS ||
+    !Number.isSafeInteger(total) || (total as number) < details.length ||
+    typeof truncated !== "boolean" || truncated !== ((total as number) > details.length))
+    return false;
+  return details.every(validCorrelatedAttentionErrorDetail);
+}
+
+function validCorrelatedAttentionErrorDetail(detail: unknown): boolean {
+  if (!isRecord(detail) || typeof detail.assistant_message_id !== "string" ||
+    detail.attribution !== "exact_parent") return false;
+  const { assistant_message_id: _assistantMessageId, attribution: _attribution, ...errorDetail } = detail;
+  return isSafeAssistantErrorDetail(errorDetail);
 }
 
 async function adoptLegacyJournal(target: string, legacyPath: string, project: string): Promise<void> {

@@ -16,7 +16,11 @@ import type {
   QuestionV2Request,
   SessionV2Info,
 } from "@opencode-ai/sdk/v2";
-import { AdapterError, isRecord } from "./types.js";
+import {
+  AdapterError,
+  isRecord,
+  MAX_CORRELATED_ERROR_DETAILS,
+} from "./types.js";
 import {
   ReadReferences,
   DEFAULT_CONTENT_BYTES,
@@ -27,6 +31,7 @@ import {
   digest,
   fitPreviews,
   jsonBytes,
+  safeAssistantErrorDetail,
   utf8Prefix,
   visibleContent,
 } from "./content.js";
@@ -39,6 +44,7 @@ import type {
   AttentionReceipt,
   AttentionEntry,
   ActivitySnapshot,
+  CorrelatedErrorDetail,
   RuntimeOptions,
   RuntimePatch,
   RuntimeUpdateResult,
@@ -386,12 +392,28 @@ export class OpenCodeGateway implements SessionGateway {
     const terminalMessages = messages.filter((item) => item.role === "assistant" && item.result_kind === "terminal");
     if (!terminalMessages.length)
       throw new AdapterError("CONTENT_UNAVAILABLE", "No terminal visible assistant result was exposed by this connector.");
+    const allErrorDetails = terminalMessages.flatMap((message) =>
+      message.parent_id === entry.submitted_message_id && message.error_detail
+        ? [{
+            ...message.error_detail,
+            assistant_message_id: message.id,
+            attribution: "exact_parent" as const,
+          }]
+        : [],
+    );
+    const errorDetails = allErrorDetails.slice(0, MAX_CORRELATED_ERROR_DETAILS);
+    const errorDetailsTruncated =
+      allErrorDetails.length > errorDetails.length;
     const reports: string[] = [];
     const messageRevisions: Array<{ id: string; revision: string }> = [];
     let totalBytes = 0;
     for (const report of terminalMessages) {
-      if (!report.content || report.content.availability === "not_exposed")
+      const errorOnly = report.parent_id === entry.submitted_message_id &&
+        Boolean(report.error_detail);
+      if (!report.content || report.content.availability === "not_exposed") {
+        if (errorOnly) continue;
         throw new AdapterError("CONTENT_UNAVAILABLE", "Complete visible terminal result text is not exposed by this connector.");
+      }
       const chunks: string[] = [];
       let contentCursor: string | undefined;
       let offset = 0;
@@ -416,11 +438,22 @@ export class OpenCodeGateway implements SessionGateway {
       messageRevisions.push({ id: report.id, revision: report.content.revision });
     }
     const visibleResult = reports.join("\n\n");
+    const errorEvidence = allErrorDetails.length
+      ? digest(JSON.stringify(allErrorDetails))
+      : undefined;
     const context = await this.resolveAttentionTask(entry);
     const sha256 = digest(visibleResult);
-    const sourceRevision = `attention-v1:${digest(JSON.stringify({
+    const sourceRevision = `attention-v2:${digest(JSON.stringify({
       messages: messageRevisions,
       sha256,
+      ...(errorEvidence
+        ? {
+            error_evidence: {
+              sha256: errorEvidence,
+              total: allErrorDetails.length,
+            },
+          }
+        : {}),
       event_cursor: entry.activity_cursor,
       task_id: context.task?.task_id ?? null,
       task_updated_at: context.task?.updated_at ?? null,
@@ -435,6 +468,9 @@ export class OpenCodeGateway implements SessionGateway {
       context.task,
       context.hierarchy,
       context.hierarchy_status,
+      errorDetails,
+      allErrorDetails.length,
+      errorDetailsTruncated,
     );
     await this.journal!.prepareAttention({ ...prepared, deliveries: entry.deliveries });
   }
@@ -1250,6 +1286,8 @@ export class OpenCodeGateway implements SessionGateway {
       )
       .map((message) => message.info.id);
     const latestAssistant = assistants.at(-1);
+    const allErrorDetails = correlatedErrorDetails(assistants);
+    const errorDetails = allErrorDetails.slice(0, MAX_CORRELATED_ERROR_DETAILS);
     const pendingForTurn =
       pending.permissionsList.some(
         (request) =>
@@ -1300,6 +1338,14 @@ export class OpenCodeGateway implements SessionGateway {
       state,
       assistant_message_ids: assistantIds,
       active_assistant_message_ids: activeAssistantIds,
+      ...(errorDetails.length
+        ? {
+            error_details: errorDetails,
+            error_details_total: allErrorDetails.length,
+            error_details_truncated:
+              allErrorDetails.length > errorDetails.length,
+          }
+        : {}),
     };
   }
 
@@ -1695,7 +1741,7 @@ export class OpenCodeGateway implements SessionGateway {
                 ? {
                     parent: item.info.parentID,
                     finish: item.info.finish,
-                    error: item.info.error?.name,
+                    error_detail: safeAssistantErrorDetail(item.info.error),
                   }
                 : {}),
             },
@@ -2956,6 +3002,23 @@ function isActivity(value: unknown): value is SessionActivity {
 
 function hasError(message: Message): boolean {
   return message.role === "assistant" && Boolean(message.error);
+}
+
+function correlatedErrorDetails(
+  assistants: MessageWithParts[],
+): CorrelatedErrorDetail[] {
+  const details: CorrelatedErrorDetail[] = [];
+  for (const message of assistants) {
+    if (message.info.role !== "assistant") continue;
+    const detail = safeAssistantErrorDetail(message.info.error);
+    if (!detail) continue;
+    details.push({
+      ...detail,
+      assistant_message_id: message.info.id,
+      attribution: "exact_parent",
+    });
+  }
+  return details;
 }
 
 function isAborted(message: Message): boolean {

@@ -12,7 +12,7 @@ import { READ_RESPONSE_BYTES, READ_PAYLOAD_BYTES } from "./content.js";
 import type { SessionV2Info } from "@opencode-ai/sdk/v2";
 import { OpenCodeGateway as ProductionGateway } from "./opencode.js";
 import { AdapterError } from "./types.js";
-import type { RuntimeDescriptor, TaskResult } from "./types.js";
+import type { AttentionEntry, RuntimeDescriptor, TaskResult } from "./types.js";
 import type { SubmissionGuardOverrideInput } from "./types.js";
 
 const project = "/project";
@@ -715,6 +715,74 @@ test("Delivery A: empty visible text is distinct from omitted tool content", asy
   assert.equal(read.text, "");
   assert.equal(read.has_more, false);
   assert.equal(read.content_complete, true); // complete visible projection, not hidden parts
+});
+
+test("worker failure details are safe on every read path and stay with the exact submitted turn", async () => {
+  const state = baseState();
+  const failed = stored("assistant_timeout", "", "user_timeout");
+  failed.info.error = {
+    name: "APIError",
+    data: {
+      message: "PRIVATE_PROVIDER_MESSAGE",
+      isRetryable: true,
+      metadata: {
+        code: "ProviderHeaderTimeoutError",
+        timeoutMs: "300000",
+        headers: { authorization: "Bearer PRIVATE_TOKEN" },
+      },
+    },
+  };
+  failed.parts = [{
+    type: "tool",
+    state: {
+      input: { token: "PRIVATE_TOOL_INPUT" },
+      output: "PRIVATE_TOOL_OUTPUT",
+    },
+  }];
+  state.messages = [
+    stored("user_timeout", "original request"),
+    failed,
+    stored("user_continued", "later continuation"),
+    stored("assistant_continued", "later response", "user_continued"),
+  ];
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  const expected = {
+    category: "provider_header_timeout",
+    name: "APIError",
+    code: "ProviderHeaderTimeoutError",
+    timeout_ms: 300000,
+    message: "Provider response headers timed out after 300000ms.",
+    detail_availability: "safe_template" as const,
+    source: "assistant_message_error" as const,
+    source_is_retryable: true,
+  };
+  const [history, direct, result, status] = await Promise.all([
+    gateway.getSessionHistory("ses_work"),
+    gateway.getMessage("ses_work", "assistant_timeout"),
+    gateway.getTaskResult("ses_work", "user_timeout"),
+    gateway.getSessionStatus("ses_work", "user_timeout"),
+  ]);
+  assert.deepEqual(
+    history.messages.find((message) => message.id === "assistant_timeout")?.error_detail,
+    expected,
+  );
+  assert.deepEqual(direct.message.error_detail, expected);
+  assert.equal(direct.message.content?.availability, "not_exposed");
+  assert.equal(result.state, "failed");
+  assert.deepEqual(result.messages.map((message) => message.id), ["assistant_timeout"]);
+  assert.deepEqual(result.messages[0]?.error_detail, expected);
+  assert.equal(status.state, "failed");
+  assert.deepEqual(status.error_details, [{
+    ...expected,
+    assistant_message_id: "assistant_timeout",
+    attribution: "exact_parent",
+  }]);
+  assert.equal(status.error_details_total, 1);
+  assert.equal(status.error_details_truncated, false);
+  assert.doesNotMatch(
+    JSON.stringify({ history, direct, result, status }),
+    /PRIVATE_/u,
+  );
 });
 
 test("Delivery A: bounded search recovers old tasks with 130 steps without confusing a later blocked task", async () => {
@@ -2350,6 +2418,78 @@ test("E-I: activity correlates parallel receipts, pending input and restart with
   );
   assert.equal(state.promptCalls.length, calls + 1);
   await gateway.close();
+});
+
+test("prepared attention retains safe correlated failure evidence without visible text", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "ocvm-error-attention-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "activity.json");
+  const state = baseState();
+  const failed = stored("assistant_timeout", "", "user_timeout");
+  failed.info.error = {
+    name: "APIError",
+    data: {
+      isRetryable: true,
+      message: "PRIVATE_PROVIDER_MESSAGE",
+      metadata: {
+        code: "ProviderHeaderTimeoutError",
+        timeoutMs: "300000",
+        headers: { authorization: "Bearer PRIVATE_TOKEN" },
+      },
+    },
+  };
+  failed.parts = [{
+    type: "tool",
+    state: { output: "PRIVATE_TOOL_OUTPUT" },
+  }];
+  state.messages = [stored("user_timeout", "request"), failed];
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  await gateway.enableActivity(path);
+  await gateway.captureActivity("ses_work");
+  const prepared = (await gateway.getProjectAttention()).entries[0]!;
+  assert.equal(prepared.event_type, "message.failed");
+  assert.equal(prepared.lifecycle, "ready");
+  assert.match(prepared.source_revision ?? "", /^attention-v2:/u);
+  assert.match(prepared.prepared_summary, /300000ms/u);
+  assert.deepEqual(prepared.error_details, [{
+    category: "provider_header_timeout",
+    name: "APIError",
+    code: "ProviderHeaderTimeoutError",
+    timeout_ms: 300000,
+    message: "Provider response headers timed out after 300000ms.",
+    detail_availability: "safe_template",
+    source: "assistant_message_error",
+    source_is_retryable: true,
+    assistant_message_id: "assistant_timeout",
+    attribution: "exact_parent",
+  }]);
+  assert.equal(prepared.error_details_total, 1);
+  assert.equal(prepared.error_details_truncated, false);
+  const sourceRevision = prepared.source_revision;
+  (failed.info.error as {
+    data: { metadata: { timeoutMs: string } };
+  }).data.metadata.timeoutMs = "300001";
+  await (
+    gateway as unknown as {
+      prefetchTerminalAttention(entry: AttentionEntry): Promise<void>;
+    }
+  ).prefetchTerminalAttention(prepared);
+  const refreshed = (await gateway.getProjectAttention()).entries[0]!;
+  assert.notEqual(refreshed.source_revision, sourceRevision);
+  assert.match(refreshed.prepared_summary, /300001ms/u);
+  const persisted = await readFile(path, "utf8");
+  assert.doesNotMatch(
+    JSON.stringify({ prepared, persisted }),
+    /PRIVATE_/u,
+  );
+  await gateway.close();
+  const restoredGateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  await restoredGateway.enableActivity(path);
+  assert.deepEqual(
+    (await restoredGateway.getProjectAttention()).entries[0]?.error_details,
+    refreshed.error_details,
+  );
+  await restoredGateway.close();
 });
 
 test("session listing and direct lookup enforce all exposure rules", async () => {

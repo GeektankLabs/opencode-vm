@@ -18,9 +18,12 @@ import {
   ADAPTER_VERSION,
   AdapterError,
   isRecord,
+  MAX_CORRELATED_ERROR_DETAILS,
 } from "./types.js";
 import {
   DEFAULT_CONTENT_BYTES,
+  MAX_ERROR_DETAIL_IDENTIFIER_BYTES,
+  MAX_ERROR_DETAIL_MESSAGE_BYTES,
   MAX_CONTENT_BYTES,
   READ_RESPONSE_BYTES,
   jsonBytes,
@@ -568,6 +571,45 @@ const attentionInput = z.object({
   classification: z.array(z.enum(["ready", "attention", "action_required"])).min(1).max(3).optional(),
 }).strict().refine((value) => value.after_cursor === undefined || value.before_cursor === undefined,
   "Use either after_cursor or before_cursor, not both.");
+const errorNameSchema = z.enum([
+  "APIError",
+  "ProviderAuthError",
+  "ContextOverflowError",
+  "MessageOutputLengthError",
+  "StructuredOutputError",
+  "ContentFilterError",
+  "MessageAbortedError",
+]).refine((value) => Buffer.byteLength(value, "utf8") <= MAX_ERROR_DETAIL_IDENTIFIER_BYTES);
+const errorCodeSchema = z.enum([
+  "ProviderHeaderTimeoutError",
+  "ProviderResponseStreamError",
+]).refine((value) => Buffer.byteLength(value, "utf8") <= MAX_ERROR_DETAIL_IDENTIFIER_BYTES);
+const errorDetailSchema = z.object({
+  category: z.enum([
+    "provider_header_timeout",
+    "provider_response_stream_error",
+    "provider_error",
+    "provider_auth",
+    "context_overflow",
+    "output_length",
+    "structured_output",
+    "content_filter",
+    "aborted",
+    "unknown",
+  ]),
+  name: errorNameSchema.optional(),
+  code: errorCodeSchema.optional(),
+  timeout_ms: z.number().int().min(1).max(2_147_483_647).optional(),
+  message: z.string().min(1).refine((value) =>
+    Buffer.byteLength(value, "utf8") <= MAX_ERROR_DETAIL_MESSAGE_BYTES),
+  detail_availability: z.enum(["safe_template", "redacted"]),
+  source: z.literal("assistant_message_error"),
+  source_is_retryable: z.boolean().optional(),
+}).strict();
+const correlatedErrorDetailSchema = errorDetailSchema.extend({
+  assistant_message_id: z.string(),
+  attribution: z.literal("exact_parent"),
+}).strict();
 const attentionEntryOutput = z.object({
   event_id: z.string(), activity_cursor: z.string(), event_sequence: z.number().int(), event_type: z.enum(ACTIVITY_TYPES),
   classification: z.enum(["ready", "attention", "action_required"]),
@@ -586,6 +628,9 @@ const attentionEntryOutput = z.object({
     lifecycle: z.string().optional(), operator_attention: z.string().optional(), next_allowed_action: z.string().optional() }).strict()).optional(),
   superseded_by: z.string().optional(),
   delivery_policy: z.enum(["immediate_proactive_wakeup", "deferred_to_next_idle_boundary", "on_demand_fallback"]),
+  error_details: z.array(correlatedErrorDetailSchema).max(MAX_CORRELATED_ERROR_DETAILS).optional(),
+  error_details_total: z.number().int().positive().optional(),
+  error_details_truncated: z.boolean().optional(),
   evidence: z.object({ source: z.enum(["visible_original", "pending_input"]), source_revision: z.string().optional(), sha256: z.string().optional(),
     assistant_message_ids: z.array(z.string()), complete: z.boolean() }).strict().optional(),
   deliveries: z.record(z.string(), z.object({ state: z.enum(["pending", "delivered", "failed", "abandoned"]), attempts: z.number().int(),
@@ -633,6 +678,9 @@ const sessionStatusOutputSchema = z
     ]),
     pending_input: pendingSchema,
     assistant_message_ids: z.array(z.string()),
+    error_details: z.array(correlatedErrorDetailSchema).max(MAX_CORRELATED_ERROR_DETAILS).optional(),
+    error_details_total: z.number().int().positive().optional(),
+    error_details_truncated: z.boolean().optional(),
     active_assistant_message_ids: z.array(z.string()).optional(),
     pending_input_scope: z.literal("session").optional(),
     admission: admissionSchema.optional(),
@@ -678,6 +726,7 @@ const messageSchema = z
     completed: z.number().optional(),
     finish: z.string().optional(),
     error: z.enum(["aborted", "failed"]).optional(),
+    error_detail: errorDetailSchema.optional(),
     text_truncated: z.boolean(),
     content_complete: z.boolean().optional(),
     truncation_reason: z.enum(["preview_limit", "response_budget"]).optional(),

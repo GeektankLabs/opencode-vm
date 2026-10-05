@@ -1,4 +1,10 @@
-import type { ActivityEvent, AttentionClass, AttentionEntry, DeliveryPolicy } from "./types.js";
+import type {
+  ActivityEvent,
+  AttentionClass,
+  AttentionEntry,
+  CorrelatedErrorDetail,
+  DeliveryPolicy,
+} from "./types.js";
 import { utf8Prefix } from "./content.js";
 
 const attentionEvents = new Map<string, AttentionClass>([
@@ -54,8 +60,14 @@ export function summarizeAttention(
     management_checkpoints?: AttentionEntry["management_checkpoints"];
   },
   hierarchyStatus: AttentionEntry["hierarchy_status"] = "unlinked",
+  errorDetails: CorrelatedErrorDetail[] = [],
+  errorDetailsTotal = errorDetails.length,
+  errorDetailsTruncated = false,
 ): Omit<AttentionEntry, "deliveries"> {
   const lead = sanitizeSummary(visibleResult).replace(/\s+/gu, " ").trim();
+  const errorLead = errorDetails
+    .map((detail) => detail.message)
+    .join(" ");
   const title = task ? `${sanitizeSummary(task.title)}: ` : "";
   const outcome = entry.classification === "ready"
     ? "Worker result is available"
@@ -64,7 +76,11 @@ export function summarizeAttention(
       : entry.event_type === "message.aborted"
         ? "Worker turn was aborted"
         : "Worker turn failed";
-  const excerpt = lead ? utf8Prefix(lead, 420) : "No complete visible result text was exposed.";
+  const excerpt = lead
+    ? utf8Prefix(lead, 420)
+    : errorLead
+      ? utf8Prefix(errorLead, 420)
+      : "No complete visible result text was exposed.";
   const nextSafeStep = entry.classification === "ready"
     ? "Review the original result and decide any authorized next step; no follow-up was started."
     : entry.classification === "action_required"
@@ -94,6 +110,13 @@ export function summarizeAttention(
     ...(hierarchy?.work_package_status ? { work_package_status: hierarchy.work_package_status } : {}),
     ...(hierarchy?.summary ? { hierarchy_summary: utf8Prefix(sanitizeSummary(hierarchy.summary), 512) } : {}),
     ...(hierarchy?.management_checkpoints ? { management_checkpoints: hierarchy.management_checkpoints } : {}),
+    ...(errorDetails.length
+      ? {
+          error_details: errorDetails,
+          error_details_total: errorDetailsTotal,
+          error_details_truncated: errorDetailsTruncated,
+        }
+      : {}),
     evidence: {
       source: "visible_original",
       source_revision: sourceRevision,

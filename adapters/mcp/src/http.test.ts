@@ -96,8 +96,18 @@ function runtime(): RuntimeDescriptor {
 }
 
 class FakeGateway implements SessionGateway {
+  attentionResult?: AttentionResult;
+  messageResult?: MessageResult;
+  historyResult?: SessionHistoryResult;
+  statusResult?: SessionStatusResult;
+  taskResult?: TaskResult;
   async getProjectAttention(): Promise<AttentionResult> {
-    return { entries: [], next_cursor: "attention", current_cursor: "attention", has_more: false };
+    return this.attentionResult ?? {
+      entries: [],
+      next_cursor: "attention",
+      current_cursor: "attention",
+      has_more: false,
+    };
   }
   async handleMcpEventMethod(method: string): Promise<unknown> {
     if (method === "events/list") return { events: MCP_EVENT_DEFINITIONS };
@@ -128,6 +138,7 @@ class FakeGateway implements SessionGateway {
     };
   }
   async getMessage(): Promise<MessageResult> {
+    if (this.messageResult) return this.messageResult;
     throw new Error("fixture unused");
   }
   async readMessageContent(): Promise<MessageContentResult> {
@@ -137,6 +148,7 @@ class FakeGateway implements SessionGateway {
     sessionId: string,
     submittedMessageId: string,
   ): Promise<TaskResult> {
+    if (this.taskResult) return this.taskResult;
     return {
       session_id: sessionId,
       submitted_message_id: submittedMessageId,
@@ -260,6 +272,7 @@ class FakeGateway implements SessionGateway {
     sessionId: string,
     messageId?: string,
   ): Promise<SessionStatusResult> {
+    if (this.statusResult) return this.statusResult;
     return {
       session_id: sessionId,
       ...(messageId ? { message_id: messageId } : {}),
@@ -271,6 +284,7 @@ class FakeGateway implements SessionGateway {
   }
 
   async getSessionHistory(sessionId: string): Promise<SessionHistoryResult> {
+    if (this.historyResult) return this.historyResult;
     return { session_id: sessionId, messages: [], truncated: false };
   }
 
@@ -783,6 +797,131 @@ test("official MCP client discovers twenty-two stateless HTTP tools and invokes 
     assert.equal("isError" in failed && failed.isError, true);
     assert.doesNotMatch(JSON.stringify(failed), /backend-secret/u);
     assert.match(JSON.stringify(failed), /INTERNAL_ERROR/u);
+  } finally {
+    await client.close().catch(() => undefined);
+    await server.close();
+  }
+});
+
+test("MCP read outputs accept only the bounded safe worker error detail shape", async () => {
+  const gateway = new FakeGateway();
+  const errorDetail = {
+    category: "provider_header_timeout" as const,
+    name: "APIError" as const,
+    code: "ProviderHeaderTimeoutError" as const,
+    timeout_ms: 300000,
+    message: "Provider response headers timed out after 300000ms.",
+    detail_availability: "safe_template" as const,
+    source: "assistant_message_error" as const,
+    source_is_retryable: true,
+  };
+  const message: MessageResult["message"] = {
+    id: "msg_error",
+    role: "assistant",
+    parent_id: "msg_user",
+    text: "",
+    created: 1,
+    completed: 2,
+    finish: "stop",
+    error: "failed",
+    error_detail: errorDetail,
+    text_truncated: false,
+    content_complete: true,
+    content: {
+      content_ref: "content.ref",
+      revision: "visible-text-v1:empty",
+      unit: "utf8_bytes",
+      total_bytes: 0,
+      sha256: "a".repeat(64),
+      availability: "not_exposed",
+      omitted_parts: [{ type: "tool", count: 1, reason: "part_not_exposed" }],
+    },
+  };
+  const correlated = {
+    ...errorDetail,
+    assistant_message_id: "msg_error",
+    attribution: "exact_parent" as const,
+  };
+  gateway.messageResult = { session_id: "ses", message };
+  gateway.historyResult = {
+    session_id: "ses",
+    messages: [message],
+    truncated: false,
+  };
+  gateway.taskResult = {
+    session_id: "ses",
+    submitted_message_id: "msg_user",
+    state: "failed",
+    observed_at: new Date().toISOString(),
+    source: "backend",
+    search_complete: true,
+    order: "newest_first",
+    messages: [{ ...message, result_kind: "terminal" }],
+  };
+  gateway.statusResult = {
+    session_id: "ses",
+    message_id: "msg_user",
+    backend_activity: "idle",
+    state: "failed",
+    pending_input: { permissions: 0, questions: 0 },
+    assistant_message_ids: ["msg_error"],
+    error_details: [correlated],
+    error_details_total: 1,
+    error_details_truncated: false,
+  };
+  gateway.attentionResult = {
+    entries: [{
+      event_id: "event_error",
+      activity_cursor: "cursor",
+      event_sequence: 1,
+      event_type: "message.failed",
+      classification: "attention",
+      lifecycle: "ready",
+      session_id: "ses",
+      session_title: "Worker",
+      submitted_message_id: "msg_user",
+      assistant_message_ids: ["msg_error"],
+      occurred_at: new Date().toISOString(),
+      observed_at: new Date().toISOString(),
+      prepared_summary: "Worker turn failed. Provider response headers timed out after 300000ms.",
+      next_safe_step: "Review the original failure/abort evidence; no automatic retry or replacement worker was started.",
+      hierarchy_status: "unlinked",
+      delivery_policy: "on_demand_fallback",
+      error_details: [correlated],
+      error_details_total: 1,
+      error_details_truncated: false,
+      evidence: {
+        source: "visible_original",
+        assistant_message_ids: ["msg_error"],
+        complete: true,
+      },
+      deliveries: {},
+    }],
+    next_cursor: "attention",
+    current_cursor: "attention",
+    has_more: false,
+  };
+  const server = new McpHttpServer(runtime(), token, gateway);
+  const port = await server.start();
+  const transport = new StreamableHTTPClientTransport(
+    new URL(`http://127.0.0.1:${port}/mcp`),
+    { requestInit: { headers: { "X-OCVM-MCP-Token": token } } },
+  );
+  const client = new Client({ name: "error-detail-wire", version: "1.0.0" });
+  try {
+    await client.connect(transport);
+    const [direct, history, result, status, attention] = await Promise.all([
+      client.callTool({ name: "get_message", arguments: { session_id: "ses", message_id: "msg_error" } }),
+      client.callTool({ name: "get_session_history", arguments: { session_id: "ses" } }),
+      client.callTool({ name: "get_task_result", arguments: { session_id: "ses", submitted_message_id: "msg_user" } }),
+      client.callTool({ name: "get_session_status", arguments: { session_id: "ses", message_id: "msg_user" } }),
+      client.callTool({ name: "get_project_attention", arguments: {} }),
+    ]);
+    assert.deepEqual((direct.structuredContent as MessageResult).message.error_detail, errorDetail);
+    assert.deepEqual((history.structuredContent as SessionHistoryResult).messages[0]?.error_detail, errorDetail);
+    assert.deepEqual((result.structuredContent as TaskResult).messages[0]?.error_detail, errorDetail);
+    assert.deepEqual((status.structuredContent as SessionStatusResult).error_details, [correlated]);
+    assert.deepEqual((attention.structuredContent as AttentionResult).entries[0]?.error_details, [correlated]);
   } finally {
     await client.close().catch(() => undefined);
     await server.close();

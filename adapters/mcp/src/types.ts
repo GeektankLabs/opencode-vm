@@ -85,6 +85,41 @@ export type CorrelatedState =
   | "failed"
   | "aborted";
 
+export const MAX_CORRELATED_ERROR_DETAILS = 10;
+
+export type ErrorDetail = {
+  category:
+    | "provider_header_timeout"
+    | "provider_response_stream_error"
+    | "provider_error"
+    | "provider_auth"
+    | "context_overflow"
+    | "output_length"
+    | "structured_output"
+    | "content_filter"
+    | "aborted"
+    | "unknown";
+  name?:
+    | "APIError"
+    | "ProviderAuthError"
+    | "ContextOverflowError"
+    | "MessageOutputLengthError"
+    | "StructuredOutputError"
+    | "ContentFilterError"
+    | "MessageAbortedError";
+  code?: "ProviderHeaderTimeoutError" | "ProviderResponseStreamError";
+  timeout_ms?: number;
+  message: string;
+  detail_availability: "safe_template" | "redacted";
+  source: "assistant_message_error";
+  source_is_retryable?: boolean;
+};
+
+export type CorrelatedErrorDetail = ErrorDetail & {
+  assistant_message_id: string;
+  attribution: "exact_parent";
+};
+
 export type SessionStatusResult = {
   session_id: string;
   message_id?: string;
@@ -98,6 +133,9 @@ export type SessionStatusResult = {
   receipt_resolution?: ReceiptResolution;
   observed_at?: string;
   source?: "backend";
+  error_details?: CorrelatedErrorDetail[];
+  error_details_total?: number;
+  error_details_truncated?: boolean;
   task_status_reason?:
     | "not_requested"
     | "outside_history_or_not_observed"
@@ -160,6 +198,7 @@ export type HistoryMessage = {
   completed?: number;
   finish?: string;
   error?: "aborted" | "failed";
+  error_detail?: ErrorDetail;
   text_truncated: boolean;
   content_complete?: boolean;
   truncation_reason?: "preview_limit" | "response_budget";
@@ -409,6 +448,9 @@ export type AttentionEntry = {
   }>;
   superseded_by?: string;
   delivery_policy: DeliveryPolicy;
+  error_details?: CorrelatedErrorDetail[];
+  error_details_total?: number;
+  error_details_truncated?: boolean;
   evidence?: {
     source: "visible_original" | "pending_input";
     source_revision?: string;
