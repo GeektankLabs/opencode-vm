@@ -1,7 +1,7 @@
 Task-ID: task_9c9d5f33-40cd-52b9-a0c4-455a69d6ea36
 Title: MCP - sichere abfragbare Worker-Fehlerdetails
-Status: candidate_qc_passed
-Last-concept-update: 2026-10-06T00:03:27+02:00
+Status: integrated_pending_release
+Last-concept-update: 2026-10-06T01:30:32+02:00
 
 # Canonical Concept Plan
 
@@ -37,3 +37,5 @@ Focused unit and MCP wire/schema regressions will accompany the candidate. Befor
 Candidate evidence on 2026-10-06: initial implementation is local commit `e737a87`; first QC remediation is local commit `b914e88`. Repeat QC found and the current candidate remediates three further issues: legacy bytes and event cursors validate before any target write, complete prepared evidence retains IDs beyond the ten exposed error details, and public schemas require an exact safe projection with internally consistent total/truncation fields. `npm run check` passed; `npm test` passed with 125 passing tests and 2 existing skipped pinned-upstream integration tests. The candidate is local-only and awaits a remediation commit plus repeat independent QC.
 
 Subsequent QC of local commit `55122f4` identified late durable error metadata and empty persisted detail arrays. Current remediation refreshes same-terminal safe evidence through the normal collector, publishes a newly sequenced correlated occurrence with fresh delivery tracking, and rejects empty persisted arrays before migration. An internal hash of all safe correlated error projections detects revisions beyond the public ten-detail cap; stale nonterminal observations remain protected. Collector, saved-cursor continuation and already-delivered webhook regressions pass. Validation passed with 127 tests passing and 2 existing integration skips. Final independent read-only QC returned **No findings**, with separate cursor/delivery/dedup/stale-state probes; the reviewer did not independently rerun the full suite. Integration/publication and hosted client/webhook acceptance remain separate.
+
+Local integration on 2026-10-06 under operator Go `OCVM-ERRORDETAIL-INTEGRATE-20261006-01`: fast-forward of `main` from base `819f8d48f38f06e7ad0e78bbbf6828349c02b8a6` to the exact reviewed candidate `f0add8ef378737d821fe7151f1a08e985c3a8cd8`, preserving the full series unchanged. JIT checks confirmed the candidate paths clean, foreign root changes and the Hub worktree (`task_686da158`, own commit `1deaf2c`) untouched, no script/version/asset change in range, and no push to origin. The integrated tree was re-verified green (adapter check + 127 tests / 2 existing skips). This integrates only the authorized point-4 error-detail surface; the broader Board ticket, adapter version bump/pin, release build, runtime rollout/restart and hosted client/webhook acceptance remain separate operator decisions. Fallback `task_fa86d673` remains HIGH todo and its concept/Hub dependency is a handoff only, not part of this scope.
