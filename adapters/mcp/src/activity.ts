@@ -583,7 +583,25 @@ export class ActivityJournal {
         const old = previous?.messages.find(
           (item) => item.message_id === message.message_id,
         );
-        return old && terminal.has(old.state) ? old : message;
+        if (!old || !terminal.has(old.state)) return message;
+        if (message.state !== old.state) return old;
+        const retainedErrorDetails = message.error_details === undefined && old.error_details
+          ? {
+              error_details: old.error_details,
+              error_details_total: old.error_details_total,
+              error_details_truncated: old.error_details_truncated,
+              error_evidence_revision: old.error_evidence_revision,
+            }
+          : {};
+        return {
+          ...message,
+          state: old.state,
+          assistant_message_ids: [...new Set([
+            ...old.assistant_message_ids,
+            ...message.assistant_message_ids,
+          ])],
+          ...retainedErrorDetails,
+        };
       }),
     };
     if (JSON.stringify(previous) === JSON.stringify(snapshot)) return false;
@@ -615,6 +633,30 @@ export class ActivityJournal {
       const old = previous?.messages.find(
         (item) => item.message_id === message.message_id,
       );
+      if (
+        old &&
+        terminal.has(old.state) &&
+        JSON.stringify({
+          error_details: old.error_details,
+          error_details_total: old.error_details_total,
+          error_details_truncated: old.error_details_truncated,
+          error_evidence_revision: old.error_evidence_revision,
+        }) !== JSON.stringify({
+          error_details: message.error_details,
+          error_details_total: message.error_details_total,
+          error_details_truncated: message.error_details_truncated,
+          error_evidence_revision: message.error_evidence_revision,
+        })
+      ) {
+        // Revised durable evidence needs a new cursor and delivery receipts.
+        this.push(draft, this.event(
+          snapshot,
+          `message.${message.state}` as ActivityType,
+          message.state,
+          source,
+          message,
+        ));
+      }
       if (!old)
         this.push(
           draft,
@@ -1081,8 +1123,8 @@ function validAttentionErrorDetails(value: Record<string, unknown>): boolean {
   const truncated = value.error_details_truncated;
   if (details === undefined)
     return total === undefined && truncated === undefined;
-  if (!Array.isArray(details) || details.length > MAX_CORRELATED_ERROR_DETAILS ||
-    !Number.isSafeInteger(total) || (total as number) < details.length ||
+  if (!Array.isArray(details) || details.length < 1 || details.length > MAX_CORRELATED_ERROR_DETAILS ||
+    !Number.isSafeInteger(total) || (total as number) < 1 || (total as number) < details.length ||
     typeof truncated !== "boolean" || truncated !== ((total as number) > details.length))
     return false;
   return details.every(validCorrelatedAttentionErrorDetail);

@@ -399,7 +399,7 @@ export type ActivitySnapshot = {
   activity: SessionActivity;
   pending_input: PendingInput;
   runtime?: SessionRuntime;
-  messages: SessionStatusResult[];
+  messages: Array<SessionStatusResult & { error_evidence_revision?: string }>;
 };
 
 export type AttentionClass = "ready" | "attention" | "action_required";

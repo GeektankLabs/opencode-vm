@@ -2794,9 +2794,14 @@ export class OpenCodeGateway implements SessionGateway {
       ...(session.agent && session.model
         ? { runtime: await this.sessionRuntime(session) }
         : {}),
-      messages: [...ids].map((messageId) =>
-        this.correlatedStatus(id, messageId, history.items, activity, pending),
-      ),
+      messages: [...ids].map((messageId) => {
+        const details = correlatedErrorDetails(history.items.filter((item) =>
+          item.info.role === "assistant" && item.info.parentID === messageId));
+        return {
+          ...this.correlatedStatus(id, messageId, history.items, activity, pending),
+          ...(details.length ? { error_evidence_revision: digest(JSON.stringify(details)) } : {}),
+        };
+      }),
     };
   }
 

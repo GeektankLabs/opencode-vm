@@ -156,9 +156,14 @@ test("legacy migration rejects persisted error details that are not safe project
   });
   await source.close();
   const raw = JSON.parse(await readFile(legacyPath, "utf8")) as {
-    attention: Record<string, { error_details: Array<{ message: string }> }>;
+    attention: Record<string, {
+      error_details: Array<{ message: string }>;
+      error_details_total: number;
+      error_details_truncated: boolean;
+    }>;
   };
-  Object.values(raw.attention)[0]!.error_details[0]!.message = "Bearer PRIVATE_TOKEN";
+  const persisted = Object.values(raw.attention)[0]!;
+  persisted.error_details[0]!.message = "Bearer PRIVATE_TOKEN";
   await writeFile(legacyPath, JSON.stringify(raw) + "\n", { mode: 0o600 });
   const targetPath = join(projectDirectory, "activity.json");
   await assert.rejects(
@@ -170,6 +175,17 @@ test("legacy migration rejects persisted error details that are not safe project
   const fresh = await ActivityJournal.open(targetPath, "project");
   await fresh.close();
   assert.doesNotMatch(await readFile(targetPath, "utf8"), /PRIVATE_TOKEN/u);
+  persisted.error_details = [];
+  persisted.error_details_total = 0;
+  persisted.error_details_truncated = false;
+  await writeFile(legacyPath, JSON.stringify(raw) + "\n", { mode: 0o600 });
+  const emptyDetailsTarget = join(projectDirectory, "empty-details.json");
+  await assert.rejects(
+    ActivityJournal.open(emptyDetailsTarget, "project", 5000, legacyPath),
+    (error) => error instanceof AdapterError && error.code === "ACTIVITY_UNAVAILABLE",
+  );
+  await assert.rejects(readFile(emptyDetailsTarget, "utf8"),
+    (error) => (error as NodeJS.ErrnoException).code === "ENOENT");
 });
 
 test("filters advance over skipped events, recheck visibility and support bounded waits", async (t) => {

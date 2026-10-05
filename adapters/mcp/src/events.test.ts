@@ -101,6 +101,42 @@ test("MCP Events webhook subscribe is idempotent, challenge-verified, signed, fi
   await journal.close();
 });
 
+test("revised terminal error evidence advances attention cursors and gets a fresh webhook delivery", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "ocvm-revised-error-events-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const journal = await ActivityJournal.open(join(directory, "activity.json"), "project");
+  const bridge = new McpEventBridge(journal, "project-hash", async (_url, body) => {
+    const parsed = JSON.parse(body) as { challenge?: string };
+    return { status: 200, body: JSON.stringify({ challenge: parsed.challenge }) };
+  });
+  const subscription = await bridge.handle("events/subscribe", {
+    name: "worker.failed",
+    arguments: { session_id: "ses_worker" },
+    delivery: { mode: "webhook", url: "https://callbacks.example.test/mcp", secret: secret() },
+    ttlMs: 60_000,
+  }) as { id: string };
+  const snapshot = completion();
+  snapshot.messages[0]!.state = "failed";
+  await journal.observe(snapshot, "observed");
+  const original = (await journal.pendingAttention())[0]!;
+  await journal.prepareAttention(ready(original));
+  await bridge.deliverPending();
+  assert.equal((await journal.attention(original.event_id))?.deliveries[subscription.id]?.state, "delivered");
+  const cursor = (await journal.listAttention()).current_cursor;
+  snapshot.messages[0]!.error_evidence_revision = "a".repeat(64);
+  await journal.observe(snapshot, "observed");
+  const revised = (await journal.pendingAttention())[0]!;
+  assert.notEqual(revised.event_id, original.event_id);
+  await journal.prepareAttention({ ...ready(revised), source_revision: "attention-v2:revised" });
+  assert.equal((await journal.listAttention({ after_cursor: cursor })).entries[0]?.event_id, revised.event_id);
+  assert.equal((await journal.pendingDeliveries()).length, 1);
+  await bridge.deliverPending();
+  assert.equal((await journal.attention(revised.event_id))?.deliveries[subscription.id]?.state, "delivered");
+  await journal.observe(snapshot, "reconciled");
+  assert.equal((await journal.pendingAttention()).length, 0, "unchanged evidence does not duplicate notifications");
+  await journal.close();
+});
+
 test("MCP Events rejects malformed callback URLs and non-public callback addresses", () => {
   for (const address of ["0.0.0.0", "10.0.0.1", "127.0.0.1", "169.254.1.2", "172.20.0.2", "192.168.1.1", "::1", "fc00::1", "fe80::1", "2001:10::1", "2001:db8::1", "2002:0808::1", "3fff::1"])
     assert.equal(isPublicAddress(address), false, address);

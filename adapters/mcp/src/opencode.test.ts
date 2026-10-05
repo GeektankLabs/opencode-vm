@@ -12,7 +12,7 @@ import { READ_RESPONSE_BYTES, READ_PAYLOAD_BYTES } from "./content.js";
 import type { SessionV2Info } from "@opencode-ai/sdk/v2";
 import { OpenCodeGateway as ProductionGateway } from "./opencode.js";
 import { AdapterError } from "./types.js";
-import type { AttentionEntry, RuntimeDescriptor, TaskResult } from "./types.js";
+import type { RuntimeDescriptor, TaskResult } from "./types.js";
 import type { SubmissionGuardOverrideInput } from "./types.js";
 
 const project = "/project";
@@ -2505,11 +2505,7 @@ test("prepared attention retains safe correlated failure evidence without visibl
     return extra;
   });
   state.messages.push(...extraFailures);
-  await (
-    gateway as unknown as {
-      prefetchTerminalAttention(entry: AttentionEntry): Promise<void>;
-    }
-  ).prefetchTerminalAttention(prepared);
+  await gateway.captureActivity("ses_work");
   const truncated = (await gateway.getProjectAttention()).entries[0]!;
   assert.equal(truncated.error_details?.length, 10);
   assert.equal(truncated.error_details_total, 11);
@@ -2522,11 +2518,7 @@ test("prepared attention retains safe correlated failure evidence without visibl
   (failed.info.error as {
     data: { metadata: { timeoutMs: string } };
   }).data.metadata.timeoutMs = "300001";
-  await (
-    gateway as unknown as {
-      prefetchTerminalAttention(entry: AttentionEntry): Promise<void>;
-    }
-  ).prefetchTerminalAttention(truncated);
+  await gateway.captureActivity("ses_work");
   const refreshed = (await gateway.getProjectAttention()).entries[0]!;
   assert.notEqual(refreshed.source_revision, sourceRevision);
   assert.equal(refreshed.error_details_total, 11);
@@ -2544,6 +2536,38 @@ test("prepared attention retains safe correlated failure evidence without visibl
     refreshed.error_details,
   );
   await restoredGateway.close();
+});
+
+test("activity refreshes prepared attention when durable error metadata arrives late", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "ocvm-late-error-attention-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const state = baseState();
+  const failed = stored("assistant_late_error", "", "user_late_error", "error");
+  state.messages = [stored("user_late_error", "request"), failed];
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  await gateway.enableActivity(join(directory, "activity.json"));
+  await gateway.captureActivity("ses_work");
+  const initialQueue = await gateway.getProjectAttention();
+  const initial = initialQueue.entries[0]!;
+  assert.equal(initial.error_details, undefined);
+  const initialRevision = initial.source_revision;
+  failed.info.error = {
+    name: "APIError",
+    data: {
+      metadata: {
+        code: "ProviderHeaderTimeoutError",
+        timeoutMs: "300000",
+      },
+    },
+  };
+  await gateway.captureActivity("ses_work");
+  const refreshedQueue = await gateway.getProjectAttention({ after_cursor: initialQueue.current_cursor });
+  assert.equal(refreshedQueue.entries.length, 1);
+  const refreshed = refreshedQueue.entries[0]!;
+  assert.notEqual(refreshed.event_id, initial.event_id);
+  assert.notEqual(refreshed.source_revision, initialRevision);
+  assert.equal(refreshed.error_details?.[0]?.message, "Provider response headers timed out after 300000ms.");
+  await gateway.close();
 });
 
 test("session listing and direct lookup enforce all exposure rules", async () => {
