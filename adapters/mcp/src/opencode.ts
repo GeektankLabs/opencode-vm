@@ -462,7 +462,7 @@ export class OpenCodeGateway implements SessionGateway {
     const assistantMessageIds = [...new Set([
       ...entry.assistant_message_ids,
       ...messageRevisions.map((message) => message.id),
-      ...errorDetails.map((detail) => detail.assistant_message_id),
+      ...allErrorDetails.map((detail) => detail.assistant_message_id),
     ])];
     const prepared = summarizeAttention(
       entry,

@@ -1,7 +1,7 @@
 Task-ID: task_9c9d5f33-40cd-52b9-a0c4-455a69d6ea36
 Title: MCP - sichere abfragbare Worker-Fehlerdetails
 Status: candidate_ready_for_qc
-Last-concept-update: 2026-10-05T23:27:52+02:00
+Last-concept-update: 2026-10-06T00:03:27+02:00
 
 # Canonical Concept Plan
 
@@ -34,4 +34,4 @@ OpenCode stores structured Assistant `info.error` data independently from visibl
 
 Focused unit and MCP wire/schema regressions will accompany the candidate. Before any future publish, rebase/reconcile against the intended integration base, inspect all commits/diffs, run the relevant adapter suite again, and have an independent reviewer verify redaction, strict schemas, parent correlation and source-revision behavior. A separate operator decides publication, adapter rollout, catalog refresh and external ChatGPT acceptance.
 
-Candidate evidence on 2026-10-05: initial implementation is local commit `e737a87`; independent QC found and the current candidate remediates two issues: legacy journal adoption now applies the full safe-attention validator, and textless error evidence retains Assistant IDs in prepared attention. `npm run check` passed; `npm test` passed with 125 passing tests and 2 existing skipped pinned-upstream integration tests. The candidate is local-only and awaits a remediation commit plus repeat independent QC.
+Candidate evidence on 2026-10-06: initial implementation is local commit `e737a87`; first QC remediation is local commit `b914e88`. Repeat QC found and the current candidate remediates three further issues: legacy bytes and event cursors validate before any target write, complete prepared evidence retains IDs beyond the ten exposed error details, and public schemas require an exact safe projection with internally consistent total/truncation fields. `npm run check` passed; `npm test` passed with 125 passing tests and 2 existing skipped pinned-upstream integration tests. The candidate is local-only and awaits a remediation commit plus repeat independent QC.

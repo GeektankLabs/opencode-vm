@@ -165,10 +165,11 @@ test("legacy migration rejects persisted error details that are not safe project
     ActivityJournal.open(targetPath, "project", 5000, legacyPath),
     (error) => error instanceof AdapterError && error.code === "ACTIVITY_UNAVAILABLE",
   );
-  await assert.rejects(
-    ActivityJournal.open(targetPath, "project"),
-    (error) => error instanceof AdapterError && error.code === "ACTIVITY_UNAVAILABLE",
-  );
+  await assert.rejects(readFile(targetPath, "utf8"),
+    (error) => (error as NodeJS.ErrnoException).code === "ENOENT");
+  const fresh = await ActivityJournal.open(targetPath, "project");
+  await fresh.close();
+  assert.doesNotMatch(await readFile(targetPath, "utf8"), /PRIVATE_TOKEN/u);
 });
 
 test("filters advance over skipped events, recheck visibility and support bounded waits", async (t) => {

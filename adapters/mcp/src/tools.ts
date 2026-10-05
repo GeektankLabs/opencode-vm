@@ -26,6 +26,7 @@ import {
   MAX_ERROR_DETAIL_MESSAGE_BYTES,
   MAX_CONTENT_BYTES,
   READ_RESPONSE_BYTES,
+  isSafeAssistantErrorDetail,
   jsonBytes,
 } from "./content.js";
 
@@ -584,7 +585,7 @@ const errorCodeSchema = z.enum([
   "ProviderHeaderTimeoutError",
   "ProviderResponseStreamError",
 ]).refine((value) => Buffer.byteLength(value, "utf8") <= MAX_ERROR_DETAIL_IDENTIFIER_BYTES);
-const errorDetailSchema = z.object({
+const errorDetailObjectSchema = z.object({
   category: z.enum([
     "provider_header_timeout",
     "provider_response_stream_error",
@@ -606,10 +607,29 @@ const errorDetailSchema = z.object({
   source: z.literal("assistant_message_error"),
   source_is_retryable: z.boolean().optional(),
 }).strict();
-const correlatedErrorDetailSchema = errorDetailSchema.extend({
+const errorDetailSchema = errorDetailObjectSchema.refine(
+  isSafeAssistantErrorDetail,
+  "Error detail must be an allowlisted safe projection.",
+);
+const correlatedErrorDetailSchema = errorDetailObjectSchema.extend({
   assistant_message_id: z.string(),
   attribution: z.literal("exact_parent"),
-}).strict();
+}).strict().refine((value) => {
+  const { assistant_message_id: _assistantMessageId, attribution: _attribution, ...detail } = value;
+  return isSafeAssistantErrorDetail(detail);
+}, "Error detail must be an allowlisted safe projection.");
+function validErrorDetailSummary(value: {
+  error_details?: unknown[];
+  error_details_total?: number;
+  error_details_truncated?: boolean;
+}): boolean {
+  if (value.error_details === undefined)
+    return value.error_details_total === undefined && value.error_details_truncated === undefined;
+  return value.error_details_total !== undefined &&
+    value.error_details_total >= value.error_details.length &&
+    value.error_details_truncated ===
+      (value.error_details_total > value.error_details.length);
+}
 const attentionEntryOutput = z.object({
   event_id: z.string(), activity_cursor: z.string(), event_sequence: z.number().int(), event_type: z.enum(ACTIVITY_TYPES),
   classification: z.enum(["ready", "attention", "action_required"]),
@@ -628,14 +648,14 @@ const attentionEntryOutput = z.object({
     lifecycle: z.string().optional(), operator_attention: z.string().optional(), next_allowed_action: z.string().optional() }).strict()).optional(),
   superseded_by: z.string().optional(),
   delivery_policy: z.enum(["immediate_proactive_wakeup", "deferred_to_next_idle_boundary", "on_demand_fallback"]),
-  error_details: z.array(correlatedErrorDetailSchema).max(MAX_CORRELATED_ERROR_DETAILS).optional(),
+  error_details: z.array(correlatedErrorDetailSchema).min(1).max(MAX_CORRELATED_ERROR_DETAILS).optional(),
   error_details_total: z.number().int().positive().optional(),
   error_details_truncated: z.boolean().optional(),
   evidence: z.object({ source: z.enum(["visible_original", "pending_input"]), source_revision: z.string().optional(), sha256: z.string().optional(),
     assistant_message_ids: z.array(z.string()), complete: z.boolean() }).strict().optional(),
   deliveries: z.record(z.string(), z.object({ state: z.enum(["pending", "delivered", "failed", "abandoned"]), attempts: z.number().int(),
     next_attempt_at: z.string().optional(), http_status: z.number().int().optional(), updated_at: z.string() }).strict()),
-}).strict();
+}).strict().refine(validErrorDetailSummary, "Error detail totals must match returned details.");
 const attentionOutput = z.object({ entries: z.array(attentionEntryOutput), next_cursor: z.string(), has_more: z.boolean(), current_cursor: z.string() }).strict();
 const attentionReceiptInput = z.object({ event_id: z.string().min(1).max(256), source_revision: z.string().min(1).max(256),
   lifecycle: z.enum(["offered", "discussed"]) }).strict();
@@ -678,7 +698,7 @@ const sessionStatusOutputSchema = z
     ]),
     pending_input: pendingSchema,
     assistant_message_ids: z.array(z.string()),
-    error_details: z.array(correlatedErrorDetailSchema).max(MAX_CORRELATED_ERROR_DETAILS).optional(),
+    error_details: z.array(correlatedErrorDetailSchema).min(1).max(MAX_CORRELATED_ERROR_DETAILS).optional(),
     error_details_total: z.number().int().positive().optional(),
     error_details_truncated: z.boolean().optional(),
     active_assistant_message_ids: z.array(z.string()).optional(),
@@ -695,7 +715,8 @@ const sessionStatusOutputSchema = z
       ])
       .optional(),
   })
-  .strict();
+  .strict()
+  .refine(validErrorDetailSummary, "Error detail totals must match returned details.");
 
 const contentDescriptorSchema = z
   .object({

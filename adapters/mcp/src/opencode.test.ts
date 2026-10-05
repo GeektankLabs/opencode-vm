@@ -2496,7 +2496,29 @@ test("prepared attention retains safe correlated failure evidence without visibl
   assert.equal(prepared.error_details_truncated, false);
   assert.deepEqual(prepared.assistant_message_ids, ["assistant_timeout"]);
   assert.deepEqual(prepared.evidence?.assistant_message_ids, ["assistant_timeout"]);
-  const sourceRevision = prepared.source_revision;
+  const extraFailures = Array.from({ length: 10 }, (_, index) => {
+    const extra = stored(`assistant_timeout_${index}`, "", "user_timeout");
+    extra.info.error = {
+      name: "APIError",
+      data: { metadata: { code: "ProviderResponseStreamError" } },
+    };
+    return extra;
+  });
+  state.messages.push(...extraFailures);
+  await (
+    gateway as unknown as {
+      prefetchTerminalAttention(entry: AttentionEntry): Promise<void>;
+    }
+  ).prefetchTerminalAttention(prepared);
+  const truncated = (await gateway.getProjectAttention()).entries[0]!;
+  assert.equal(truncated.error_details?.length, 10);
+  assert.equal(truncated.error_details_total, 11);
+  assert.equal(truncated.error_details_truncated, true);
+  const allAssistantIds = ["assistant_timeout", ...extraFailures.map((message) => message.info.id)];
+  assert.deepEqual([...truncated.assistant_message_ids].sort(), [...allAssistantIds].sort());
+  assert.deepEqual([...truncated.evidence?.assistant_message_ids ?? []].sort(), [...allAssistantIds].sort());
+  assert.equal(truncated.evidence?.complete, true);
+  const sourceRevision = truncated.source_revision;
   (failed.info.error as {
     data: { metadata: { timeoutMs: string } };
   }).data.metadata.timeoutMs = "300001";
@@ -2504,10 +2526,11 @@ test("prepared attention retains safe correlated failure evidence without visibl
     gateway as unknown as {
       prefetchTerminalAttention(entry: AttentionEntry): Promise<void>;
     }
-  ).prefetchTerminalAttention(prepared);
+  ).prefetchTerminalAttention(truncated);
   const refreshed = (await gateway.getProjectAttention()).entries[0]!;
   assert.notEqual(refreshed.source_revision, sourceRevision);
-  assert.match(refreshed.prepared_summary, /300001ms/u);
+  assert.equal(refreshed.error_details_total, 11);
+  assert.equal(refreshed.error_details_truncated, true);
   const persisted = await readFile(path, "utf8");
   assert.doesNotMatch(
     JSON.stringify({ prepared, persisted }),

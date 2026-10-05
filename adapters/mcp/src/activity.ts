@@ -105,21 +105,8 @@ export class ActivityJournal {
         )
           throw new Error();
         store = JSON.parse(await file.readFile("utf8")) as Store;
-        if (!validStore(store, project))
+        if (!validStore(store, project) || !validEvents(store))
           throw new Error();
-        let previous = 0;
-        for (const event of store.events) {
-          const sequence = Number(event.cursor.split(":")[1]);
-          if (
-            !event.cursor.startsWith(`${store.epoch}:`) ||
-            !Number.isSafeInteger(sequence) ||
-            sequence <= previous ||
-            sequence >= store.next ||
-            !ACTIVITY_TYPES.includes(event.type)
-          )
-            throw new Error();
-          previous = sequence;
-        }
       } finally {
         await file.close();
       }
@@ -138,7 +125,7 @@ export class ActivityJournal {
           const legacy = JSON.parse(await adopted.readFile("utf8")) as Store;
           if (legacy.observations === undefined) legacy.observations = {};
           if (legacy.watched === undefined) legacy.watched = {};
-          if (!validStore(legacy, project)) throw new Error();
+          if (!validStore(legacy, project) || !validEvents(legacy)) throw new Error();
           store = legacy;
         } finally { await adopted.close(); }
       } catch (adoptError) {
@@ -1041,6 +1028,24 @@ function validStore(store: Store, project: string): boolean {
     validAttentionState(store);
 }
 
+function validEvents(store: Store): boolean {
+  let previous = 0;
+  for (const event of store.events) {
+    if (!isRecord(event) || typeof event.cursor !== "string" || typeof event.type !== "string")
+      return false;
+    const prefix = `${store.epoch}:`;
+    const sequenceText = event.cursor.startsWith(prefix)
+      ? event.cursor.slice(prefix.length)
+      : "";
+    const sequence = Number(sequenceText);
+    if (!/^[0-9]+$/u.test(sequenceText) || !Number.isSafeInteger(sequence) ||
+      sequence <= previous || sequence >= store.next ||
+      !ACTIVITY_TYPES.includes(event.type as ActivityType)) return false;
+    previous = sequence;
+  }
+  return true;
+}
+
 function validAttentionState(store: Store): boolean {
   for (const [id, value] of Object.entries(store.attention ?? {})) {
     if (!isRecord(value) || value.event_id !== id || !Number.isSafeInteger(value.event_sequence) ||
@@ -1110,13 +1115,18 @@ async function adoptLegacyJournal(target: string, legacyPath: string, project: s
   try { value = JSON.parse(raw); } catch {
     throw new AdapterError("ACTIVITY_UNAVAILABLE", "Legacy activity file is invalid; the journal was not migrated.");
   }
-  if (!isRecord(value) || value.schema !== 1 || value.project !== project || !Array.isArray(value.events) ||
-    typeof value.epoch !== "string" || !Number.isSafeInteger(value.next))
+  if (!isRecord(value))
     throw new AdapterError("ACTIVITY_UNAVAILABLE", "Legacy activity identity is invalid; the journal was not migrated.");
+  const legacy = value as Store;
+  if (legacy.observations === undefined) legacy.observations = {};
+  if (legacy.watched === undefined) legacy.watched = {};
+  if (!validStore(legacy, project) || !validEvents(legacy))
+    throw new AdapterError("ACTIVITY_UNAVAILABLE", "Legacy activity file is invalid; the journal was not migrated.");
+  const serialized = `${JSON.stringify(legacy)}\n`;
   const temporary = `${target}.${randomUUID()}.tmp`;
   try {
     const file = await open(temporary, "wx", 0o600);
-    try { await file.writeFile(raw); await file.sync(); }
+    try { await file.writeFile(serialized); await file.sync(); }
     finally { await file.close(); }
     try { await link(temporary, target); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }

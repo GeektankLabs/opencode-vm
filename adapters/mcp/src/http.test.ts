@@ -922,6 +922,28 @@ test("MCP read outputs accept only the bounded safe worker error detail shape", 
     assert.deepEqual((result.structuredContent as TaskResult).messages[0]?.error_detail, errorDetail);
     assert.deepEqual((status.structuredContent as SessionStatusResult).error_details, [correlated]);
     assert.deepEqual((attention.structuredContent as AttentionResult).entries[0]?.error_details, [correlated]);
+    gateway.messageResult = {
+      session_id: "ses",
+      message: {
+        ...message,
+        error_detail: { ...errorDetail, message: "Bearer PRIVATE_TOKEN" },
+      },
+    };
+    const unsafeMessage = await client.callTool({
+      name: "get_message",
+      arguments: { session_id: "ses", message_id: "msg_error" },
+    });
+    assert.equal("isError" in unsafeMessage && unsafeMessage.isError, true);
+    assert.doesNotMatch(JSON.stringify(unsafeMessage), /PRIVATE_TOKEN/u);
+    gateway.statusResult = {
+      ...gateway.statusResult!,
+      error_details_truncated: true,
+    };
+    const inconsistentSummary = await client.callTool({
+      name: "get_session_status",
+      arguments: { session_id: "ses", message_id: "msg_user" },
+    });
+    assert.equal("isError" in inconsistentSummary && inconsistentSummary.isError, true);
   } finally {
     await client.close().catch(() => undefined);
     await server.close();
