@@ -105,23 +105,7 @@ export class ActivityJournal {
         )
           throw new Error();
         store = JSON.parse(await file.readFile("utf8")) as Store;
-        if (
-          store.schema !== 1 ||
-          store.project !== project ||
-          !/^[a-f0-9-]{36}$/u.test(store.epoch) ||
-          !Number.isSafeInteger(store.next) ||
-          store.next < 1 ||
-          !Array.isArray(store.events) ||
-          !isRecord(store.observations) ||
-          !isRecord(store.watched) ||
-          (store.guardOverrides !== undefined &&
-            !isRecord(store.guardOverrides)) ||
-           (store.resolutions !== undefined && !isRecord(store.resolutions)) ||
-           (store.attention !== undefined && !isRecord(store.attention)) ||
-           (store.attentionNext !== undefined && (!Number.isSafeInteger(store.attentionNext) || store.attentionNext < 1)) ||
-           (store.subscriptions !== undefined && !isRecord(store.subscriptions)) ||
-           !validAttentionState(store)
-        )
+        if (!validStore(store, project))
           throw new Error();
         let previous = 0;
         for (const event of store.events) {
@@ -152,7 +136,9 @@ export class ActivityJournal {
           const stat = await adopted.stat();
           if (!stat.isFile() || stat.uid !== process.getuid?.() || (stat.mode & 0o777) !== 0o600 || stat.size > 32 * 1024 * 1024) throw new Error();
           const legacy = JSON.parse(await adopted.readFile("utf8")) as Store;
-          if (legacy.schema !== 1 || legacy.project !== project || !Array.isArray(legacy.events)) throw new Error();
+          if (legacy.observations === undefined) legacy.observations = {};
+          if (legacy.watched === undefined) legacy.watched = {};
+          if (!validStore(legacy, project)) throw new Error();
           store = legacy;
         } finally { await adopted.close(); }
       } catch (adoptError) {
@@ -1038,6 +1024,21 @@ function eventName(type: ActivityEvent["type"]): string | undefined {
     case "session.input_required": return "worker.input_required";
     default: return undefined;
   }
+}
+
+function validStore(store: Store, project: string): boolean {
+  return store.schema === 1 && store.project === project &&
+    /^[a-f0-9-]{36}$/u.test(store.epoch) &&
+    Number.isSafeInteger(store.next) && store.next >= 1 &&
+    Array.isArray(store.events) && isRecord(store.observations) &&
+    isRecord(store.watched) &&
+    (store.guardOverrides === undefined || isRecord(store.guardOverrides)) &&
+    (store.resolutions === undefined || isRecord(store.resolutions)) &&
+    (store.attention === undefined || isRecord(store.attention)) &&
+    (store.attentionNext === undefined ||
+      (Number.isSafeInteger(store.attentionNext) && store.attentionNext >= 1)) &&
+    (store.subscriptions === undefined || isRecord(store.subscriptions)) &&
+    validAttentionState(store);
 }
 
 function validAttentionState(store: Store): boolean {

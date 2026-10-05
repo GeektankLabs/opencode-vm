@@ -100,6 +100,77 @@ test("project-persistent journal adopts the prior session journal once without r
   assert.equal((await readFile(legacyPath, "utf8")).includes('"state":"busy"'), true, "migration leaves old bytes intact");
 });
 
+test("legacy migration rejects persisted error details that are not safe projections", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "ocvm-journal-error-migration-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const legacyDirectory = join(directory, "session-mcp");
+  const projectDirectory = join(directory, "project-mcp");
+  await mkdir(legacyDirectory, { mode: 0o700 });
+  await mkdir(projectDirectory, { mode: 0o700 });
+  const legacyPath = join(legacyDirectory, "activity.json");
+  const source = await ActivityJournal.open(legacyPath, "project");
+  await source.observe({
+    session_id: "ses",
+    session_title: "Worker",
+    activity: "idle",
+    pending_input: { permissions: 0, questions: 0 },
+    messages: [{
+      session_id: "ses",
+      message_id: "msg_user",
+      backend_activity: "idle",
+      state: "failed",
+      pending_input: { permissions: 0, questions: 0 },
+      assistant_message_ids: ["msg_assistant"],
+    }],
+  }, "observed");
+  const entry = (await source.pendingAttention())[0]!;
+  await source.prepareAttention({
+    ...entry,
+    lifecycle: "ready",
+    source_revision: "attention-v2:test",
+    result_sha256: "a".repeat(64),
+    prepared_at: new Date().toISOString(),
+    prepared_summary: "Worker failed.",
+    next_safe_step: "Review the original failure evidence.",
+    hierarchy_status: "unlinked",
+    error_details: [{
+      category: "provider_header_timeout",
+      name: "APIError",
+      code: "ProviderHeaderTimeoutError",
+      timeout_ms: 300000,
+      message: "Provider response headers timed out after 300000ms.",
+      detail_availability: "safe_template",
+      source: "assistant_message_error",
+      assistant_message_id: "msg_assistant",
+      attribution: "exact_parent",
+    }],
+    error_details_total: 1,
+    error_details_truncated: false,
+    evidence: {
+      source: "visible_original",
+      source_revision: "attention-v2:test",
+      sha256: "a".repeat(64),
+      assistant_message_ids: ["msg_assistant"],
+      complete: true,
+    },
+  });
+  await source.close();
+  const raw = JSON.parse(await readFile(legacyPath, "utf8")) as {
+    attention: Record<string, { error_details: Array<{ message: string }> }>;
+  };
+  Object.values(raw.attention)[0]!.error_details[0]!.message = "Bearer PRIVATE_TOKEN";
+  await writeFile(legacyPath, JSON.stringify(raw) + "\n", { mode: 0o600 });
+  const targetPath = join(projectDirectory, "activity.json");
+  await assert.rejects(
+    ActivityJournal.open(targetPath, "project", 5000, legacyPath),
+    (error) => error instanceof AdapterError && error.code === "ACTIVITY_UNAVAILABLE",
+  );
+  await assert.rejects(
+    ActivityJournal.open(targetPath, "project"),
+    (error) => error instanceof AdapterError && error.code === "ACTIVITY_UNAVAILABLE",
+  );
+});
+
 test("filters advance over skipped events, recheck visibility and support bounded waits", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "ocvm-journal-filter-"));
   t.after(() => rm(directory, { recursive: true, force: true }));

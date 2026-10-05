@@ -785,6 +785,35 @@ test("worker failure details are safe on every read path and stay with the exact
   );
 });
 
+test("correlated status bounds worker error details without losing the total", async () => {
+  const state = baseState();
+  const failures = Array.from({ length: 11 }, (_, index) => {
+    const failed = stored(`assistant_${index}`, "", "user_timeout");
+    failed.info.error = {
+      name: "APIError",
+      data: {
+        metadata: {
+          code: "ProviderHeaderTimeoutError",
+          timeoutMs: String(index + 1),
+        },
+      },
+    };
+    return failed;
+  });
+  state.messages = [stored("user_timeout", "original request"), ...failures];
+  const status = await new OpenCodeGateway(
+    runtime(),
+    fakeClient(state) as never,
+  ).getSessionStatus("ses_work", "user_timeout");
+  assert.equal(status.error_details?.length, 10);
+  assert.equal(status.error_details_total, 11);
+  assert.equal(status.error_details_truncated, true);
+  assert.deepEqual(
+    status.error_details?.map((detail) => detail.assistant_message_id),
+    Array.from({ length: 10 }, (_, index) => `assistant_${index}`),
+  );
+});
+
 test("Delivery A: bounded search recovers old tasks with 130 steps without confusing a later blocked task", async () => {
   const state = baseState();
   state.messages = [
@@ -2465,6 +2494,8 @@ test("prepared attention retains safe correlated failure evidence without visibl
   }]);
   assert.equal(prepared.error_details_total, 1);
   assert.equal(prepared.error_details_truncated, false);
+  assert.deepEqual(prepared.assistant_message_ids, ["assistant_timeout"]);
+  assert.deepEqual(prepared.evidence?.assistant_message_ids, ["assistant_timeout"]);
   const sourceRevision = prepared.source_revision;
   (failed.info.error as {
     data: { metadata: { timeoutMs: string } };

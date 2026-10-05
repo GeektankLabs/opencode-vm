@@ -459,12 +459,17 @@ export class OpenCodeGateway implements SessionGateway {
       task_updated_at: context.task?.updated_at ?? null,
       documents: context.documentRevisions,
     }))}`;
+    const assistantMessageIds = [...new Set([
+      ...entry.assistant_message_ids,
+      ...messageRevisions.map((message) => message.id),
+      ...errorDetails.map((detail) => detail.assistant_message_id),
+    ])];
     const prepared = summarizeAttention(
       entry,
       visibleResult,
       sourceRevision,
       sha256,
-      messageRevisions.map((message) => message.id),
+      assistantMessageIds,
       context.task,
       context.hierarchy,
       context.hierarchy_status,
