@@ -34,7 +34,7 @@ OPENLIVE_PREVIOUS_COMMAND="$OPENLIVE_DIR/previous-command"
 OPENLIVE_AUTH_MARKER="__opencode_vm_openlive__"
 OPENLIVE_LOCK_PATH=""
 OPENLIVE_ADAPTER_VERSION="0.1.7"
-OPENLIVE_ADAPTER_TAG="v0.7.10"
+OPENLIVE_ADAPTER_TAG="v0.7.11"
 OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.7.tar"
 OPENLIVE_ADAPTER_SHA256="39a50c5127b0a577b54e4790b5c3c1f463b35a52b42c4343aa639dcea53bad47"
 OPENLIVE_ACP_SDK_VERSION="1.2.1"
@@ -45,14 +45,14 @@ OPENLIVE_MANAGER_PROMPT="You manage an OpenLive voice call. The voice_sessions t
 MCP_CONNECTOR_DIR="$SHARE_ROOT/mcp-connector"
 MCP_ADAPTER_CACHE_ROOT="$MCP_CONNECTOR_DIR/adapters"
 MCP_ADAPTER_VERSION="0.1.26"
-MCP_ADAPTER_TAG="v0.7.10"
+MCP_ADAPTER_TAG="v0.7.11"
 MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.26.tar"
 MCP_ADAPTER_SHA256="985c8b6c4cac00d659eda36d6363778cefd63af74347e71be05ee0c6cad0e188"
 MCP_SDK_VERSION="1.30.1"
 MCP_OPENCODE_SDK_VERSION="1.18.21"
 MCP_TESTED_PROTOCOL_VERSION="2025-11-25"
 MCP_TUNNEL_DIR="$SHARE_ROOT/mcp-tunnel/openai"
-HUB_ASSET_TAG="v0.7.10"
+HUB_ASSET_TAG="v0.7.11"
 HUB_ASSET_FILENAME="opencode-vm-hub-1.tar"
 HUB_ASSET_SHA256="0d2f328ffda9ee3a0c8d61cfe303f7e479863a3f3af032d07d8650dd3eb1c84a"
 
@@ -286,7 +286,7 @@ TASKBOARD_ARM64_SHA256="3749fb985f544fdb6788ba1dff69761e599ff82b3fe86d39ca54307c
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.7.10"
+OCVM_VERSION="0.7.11"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -11426,6 +11426,107 @@ taskboard_ensure_installed_in_base() {
   vm_exec "$BASE_NAME" "$OCVM_TASKBOARD_INSTALL_SH"$'\ninstall_taskboard'
 }
 
+# The VM-local doctor wrapper is a small, version-marked PATH entry that only
+# discovers this VM's session share and dispatches to the canonical library
+# staged at <share>/lib/doctor.sh (one diagnosis path; no logic duplication).
+# Embedded like the editor payload so standalone installs and source checkouts
+# behave identically. Pure text — no download.
+read -r -d '' OCVM_DOCTOR_INSTALL_SH <<'DOCTOR_INSTALL' || true
+install_doctor_wrapper() {
+  local bin="$HOME/.local/bin/doctor" marker='ocvm-doctor-wrapper v1' tmp
+  if [ -L "$bin" ]; then
+    echo "[doctor] Refusing to manage a symlinked wrapper: $bin" >&2
+    return 1
+  fi
+  if [ -f "$bin" ] && head -n 2 "$bin" 2>/dev/null | grep -qF "$marker"; then
+    return 0
+  fi
+  mkdir -p "$HOME/.local/bin" || return 1
+  tmp="$bin.ocvm-tmp.$$"
+  cat > "$tmp" <<'DOCTORWRAPPER'
+#!/usr/bin/env bash
+# ocvm-doctor-wrapper v1 — ocvm managed; rewritten on drift. Strictly read-only.
+# Thin PATH entry for the canonical VM-local doctor: discovers this VM's session
+# share from real mount metadata, sources <share>/lib/doctor.sh (the single
+# diagnosis path staged by opencode-vm) and dispatches one area. Never repairs.
+set -u
+doctor_usage() { printf '%s\n' "Usage: doctor [show|tunnel|mcp|services|help]" >&2; }
+if [ "$#" -gt 1 ]; then doctor_usage; exit 2; fi
+area="${1:-show}"
+case "$area" in
+  help|-h|--help)
+    printf '%s\n' \
+      "doctor — compact VM-local diagnostics for this opencode-vm session (read-only)." \
+      "" \
+      "  doctor            full report: identity, versions, services, health, excerpts" \
+      "  doctor tunnel     MCP tunnel focus (canonical guest tunnel status)" \
+      "  doctor mcp        OpenCode backend + incoming MCP adapter focus" \
+      "  doctor services   guest services/units/PIDs/listeners focus" \
+      "  doctor help       this text" \
+      "" \
+      "Local checks only — not a ChatGPT/E2E acceptance. Never repairs anything."
+    exit 0 ;;
+  show|tunnel|mcp|services) ;;
+  *) doctor_usage; exit 2 ;;
+esac
+hn="$(hostname 2>/dev/null || cat /proc/sys/kernel/hostname 2>/dev/null || printf 'unknown')"
+mounts="${OCVM_DOCTOR_MOUNTS_FILE:-/proc/mounts}"
+candidates="$(awk '$3 == "virtiofs" || $3 == "9p" { print $2 }' "$mounts" 2>/dev/null |
+  grep -E '/\.opencode-vm/sessions/[0-9a-fA-F]{32}$' | sort -u)" || candidates=""
+count=0
+if [ -n "$candidates" ]; then count="$(printf '%s\n' "$candidates" | grep -c .)"; fi
+if [ "$count" -eq 1 ] && [ -f "$candidates/lib/doctor.sh" ]; then
+  # shellcheck source=/dev/null
+  if ! . "$candidates/lib/doctor.sh"; then
+    printf '%s\n' "[vm-doctor] canonical library failed to load: $candidates/lib/doctor.sh" >&2
+    exit 4
+  fi
+  if ! command -v doctor_main >/dev/null 2>&1; then
+    printf '%s\n' "[vm-doctor] canonical library does not provide doctor_main (corrupt staging)." >&2
+    exit 4
+  fi
+  doctor_main "$area" "$candidates"
+  exit $?
+fi
+# Honest degradation: no arbitrary choice, no repair.
+printf '%s\n' "[vm-doctor] $(date -u +%Y-%m-%dT%H:%M:%SZ) ($(date +%Z 2>/dev/null || printf UTC)) vm=$hn"
+if [ "$count" -gt 1 ]; then
+  printf '%s\n' "[vm-doctor] identity: AMBIGUOUS — $count session shares mounted; refusing to choose:"
+  printf '%s\n' "$candidates" | sed 's|^|[vm-doctor]   candidate: |'
+  exit 3
+fi
+if [ "$count" -eq 1 ]; then
+  printf '%s\n' "[vm-doctor] identity: share=$candidates"
+  printf '%s\n' "[vm-doctor] canonical library not staged (lib/doctor.sh missing); session predates this feature or staging failed."
+  printf '%s\n' "[vm-doctor] re-start/attach the session, or use host-side diagnostics: opencode-vm doctor"
+  exit 4
+fi
+case "$hn" in
+  oc-base|lima-oc-base)
+    printf '%s\n' "[vm-doctor] identity: BASE — no session share mounted; session diagnostics unavailable here."
+    printf '%s\n' "[vm-doctor] host-side diagnostics: opencode-vm doctor"
+    exit 0 ;;
+  oc-*|lima-oc-*)
+    printf '%s\n' "[vm-doctor] identity: FAIL — session VM without a session-share mount (lost mount or stale clone)."
+    exit 3 ;;
+  *)
+    printf '%s\n' "[vm-doctor] identity: UNVERIFIED — not an opencode-vm session VM (no session share mounted)."
+    exit 3 ;;
+esac
+DOCTORWRAPPER
+  chmod 755 "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$bin" || { rm -f "$tmp"; return 1; }
+  [ -x "$bin" ] && [ ! -L "$bin" ]
+}
+DOCTOR_INSTALL
+
+doctor_ensure_installed_in_base() {
+  if ! is_vm_running "$BASE_NAME"; then
+    limactl start "$BASE_NAME" --tty=false >/dev/null || return 1
+  fi
+  vm_exec "$BASE_NAME" "$OCVM_DOCTOR_INSTALL_SH"$'\ninstall_doctor_wrapper'
+}
+
 # Only the editor's User directory is persistent. Runtime credentials, downloaded
 # binaries, logs and the managed extension never enter project preferences.
 editor_sync_preferences() {
@@ -14785,6 +14886,927 @@ EDITOR_MANIFEST
   return 0
 }
 
+# ---------------------------------------------------------------------------
+# In-VM canonical doctor library
+#
+# One diagnosis path: install_doctor_lib materializes this payload as
+# <session-share>/lib/doctor.sh (same absolute path inside the VM via the
+# session mount); the thin ~/.local/bin/doctor wrapper only discovers the
+# share and dispatches here. Strictly read-only: no writes, no temp files,
+# no unit/process mutation, no signals, no MCP tool calls, no LLM or work
+# dispatch, no repairs. Missing files/rights degrade to section-level
+# UNVERIFIED instead of aborting. All foreign text passes doctor_redact on
+# the single output chokepoint, and known secret values are scrubbed from
+# the buffered report before it is printed (also on error paths).
+# Bash 3.2 compatible by design; every external probe is time-bounded.
+# Contract: the wrapper sources this file under `set -u` and calls
+#   doctor_main <show|tunnel|mcp|services> [wrapper-resolved-share]
+# The optional second argument is cross-verified against the library's own
+# mount discovery; any divergence fails closed instead of diagnosing a
+# different share than the one that was sourced.
+# Test seams (function overrides / env defaults, never user configuration):
+#   _doctor_now _doctor_mounts _doctor_hostname _doctor_md5 _doctor_pid_alive
+#   _doctor_proc_cwd _doctor_proc_cmdline _doctor_pgrep_opencode
+#   _doctor_systemctl_show _doctor_listening _doctor_run  curl
+#   DOCTOR_WALL_BUDGET DOCTOR_LINE_BUDGET DOCTOR_EXCERPT_LINES
+#   DOCTOR_EXCERPT_BYTES DOCTOR_PROBE_TIMEOUT DOCTOR_TMPDIR
+read -r -d '' OCVM_DOCTOR_SH <<'DOCTORLIB' || true
+DOCTOR_LIB_VERSION=1
+DOCTOR_WALL_BUDGET="${DOCTOR_WALL_BUDGET:-15}"
+DOCTOR_LINE_BUDGET="${DOCTOR_LINE_BUDGET:-150}"
+DOCTOR_EXCERPT_LINES="${DOCTOR_EXCERPT_LINES:-5}"
+DOCTOR_EXCERPT_BYTES="${DOCTOR_EXCERPT_BYTES:-262144}"
+DOCTOR_PROBE_TIMEOUT="${DOCTOR_PROBE_TIMEOUT:-2}"
+DOCTOR_TMPDIR="${DOCTOR_TMPDIR:-/tmp}"
+
+# --- probe seams (overridable; read-only implementations) ------------------
+_doctor_now() { date +%s; }
+_doctor_mounts() { cat "${OCVM_DOCTOR_MOUNTS_FILE:-/proc/mounts}" 2>/dev/null || true; }
+_doctor_hostname() { hostname 2>/dev/null || cat /proc/sys/kernel/hostname 2>/dev/null || printf 'unknown'; }
+_doctor_md5() {
+  if command -v md5sum >/dev/null 2>&1; then md5sum | cut -d' ' -f1;
+  elif command -v md5 >/dev/null 2>&1; then md5 | awk '{print $NF}';
+  fi
+}
+_doctor_pid_alive() { [ -n "${1:-}" ] && ps -p "$1" >/dev/null 2>&1; }
+_doctor_proc_cwd() { readlink "/proc/$1/cwd" 2>/dev/null || true; }
+_doctor_proc_cmdline() { tr '\0' '\n' < "/proc/$1/cmdline" 2>/dev/null || true; }
+_doctor_pgrep_opencode() { pgrep -x opencode 2>/dev/null || true; }
+_doctor_systemctl_show() {
+  _doctor_run "$DOCTOR_PROBE_TIMEOUT" sudo -n systemctl show "$1" \
+    -p LoadState -p ActiveState -p SubState -p NRestarts -p Description
+}
+_doctor_listening() { ss -ltn "sport = :$1" 2>/dev/null | grep -q LISTEN; }
+_doctor_run() {
+  local t="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then timeout "$t" "$@" 2>/dev/null
+  else "$@" 2>/dev/null; fi
+}
+
+# --- redaction and output chokepoint ---------------------------------------
+doctor_redact() {
+  sed -E \
+    -e 's/[Bb]asic [A-Za-z0-9+/=]{12,}/Basic <redacted>/g' \
+    -e 's/([Tt]oken|[Kk]ey|[Pp]assword|[Ss]ecret|[Cc]redential|[Aa]uthorization|[Bb]earer)([\"=: ]+)[^\",} ]+/\1\2<redacted>/g' \
+    -e 's/sk-[A-Za-z0-9_.-]{8,}/<redacted-key>/g' \
+    -e 's/gh[pousr]_[A-Za-z0-9]{16,}/<redacted-scm>/g' \
+    -e 's/eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}/<redacted-jwt>/g'
+}
+
+_dout() {
+  local line
+  line="$(printf '%s' "$1" | doctor_redact | cut -c1-500)"
+  if [ "$DOCTOR_LINES" -ge "$DOCTOR_LINE_BUDGET" ]; then
+    DOCTOR_LINE_BUDGET_HIT=1
+    return 0
+  fi
+  DOCTOR_LINES=$((DOCTOR_LINES + 1))
+  if [ -z "$DOCTOR_BUFFER" ]; then DOCTOR_BUFFER="$line"
+  else DOCTOR_BUFFER="$DOCTOR_BUFFER
+$line"; fi
+}
+
+_dout_force() {
+  local line
+  line="$(printf '%s' "$1" | doctor_redact | cut -c1-500)"
+  DOCTOR_LINES=$((DOCTOR_LINES + 1))
+  if [ -z "$DOCTOR_BUFFER" ]; then DOCTOR_BUFFER="$line"
+  else DOCTOR_BUFFER="$DOCTOR_BUFFER
+$line"; fi
+}
+
+_doctor_note_secret() {
+  local v="${1:-}"
+  [ -n "$v" ] || return 0
+  if [ -z "$DOCTOR_SECRETS" ]; then DOCTOR_SECRETS="$v"
+  else DOCTOR_SECRETS="$DOCTOR_SECRETS
+$v"; fi
+}
+
+_doctor_add_finding() {
+  local f
+  f="$(printf '%s' "$1" | doctor_redact | head -n 1 | cut -c1-220)"
+  [ -n "$f" ] || return 0
+  if [ -z "$DOCTOR_FINDINGS" ]; then DOCTOR_FINDINGS="$f"
+  else DOCTOR_FINDINGS="$DOCTOR_FINDINGS
+$f"; fi
+}
+
+# Bounded whitelisted JSON field read: regular files up to 64 KiB only,
+# single value, truncated. Never dumps whole descriptor files.
+_doctor_json_field() {
+  local file="$1" filter="$2" size out
+  [ -f "$file" ] && [ ! -L "$file" ] || { printf ''; return 0; }
+  size="$(wc -c < "$file" 2>/dev/null | tr -d '[:space:]')" || size=""
+  case "$size" in ''|*[!0-9]*) printf ''; return 0 ;; esac
+  [ "$size" -le 65536 ] || { printf ''; return 0; }
+  out="$(jq -r "$filter" "$file" 2>/dev/null | head -n 1)" || out=""
+  [ "$out" = null ] && out=""
+  printf '%s' "$out" | cut -c1-200 | tr -d '\r'
+  return 0
+}
+
+_doctor_env_value() {
+  local f="$DOCTOR_SHARE/lib/doctor.env"
+  [ -f "$f" ] || { printf ''; return 0; }
+  sed -n "s/^$1=//p" "$f" 2>/dev/null | head -n 1 | cut -c1-80 | tr -d "'\r"
+}
+
+_doctor_unit_field() {
+  printf '%s\n' "$1" | sed -n "s/^$2=//p" | head -n 1
+}
+
+_doctor_section() {
+  local elapsed
+  elapsed=$(( $(_doctor_now) - DOCTOR_START_EPOCH ))
+  if [ "$elapsed" -ge "$DOCTOR_WALL_BUDGET" ]; then
+    _dout "[vm-doctor] BUDGET_EXCEEDED section=$1 (wall ${elapsed}s >= ${DOCTOR_WALL_BUDGET}s budget)"
+    DOCTOR_UNVERIFIED=$((DOCTOR_UNVERIFIED + 1))
+    DOCTOR_BUDGET_HIT=1
+    return 1
+  fi
+  if [ "$DOCTOR_LINES" -ge "$DOCTOR_LINE_BUDGET" ]; then
+    DOCTOR_LINE_BUDGET_HIT=1
+    return 1
+  fi
+  return 0
+}
+
+_doctor_oc_cli_version() {
+  if [ -z "$DOCTOR_OC_CLI_SEEN" ]; then
+    DOCTOR_OC_CLI_SEEN=1
+    DOCTOR_OC_CLI_VERSION="$(_doctor_run 3 opencode --version | head -n 1 | tr -d '[:space:]' | cut -c1-40 || true)"
+  fi
+  printf '%s' "$DOCTOR_OC_CLI_VERSION"
+  return 0
+}
+
+# --- state reset (idempotent; tests may call directly) ---------------------
+doctor_reset() {
+  DOCTOR_MAIN_EXIT=0; DOCTOR_ID_EXIT=""; DOCTOR_BUFFER=""; DOCTOR_FINDINGS=""
+  DOCTOR_SECRETS=""; DOCTOR_LINES=0; DOCTOR_PASS=0; DOCTOR_FAIL=0
+  DOCTOR_UNVERIFIED=0; DOCTOR_LINE_BUDGET_HIT=0; DOCTOR_BUDGET_HIT=0
+  DOCTOR_START_EPOCH="$(_doctor_now)"
+  DOCTOR_VM=""; DOCTOR_CTX=""; DOCTOR_SHARE=""; DOCTOR_CANDIDATES=""
+  DOCTOR_PROJECT=""; DOCTOR_HASH=""; DOCTOR_GENERATION=""
+  DOCTOR_OC_CLI_SEEN=""; DOCTOR_OC_CLI_VERSION=""; DOCTOR_OC_LIVE_VERSION=""
+  DOCTOR_LAST_TOOL_LINE=""
+}
+
+doctor_emit_header() {
+  _dout "[vm-doctor] $(date -u +%Y-%m-%dT%H:%M:%SZ) local=$(date +%Y-%m-%dT%H:%M:%S%z 2>/dev/null || true) tz=$(date +%Z 2>/dev/null || printf UTC)"
+}
+
+# --- identity from real runtime metadata; never an arbitrary choice --------
+doctor_resolve_identity() {
+  local expected="${1:-}"
+  DOCTOR_VM="$(_doctor_hostname)"
+  case "$DOCTOR_VM" in
+    oc-base|lima-oc-base) DOCTOR_CTX="base" ;;
+    oc-*|lima-oc-*) DOCTOR_CTX="session" ;;
+    *) DOCTOR_CTX="foreign" ;;
+  esac
+  DOCTOR_CANDIDATES="$(_doctor_mounts | awk '$3 == "virtiofs" || $3 == "9p" { print $2 }' |
+    grep -E '/\.opencode-vm/sessions/[0-9a-fA-F]{32}$' | sed -e 's/\\040/ /g' -e 's/\\011/\t/g' | sort -u || true)"
+  local count=0
+  if [ -n "$DOCTOR_CANDIDATES" ]; then count="$(printf '%s\n' "$DOCTOR_CANDIDATES" | grep -c .)"; fi
+  if [ "$count" -gt 1 ]; then
+    if [ -n "$expected" ]; then
+      _dout "[vm-doctor] identity: wrapper expected $expected but runtime mounts are ambiguous:"
+    fi
+    _dout "[vm-doctor] identity: AMBIGUOUS — $count session shares mounted; refusing to choose:"
+    local c
+    while IFS= read -r c; do
+      [ -n "$c" ] && _dout "[vm-doctor]   candidate: $c"
+    done <<< "$DOCTOR_CANDIDATES"
+    DOCTOR_ID_EXIT=3
+    return 1
+  fi
+  if [ "$count" -eq 0 ]; then
+    case "$DOCTOR_CTX" in
+      base)
+        _dout "[vm-doctor] vm=$DOCTOR_VM identity: BASE — no session share mounted; session checks unavailable here."
+        _dout "[vm-doctor] host-side diagnostics: opencode-vm doctor" ;;
+      session)
+        _dout "[vm-doctor] vm=$DOCTOR_VM identity: FAIL — session VM without a session-share mount (lost mount or stale clone${expected:+; wrapper expected $expected})."
+        DOCTOR_FAIL=$((DOCTOR_FAIL + 1)); DOCTOR_ID_EXIT=3 ;;
+      *)
+        _dout "[vm-doctor] vm=$DOCTOR_VM identity: UNVERIFIED — not an opencode-vm session VM; no session share mounted."
+        DOCTOR_UNVERIFIED=$((DOCTOR_UNVERIFIED + 1)); DOCTOR_ID_EXIT=3 ;;
+    esac
+    return 1
+  fi
+  DOCTOR_SHARE="$DOCTOR_CANDIDATES"
+  if [ -n "$expected" ] && [ "$DOCTOR_SHARE" != "$expected" ]; then
+    _dout "[vm-doctor] identity: FAIL — wrapper resolved '$expected' but runtime mounts resolve '$DOCTOR_SHARE'; refusing the mixed view."
+    _doctor_add_finding "wrapper/library share view mismatch: wrapper=$expected library=$DOCTOR_SHARE"
+    DOCTOR_FAIL=$((DOCTOR_FAIL + 1)); DOCTOR_ID_EXIT=3
+    return 1
+  fi
+  DOCTOR_HASH="$(basename "$DOCTOR_SHARE")"
+  DOCTOR_PROJECT="$(_doctor_json_field "$DOCTOR_SHARE/mcp/runtime.json" '.project')"
+  DOCTOR_GENERATION="$(_doctor_json_field "$DOCTOR_SHARE/mcp/runtime.json" '.generation')"
+  local rt_hash rd_gen
+  rt_hash="$(_doctor_json_field "$DOCTOR_SHARE/mcp/runtime.json" '.projectHash')"
+  rd_gen="$(_doctor_json_field "$DOCTOR_SHARE/mcp/ready.json" '.generation')"
+  if [ -n "$rt_hash" ] && [ "$rt_hash" != "$DOCTOR_HASH" ]; then
+    _dout "[vm-doctor] vm=$DOCTOR_VM share=$DOCTOR_SHARE"
+    _dout "[vm-doctor] identity: FAIL — runtime projectHash '$rt_hash' does not match share id '$DOCTOR_HASH' (wrong-project guard)."
+    DOCTOR_FAIL=$((DOCTOR_FAIL + 1)); DOCTOR_MAIN_EXIT=1
+    return 0
+  fi
+  if [ -n "$DOCTOR_PROJECT" ]; then
+    local calc=""
+    calc="$(printf '%s' "$DOCTOR_PROJECT" | _doctor_md5)" || calc=""
+    if [ -n "$calc" ] && [ "$calc" != "$DOCTOR_HASH" ]; then
+      _dout "[vm-doctor] vm=$DOCTOR_VM share=$DOCTOR_SHARE project=$DOCTOR_PROJECT"
+      _dout "[vm-doctor] identity: FAIL — md5(project) '$calc' does not match share id '$DOCTOR_HASH'."
+      DOCTOR_FAIL=$((DOCTOR_FAIL + 1)); DOCTOR_MAIN_EXIT=1
+      return 0
+    fi
+  fi
+  if [ -n "$rd_gen" ] && [ -n "$DOCTOR_GENERATION" ] && [ "$rd_gen" != "$DOCTOR_GENERATION" ]; then
+    _dout "[vm-doctor] identity: STALE — ready.json generation differs from runtime.json (mixed generations present)."
+    _doctor_add_finding "generation mismatch: ready.json=$rd_gen runtime.json=$DOCTOR_GENERATION"
+    DOCTOR_UNVERIFIED=$((DOCTOR_UNVERIFIED + 1))
+  fi
+  _dout "[vm-doctor] vm=$DOCTOR_VM share=$DOCTOR_SHARE"
+  _dout "[vm-doctor] project=${DOCTOR_PROJECT:-UNVERIFIED(no runtime descriptor)} hash=$DOCTOR_HASH generation=${DOCTOR_GENERATION:-unknown}"
+  if [ -n "$DOCTOR_PROJECT" ]; then
+    _dout "[vm-doctor] identity: PASS (mount, project hash and generation cross-checked)"
+    DOCTOR_PASS=$((DOCTOR_PASS + 1))
+  else
+    _dout "[vm-doctor] identity: UNVERIFIED (share mount only; live /path probe may still resolve and hash-confirm the project)"
+    DOCTOR_UNVERIFIED=$((DOCTOR_UNVERIFIED + 1))
+  fi
+  return 0
+}
+
+# --- versions and provenance (guest-provable only; honest UNVERIFIED) ------
+doctor_collect_versions() {
+  local oc_cli oc_desc script_staged script_live="" adapter_ver="" marker_state="not-staged"
+  local tunnel_dirs="" tb_dirs="" ed_dirs="" hub_assets="" ol_adapter="" gr gport gpid info
+  oc_cli="$(_doctor_oc_cli_version)"
+  oc_desc="$(_doctor_json_field "$DOCTOR_SHARE/mcp/runtime.json" '.opencodeVersion')"
+  script_staged="$(_doctor_env_value OCVM_SCRIPT_VERSION)"
+  gr="$DOCTOR_SHARE/openlive/gateway-ready.json"
+  gport="$(_doctor_json_field "$gr" '.port')"
+  gpid="$(_doctor_json_field "$gr" '.pid')"
+  if [ -n "$gport" ] && [ -n "$gpid" ] && _doctor_pid_alive "$gpid"; then
+    info="$(_doctor_run "$DOCTOR_PROBE_TIMEOUT" curl -fsS --max-time "$DOCTOR_PROBE_TIMEOUT" "http://127.0.0.1:$gport/openlive/info")" || info=""
+    if [ -n "$info" ]; then
+      script_live="$(printf '%s' "$info" | jq -r '.scriptVersion // empty' 2>/dev/null | head -n 1 | cut -c1-40)" || script_live=""
+    fi
+  fi
+  if [ -d "$DOCTOR_SHARE/mcp/adapter" ]; then
+    adapter_ver="$(_doctor_json_field "$DOCTOR_SHARE/mcp/adapter/package.json" '.version')"
+    if grep -qFx 'opencode-vm-mcp-staging-v1' "$DOCTOR_SHARE/mcp/adapter/.ocvm-managed" 2>/dev/null; then
+      marker_state="managed-v1"
+    else
+      marker_state="UNVERIFIED(managed marker missing)"
+    fi
+  fi
+  ol_adapter="$(_doctor_json_field "$DOCTOR_SHARE/openlive/adapter/package.json" '.version')"
+  tunnel_dirs="$(cd "$HOME/.local/share/ocvm-mcp-tunnel" 2>/dev/null && ls -d */ 2>/dev/null | tr -d '/' | head -n 3 | tr '\n' ' ' || true)"
+  tb_dirs="$(cd "$HOME/.local/share/ocvm-taskboard" 2>/dev/null && ls -d taskboard-*/ 2>/dev/null | tr -d '/' | head -n 3 | tr '\n' ' ' || true)"
+  ed_dirs="$(cd "$HOME/.local/share/ocvm-editor" 2>/dev/null && ls -d code-server-*/ 2>/dev/null | tr -d '/' | head -n 3 | tr '\n' ' ' || true)"
+  hub_assets="$(cd "$DOCTOR_SHARE/hub" 2>/dev/null && ls -d assets-* 2>/dev/null | head -n 2 | tr '\n' ' ' || true)"
+  _dout "[vm-doctor] versions: opencode-cli=${oc_cli:-UNVERIFIED} opencode-descriptor=${oc_desc:-UNVERIFIED} opencode-live=${DOCTOR_OC_LIVE_VERSION:-UNVERIFIED}"
+  _dout "[vm-doctor]           script-staged=${script_staged:-UNVERIFIED} script-live=${script_live:-UNVERIFIED} install-vs-checkout=UNVERIFIED(host-side fact)"
+  _dout "[vm-doctor]           mcp-adapter=${adapter_ver:-not-staged}($marker_state) openlive-adapter=${ol_adapter:-not-staged}"
+  _dout "[vm-doctor]           tunnel-client=${tunnel_dirs:-none} taskboard=${tb_dirs:-none} editor=${ed_dirs:-none} hub-assets=${hub_assets:-none}"
+  if [ -n "$oc_cli" ] && [ -n "$oc_desc" ] && [ "$oc_cli" != "$oc_desc" ]; then
+    _doctor_add_finding "opencode version mismatch: cli=$oc_cli descriptor=$oc_desc"
+    DOCTOR_FAIL=$((DOCTOR_FAIL + 1))
+  elif [ -n "$oc_cli" ]; then
+    DOCTOR_PASS=$((DOCTOR_PASS + 1))
+  else
+    DOCTOR_UNVERIFIED=$((DOCTOR_UNVERIFIED + 1))
+  fi
+  return 0
+}
+
+# --- OpenCode server: discovery refuses ambiguity (provider pattern) -------
+doctor_collect_opencode() {
+  local backend="" pidlist="" pid="" mode="" port="" host_arg="" cwd="" matches=0
+  local found_pid="" found_port="" found_mode="" cfg="" proc="" ready=""
+  backend="$(_doctor_json_field "$DOCTOR_SHARE/mcp/runtime.json" '.backendUrl')"
+  pidlist="$(_doctor_pgrep_opencode)"
+  if [ -n "$pidlist" ]; then
+    while IFS= read -r pid; do
+      [ -n "$pid" ] || continue
+      cwd="$(_doctor_proc_cwd "$pid")"
+      mode="$(_doctor_proc_cmdline "$pid" | sed -n '2p')"
+      host_arg="$(_doctor_proc_cmdline "$pid" | sed -n '/^--hostname$/{n;p;q;}')"
+      port="$(_doctor_proc_cmdline "$pid" | sed -n '/^--port$/{n;p;q;}')"
+      case "$mode" in web|serve) ;; *) continue ;; esac
+      [ "$host_arg" = "127.0.0.1" ] || continue
+      case "$port" in ''|*[!0-9]*) continue ;; esac
+      if [ -n "$DOCTOR_PROJECT" ] && [ -n "$cwd" ] && [ "$cwd" != "$DOCTOR_PROJECT" ]; then continue; fi
+      matches=$((matches + 1)); found_pid="$pid"; found_port="$port"; found_mode="$mode"
+    done <<< "$pidlist"
+  fi
+  cfg="no-descriptor"
+  [ -n "$backend" ] && cfg="backendUrl=$backend"
+  if [ "$matches" -gt 1 ]; then
+    _dout "[vm-doctor] opencode-server: config=$cfg process=AMBIGUOUS($matches matching servers; refusing to choose) readiness=UNVERIFIED"
+    DOCTOR_UNVERIFIED=$((DOCTOR_UNVERIFIED + 1))
+    return 0
+  fi
+  if [ "$matches" -eq 0 ]; then
+    _dout "[vm-doctor] opencode-server: config=$cfg process=not-running(normal for idle shell/TUI sessions) readiness=UNVERIFIED last-success=see roundtrip"
+    DOCTOR_UNVERIFIED=$((DOCTOR_UNVERIFIED + 1))
+    return 0
+  fi
+  proc="running(mode=$found_mode pid=$found_pid port=$found_port)"
+  local url="http://127.0.0.1:$found_port" health="" pathjson="" h_ok="" h_ver="" p_dir=""
+  health="$(_doctor_run "$DOCTOR_PROBE_TIMEOUT" curl -fsS --max-time "$DOCTOR_PROBE_TIMEOUT" "$url/global/health")" || health=""
+  if [ -n "$health" ]; then
+    h_ok="$(printf '%s' "$health" | jq -r '.healthy // empty' 2>/dev/null)" || h_ok=""
+    h_ver="$(printf '%s' "$health" | jq -r '.version // empty' 2>/dev/null)" || h_ver=""
+    DOCTOR_OC_LIVE_VERSION="$h_ver"
+    pathjson="$(_doctor_run "$DOCTOR_PROBE_TIMEOUT" curl -fsS --max-time "$DOCTOR_PROBE_TIMEOUT" "$url/path")" || pathjson=""
+    p_dir="$(printf '%s' "$pathjson" | jq -r '.directory // empty' 2>/dev/null)" || p_dir=""
+    if [ "$h_ok" = "true" ]; then
+      if [ -z "$DOCTOR_PROJECT" ] && [ -n "$p_dir" ]; then
+        DOCTOR_PROJECT="$p_dir"
+        local calc=""
+        calc="$(printf '%s' "$p_dir" | _doctor_md5)" || calc=""
+        if [ -n "$calc" ] && [ "$calc" = "$DOCTOR_HASH" ]; then
+          _dout "[vm-doctor] identity: project resolved from live /path probe and hash-confirmed: $p_dir"
+        else
+          _doctor_add_finding "live server directory '$p_dir' does not hash-confirm share id '$DOCTOR_HASH'"
+          _dout "[vm-doctor] identity: FAIL — live /path directory does not hash-confirm this share."
+          DOCTOR_FAIL=$((DOCTOR_FAIL + 1)); DOCTOR_MAIN_EXIT=1
+        fi
+      fi
+      if [ -n "$backend" ]; then
+        local bport="${backend##*:}"
+        if [ "$bport" != "$found_port" ]; then
+          _doctor_add_finding "opencode descriptor backendUrl port $bport differs from discovered $found_port"
+        fi
+      fi
+      ready="PASS(/global/health healthy=true version=${h_ver:-?} /path=${p_dir:-UNVERIFIED})"
+      DOCTOR_PASS=$((DOCTOR_PASS + 1))
+    else
+      ready="FAIL(/global/health healthy!=true)"
+      _doctor_add_finding "opencode health probe returned healthy!=true on port $found_port"
+      DOCTOR_FAIL=$((DOCTOR_FAIL + 1)); DOCTOR_MAIN_EXIT=1
+    fi
+  else
+    ready="UNVERIFIED(health probe failed, refused or auth-required)"
+    DOCTOR_UNVERIFIED=$((DOCTOR_UNVERIFIED + 1))
+  fi
+  _dout "[vm-doctor] opencode-server: config=$cfg process=$proc readiness=$ready"
+  return 0
+}
+
+# --- last PROVEN tool roundtrip (adapter trace) + separate worker event ----
+doctor_collect_roundtrip() {
+  DOCTOR_LAST_TOOL_LINE=""
+  local log="$DOCTOR_SHARE/mcp/adapter.log" trace="" js="" ts="" tool="" dur="" req=""
+  if [ -f "$log" ]; then
+    trace="$(tail -c "$DOCTOR_EXCERPT_BYTES" "$log" 2>/dev/null | grep -F '[mcp] call=' | grep -F '"state":"completed"' | tail -n 1 || true)"
+    if [ -n "$trace" ]; then
+      js="${trace#*call=}"
+      ts="$(printf '%s' "$js" | jq -r '.timestamp // empty' 2>/dev/null | head -n 1)" || ts=""
+      tool="$(printf '%s' "$js" | jq -r '.tool // empty' 2>/dev/null | head -n 1)" || tool=""
+      dur="$(printf '%s' "$js" | jq -r '.duration_ms // empty' 2>/dev/null | head -n 1)" || dur=""
+      req="$(printf '%s' "$js" | jq -r '.request // empty' 2>/dev/null | head -n 1)" || req=""
+      if [ -n "$ts" ] && [ -n "$tool" ]; then
+        DOCTOR_LAST_TOOL_LINE="$ts tool=$tool duration_ms=${dur:-?} request=${req:-?}"
+        _dout "[vm-doctor] last-tool-roundtrip: PASS $DOCTOR_LAST_TOOL_LINE (completed adapter tool trace)"
+        DOCTOR_PASS=$((DOCTOR_PASS + 1))
+      else
+        _dout "[vm-doctor] last-tool-roundtrip: UNVERIFIED (completed trace present but unparseable)"
+        DOCTOR_UNVERIFIED=$((DOCTOR_UNVERIFIED + 1))
+      fi
+    else
+      _dout "[vm-doctor] last-tool-roundtrip: UNVERIFIED (no completed tool trace in bounded adapter.log tail)"
+      DOCTOR_UNVERIFIED=$((DOCTOR_UNVERIFIED + 1))
+    fi
+    trace="$(tail -c "$DOCTOR_EXCERPT_BYTES" "$log" 2>/dev/null | grep -F '[mcp] call=' | grep -F '"state":"failed"' | tail -n 1 || true)"
+    if [ -n "$trace" ]; then
+      js="${trace#*call=}"
+      _doctor_add_finding "adapter tool failure: $(printf '%s' "$js" | jq -c '{timestamp,tool,error,reason,request,session_id,message_id}' 2>/dev/null | cut -c1-180 || true)"
+    fi
+  else
+    _dout "[vm-doctor] last-tool-roundtrip: UNVERIFIED (no adapter log)"
+    DOCTOR_UNVERIFIED=$((DOCTOR_UNVERIFIED + 1))
+  fi
+  local jpath="" cand size="" ev=""
+  for cand in "${DOCTOR_PROJECT:+$DOCTOR_PROJECT/.opencode-vm/mcp/activity.json}" "$DOCTOR_SHARE/mcp/activity.json"; do
+    if [ -n "$cand" ] && [ -f "$cand" ]; then jpath="$cand"; break; fi
+  done
+  if [ -n "$jpath" ]; then
+    size="$(wc -c < "$jpath" 2>/dev/null | tr -d '[:space:]')" || size=""
+    case "$size" in ''|*[!0-9]*) size="" ;; esac
+    if [ -n "$size" ] && [ "$size" -le 1048576 ]; then
+      ev="$(jq -r '(.events // []) | map(select(.type == "message.completed")) | last | if . == null then empty else [.timestamp, .type, .cursor // "no-cursor"] | @tsv end' "$jpath" 2>/dev/null | head -n 1)" || ev=""
+      if [ -n "$ev" ]; then
+        _dout "[vm-doctor] last-worker-event: $(printf '%s' "$ev" | tr '\t' ' ') (journal worker event — NOT tool-roundtrip proof, NOT E2E)"
+      else
+        _dout "[vm-doctor] last-worker-event: none recorded (journal readable, no message.completed)"
+      fi
+    else
+      _dout "[vm-doctor] last-worker-event: UNVERIFIED (journal ${size:-?}B exceeds 1MiB bounded-read gate)"
+      DOCTOR_UNVERIFIED=$((DOCTOR_UNVERIFIED + 1))
+    fi
+  else
+    _dout "[vm-doctor] last-worker-event: UNVERIFIED (no activity journal found)"
+    DOCTOR_UNVERIFIED=$((DOCTOR_UNVERIFIED + 1))
+  fi
+  return 0
+}
+
+# --- incoming MCP adapter (readiness contract reused; token only via stdin) -
+doctor_collect_adapter() {
+  local rj="$DOCTOR_SHARE/mcp/ready.json" rt="$DOCTOR_SHARE/mcp/runtime.json"
+  local cfg="not-configured" proc="inactive" ready="UNVERIFIED(no descriptor)"
+  local ver="" marker_state="" pid="" port="" gen="" hproj=""
+  if [ -d "$DOCTOR_SHARE/mcp/adapter" ]; then
+    ver="$(_doctor_json_field "$DOCTOR_SHARE/mcp/adapter/package.json" '.version')"
+    if grep -qFx 'opencode-vm-mcp-staging-v1' "$DOCTOR_SHARE/mcp/adapter/.ocvm-managed" 2>/dev/null; then
+      marker_state="managed-v1"; cfg="staged(${ver:-?},$marker_state)"
+    else
+      cfg="staged-incomplete(managed marker missing)"
+    fi
+  fi
+  if [ -f "$rj" ]; then
+    pid="$(_doctor_json_field "$rj" '.pid')"
+    port="$(_doctor_json_field "$rj" '.port')"
+    gen="$(_doctor_json_field "$rj" '.generation')"
+    hproj="$(_doctor_json_field "$rj" '.projectHash')"
+    if [ -z "$pid" ] && [ -z "$port" ]; then
+      _doctor_add_finding "mcp ready.json present but unparseable or field-less"
+    fi
+    if [ -n "$pid" ] && _doctor_pid_alive "$pid"; then
+      proc="running(pid=$pid)"
+    else
+      proc="STALE(descriptor without live process)"
+      _doctor_add_finding "mcp adapter ready.json names pid ${pid:-none} which is not alive"
+      DOCTOR_FAIL=$((DOCTOR_FAIL + 1)); DOCTOR_MAIN_EXIT=1
+    fi
+    if [ -n "$hproj" ] && [ "$hproj" != "$DOCTOR_HASH" ]; then
+      _doctor_add_finding "ready.json projectHash $hproj does not match share id $DOCTOR_HASH"
+    fi
+    if [ -n "$port" ]; then
+      local token="" health="" hok="" hgen=""
+      if [ -f "$DOCTOR_SHARE/mcp/credential" ]; then
+        token="$(head -c 512 "$DOCTOR_SHARE/mcp/credential" 2>/dev/null | head -n 1)" || token=""
+        if [ -n "$token" ]; then _doctor_note_secret "$token"; fi
+      fi
+      if [ -n "$token" ]; then
+        health="$(printf 'header = "X-OCVM-MCP-Token: %s"\n' "$token" |
+          curl -fsS --config - --max-time "$DOCTOR_PROBE_TIMEOUT" "http://127.0.0.1:$port/healthz" 2>/dev/null)" || health=""
+        if [ -n "$health" ]; then
+          hok="$(printf '%s' "$health" | jq -r '.healthy // empty' 2>/dev/null)" || hok=""
+          hgen="$(printf '%s' "$health" | jq -r '.generation // empty' 2>/dev/null)" || hgen=""
+          local hpid=""
+          hpid="$(printf '%s' "$health" | jq -r '.project.id // empty' 2>/dev/null)" || hpid=""
+          if [ "$hok" = "true" ] &&
+             { [ -z "$hpid" ] || [ "$hpid" = "$DOCTOR_HASH" ]; } &&
+             { [ -z "$hgen" ] || [ -z "$DOCTOR_GENERATION" ] || [ "$hgen" = "$DOCTOR_GENERATION" ]; }; then
+            ready="PASS(healthz token-verified project/generation matched)"
+            DOCTOR_PASS=$((DOCTOR_PASS + 1))
+          elif [ "$hok" = "true" ]; then
+            ready="FAIL(healthz identity mismatch project=${hpid:-?} generation=${hgen:-?})"
+            _doctor_add_finding "mcp healthz identity mismatch: project=$hpid generation=$hgen"
+            DOCTOR_FAIL=$((DOCTOR_FAIL + 1)); DOCTOR_MAIN_EXIT=1
+          else
+            ready="FAIL(healthz healthy!=true)"
+            _doctor_add_finding "mcp healthz reported healthy!=true on port $port"
+            DOCTOR_FAIL=$((DOCTOR_FAIL + 1)); DOCTOR_MAIN_EXIT=1
+          fi
+        else
+          case "$proc" in
+            running*)
+              ready="FAIL(healthz probe failed while adapter process is alive)"
+              _doctor_add_finding "mcp adapter healthz unreachable on port $port despite live pid"
+              DOCTOR_FAIL=$((DOCTOR_FAIL + 1)); DOCTOR_MAIN_EXIT=1 ;;
+            *)
+              ready="UNVERIFIED(healthz probe failed)"
+              DOCTOR_UNVERIFIED=$((DOCTOR_UNVERIFIED + 1)) ;;
+          esac
+        fi
+      else
+        ready="UNVERIFIED(no readable credential for probe)"
+        DOCTOR_UNVERIFIED=$((DOCTOR_UNVERIFIED + 1))
+      fi
+    fi
+  elif [ "$cfg" != "not-configured" ]; then
+    _doctor_add_finding "mcp adapter staged but no ready.json (adapter not running in this session mode or stopped)"
+  fi
+  local last="${DOCTOR_LAST_TOOL_LINE:-not-collected}"
+  _dout "[vm-doctor] mcp-adapter: config=$cfg process=$proc readiness=$ready last-success=$last"
+  return 0
+}
+
+# --- MCP tunnel: canonical guest status reused verbatim ---------------------
+doctor_collect_tunnel() {
+  local cfg="not-configured" proc="not-installed" ready="UNVERIFIED" last="none-evidenced"
+  local tid="" props="" loadstate="" activestate="" nrestarts="" state_json=""
+  tid="$(_doctor_json_field "$DOCTOR_SHARE/mcp/tunnel.yaml" '.control_plane.tunnel_id')"
+  if [ -f "$DOCTOR_SHARE/mcp/tunnel.yaml" ]; then
+    cfg="configured(tunnel_id=${tid:-unknown})"
+  fi
+  props="$(_doctor_systemctl_show ocvm-mcp-tunnel.service)" || props=""
+  loadstate="$(_doctor_unit_field "$props" LoadState)"
+  if [ -n "$loadstate" ] && [ "$loadstate" != "not-found" ]; then
+    activestate="$(_doctor_unit_field "$props" ActiveState)"
+    nrestarts="$(_doctor_unit_field "$props" NRestarts)"
+    proc="unit=${activestate:-unknown}(restarts=${nrestarts:-?})"
+  fi
+  if [ -f "$DOCTOR_SHARE/lib/web.sh" ]; then
+    state_json="$(
+      PROJ_DIR="${DOCTOR_PROJECT:-/}" SESS_SHARE="$DOCTOR_SHARE" OC_PORT=4096
+      set +u
+      # shellcheck source=/dev/null
+      . "$DOCTOR_SHARE/lib/web.sh" >/dev/null 2>&1
+      mcp_tunnel_guest_status 2>/dev/null
+    )" || state_json=""
+    if [ -n "$state_json" ] && printf '%s' "$state_json" | jq -e 'type == "object"' >/dev/null 2>&1; then
+      local tproc="" tready="" tcp="" tconn="" thttp="" ttid=""
+      tproc="$(printf '%s' "$state_json" | jq -r '.process // empty' 2>/dev/null)" || tproc=""
+      tready="$(printf '%s' "$state_json" | jq -r '.ready // empty' 2>/dev/null)" || tready=""
+      tcp="$(printf '%s' "$state_json" | jq -r '.controlPlane // empty' 2>/dev/null)" || tcp=""
+      tconn="$(printf '%s' "$state_json" | jq -r '.connected // empty' 2>/dev/null)" || tconn=""
+      thttp="$(printf '%s' "$state_json" | jq -r '.httpStatus // 0' 2>/dev/null)" || thttp="0"
+      ttid="$(printf '%s' "$state_json" | jq -r '.tunnelId // empty' 2>/dev/null)" || ttid=""
+      if [ -n "$tproc" ]; then proc="guest=$tproc $proc"; fi
+      if [ -n "$ttid" ] && [ "$ttid" != "unknown" ]; then cfg="configured(tunnel_id=$ttid)"; fi
+      if [ "$tready" = "true" ]; then
+        ready="PASS(ready control-plane=${tcp:-?})"
+        DOCTOR_PASS=$((DOCTOR_PASS + 1))
+      else
+        if [ "$cfg" = "not-configured" ]; then
+          ready="UNVERIFIED(not configured)"
+          DOCTOR_UNVERIFIED=$((DOCTOR_UNVERIFIED + 1))
+        else
+          ready="FAIL(not ready control-plane=${tcp:-?} httpStatus=${thttp:-0})"
+          _doctor_add_finding "tunnel not ready: control-plane=${tcp:-?} httpStatus=${thttp:-0}"
+          DOCTOR_FAIL=$((DOCTOR_FAIL + 1)); DOCTOR_MAIN_EXIT=1
+        fi
+      fi
+      if [ "$tconn" = "true" ]; then
+        last="connected(control-plane success evidenced, consecutive_failures=0)"
+      fi
+      if [ -n "$thttp" ] && [ "$thttp" != "0" ]; then
+        _doctor_add_finding "tunnel control-plane HTTP status $thttp"
+      fi
+    else
+      ready="UNVERIFIED(canonical guest status unavailable or unit ownership mismatch — not touched)"
+      DOCTOR_UNVERIFIED=$((DOCTOR_UNVERIFIED + 1))
+    fi
+  else
+    ready="UNVERIFIED(web library not staged; tunnel runs only in web sessions)"
+    DOCTOR_UNVERIFIED=$((DOCTOR_UNVERIFIED + 1))
+  fi
+  _dout "[vm-doctor] mcp-tunnel: config=$cfg process=$proc readiness=$ready last-success=$last"
+  return 0
+}
+
+# --- app services with runtime/failure descriptors (launcher registry) -----
+_doctor_app_service() {
+  local name="$1" unit="$2" dir="$3" rt="$4" fj="$5" portfield="$6" scheme="$7" hpath="$8"
+  local cfg="not-configured" proc="no-unit" ready="" port="" props="" loadstate="" activestate="" nrestarts="" desc="" reason=""
+  props="$(_doctor_systemctl_show "$unit")" || props=""
+  loadstate="$(_doctor_unit_field "$props" LoadState)"
+  if [ -n "$loadstate" ] && [ "$loadstate" != "not-found" ]; then
+    activestate="$(_doctor_unit_field "$props" ActiveState)"
+    nrestarts="$(_doctor_unit_field "$props" NRestarts)"
+    desc="$(_doctor_unit_field "$props" Description)"
+    case "$desc" in
+      *"$DOCTOR_SHARE"*) proc="unit=${activestate:-unknown}(restarts=${nrestarts:-?})" ;;
+      *)
+        _dout "[vm-doctor]   $name: config=UNVERIFIED process=foreign-unit(description does not match this share; not touched) readiness=UNVERIFIED last-success=n/a"
+        _doctor_add_finding "$name unit description does not reference this session share; left untouched"
+        DOCTOR_UNVERIFIED=$((DOCTOR_UNVERIFIED + 1))
+        return 0 ;;
+    esac
+  fi
+  if [ -n "$dir" ] && [ -n "$rt" ] && [ -f "$dir/$rt" ]; then
+    port="$(_doctor_json_field "$dir/$rt" ".$portfield")"
+    local rdyflag
+    rdyflag="$(_doctor_json_field "$dir/$rt" '.ready')"
+    cfg="descriptor(port=${port:-?}${rdyflag:+,ready=$rdyflag})"
+  elif [ -n "$dir" ] && [ -n "$fj" ] && [ -f "$dir/$fj" ]; then
+    cfg="failure-recorded"
+    reason="$(_doctor_json_field "$dir/$fj" '.reason')"
+    _doctor_add_finding "$name failure.json: ${reason:-<no reason field>}"
+  fi
+  if [ -n "$port" ]; then
+    if _doctor_listening "$port"; then
+      local body="" code=""
+      if [ -n "$scheme" ] && [ -n "$hpath" ]; then
+        if [ "$scheme" = "https" ]; then
+          body="$(_doctor_run "$DOCTOR_PROBE_TIMEOUT" curl -fsk --max-time "$DOCTOR_PROBE_TIMEOUT" "https://127.0.0.1:$port$hpath")" || body=""
+          code="$(_doctor_run "$DOCTOR_PROBE_TIMEOUT" curl -sk -o /dev/null -w '%{http_code}' --max-time "$DOCTOR_PROBE_TIMEOUT" "https://127.0.0.1:$port$hpath")" || code="000"
+        else
+          body="$(_doctor_run "$DOCTOR_PROBE_TIMEOUT" curl -fsS --max-time "$DOCTOR_PROBE_TIMEOUT" "http://127.0.0.1:$port$hpath")" || body=""
+          code="$(_doctor_run "$DOCTOR_PROBE_TIMEOUT" curl -s -o /dev/null -w '%{http_code}' --max-time "$DOCTOR_PROBE_TIMEOUT" "http://127.0.0.1:$port$hpath")" || code="000"
+        fi
+        case "$code" in [0-9][0-9][0-9]) ;; *) code="000" ;; esac
+        case "$code" in
+          2*) ready="PASS(health $hpath HTTP $code)" ;;
+          401|403) ready="UNVERIFIED(HTTP $code — credentials required; doctor does not log in)" ;;
+          000) ready="FAIL(listener present but health probe failed)" ;;
+          *) ready="FAIL(health $hpath HTTP ${code:-?})" ;;
+        esac
+      else
+        ready="PASS(listener on $port)"
+      fi
+    else
+      if [ "$proc" = "no-unit" ]; then
+        ready="UNVERIFIED(descriptor without unit or listener — not started in this session mode)"
+      else
+        ready="FAIL($proc but no listener on $port)"
+        _doctor_add_finding "$name: $proc but nothing listening on port $port"
+      fi
+    fi
+  else
+    case "$cfg" in
+      not-configured) ready="UNVERIFIED(not configured in this session)" ;;
+      failure-recorded) ready="FAIL(startup failure recorded; no port)" ;;
+      *) ready="UNVERIFIED(no port evidence)" ;;
+    esac
+  fi
+  case "$ready" in
+    PASS*) DOCTOR_PASS=$((DOCTOR_PASS + 1)) ;;
+    FAIL*) DOCTOR_FAIL=$((DOCTOR_FAIL + 1)); DOCTOR_MAIN_EXIT=1 ;;
+    *) DOCTOR_UNVERIFIED=$((DOCTOR_UNVERIFIED + 1)) ;;
+  esac
+  _dout "[vm-doctor]   $name: config=$cfg process=$proc readiness=$ready last-success=n/a(no per-app journal)"
+  return 0
+}
+
+# Echoes "<label>=running|STALE|absent". Runs inside command substitution, so
+# it must not mutate report state; callers register STALE findings themselves.
+_doctor_pid_file_state() {
+  local label="$1" pidfile="$2" pid=""
+  if [ -f "$pidfile" ]; then
+    pid="$(head -n 1 "$pidfile" 2>/dev/null | tr -d '[:space:]')" || pid=""
+    if [ -n "$pid" ] && _doctor_pid_alive "$pid"; then
+      printf '%s=running(pid=%s)' "$label" "$pid"
+    else
+      printf '%s=STALE(pidfile without live process)' "$label"
+    fi
+  else
+    printf '%s=absent' "$label"
+  fi
+  return 0
+}
+
+# --- pid-file services (web front, a2a, openlive gateway, session runtime) -
+doctor_collect_services() {
+  _dout "[vm-doctor] services (config | process | readiness | last-success separated):"
+  local tbdir=""
+  [ -n "$DOCTOR_PROJECT" ] && tbdir="$DOCTOR_PROJECT/.opencode-vm/taskboard"
+  _doctor_app_service hub ocvm-hub.service "$DOCTOR_SHARE/hub" runtime.json failure.json hubPort https /healthz
+  _doctor_app_service dashboard ocvm-dashboard.service "$DOCTOR_SHARE/dashboard" runtime.json failure.json dashboardPort https /healthz
+  _doctor_app_service editor ocvm-editor.service "$DOCTOR_SHARE/editor" runtime.json "" editorPort https /healthz
+  _doctor_app_service taskboard ocvm-taskboard.service "$tbdir" runtime.json failure.json taskboardPort http /api/projects
+  local backend bport="" pubport="" a2aport=""
+  backend="$(_doctor_json_field "$DOCTOR_SHARE/mcp/runtime.json" '.backendUrl')"
+  if [ -n "$backend" ]; then
+    bport="${backend##*:}"
+    case "$bport" in ''|*[!0-9]*) bport="" ;; esac
+  fi
+  if [ -n "$bport" ]; then pubport=$((bport + 1)); a2aport=$((bport - 1)); fi
+  local sup run front_proc
+  sup="$(_doctor_pid_file_state sup "$DOCTOR_TMPDIR/ocvm-web-redirect.sup.pid")"
+  run="$(_doctor_pid_file_state run "$DOCTOR_TMPDIR/ocvm-web-redirect.run.pid")"
+  case "$sup$run" in
+    *STALE*)
+      front_proc="$sup $run"
+      _doctor_add_finding "web-front proxy pidfile names a dead process"
+      DOCTOR_FAIL=$((DOCTOR_FAIL + 1)); DOCTOR_MAIN_EXIT=1 ;;
+    *running*) front_proc="$sup $run" ;;
+    *) front_proc="not-running($sup $run)" ;;
+  esac
+  local front_ready="UNVERIFIED(public port not derivable without descriptors)"
+  if [ -n "$pubport" ]; then
+    if _doctor_listening "$pubport"; then
+      local code
+      code="$(_doctor_run "$DOCTOR_PROBE_TIMEOUT" curl -sk -o /dev/null -w '%{http_code}' --max-time "$DOCTOR_PROBE_TIMEOUT" "https://127.0.0.1:$pubport/healthz")" || code="000"
+      case "$code" in [0-9][0-9][0-9]) ;; *) code="000" ;; esac
+      case "$code" in
+        2*) front_ready="PASS(https healthz HTTP $code)"; DOCTOR_PASS=$((DOCTOR_PASS + 1)) ;;
+        401|403) front_ready="UNVERIFIED(HTTP $code — credentials required)"; DOCTOR_UNVERIFIED=$((DOCTOR_UNVERIFIED + 1)) ;;
+        000) front_ready="UNVERIFIED(listener present; https probe failed — check --no-tls mode)"; DOCTOR_UNVERIFIED=$((DOCTOR_UNVERIFIED + 1)) ;;
+        *) front_ready="FAIL(https healthz HTTP $code)"; DOCTOR_FAIL=$((DOCTOR_FAIL + 1)); DOCTOR_MAIN_EXIT=1 ;;
+      esac
+    else
+      case "$front_proc" in
+        not-running*) front_ready="UNVERIFIED(not running — normal outside web sessions)"; DOCTOR_UNVERIFIED=$((DOCTOR_UNVERIFIED + 1)) ;;
+        *) front_ready="FAIL(process evidence but no listener on $pubport)"; DOCTOR_FAIL=$((DOCTOR_FAIL + 1)); DOCTOR_MAIN_EXIT=1 ;;
+      esac
+    fi
+  else
+    DOCTOR_UNVERIFIED=$((DOCTOR_UNVERIFIED + 1))
+  fi
+  _dout "[vm-doctor]   web-front: config=public-port=${pubport:-UNVERIFIED} process=$front_proc readiness=$front_ready last-success=n/a"
+  local asup arun a2a_proc a2a_ready="UNVERIFIED(no descriptor; host-side choice)"
+  asup="$(_doctor_pid_file_state sup "$DOCTOR_TMPDIR/ocvm-a2a.sup.pid")"
+  arun="$(_doctor_pid_file_state run "$DOCTOR_TMPDIR/ocvm-a2a.run.pid")"
+  case "$asup$arun" in
+    *STALE*)
+      a2a_proc="$asup $arun"
+      _doctor_add_finding "a2a pidfile names a dead process"
+      a2a_ready="FAIL(stale pidfiles)"; DOCTOR_FAIL=$((DOCTOR_FAIL + 1)); DOCTOR_MAIN_EXIT=1 ;;
+    *running*)
+      a2a_proc="$asup $arun"
+      if [ -n "$a2aport" ] && _doctor_listening "$a2aport"; then
+        a2a_ready="PASS(listener on $a2aport)"; DOCTOR_PASS=$((DOCTOR_PASS + 1))
+      else
+        a2a_ready="UNVERIFIED(running; port ${a2aport:-?} listener not confirmed)"; DOCTOR_UNVERIFIED=$((DOCTOR_UNVERIFIED + 1))
+      fi ;;
+    *) a2a_proc="not-running($asup $arun)"; DOCTOR_UNVERIFIED=$((DOCTOR_UNVERIFIED + 1)) ;;
+  esac
+  _dout "[vm-doctor]   a2a: config=UNVERIFIED(host-side choice) process=$a2a_proc readiness=$a2a_ready last-success=n/a"
+  local gr="$DOCTOR_SHARE/openlive/gateway-ready.json" gcfg="not-configured(HTTPS web sessions only)" gproc="inactive" gready="UNVERIFIED"
+  local gport="" gpid="" ggen=""
+  gport="$(_doctor_json_field "$gr" '.port')"
+  gpid="$(_doctor_json_field "$gr" '.pid')"
+  ggen="$(_doctor_json_field "$gr" '.generation')"
+  if [ -n "$gport" ] && [ -n "$gpid" ]; then
+    gcfg="ready-file(port=$gport)"
+    if _doctor_pid_alive "$gpid"; then
+      gproc="running(pid=$gpid)"
+      if [ -n "$ggen" ] && [ -n "$DOCTOR_GENERATION" ] && [ "$ggen" != "$DOCTOR_GENERATION" ]; then
+        _doctor_add_finding "openlive gateway generation $ggen differs from session generation $DOCTOR_GENERATION"
+      fi
+      if _doctor_listening "$gport"; then
+        gready="PASS(listener on $gport)"; DOCTOR_PASS=$((DOCTOR_PASS + 1))
+      else
+        gready="FAIL(ready-file pid alive but no listener on $gport)"; DOCTOR_FAIL=$((DOCTOR_FAIL + 1)); DOCTOR_MAIN_EXIT=1
+      fi
+    else
+      gproc="STALE(ready-file pid $gpid not alive)"
+      gready="FAIL(stale gateway ready-file)"
+      _doctor_add_finding "openlive gateway ready-file names dead pid $gpid"
+      DOCTOR_FAIL=$((DOCTOR_FAIL + 1)); DOCTOR_MAIN_EXIT=1
+    fi
+  else
+    DOCTOR_UNVERIFIED=$((DOCTOR_UNVERIFIED + 1))
+  fi
+  _dout "[vm-doctor]   openlive-gateway: config=$gcfg process=$gproc readiness=$gready last-success=n/a"
+  local rpid="" rchild="" rt_proc
+  if [ -f "$DOCTOR_TMPDIR/ocvm-runtime.pid" ]; then
+    rpid="$(head -n 1 "$DOCTOR_TMPDIR/ocvm-runtime.pid" 2>/dev/null | tr -d '[:space:]')" || rpid=""
+    rchild=""
+    if [ -f "$DOCTOR_TMPDIR/ocvm-runtime.child" ]; then
+      rchild="$(head -n 1 "$DOCTOR_TMPDIR/ocvm-runtime.child" 2>/dev/null | cut -c1-40)" || rchild=""
+    fi
+    if [ -n "$rpid" ] && _doctor_pid_alive "$rpid"; then
+      rt_proc="running(pid=$rpid child=${rchild:-none})"
+      DOCTOR_PASS=$((DOCTOR_PASS + 1))
+    else
+      rt_proc="STALE(runtime pidfile without live process)"
+      _doctor_add_finding "session runtime pidfile names dead pid ${rpid:-none}"
+      DOCTOR_FAIL=$((DOCTOR_FAIL + 1)); DOCTOR_MAIN_EXIT=1
+    fi
+  else
+    rt_proc="not-running(no runtime pidfile — shell without active session launcher)"
+    DOCTOR_UNVERIFIED=$((DOCTOR_UNVERIFIED + 1))
+  fi
+  _dout "[vm-doctor]   session-runtime: config=n/a process=$rt_proc readiness=n/a last-success=n/a"
+  return 0
+}
+
+# --- findings and support IDs ----------------------------------------------
+doctor_collect_errors() {
+  _dout "[vm-doctor] errors/support-ids:"
+  if [ -n "$DOCTOR_FINDINGS" ]; then
+    local f
+    while IFS= read -r f; do
+      [ -n "$f" ] && _dout "[vm-doctor]   finding: $f"
+    done <<< "$(printf '%s\n' "$DOCTOR_FINDINGS" | head -n 6)"
+    local total
+    total="$(printf '%s\n' "$DOCTOR_FINDINGS" | grep -c .)"
+    [ "$total" -gt 6 ] && _dout "[vm-doctor]   ($((total - 6)) further findings suppressed by bound)"
+  else
+    _dout "[vm-doctor]   none recorded"
+  fi
+  return 0
+}
+
+# --- bounded, redacted log excerpts ----------------------------------------
+doctor_collect_excerpts() {
+  local filter="${1:-}" src name path size lines line
+  for src in \
+    "adapter:$DOCTOR_SHARE/mcp/adapter.log" \
+    "tunnel:$DOCTOR_SHARE/mcp/tunnel.log" \
+    "backend:$DOCTOR_SHARE/mcp/backend.log" \
+    "hub:$DOCTOR_SHARE/hub/server.log" \
+    "dashboard:$DOCTOR_SHARE/dashboard/server.log"; do
+    name="${src%%:*}"; path="${src#*:}"
+    if [ -n "$filter" ]; then
+      case "$name" in *"$filter"*) ;; *) continue ;; esac
+    fi
+    [ -f "$path" ] || continue
+    size="$(wc -c < "$path" 2>/dev/null | tr -d '[:space:]')" || size="?"
+    lines="$(tail -c "$DOCTOR_EXCERPT_BYTES" "$path" 2>/dev/null | tail -n "$DOCTOR_EXCERPT_LINES" || true)"
+    [ -n "$lines" ] || continue
+    _dout "[vm-doctor] excerpt $name (${size:-?}B total; last $DOCTOR_EXCERPT_LINES lines; redacted):"
+    while IFS= read -r line; do
+      if [ -n "$line" ]; then _dout "[vm-doctor]   | $(printf '%s' "$line" | cut -c1-220)"; fi
+    done <<< "$lines"
+  done
+  return 0
+}
+
+doctor_emit_summary() {
+  local elapsed
+  elapsed=$(( $(_doctor_now) - DOCTOR_START_EPOCH ))
+  if [ -n "$DOCTOR_ID_EXIT" ]; then
+    DOCTOR_MAIN_EXIT="$DOCTOR_ID_EXIT"
+  elif [ "$DOCTOR_FAIL" -gt 0 ]; then
+    DOCTOR_MAIN_EXIT=1
+  else
+    DOCTOR_MAIN_EXIT=0
+  fi
+  _dout_force "[vm-doctor] SUMMARY: PASS=$DOCTOR_PASS FAIL=$DOCTOR_FAIL UNVERIFIED=$DOCTOR_UNVERIFIED budget=${elapsed}s/${DOCTOR_WALL_BUDGET}s lines=$DOCTOR_LINES/$DOCTOR_LINE_BUDGET exit=$DOCTOR_MAIN_EXIT"
+  [ "$DOCTOR_LINE_BUDGET_HIT" = "1" ] && _dout_force "[vm-doctor] LINE_BUDGET_EXCEEDED — report truncated after $DOCTOR_LINE_BUDGET lines."
+  [ "$DOCTOR_BUDGET_HIT" = "1" ] && _dout_force "[vm-doctor] WALL_BUDGET_EXCEEDED — sections after the budget are marked BUDGET_EXCEEDED."
+  _dout_force "[vm-doctor] local checks only — NOT a ChatGPT/E2E acceptance; read-only, nothing was repaired."
+  return 0
+}
+
+doctor_flush() {
+  local s
+  if [ -n "$DOCTOR_SECRETS" ]; then
+    while IFS= read -r s; do
+      [ -n "$s" ] || continue
+      [ "${#s}" -ge 8 ] || continue
+      DOCTOR_BUFFER="${DOCTOR_BUFFER//"$s"/<redacted-secret>}"
+    done <<< "$DOCTOR_SECRETS"
+  fi
+  printf '%s\n' "$DOCTOR_BUFFER"
+  return 0
+}
+
+doctor_main() {
+  local area="${1:-show}" expected_share="${2:-}"
+  doctor_reset
+  doctor_emit_header
+  if doctor_resolve_identity "$expected_share"; then
+    case "$area" in
+      show)
+        _doctor_section versions && doctor_collect_versions
+        _doctor_section opencode && doctor_collect_opencode
+        _doctor_section roundtrip && doctor_collect_roundtrip
+        _doctor_section adapter && doctor_collect_adapter
+        _doctor_section tunnel && doctor_collect_tunnel
+        _doctor_section services && doctor_collect_services
+        _doctor_section errors && doctor_collect_errors
+        _doctor_section excerpts && doctor_collect_excerpts ""
+        ;;
+      tunnel)
+        _doctor_section tunnel && doctor_collect_tunnel
+        _doctor_section errors && doctor_collect_errors
+        _doctor_section excerpts && doctor_collect_excerpts tunnel
+        ;;
+      mcp)
+        _doctor_section opencode && doctor_collect_opencode
+        _doctor_section roundtrip && doctor_collect_roundtrip
+        _doctor_section adapter && doctor_collect_adapter
+        _doctor_section errors && doctor_collect_errors
+        _doctor_section excerpts && doctor_collect_excerpts adapter
+        _doctor_section excerpts-backend && doctor_collect_excerpts backend
+        ;;
+      services)
+        _doctor_section services && doctor_collect_services
+        _doctor_section errors && doctor_collect_errors
+        ;;
+      *)
+        printf '%s\n' "Usage: doctor [show|tunnel|mcp|services|help]" >&2
+        return 2 ;;
+    esac
+  fi
+  doctor_emit_summary
+  doctor_flush
+  return "$DOCTOR_MAIN_EXIT"
+}
+DOCTORLIB
+
+# Materialize the canonical VM-local doctor library into the session share
+# (mounted at the same absolute path inside the VM). Called for every session
+# mode at start and attach, so sessions created by older scripts are healed on
+# their next start or attach. doctor.env records the staging script version —
+# the guest-provable script provenance the in-VM report displays.
+install_doctor_lib() {
+  local share="$1"
+  [[ -n "$share" && -d "$share" && ! -L "$share" ]] || return 1
+  local dir="$share/lib"
+  [[ ! -L "$dir" ]] || return 1
+  mkdir -p "$dir" || return 1
+  printf '%s\n' "$OCVM_DOCTOR_SH" > "$dir/doctor.sh" || return 1
+  printf 'OCVM_SCRIPT_VERSION=%q\nOCVM_DOCTOR_LIB_STAGED_AT=%q\n' \
+    "$OCVM_VERSION" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$dir/doctor.env" || return 1
+  return 0
+}
+
 # Write the web-mode AGENTS notes sidecar (materialized web-UI attachments).
 # The VM-side AGENTS.md composition appends it after the MCP snippets, so
 # terminal sessions never advertise the web-only daemon.
@@ -15441,6 +16463,11 @@ attach_session() {
   # OpenCode reads skills/commands at startup. Reconcile the managed package
   # after stopping the old web runtime and before launching the resumed one.
   skills_sync_besprechung_for_session "$(session_share_dir "$proj")" || return 1
+
+  # Heal the canonical doctor library and PATH wrapper on reattach.
+  install_doctor_lib "$(session_share_dir "$proj")" || echo "[doctor] Staging unavailable; the in-VM doctor will report a missing library." >&2
+  vm_exec "$SESS_NAME" "$OCVM_DOCTOR_INSTALL_SH"$'\ninstall_doctor_wrapper' ||
+    echo "[doctor] Wrapper installation unavailable inside the session." >&2
   if [[ "$sess_editor_enabled" == 1 ]]; then
     vm_exec "$SESS_NAME" "$OCVM_EDITOR_INSTALL_SH"$'\ninstall_editor' ||
       echo "[editor] Installation unavailable; OpenCode will continue without the editor." >&2
@@ -16806,6 +17833,9 @@ start_session() {
   fi
   managed_policy_install "$sess_share" || return 1
 
+  # Canonical VM-local doctor library (mode-independent; heals older sessions).
+  install_doctor_lib "$sess_share" || echo "[doctor] Staging unavailable; the in-VM doctor will report a missing library." >&2
+
   if [[ "$SESSION_MODE" == "web" ]]; then
     resolve_session_auth "$sess_share" || return 1
     install_web_lib "$sess_share" || {
@@ -16920,6 +17950,10 @@ start_session() {
   # when searxng MCP is active). Must also run BEFORE stop-for-clone so the
   # service is fully provisioned in the base disk inherited by session VMs.
   searxng_ensure_installed_in_base || echo "[run] SearXNG install skipped; session will start without web-search MCP." >&2
+
+  # Bake the VM-local doctor wrapper into the base image so every clone inherits
+  # bare 'doctor' on PATH (pure embedded payload, no download; session retry below).
+  doctor_ensure_installed_in_base || echo "[doctor] Base wrapper installation failed; will retry inside the session." >&2
 
   # Install the A2A adapter into the base VM so every session clone inherits it
   # (idempotent, web mode only). Same BEFORE-stop-for-clone placement as above.
@@ -17360,6 +18394,9 @@ start_session() {
     start_materialize_daemon "$sess" "$sess_share" || true
   fi
 
+  # Idempotent wrapper repair for sessions whose base predates the doctor.
+  vm_exec "$sess" "$OCVM_DOCTOR_INSTALL_SH"$'\ninstall_doctor_wrapper' ||
+    echo "[doctor] Wrapper installation unavailable inside the session." >&2
   if [[ "$effective_editor_enabled" == 1 ]]; then
     vm_exec "$sess" "$OCVM_EDITOR_INSTALL_SH"$'\ninstall_editor' ||
       echo "[editor] Installation unavailable; OpenCode will continue without the editor." >&2
@@ -18241,6 +19278,8 @@ Usage:
   opencode-vm ports lan tcp {show|add|rm|clear} IP[:PORT]
   opencode-vm ports lan udp {show|add|rm|clear} IP[:PORT]
   opencode-vm doctor [show]                # inspect local sync/auth/model/db state
+                                           # inside any session VM: bare 'doctor [show|tunnel|mcp|services]'
+                                           # (read-only compact report; see docs/DOCTOR.md)
   opencode-vm provider list                # list model providers and MCP connections
   opencode-vm provider new                 # interactive: custom endpoint, subscription, or MCP
   opencode-vm provider custom new          # interactive custom-endpoint wizard
