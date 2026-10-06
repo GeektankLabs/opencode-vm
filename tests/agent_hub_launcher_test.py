@@ -296,18 +296,19 @@ stop_hub
         with tempfile.TemporaryDirectory() as temporary:
             shell(code, temporary)
 
-    def test_launcher_requires_same_generation_tls_health_and_loopback_port(self):
+    def test_launcher_requires_same_generation_tls_health_and_lan_bound_block(self):
         registry = SCRIPT.split("LAUNCHER_APP_REGISTRY = (", 1)[1].split("\n)", 1)[0]
         self.assertIn('"id": "agent-hub"', registry)
         self.assertIn('"port_offset": 7', registry)
         self.assertIn('"scheme": "https"', registry)
         self.assertIn('"runtime_file": "hub/runtime.json"', registry)
         self.assertIn('"failure_file": "hub/failure.json"', registry)
+        self.assertNotIn('"local_only"', registry)
         self.assertIn('generation != LAUNCHER_GENERATION', SCRIPT)
         self.assertIn('ssl._create_unverified_context()', SCRIPT)
         self.assertIn('health.get("generation") == generation', SCRIPT)
-        self.assertIn('(( p >= base + 6 )) && bind="127.0.0.1"', SCRIPT)
-        self.assertIn('forwards+=( -L "${bind}:${p}:127.0.0.1:${p}" )', SCRIPT)
+        self.assertNotIn('bind="127.0.0.1"', SCRIPT)
+        self.assertIn('forwards+=( -L "0.0.0.0:${p}:127.0.0.1:${p}" )', SCRIPT)
         self.assertIn('P+7  Agent Control Hub HTTPS', SCRIPT)
 
     def test_reattach_stops_only_the_previous_owned_hub_generation(self):

@@ -4,7 +4,7 @@ Projektgebundene Verbindungsdiagnose und portable Runtime-Präferenzen. Reihenfo
 
 ## Start und Netzwerk
 
-`opencode-vm web` beziehungsweise `attach` startet den Hub im Session-Gast auf dem effektiven Webbasisport `P+7`. Er bindet dort ausschließlich `127.0.0.1`, verwendet das vorhandene Session-Zertifikat und erhält Projekt, Generation und optionale Authentifizierung aus einem privaten, guestseitig erzeugten Runtimeinput. Der Host reicht P+7 nur über Loopback weiter; der Hub wird nie automatisch ins LAN exponiert. Ein manueller Start benötigt deshalb explizit `--project`, `--project-hash`, `--runtime-input`, `--tls-cert` und `--tls-key`; Umgebungsvariablen wählen weder Projekt noch Session-Share.
+`opencode-vm web` beziehungsweise `attach` startet den Hub im Session-Gast auf dem effektiven Webbasisport `P+7`. Er bindet dort ausschließlich `127.0.0.1`, verwendet das vorhandene Session-Zertifikat und erhält Projekt, Generation und optionale Authentifizierung aus einem privaten, guestseitig erzeugten Runtimeinput. Der Host reicht P+7 wie den Rest des Blocks über das ausdrücklich vertrauenswürdige LAN weiter, unabhängig von der Auth-Wahl; der Gast-Listener selbst bleibt loopback-gebunden. Ein manueller Start benötigt deshalb explizit `--project`, `--project-hash`, `--runtime-input`, `--tls-cert` und `--tls-key`; Umgebungsvariablen wählen weder Projekt noch Session-Share.
 
 ## HTTP- und Projektvertrag
 
@@ -35,4 +35,4 @@ Hub-Logvorschau liest nur erlaubte lokale MCP-Logs, begrenzt und redigiert; kein
 
 ## Launcher
 
-Der bestehende Button **Agent Control** (nach Editor und Project Management) öffnet den effektiven Hub-Port nur von einer Host-Loopback-Seite in einem neuen Tab. Ein LAN-Browser zeigt stattdessen den nicht verfügbaren lokalen Eintrag und erhält keinen kaputten Link. `/healthz` liefert `status:"ok"`, `service:"agent-connectivity-hub"`, `readOnly:false`, `projectHash` und `generation`. Nur ein passender TLS-Healthcheck für dieselbe Projektgeneration macht den Eintrag ready; ein Descriptor oder Log allein reicht nicht.
+Der bestehende Button **Agent Control** (nach Editor und Project Management) öffnet den effektiven Hub-Port in einem neuen Tab — von der Host-Loopback- wie der LAN-Seite, bindungsgesteuert und ohne Auth-Ausblendung. Bei Dienstausfall bleibt der Eintrag mit ehrlichem Grund sichtbar; es gibt keinen kaputten Link. `/healthz` liefert `status:"ok"`, `service:"agent-connectivity-hub"`, `readOnly:false`, `projectHash` und `generation`. Nur ein passender TLS-Healthcheck für dieselbe Projektgeneration macht den Eintrag ready; ein Descriptor oder Log allein reicht nicht.

@@ -2,6 +2,7 @@ import { createServer } from "node:https";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { isIP } from "node:net";
 import type { DashboardCollector } from "./dashboard.js";
 
 export type DashboardConfig = {
@@ -10,6 +11,24 @@ export type DashboardConfig = {
   cert: string; key: string; assets: string;
   navigation?: { web_port: number; board_port: number; opencode_version: string };
 };
+// The LAN is an explicitly trusted operator surface reached through the host
+// forward; the guest listener itself stays loopback-bound. Accept any
+// private-network Host so LAN browsers reach the dashboard exactly like the
+// local browser, while public or foreign Host values stay rejected.
+function privateHostName(value: string): boolean {
+  if (value === "localhost") return true;
+  const version = isIP(value);
+  if (version === 4) {
+    const [a = -1, b = -1] = value.split(".").map(Number);
+    return a === 0 || a === 10 || a === 127 || (a === 100 && b >= 64 && b <= 127) ||
+      (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+  }
+  if (version === 6) {
+    const v = value.toLowerCase();
+    return v === "::1" || v.startsWith("fc") || v.startsWith("fd") || v.startsWith("fe80");
+  }
+  return false;
+}
 export function dashboardHandler(config: DashboardConfig, collector: DashboardCollector) {
   const auth = config.authEnabled && config.auth ? `Basic ${Buffer.from(`${config.auth.username}:${config.auth.password}`).toString("base64")}` : null;
   if (config.authEnabled && (!config.auth?.username || !config.auth.password)) throw new Error("Dashboard authentication unavailable");
@@ -21,7 +40,10 @@ export function dashboardHandler(config: DashboardConfig, collector: DashboardCo
       response.end(data);
     };
     try {
-      if (![`127.0.0.1:${config.listenPort}`, `localhost:${config.listenPort}`].includes(request.headers.host ?? "")) return send(403, { error: "HOST_REJECTED" });
+      const hostHeader = request.headers.host ?? "";
+      const colon = hostHeader.lastIndexOf(":");
+      const hostName = hostHeader.startsWith("[") ? hostHeader.slice(1, hostHeader.indexOf("]")) : colon > 0 ? hostHeader.slice(0, colon) : "";
+      if (colon <= 0 || hostHeader.slice(colon + 1) !== String(config.listenPort) || !privateHostName(hostName)) return send(403, { error: "HOST_REJECTED" });
       if (request.headers.origin && request.headers.origin !== `https://${request.headers.host}`) return send(403, { error: "ORIGIN_REJECTED" });
       if (auth) {
         const given = Buffer.from(request.headers.authorization ?? "");

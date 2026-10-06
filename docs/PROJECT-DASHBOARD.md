@@ -2,7 +2,9 @@
 
 The project Web lifecycle starts an independent **guest-resident Node HTTPS**
 dashboard on **P+6**, using the existing eight-port forwarding block. P+6 and
-the Agent Control Hub at P+7 remain **host-loopback-only**. Terminal-only mode
+the Agent Control Hub at P+7 are **LAN-bound** like the rest of the block
+(explicitly trusted LAN, independent of the auth choice); their guest
+listeners stay loopback-bound. Terminal-only mode
 starts neither dashboard nor additional web listeners. Dashboard failure is
 nonfatal to OpenCode workers. No live cutover is implied by this source change.
 

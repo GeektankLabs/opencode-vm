@@ -34,7 +34,7 @@ OPENLIVE_PREVIOUS_COMMAND="$OPENLIVE_DIR/previous-command"
 OPENLIVE_AUTH_MARKER="__opencode_vm_openlive__"
 OPENLIVE_LOCK_PATH=""
 OPENLIVE_ADAPTER_VERSION="0.1.7"
-OPENLIVE_ADAPTER_TAG="v0.7.9"
+OPENLIVE_ADAPTER_TAG="v0.7.10"
 OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.7.tar"
 OPENLIVE_ADAPTER_SHA256="39a50c5127b0a577b54e4790b5c3c1f463b35a52b42c4343aa639dcea53bad47"
 OPENLIVE_ACP_SDK_VERSION="1.2.1"
@@ -44,15 +44,15 @@ OPENLIVE_MANAGER_DESCRIPTION="Read-only OpenLive voice session manager"
 OPENLIVE_MANAGER_PROMPT="You manage an OpenLive voice call. The voice_sessions tool is available and you must call it before listing, inspecting, summarizing, checking, attaching to, or creating project sessions. Never claim session details without a successful tool result. Ask for clarification if a requested session is ambiguous. Create a new work session only when the user explicitly asks for one. Apart from that explicit create action, you are read-only: do not edit files, run shell commands, create tasks, or mutate sessions. Keep responses brief and conversational: one or two plain sentences without Markdown, paths, URLs, code, or stray symbols. When attachment or creation succeeds, tell the user the next voice prompt will continue in that session."
 MCP_CONNECTOR_DIR="$SHARE_ROOT/mcp-connector"
 MCP_ADAPTER_CACHE_ROOT="$MCP_CONNECTOR_DIR/adapters"
-MCP_ADAPTER_VERSION="0.1.25"
-MCP_ADAPTER_TAG="v0.7.9"
-MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.25.tar"
-MCP_ADAPTER_SHA256="9156a9937808db56c96362bee514c98458eaef1b84590a54caffc9bb6bc9be15"
+MCP_ADAPTER_VERSION="0.1.26"
+MCP_ADAPTER_TAG="v0.7.10"
+MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.26.tar"
+MCP_ADAPTER_SHA256="985c8b6c4cac00d659eda36d6363778cefd63af74347e71be05ee0c6cad0e188"
 MCP_SDK_VERSION="1.30.1"
 MCP_OPENCODE_SDK_VERSION="1.18.21"
 MCP_TESTED_PROTOCOL_VERSION="2025-11-25"
 MCP_TUNNEL_DIR="$SHARE_ROOT/mcp-tunnel/openai"
-HUB_ASSET_TAG="v0.7.9"
+HUB_ASSET_TAG="v0.7.10"
 HUB_ASSET_FILENAME="opencode-vm-hub-1.tar"
 HUB_ASSET_SHA256="0d2f328ffda9ee3a0c8d61cfe303f7e479863a3f3af032d07d8650dd3eb1c84a"
 
@@ -286,7 +286,7 @@ TASKBOARD_ARM64_SHA256="3749fb985f544fdb6788ba1dff69761e599ff82b3fe86d39ca54307c
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.7.9"
+OCVM_VERSION="0.7.10"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -378,7 +378,7 @@ run_with_spinner() {
 #   P+1    web  HTTP       P+3    a2a HTTP
 #   P+4    editor HTTPS (optional)
 #   P+5    Taskboard HTTP
-#   P+6    Repo Dashboard HTTPS (host-loopback-only)
+#   P+6    Repo Dashboard HTTPS
 #   P+7    Agent Control Hub HTTPS
 #
 # and inside the VM, never tunnelled to the LAN:
@@ -406,7 +406,7 @@ validate_web_port() {
     echo "  P+2  a2a HTTPS         P+3  a2a HTTP" >&2
     echo "  P+4  editor HTTPS      (unless --no-editor)" >&2
     echo "  P+5  Taskboard HTTP" >&2
-    echo "  P+6  Repo Dashboard HTTPS (host loopback)" >&2
+    echo "  P+6  Repo Dashboard HTTPS" >&2
     echo "  P+7  Agent Control Hub HTTPS" >&2
     echo "so the base port must be between 1026 and $((65535 - last))." >&2
     exit 2
@@ -11113,8 +11113,10 @@ is_browser_unsafe_port() {
 }
 
 # Web-mode forwarding: one SSH process carrying the complete P..P+7 service block.
-# Existing P..P+5 LAN forwards retain their binding; new Dashboard/Hub forwards
-# default to host loopback until an explicit exposure decision exists.
+# All eight forwards bind 0.0.0.0: the LAN is an explicitly trusted surface
+# (operator decision), so Dashboard and Hub are reachable like the rest of the
+# block, independent of the session's auth choice. Guest listeners stay on
+# 127.0.0.1 — the LAN path is exclusively this tunnel.
 #
 # One SSH process for the complete block:
 #   - ExitOnForwardFailure=yes makes the whole block bind atomically. Either all
@@ -11233,11 +11235,9 @@ start_web_tunnels() {
     if ! guest_port_available "$vm" "$((base + 7))"; then
       continue
     fi
-    local forwards=() bind
+    local forwards=()
     for p in $(seq "$base" $((base + last))); do
-      bind="0.0.0.0"
-      (( p >= base + 6 )) && bind="127.0.0.1"
-      forwards+=( -L "${bind}:${p}:127.0.0.1:${p}" )
+      forwards+=( -L "0.0.0.0:${p}:127.0.0.1:${p}" )
     done
     if ssh -f -N -F /dev/null \
         -o IdentityFile="$HOME/.lima/_config/user" \
@@ -11264,7 +11264,8 @@ start_web_tunnels() {
       echo "[tunnel] LAN tunnels up (pid ${pid:-?}): ${base} web/https, $((base + 1)) web/http, $((base + 2)) a2a/https, $((base + 3)) a2a/http"
        [[ "${4:-0}" != 1 ]] || echo "[tunnel] Editor HTTPS: $((base + 4))"
        echo "[tunnel] Taskboard HTTP: $((base + 5))"
-       echo "[tunnel] Dashboard/Hub forwards remain loopback-only: $((base + 6))/$((base + 7))"
+       echo "[tunnel] Repo Dashboard HTTPS: $((base + 6))"
+       echo "[tunnel] Agent Control Hub HTTPS: $((base + 7))"
       rm -f "$err_file"
       return 0
     fi
@@ -11733,7 +11734,7 @@ LAUNCHER_APP_REGISTRY = (
     {
         "id": "repo-dashboard", "label": "Repo Live", "icon": "board",
         "runtime_file": "dashboard/runtime.json", "failure_file": "dashboard/failure.json",
-        "port_field": "dashboardPort", "port_offset": 6, "local_only": True,
+        "port_field": "dashboardPort", "port_offset": 6,
         "scheme": "https", "health_path": "/healthz",
     },
     {
@@ -11766,7 +11767,6 @@ LAUNCHER_APP_REGISTRY = (
         "failure_file": "hub/failure.json",
         "port_field": "hubPort",
         "port_offset": 7,
-        "local_only": True,
         "scheme": "https",
         "health_path": "/healthz",
     },
@@ -13592,7 +13592,10 @@ DASH_HEALTH
       if jq -n --arg hash "$OC_OPENLIVE_PROJECT_HASH" --arg generation "$OC_HUB_GENERATION" --argjson port "$port" \
         '{schema:1,projectHash:$hash,generation:$generation,dashboardPort:$port,ready:true}' > "$tmp" &&
         chmod 600 "$tmp" && mv -f "$tmp" "$dir/runtime.json"; then
-        echo "[dashboard] Repo Live: https://127.0.0.1:$port (host loopback forward)"; return 0
+        local dash_host="$OC_HOST_IP"
+        [[ "${OC_LAN_UP:-1}" == "1" ]] || dash_host="127.0.0.1"
+        echo "[dashboard] Repo Live: https://${dash_host}:$port"
+        return 0
       fi
       rm -f "$tmp"; break
     fi

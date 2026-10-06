@@ -535,7 +535,7 @@ class LauncherProxyTest(unittest.TestCase):
                                  ["Editor", "Project Management", "Agent Control"])
                 self.assertEqual(apps[2]["port"], base + 7)
                 self.assertEqual(apps[2]["scheme"], "https")
-                self.assertTrue(apps[2]["localOnly"])
+                self.assertNotIn("localOnly", apps[2])
                 self.assertNotIn("host", apps[2])
                 hub_file.write_text(json.dumps({**hub_runtime, "generation": "stale-generation"}))
                 status, _, stale_hub = http_request(base, PROJECT_PATH, headers=auth)
@@ -557,7 +557,7 @@ class LauncherProxyTest(unittest.TestCase):
                 failed_apps = json.loads(markup.mount["data-apps"])
                 self.assertEqual([app["id"] for app in failed_apps], ["editor", "taskboard", "agent-hub"])
                 self.assertFalse(failed_apps[2]["ready"])
-                self.assertTrue(failed_apps[2]["localOnly"])
+                self.assertNotIn("localOnly", failed_apps[2])
                 self.assertEqual(failed_apps[2]["error"], "Assets missing")
                 failure_file.unlink()
 
