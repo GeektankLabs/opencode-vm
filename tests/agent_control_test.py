@@ -173,8 +173,21 @@ class PolicyTest(unittest.TestCase):
 class HubApiTest(PolicyTest):
     def setUp(self):
         super().setUp()
-        self.prior = (server.PROJECT, server.SHARE_ROOT, server.read_catalog)
-        server.PROJECT, server.SHARE_ROOT = self.project, Path(self.temp.name)
+        self.share = Path(self.temp.name) / "share"
+        self.share.mkdir(mode=0o700)
+        self.prior = (server.PROJECT, server.SESSION_ROOT, server.RUNTIME, server.AUTH_CREDENTIALS,
+                      server.REQUEST_SCHEME, server.read_catalog)
+        server.PROJECT = self.project
+        server.SESSION_ROOT = self.share
+        server.RUNTIME = {
+            "generation": "fixture-generation",
+            "mcp": {"enabled": False, "port": 0, "generation": "fixture-generation"},
+            "tunnelConfigured": False,
+            "openliveConfigured": False,
+            "a2aEnabled": False,
+        }
+        server.AUTH_CREDENTIALS = None
+        server.REQUEST_SCHEME = "http"
         server.read_catalog = lambda *args, **kwargs: CATALOG
         self.http = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
         self.thread = threading.Thread(target=self.http.serve_forever, daemon=True)
@@ -183,7 +196,8 @@ class HubApiTest(PolicyTest):
 
     def tearDown(self):
         self.http.shutdown(); self.http.server_close(); self.thread.join()
-        server.PROJECT, server.SHARE_ROOT, server.read_catalog = self.prior
+        (server.PROJECT, server.SESSION_ROOT, server.RUNTIME, server.AUTH_CREDENTIALS,
+         server.REQUEST_SCHEME, server.read_catalog) = self.prior
         super().tearDown()
 
     def request(self, selection, revision=0, origin=True, profile="deep"):
@@ -244,10 +258,11 @@ class HubApiTest(PolicyTest):
 
 class CatalogTest(PolicyTest):
     def test_authenticated_mcp_read_checks_project_and_generation(self):
-        root = Path(self.temp.name)
-        session = root / "sessions/demo.env"
-        credential = root / "sessions/demo/mcp/credential"
-        credential.parent.mkdir(parents=True)
+        root = Path(self.temp.name) / "share"
+        root.mkdir(mode=0o700)
+        credential = root / "mcp/credential"
+        credential.parent.mkdir(parents=True, mode=0o700)
+        credential.parent.chmod(0o700)
         credential.write_text("fixture-token\n")
         credential.chmod(0o600)
 
@@ -266,21 +281,22 @@ class CatalogTest(PolicyTest):
         http = ThreadingHTTPServer(("127.0.0.1", 0), McpFixture)
         thread = threading.Thread(target=http.serve_forever, daemon=True); thread.start()
         try:
-            values = {"SESS_MCP_ENABLED": "1", "SESS_MCP_PORT": str(http.server_port), "SESS_CONTROLLER": "generation"}
-            self.assertEqual(read_catalog(root, [(session, values)], "project-hash"), CATALOG)
-            self.assertIsNone(read_catalog(root, [(session, values)], "foreign-project"))
-            self.assertEqual(mcp_connection(root, [(session, values)], "foreign-project")["state"], "not_ready")
-            self.assertFalse(read_capabilities(mcp_connection(root, [(session, values)], "project-hash")))
+            runtime = {"enabled": True, "port": http.server_port, "generation": "generation"}
+            self.assertEqual(read_catalog(runtime, root, "project-hash"), CATALOG)
+            self.assertIsNone(read_catalog(runtime, root, "foreign-project"))
+            self.assertEqual(mcp_connection(runtime, root, "foreign-project")["state"], "not_ready")
+            self.assertFalse(read_capabilities(mcp_connection(runtime, root, "project-hash")))
         finally:
             http.shutdown(); http.server_close(); thread.join()
 
     @unittest.skipUnless((Path(__file__).resolve().parents[1] / "adapters/mcp/dist/http.js").is_file(),
                          "MCP adapter has not been built in this checkout")
     def test_real_stateless_mcp_transport_returns_catalog(self):
-        root = Path(self.temp.name)
-        session = root / "sessions/demo.env"
-        credential = root / "sessions/demo/mcp/credential"
-        credential.parent.mkdir(parents=True)
+        root = Path(self.temp.name) / "share"
+        root.mkdir(mode=0o700)
+        credential = root / "mcp/credential"
+        credential.parent.mkdir(parents=True, mode=0o700)
+        credential.parent.chmod(0o700)
         credential.write_text("fixture-token\n"); credential.chmod(0o600)
         js = '''import { McpHttpServer } from "./adapters/mcp/dist/http.js";
 const runtime = {schema:1,project:process.argv[1],projectHash:"project-hash",projectName:"fixture",
@@ -294,9 +310,9 @@ process.on("SIGTERM",()=>{void server.close().then(()=>process.exit(0));});'''
                                    cwd=Path(__file__).resolve().parents[1], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             port = int(process.stdout.readline().strip())
-            values = {"SESS_MCP_ENABLED": "1", "SESS_MCP_PORT": str(port), "SESS_CONTROLLER": "generation"}
-            self.assertEqual(read_catalog(root, [(session, values)], "project-hash"), CATALOG)
-            self.assertTrue(read_capabilities(mcp_connection(root, [(session, values)], "project-hash")))
+            runtime = {"enabled": True, "port": port, "generation": "generation"}
+            self.assertEqual(read_catalog(runtime, root, "project-hash"), CATALOG)
+            self.assertTrue(read_capabilities(mcp_connection(runtime, root, "project-hash")))
         finally:
             process.terminate(); process.communicate(timeout=5)
 

@@ -19,8 +19,10 @@ class WebServiceFlagsTest(unittest.TestCase):
         self.assertIn('"${SESSION_TASKBOARD_MODE:-}" != disable', SCRIPT)
 
     def test_no_launcher_does_not_disable_standard_services(self):
-        self.assertIn('if [[ "$SESSION_MODE" == "web" && "${SESSION_HUB_MODE:-}" != disable ]]', SCRIPT)
-        self.assertNotIn('SESSION_LAUNCHER_ENABLED:-1}" == "1" ]]; then\n    agent_hub_start', SCRIPT)
+        self.assertIn('if [[ "$SESSION_MODE" == web && "${SESSION_HUB_MODE:-}" != disable ]]', SCRIPT)
+        self.assertIn('"$effective_hub_enabled" "$hub_asset_dir"', SCRIPT)
+        self.assertIn('OC_HUB_ENABLED="${23:-0}"', SCRIPT)
+        self.assertIn('start_hub || echo "[hub] Unavailable; OpenCode continues without the Hub."', SCRIPT)
 
     def test_taskboard_health_and_project_db_contract(self):
         self.assertIn('curl -fsS --max-time 1 "http://127.0.0.1:$port/api/projects"', SCRIPT)

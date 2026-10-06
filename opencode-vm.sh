@@ -34,7 +34,7 @@ OPENLIVE_PREVIOUS_COMMAND="$OPENLIVE_DIR/previous-command"
 OPENLIVE_AUTH_MARKER="__opencode_vm_openlive__"
 OPENLIVE_LOCK_PATH=""
 OPENLIVE_ADAPTER_VERSION="0.1.7"
-OPENLIVE_ADAPTER_TAG="v0.7.6"
+OPENLIVE_ADAPTER_TAG="v0.7.7"
 OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.7.tar"
 OPENLIVE_ADAPTER_SHA256="39a50c5127b0a577b54e4790b5c3c1f463b35a52b42c4343aa639dcea53bad47"
 OPENLIVE_ACP_SDK_VERSION="1.2.1"
@@ -45,16 +45,16 @@ OPENLIVE_MANAGER_PROMPT="You manage an OpenLive voice call. The voice_sessions t
 MCP_CONNECTOR_DIR="$SHARE_ROOT/mcp-connector"
 MCP_ADAPTER_CACHE_ROOT="$MCP_CONNECTOR_DIR/adapters"
 MCP_ADAPTER_VERSION="0.1.23"
-MCP_ADAPTER_TAG="v0.7.6"
+MCP_ADAPTER_TAG="v0.7.7"
 MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.23.tar"
 MCP_ADAPTER_SHA256="4d9a5eaf06b5c0a72c4af1e6cd4364231ca24fdf7e141d95f4c69744c462eb8f"
 MCP_SDK_VERSION="1.30.1"
 MCP_OPENCODE_SDK_VERSION="1.18.21"
 MCP_TESTED_PROTOCOL_VERSION="2025-11-25"
 MCP_TUNNEL_DIR="$SHARE_ROOT/mcp-tunnel/openai"
-HUB_ASSET_TAG="v0.7.6"
+HUB_ASSET_TAG="v0.7.7"
 HUB_ASSET_FILENAME="opencode-vm-hub-1.tar"
-HUB_ASSET_SHA256="2ef956152cb1141239b58cd379726873824136dee25baff42d16bed4934b6034"
+HUB_ASSET_SHA256="0d2f328ffda9ee3a0c8d61cfe303f7e479863a3f3af032d07d8650dd3eb1c84a"
 
 # BEGIN GENERATED MANAGED RUNTIME
 OCVM_MANAGED_RUNTIME_GZIP_BASE64='H4sIAAAAAAAC/+19a3PbRrJoPvtXwKjUBrBBUHYSbw51FJUiMYluZElHUl5X1tIQAYqwQYABQNmKxP9++zFPAKTkze5W3TpiJRYxM+jp6enu6enpac6iPLpK
@@ -280,14 +280,13 @@ DEFAULT_LAN_ALLOW_UDP=""              # z.B. "192.168.178.20:53"              (o
 DEFAULT_HOST_LOCALHOST_FORWARD="yes"  # expose HOST_TCP_PORTS inside VM as localhost:PORT
 DEFAULT_OC_PORT=4096                  # OpenCode web/API server port
 DEFAULT_MCP_PORT=40960                # private incoming MCP connector
-AGENT_HUB_PORT=4180                   # first host-local Agent Connectivity Hub port (4180..4199)
 TASKBOARD_VERSION="0.6.0"
 TASKBOARD_AMD64_SHA256="ea5d28c266d4cc7caf4aa86f5efd575871d6255ff2e41d61a84201f5d68647e9"
 TASKBOARD_ARM64_SHA256="3749fb985f544fdb6788ba1dff69761e599ff82b3fe86d39ca54307c0f523e9d"
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.7.6"
+OCVM_VERSION="0.7.7"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -379,6 +378,8 @@ run_with_spinner() {
 #   P+1    web  HTTP       P+3    a2a HTTP
 #   P+4    editor HTTPS (optional)
 #   P+5    Taskboard HTTP
+#   P+6    Repo Dashboard HTTPS (reserved for its separate owner)
+#   P+7    Agent Control Hub HTTPS
 #
 # and inside the VM, never tunnelled to the LAN:
 #
@@ -395,7 +396,7 @@ web_editor_enabled() {
 
 validate_web_port() {
   local p="$1"
-  local last=5
+  local last=7
   if ! is_valid_port "$p" || (( p < 1026 || p > 65535 - last )); then
     echo "Invalid --port value: $p" >&2
     echo "opencode-vm web reserves a block around the base port:" >&2
@@ -405,6 +406,8 @@ validate_web_port() {
     echo "  P+2  a2a HTTPS         P+3  a2a HTTP" >&2
     echo "  P+4  editor HTTPS      (unless --no-editor)" >&2
     echo "  P+5  Taskboard HTTP" >&2
+    echo "  P+6  Repo Dashboard HTTPS (reserved)" >&2
+    echo "  P+7  Agent Control Hub HTTPS" >&2
     echo "so the base port must be between 1026 and $((65535 - last))." >&2
     exit 2
   fi
@@ -7982,6 +7985,10 @@ ocvm_post_update_migrate() {
   # shadowing). Upgrading from pre-0.4.x state: upgrade through the latest
   # 0.4.x first, or re-run `opencode-vm init`.
   [[ "$#" -eq 2 ]] || return 0
+  if ! agent_hub_retire_legacy_sessions; then
+    echo "[hub] Could not safely retire a legacy host Hub. Resolve its ownership before starting a guest Hub." >&2
+    return 1
+  fi
   if ! skills_registry_ensure >/dev/null; then
     echo "[skills] Could not refresh bundled skill packages after update." >&2
     return 1
@@ -11075,10 +11082,11 @@ is_browser_unsafe_port() {
   return 1
 }
 
-# Web-mode forwarding: one SSH process carrying the public P..P+5 service block,
-# host(0.0.0.0:X) -> VM(127.0.0.1:X).
+# Web-mode forwarding: one SSH process carrying the complete P..P+7 service block.
+# Existing P..P+5 LAN forwards retain their binding; new Dashboard/Hub forwards
+# default to host loopback until an explicit exposure decision exists.
 #
-# One SSH process for the complete public block:
+# One SSH process for the complete block:
 #   - ExitOnForwardFailure=yes makes the whole block bind atomically. Either all
 #     public ports are reserved or none are, so there is no window in which the
 #     port relationship is half-established, and no TOCTOU gap between
@@ -11099,8 +11107,10 @@ is_browser_unsafe_port() {
 # absolute URL: the effective base is chosen here and then handed to the VM.
 WEB_PORT_BASE=""
 
-# A running guest service can occupy P+4 even if no LAN forward exists yet.
-editor_guest_port_available() {
+# A running guest service can occupy an assigned port even if no LAN forward
+# exists yet. Probe before selecting a host block so guest startup cannot later
+# silently lose its fixed port.
+guest_port_available() {
   vm_exec "$1" 'python3 -c '\''import socket, sys
 s = socket.socket()
 try:
@@ -11116,7 +11126,7 @@ finally:
 # WEB_PORT_BASE holds the base that was actually reserved.
 start_web_tunnels() {
   local vm="$1" req="$2" reserved="${3:-}"
-  local last=5
+  local last=7
   [[ -n "$vm" && -n "$req" ]] || return 1
   WEB_PORT_BASE=""
 
@@ -11187,12 +11197,17 @@ start_web_tunnels() {
     done
     (( ok )) || continue
 
-    if [[ "${4:-0}" == 1 ]] && ! editor_guest_port_available "$vm" "$((base + 4))"; then
+    if [[ "${4:-0}" == 1 ]] && ! guest_port_available "$vm" "$((base + 4))"; then
       continue
     fi
-    local forwards=()
+    if ! guest_port_available "$vm" "$((base + 7))"; then
+      continue
+    fi
+    local forwards=() bind
     for p in $(seq "$base" $((base + last))); do
-      forwards+=( -L "0.0.0.0:${p}:127.0.0.1:${p}" )
+      bind="0.0.0.0"
+      (( p >= base + 6 )) && bind="127.0.0.1"
+      forwards+=( -L "${bind}:${p}:127.0.0.1:${p}" )
     done
     if ssh -f -N -F /dev/null \
         -o IdentityFile="$HOME/.lima/_config/user" \
@@ -11219,6 +11234,7 @@ start_web_tunnels() {
       echo "[tunnel] LAN tunnels up (pid ${pid:-?}): ${base} web/https, $((base + 1)) web/http, $((base + 2)) a2a/https, $((base + 3)) a2a/http"
        [[ "${4:-0}" != 1 ]] || echo "[tunnel] Editor HTTPS: $((base + 4))"
        echo "[tunnel] Taskboard HTTP: $((base + 5))"
+       echo "[tunnel] Dashboard/Hub forwards remain loopback-only: $((base + 6))/$((base + 7))"
       rm -f "$err_file"
       return 0
     fi
@@ -11229,7 +11245,7 @@ start_web_tunnels() {
   fi
   rm -f "$err_file"
   echo "[tunnel] ERROR: no free browser-safe block of $((last + 1)) consecutive host ports in ${req}..$((req + 9 + last))." >&2
-  echo "[tunnel]   web mode uses P (web https), P+1 (web http), P+2 (a2a https), P+3 (a2a http), P+4 (editor), and P+5 (taskboard)." >&2
+  echo "[tunnel]   web mode uses P (web https), P+1 (web http), P+2 (a2a https), P+3 (a2a http), P+4 (editor), P+5 (taskboard), P+6 (dashboard), and P+7 (hub)." >&2
   echo "[tunnel]   Diagnose: lsof -nP -iTCP:${req}-$((req + 9 + last)) -sTCP:LISTEN" >&2
   echo "[tunnel]   Pick another base: opencode-vm web --port 8080" >&2
   echo "[tunnel]   If a limactl process holds one, stop & restart the VM to clear it:" >&2
@@ -11238,11 +11254,11 @@ start_web_tunnels() {
 }
 
 # Select the guest-side fallback independently from SSH tunnel availability.
-# Even when LAN forwarding fails, P-2..P+5 must not overlap the private MCP
+# Even when LAN forwarding fails, P-2..P+7 must not overlap the private MCP
 # listener and the public ports must remain browser-safe.
 select_web_guest_base() {
-  local req="$1" reserved="${2:-}" base p ok
-  local last=5
+  local req="$1" reserved="${2:-}" editor_enabled="${3:-0}" vm="${4:-}" base p ok
+  local last=7
   for base in $(seq "$req" $((req + 9))); do
     (( base >= 1026 && base <= 65535 - last )) || continue
     if [[ -n "$reserved" ]] && (( reserved >= base - 2 && reserved <= base + last )); then
@@ -11253,6 +11269,12 @@ select_web_guest_base() {
       if is_browser_unsafe_port "$p"; then ok=0; break; fi
     done
     (( ok )) || continue
+    if [[ -n "$vm" ]]; then
+      if [[ "$editor_enabled" == 1 ]] && ! guest_port_available "$vm" "$((base + 4))"; then
+        continue
+      fi
+      guest_port_available "$vm" "$((base + 7))" || continue
+    fi
     printf '%s\n' "$base"
     return 0
   done
@@ -11587,6 +11609,7 @@ LAUNCHER_PROJECT_HASH = sys.argv[11] if len(sys.argv) > 11 else ""
 LAUNCHER_ENABLED = sys.argv[12] != "0" if len(sys.argv) > 12 else True
 PROJECT_TITLE = sys.argv[13] if len(sys.argv) > 13 else ""
 LAUNCHER_TASKBOARD_RUNTIME_DIR = sys.argv[14] if len(sys.argv) > 14 else ""
+LAUNCHER_GENERATION = sys.argv[15] if len(sys.argv) > 15 else ""
 if (PROJECT_TITLE in (".", "..") or "/" in PROJECT_TITLE or len(PROJECT_TITLE) > 255 or
         any(ord(char) < 32 or ord(char) == 127 for char in PROJECT_TITLE)):
     PROJECT_TITLE = ""
@@ -11704,12 +11727,12 @@ LAUNCHER_APP_REGISTRY = (
         "label": "Agent Control",
         "icon": "hub",
         "runtime_file": "hub/runtime.json",
+        "failure_file": "hub/failure.json",
         "port_field": "hubPort",
-        "port_min": 4180,
-        "port_max": 4199,
-        "scheme": "http",
+        "port_offset": 7,
+        "local_only": True,
+        "scheme": "https",
         "health_path": "/healthz",
-        "heartbeat_max_age": 3,
     },
 )
 
@@ -11726,6 +11749,7 @@ LAUNCHER_JS = r"""
     typeof app.label === "string" && app.label.length <= 48 &&
     (app.scheme === "http" || app.scheme === "https") &&
     Number.isInteger(app.port) && app.port > 0 && app.port <= 65535 &&
+    (app.localOnly === undefined || typeof app.localOnly === "boolean") &&
     !app.host &&
     ["editor", "board", "hub", "terminal", "app"].includes(app.icon));
 
@@ -11793,15 +11817,18 @@ LAUNCHER_JS = r"""
   trigger.setAttribute("aria-controls", menu.id);
 
   const links = [];
+  const loopbackHost = ["localhost", "127.0.0.1", "[::1]", "::1"].includes(window.location.hostname.toLowerCase());
   for (const app of apps) {
-    const link = document.createElement(app.ready === false ? "div" : "a");
+    const localOnlyUnavailable = app.localOnly === true && !loopbackHost;
+    const unavailable = app.ready === false || localOnlyUnavailable;
+    const link = document.createElement(unavailable ? "div" : "a");
     link.className = "app-entry";
     link.setAttribute("role", "menuitem");
     link.tabIndex = -1;
-    if (app.ready === false) {
+    if (unavailable) {
       link.className += " unavailable";
       link.setAttribute("aria-disabled", "true");
-      link.title = [app.error, app.log].filter(Boolean).join(" ");
+      link.title = [app.error, app.log, localOnlyUnavailable ? "Available only through the host loopback address." : ""].filter(Boolean).join(" ");
     } else {
       link.target = "_blank";
       link.rel = "noopener noreferrer";
@@ -11823,7 +11850,7 @@ LAUNCHER_JS = r"""
     const external = document.createElement("span");
     external.className = "external";
     external.setAttribute("aria-hidden", "true");
-    external.textContent = app.ready === false ? "!" : "↗";
+    external.textContent = unavailable ? "!" : "↗";
     link.append(icon, label, external);
     menu.appendChild(link);
     links.push(link);
@@ -12285,6 +12312,40 @@ def launcher_app_ready(app, runtime):
         valid_port = port == WEB_BASE_PORT + app.get("port_offset", 0)
     if not valid_port:
         return False
+    if app.get("id") == "agent-hub":
+        generation = runtime.get("generation")
+        if (runtime.get("ready") is not True or not isinstance(generation, str) or not generation
+                or generation != LAUNCHER_GENERATION):
+            return False
+        sock = None
+        try:
+            sock = socket.create_connection(("127.0.0.1", port), timeout=0.5)
+            context = ssl._create_unverified_context()
+            sock = context.wrap_socket(sock, server_hostname="localhost")
+            sock.settimeout(0.5)
+            sock.sendall(b"GET /healthz HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            response = b""
+            while len(response) <= 8192:
+                chunk = sock.recv(8192 - len(response) + 1)
+                if not chunk:
+                    break
+                response += chunk
+            head, separator, body = response.partition(b"\r\n\r\n")
+            status = head.partition(b"\r\n")[0].split(b" ")
+            if not separator or len(status) < 2 or status[1] != b"200":
+                return False
+            health = json.loads(body.decode("utf-8"))
+            return (health.get("status") == "ok" and health.get("service") == "agent-connectivity-hub"
+                    and health.get("schema") == 1 and health.get("projectHash") == LAUNCHER_PROJECT_HASH
+                    and health.get("generation") == generation)
+        except (OSError, ssl.SSLError, ValueError, TypeError):
+            return False
+        finally:
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
     if app.get("heartbeat_max_age") is not None:
         heartbeat = runtime.get("heartbeat")
         current = time.time()
@@ -12322,20 +12383,43 @@ def launcher_apps():
             runtime_file = launcher_taskboard_runtime_path("runtime.json")
         runtime = read_launcher_runtime(runtime_file)
         if runtime is None or not launcher_app_ready(app, runtime):
-            if app.get("id") == "taskboard":
-                failure = read_launcher_failure(launcher_taskboard_runtime_path(app["failure_file"]))
-                if failure:
-                    apps.append({
-                        "id": app["id"], "label": app["label"], "icon": app["icon"],
-                        "scheme": app["scheme"], "port": WEB_BASE_PORT + app.get("port_offset", 0),
-                        "ready": False, "error": failure.get("reason", "Taskboard nicht bereit."),
-                        "log": failure.get("log", "VM-interner Taskboard-Logpfad nicht verfügbar."),
-                    })
+            failure = None
+            if app.get("failure_file"):
+                failure_path = (launcher_taskboard_runtime_path(app["failure_file"])
+                                if app.get("runtime_location") == "taskboard-state"
+                                else os.path.join(LAUNCHER_SHARE, app["failure_file"]))
+                failure = read_launcher_failure(failure_path)
+                if app.get("id") == "agent-hub" and (not failure or failure.get("generation") != LAUNCHER_GENERATION):
+                    failure = None
+            if failure or (app.get("id") == "agent-hub" and runtime is not None):
+                if app.get("id") == "agent-hub":
+                    fallback_reason = "Hub readiness did not confirm this project generation."
+                    fallback_log = "VM-internal Hub log path is unavailable."
+                else:
+                    fallback_reason = "Taskboard ist nicht bereit."
+                    fallback_log = "VM-interner Taskboard-Logpfad nicht verfügbar."
+                reason = failure.get("reason") if failure else fallback_reason
+                log = failure.get("log") if failure else fallback_log
+                if not isinstance(reason, str) or not reason or len(reason) > 512:
+                    reason = fallback_reason
+                if not isinstance(log, str) or not log or len(log) > 1024:
+                    log = fallback_log
+                unavailable = {
+                    "id": app["id"], "label": app["label"], "icon": app["icon"],
+                    "scheme": app["scheme"], "port": WEB_BASE_PORT + app.get("port_offset", 0),
+                    "ready": False, "error": reason, "log": log,
+                }
+                if app.get("local_only"):
+                    unavailable["localOnly"] = True
+                apps.append(unavailable)
             continue
-        apps.append({
+        available = {
             "id": app["id"], "label": app["label"], "icon": app["icon"],
             "scheme": app["scheme"], "port": runtime[app["port_field"]],
-        })
+        }
+        if app.get("local_only"):
+            available["localOnly"] = True
+        apps.append(available)
     return apps
 
 
@@ -12643,7 +12727,10 @@ agent_hub_source_dir() {
       if [[ "$candidate" == "$SHARE_ROOT/hub" && "$(cat "$candidate/.ocvm-version" 2>/dev/null || true)" != "$OCVM_VERSION" ]]; then
         continue
       fi
-      if [[ "$candidate" == "$SHARE_ROOT/hub-assets/"* && "$(cat "${candidate%/hub}/.sha256" 2>/dev/null || true)" != "$HUB_ASSET_SHA256" ]]; then
+      if [[ "$candidate" == "$SHARE_ROOT/hub-assets/"* ]] && {
+           [[ "$(cat "${candidate%/hub}/.sha256" 2>/dev/null || true)" != "$HUB_ASSET_SHA256" ]] ||
+           ! _agent_hub_verify_manifest "$candidate"
+         }; then
         continue
       fi
       printf '%s\n' "$candidate"
@@ -12653,13 +12740,61 @@ agent_hub_source_dir() {
   return 1
 }
 
+_hub_file_sha256() {
+  local file="$1"
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | awk '{print $1}'
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 "$file" | awk '{print $NF}'
+  else
+    echo "[hub] No SHA-256 tool is available (shasum, sha256sum, or openssl)." >&2
+    return 1
+  fi
+}
+
+# Record one digest per shipped asset, in the canonical archive order. Marker
+# or existence checks alone cannot detect a silently corrupted file.
+_hub_write_manifest() {
+  local dir="$1" asset digest tmp
+  tmp="$dir/.files.sha256.tmp.$$"
+  for asset in server.py policy.py catalog.py index.html styles.css app.js control.js; do
+    [[ -f "$dir/$asset" && ! -L "$dir/$asset" ]] || { rm -f "$tmp"; return 1; }
+    digest="$(_hub_file_sha256 "$dir/$asset")" || { rm -f "$tmp"; return 1; }
+    printf '%s  %s\n' "$digest" "$asset"
+  done > "$tmp" || { rm -f "$tmp"; return 1; }
+  chmod 600 "$tmp" && mv "$tmp" "$dir/.files.sha256"
+}
+
+_agent_hub_verify_manifest() {
+  local dir="$1" want asset have seen=0
+  [[ -f "$dir/.files.sha256" && ! -L "$dir/.files.sha256" && -s "$dir/.files.sha256" ]] || return 1
+  while read -r want asset; do
+    [[ "$want" =~ ^[0-9a-f]{64}$ ]] || return 1
+    case " server.py policy.py catalog.py index.html styles.css app.js control.js " in
+      *" $asset "*) ;;
+      *) return 1 ;;
+    esac
+    [[ -f "$dir/$asset" && ! -L "$dir/$asset" ]] || return 1
+    have="$(_hub_file_sha256 "$dir/$asset")" || return 1
+    [[ "$have" == "$want" ]] || return 1
+    seen=$((seen + 1))
+  done < "$dir/.files.sha256"
+  (( seen == 7 ))
+}
+
 # Standalone installs have only opencode-vm.sh. Download the release's exact
 # read-only Hub assets when no adjacent development tree is available.
 agent_hub_prepare_cache() {
   local cache="$SHARE_ROOT/hub-assets/$HUB_ASSET_SHA256" stage archive expected
   [[ ! -L "$SHARE_ROOT/hub-assets" && ! -L "$cache" ]] || return 1
   mkdir -p "$SHARE_ROOT/hub-assets" || return 1
-  if [[ -f "$cache/.sha256" && "$(<"$cache/.sha256")" == "$HUB_ASSET_SHA256" ]]; then return 0; fi
+  if [[ -f "$cache/.sha256" && "$(<"$cache/.sha256")" == "$HUB_ASSET_SHA256" ]]; then
+    if _agent_hub_verify_manifest "$cache/hub"; then return 0; fi
+    echo "[hub] Cached Hub assets failed their content integrity check; refetching." >&2
+    rm -rf "$cache"
+  fi
   [[ ! -e "$cache" ]] || { echo "[hub] Unrecognized cache contents; refusing to overwrite." >&2; return 1; }
   stage="$(mktemp -d "$SHARE_ROOT/hub-assets/.stage.XXXXXX")" || return 1
   archive="$stage/assets.tar"
@@ -12681,121 +12816,161 @@ PY
   fi
   tar -xf "$archive" -C "$stage" || { rm -rf "$stage"; return 1; }
   rm -f "$archive"
+  _hub_write_manifest "$stage/hub" || { rm -rf "$stage"; return 1; }
   printf '%s\n' "$HUB_ASSET_SHA256" > "$stage/.sha256"
   mv "$stage" "$cache" || { rm -rf "$stage"; return 1; }
 }
 
-agent_hub_runtime_path() {
-  printf '%s/hub/runtime.json\n' "$1"
+legacy_hub_process_matches() {
+  local pid="$1" hash="$2" command
+  [[ "$pid" =~ ^[0-9]+$ && "$hash" =~ ^[0-9a-f]{32}$ ]] || return 1
+  command="$(ps -ww -p "$pid" -o command= 2>/dev/null || true)"
+  [[ -n "$command" ]] || return 1
+  # Exact argv tokens, never bare substrings: a prefix match would accept a
+  # longer, foreign --project-hash that merely starts with this session's hash,
+  # or a path like hub/server.pyx. Token boundaries make both fail closed.
+  [[ "$command" =~ (^|[[:space:]])/[^[:space:]]*/hub/server\.py([[:space:]]|$) ]] || return 1
+  [[ "$command" =~ (^|[[:space:]])--host[[:space:]]+0\.0\.0\.0([[:space:]]|$) ]] || return 1
+  [[ "$command" =~ (^|[[:space:]])--project-hash[[:space:]]+$hash([[:space:]]|$) ]]
 }
 
-agent_hub_stop() {
-  local share="${1:-}" pid_file watcher_file pid watcher source command hash
-  [[ -n "$share" ]] || return 0
-  pid_file="$share/hub/server.pid"
-  watcher_file="$share/hub/watcher.pid"
-  if [[ -f "$watcher_file" ]]; then
-    watcher="$(cat "$watcher_file" 2>/dev/null || true)"
-    if [[ "$watcher" =~ ^[0-9]+$ ]]; then
-      kill "$watcher" 2>/dev/null || true
-    fi
-  fi
+# Version 0.7.6 ran a host-side Hub and watcher from these pid files. Retire
+# only a positively identified legacy server; its watcher exits after the
+# server is gone. Refuse to stage a guest Hub if that watcher cannot quiesce.
+agent_hub_retire_legacy() {
+  local share="$1" dir pid_file watcher_file runtime_file pid watcher hash waited marker server_target="" watcher_target="" legacy_seen=0
+  [[ -n "$share" && ( -d "$share" || -L "$share" ) ]] || return 0
+  [[ ! -L "$share" ]] || { echo "[hub] Refusing legacy cleanup through a symlinked session share." >&2; return 1; }
+  dir="$share/hub"
+  [[ -e "$dir" || -L "$dir" ]] || return 0
+  [[ -d "$dir" && ! -L "$dir" ]] || { echo "[hub] Legacy Hub directory is unsafe." >&2; return 1; }
+  pid_file="$dir/server.pid"
+  watcher_file="$dir/watcher.pid"
+  runtime_file="$dir/runtime.json"
+  for marker in "$pid_file" "$watcher_file"; do
+    [[ ( ! -e "$marker" && ! -L "$marker" ) || ( -f "$marker" && ! -L "$marker" ) ]] || {
+      echo "[hub] Legacy Hub marker is unsafe." >&2
+      return 1
+    }
+  done
+  [[ -f "$pid_file" || -f "$watcher_file" ]] || return 0
+  hash="$(basename "$share")"
+  [[ "$hash" =~ ^[0-9a-f]{32}$ ]] || { echo "[hub] Legacy Hub session identity is invalid." >&2; return 1; }
+
+  # Validate every marker and identity before the first signal. An invalid
+  # watcher marker must never be discovered after the server already died.
   if [[ -f "$pid_file" ]]; then
-    pid="$(cat "$pid_file" 2>/dev/null || true)"
-    source="$(agent_hub_source_dir 2>/dev/null || true)"
-    hash="$(basename "$share")"
-    if [[ "$pid" =~ ^[0-9]+$ && -n "$source" ]]; then
-      command="$(ps -ww -p "$pid" -o command= 2>/dev/null || true)"
-      if [[ "$command" == *"$source/server.py"* && "$command" == *"--project-hash $hash"* ]]; then
-        kill "$pid" 2>/dev/null || true
-        wait "$pid" 2>/dev/null || true
-      fi
+    legacy_seen=1
+    pid="$(<"$pid_file")"
+    [[ "$pid" =~ ^[0-9]+$ ]] || { echo "[hub] Legacy Hub server marker is invalid." >&2; return 1; }
+    if kill -0 "$pid" 2>/dev/null; then
+      legacy_hub_process_matches "$pid" "$hash" || {
+        echo "[hub] Legacy Hub server ownership could not be verified." >&2
+        return 1
+      }
+      server_target="$pid"
     fi
   fi
-  rm -f "$pid_file" "$watcher_file" "$(agent_hub_runtime_path "$share")"
+  if [[ -f "$watcher_file" ]]; then
+    watcher="$(<"$watcher_file")"
+    [[ "$watcher" =~ ^[0-9]+$ ]] || { echo "[hub] Legacy Hub watcher marker is invalid." >&2; return 1; }
+    if kill -0 "$watcher" 2>/dev/null; then
+      (( legacy_seen )) || { echo "[hub] Legacy Hub watcher ownership could not be verified." >&2; return 1; }
+      watcher_target="$watcher"
+    fi
+  fi
+
+  if [[ -n "$server_target" ]]; then
+    kill "$server_target" 2>/dev/null || return 1
+    for waited in $(seq 1 20); do
+      kill -0 "$server_target" 2>/dev/null || break
+      sleep 0.1
+    done
+    if kill -0 "$server_target" 2>/dev/null; then
+      legacy_hub_process_matches "$server_target" "$hash" || return 1
+      kill -KILL "$server_target" 2>/dev/null || return 1
+      for waited in $(seq 1 10); do
+        kill -0 "$server_target" 2>/dev/null || break
+        sleep 0.1
+      done
+    fi
+    kill -0 "$server_target" 2>/dev/null && { echo "[hub] Legacy Hub server did not stop." >&2; return 1; }
+  fi
+
+  # The legacy watcher must quiesce on its own once its server is gone; a
+  # positively-owned server alone authorises this wait, never a signal.
+  if [[ -n "$watcher_target" ]]; then
+    for waited in $(seq 1 25); do
+      kill -0 "$watcher_target" 2>/dev/null || break
+      sleep 0.1
+    done
+    kill -0 "$watcher_target" 2>/dev/null && {
+      echo "[hub] Legacy Hub watcher did not exit after its server stopped." >&2
+      return 1
+    }
+  fi
+
+  rm -f "$pid_file" "$watcher_file"
+  [[ ! -f "$runtime_file" || -L "$runtime_file" ]] || rm -f "$runtime_file"
 }
 
-agent_hub_health() {
-  local port="$1" hash="$2"
-  curl -fsS --max-time 1 "http://127.0.0.1:$port/healthz" 2>/dev/null |
-    jq -e --arg hash "$hash" '.status == "ok" and .service == "agent-connectivity-hub" and
-       .readOnly == false and .projectHash == $hash' >/dev/null 2>&1
+agent_hub_retire_legacy_sessions() {
+  local share failed=0
+  [[ -d "$SESSIONS_DIR" ]] || return 0
+  for share in "$SESSIONS_DIR"/*; do
+    [[ -d "$share" ]] || continue
+    agent_hub_retire_legacy "$share" || failed=1
+  done
+  return "$failed"
 }
 
-# Start the host-local Hub and publish a heartbeat-backed runtime descriptor for
-# the VM proxy. The descriptor is only present while /healthz is returning 200.
-agent_hub_start() {
-  local share="$1" project="$2" source pid watcher tmp waited runtime port hash
+# Stage exactly the verified Hub package into the project session share. The
+# host never starts or supervises this service; the guest owns the process.
+agent_hub_stage_assets() {
+  local share="$1" source root target stage asset
+  [[ -n "$share" && ! -L "$share" ]] || return 1
+  agent_hub_retire_legacy "$share" || return 1
+  chmod 700 "$share" || return 1
   source="$(agent_hub_source_dir 2>/dev/null || true)"
   if [[ -z "$source" ]] && agent_hub_prepare_cache; then
     source="$(agent_hub_source_dir 2>/dev/null || true)"
   fi
   [[ -n "$source" ]] || {
-    echo "[hub] Hub assets are unavailable; launcher entry will stay hidden." >&2
+    echo "[hub] Verified Hub assets are unavailable; the guest Hub will stay unavailable." >&2
     return 1
   }
-  agent_hub_stop "$share"
-  mkdir -p "$share/hub"
-  chmod 700 "$share/hub"
-  runtime="$(agent_hub_runtime_path "$share")"
-  rm -f "$runtime"
-  hash="$(proj_hash "$project")"
-  for port in $(seq "$AGENT_HUB_PORT" "$((AGENT_HUB_PORT + 19))"); do
-    # Another project's Hub may already own a fixed port; never reuse its
-    # health response as proof that this project's service started.
-    if ! python3 -c 'import socket,sys; s=socket.socket(); s.bind(("127.0.0.1",int(sys.argv[1]))); s.close()' "$port" 2>/dev/null; then
-      continue
+  root="$share/hub"
+  target="$root/assets-$HUB_ASSET_SHA256"
+  [[ ! -L "$root" && ! -L "$target" ]] || return 1
+  mkdir -p -m 700 "$root" || return 1
+  chmod 700 "$root" || return 1
+  if [[ -d "$target" ]]; then
+    if [[ -f "$target/.sha256" && "$(<"$target/.sha256")" == "$HUB_ASSET_SHA256" ]] &&
+       _agent_hub_verify_manifest "$target"; then
+      return 0
     fi
-    HUB_PROJECT="$project" OCVM_SHARE_ROOT="$SHARE_ROOT" \
-       python3 "$source/server.py" --host 0.0.0.0 --port "$port" --project-hash "$hash" \
-      >>"$share/hub/server.log" 2>&1 &
-    pid=$!
-    printf '%s\n' "$pid" > "$share/hub/server.pid"
-    chmod 600 "$share/hub/server.pid"
-    waited=0
-    while (( waited < 20 )); do
-      if agent_hub_health "$port" "$hash" && kill -0 "$pid" 2>/dev/null; then
-        break
-      fi
-      kill -0 "$pid" 2>/dev/null || break
-      sleep 0.1
-      waited=$((waited + 1))
-    done
-    if ! agent_hub_health "$port" "$hash" || ! kill -0 "$pid" 2>/dev/null; then
-      agent_hub_stop "$share"
-      continue
+    # Existence and marker checks alone would reuse a silently corrupted file.
+    # Treat any content mismatch as absent and re-stage from the verified
+    # source; the exact pinned directory name keeps this delete scoped.
+    rm -rf "$target"
+  fi
+  stage="$(mktemp -d "$root/.assets.XXXXXX")" || return 1
+  for asset in server.py policy.py catalog.py index.html styles.css app.js control.js; do
+    if [[ ! -f "$source/$asset" || -L "$source/$asset" ]] || ! cp -p "$source/$asset" "$stage/$asset"; then
+      rm -rf "$stage"
+      return 1
     fi
-    (
-      trap 'rm -f "$runtime" "$share/hub/watcher.pid"; exit 0' EXIT HUP INT TERM
-      while kill -0 "$pid" 2>/dev/null; do
-        if agent_hub_health "$port" "$hash"; then
-          tmp="$(mktemp "$share/hub/runtime.XXXXXX")" || exit 1
-          jq -n --arg share "$share" --arg project "$hash" \
-            --argjson port "$port" --argjson heartbeat "$(date +%s)" \
-            '{schema:1,share:$share,projectHash:$project,hubPort:$port,ready:true,heartbeat:$heartbeat}' > "$tmp" || exit 1
-          chmod 600 "$tmp" && mv -f "$tmp" "$runtime" || exit 1
-        else
-          rm -f "$runtime"
-        fi
-        sleep 0.5
-      done
-    ) &
-    watcher=$!
-    printf '%s\n' "$watcher" > "$share/hub/watcher.pid"
-    chmod 600 "$share/hub/watcher.pid"
-    waited=0
-    while (( waited < 30 )); do
-      if [[ -f "$runtime" ]] && agent_hub_health "$port" "$hash"; then
-        echo "[hub] Agent Connectivity Hub ready on http://127.0.0.1:$port" >&2
-        return 0
-      fi
-      sleep 0.2
-      waited=$((waited + 1))
-    done
-    agent_hub_stop "$share"
+    chmod 600 "$stage/$asset" || { rm -rf "$stage"; return 1; }
   done
-  echo "[hub] No project-bound Agent Connectivity Hub port was available in $AGENT_HUB_PORT..$((AGENT_HUB_PORT + 19))." >&2
-  return 1
+  if ! _hub_write_manifest "$stage" || ! _agent_hub_verify_manifest "$stage" ||
+     ! printf '%s\n' "$HUB_ASSET_SHA256" > "$stage/.sha256" || ! chmod 600 "$stage/.sha256"; then
+    rm -rf "$stage"
+    return 1
+  fi
+  mv "$stage" "$target" || {
+    rm -rf "$stage"
+    return 1
+  }
 }
 
 # ---------------------------------------------------------------------------
@@ -12940,7 +13115,7 @@ _stop_legacy_redirector() {
 }
 
 # start_proxy <name> <listen-port> <target-port> <seed-key> <cert> <key>
-#   [openlive-target project generation launcher-share project-hash launcher-enabled project-title taskboard-runtime-dir]
+#   [openlive-target project generation launcher-share project-hash launcher-enabled project-title taskboard-runtime-dir hub-generation]
 # Idempotent. Silent on failure — the caller owns the message, because what a
 # dead listener means differs per service. Returns non-zero if nothing is
 # listening after ~4s.
@@ -12948,7 +13123,7 @@ start_proxy() {
   local name="$1" listen="$2" target="$3" seedkey="$4" crt="$5" keyf="$6" remote="${7:-0}"
   local remote_project="${8:-}" remote_generation="${9:-}"
   local launcher_share="${10:-}" launcher_project="${11:-}" launcher_enabled="${12:-1}" project_title="${13:-}"
-  local taskboard_runtime_dir="${14:-}"
+  local taskboard_runtime_dir="${14:-}" hub_generation="${15:-}"
   local waited=0 marker="ocvm-proxy-$1"
   stop_proxy "$name"
   # `bash -c <loop> <marker> ...` rather than a forked subshell, so the marker
@@ -12958,15 +13133,15 @@ start_proxy() {
   setsid bash -c '
     marker="$0"; name="$1"; py="$2"; listen="$3"; target="$4"
      key="$5"; crt="$6"; keyf="$7"; remote="$8"; remote_project="$9"; remote_generation="${10}"
-        launcher_share="${11}"; launcher_project="${12}"; launcher_enabled="${13}"; project_title="${14}"; taskboard_runtime_dir="${15}"
+         launcher_share="${11}"; launcher_project="${12}"; launcher_enabled="${13}"; project_title="${14}"; taskboard_runtime_dir="${15}"; hub_generation="${16}"
       while true; do
-        python3 "$py" "$listen" "$target" "$key" "$crt" "$keyf" "$remote" "$remote_project" "$remote_generation" "$marker" "$launcher_share" "$launcher_project" "$launcher_enabled" "$project_title" "$taskboard_runtime_dir" \
+        python3 "$py" "$listen" "$target" "$key" "$crt" "$keyf" "$remote" "$remote_project" "$remote_generation" "$marker" "$launcher_share" "$launcher_project" "$launcher_enabled" "$project_title" "$taskboard_runtime_dir" "$hub_generation" \
         >>"/tmp/ocvm-proxy-$name.log" 2>&1 &
       echo $! > "/tmp/ocvm-proxy-$name.run.pid"
       wait $! || true
       sleep 1
     done' "$marker" "$name" "$OC_PROXY_PY" "$listen" "$target" "$seedkey" "$crt" "$keyf" "$remote" "$remote_project" "$remote_generation" \
-    "$launcher_share" "$launcher_project" "$launcher_enabled" "$project_title" "$taskboard_runtime_dir" </dev/null >/dev/null 2>&1 &
+    "$launcher_share" "$launcher_project" "$launcher_enabled" "$project_title" "$taskboard_runtime_dir" "$hub_generation" </dev/null >/dev/null 2>&1 &
   echo $! > "/tmp/ocvm-proxy-$name.sup.pid"
   while [ "$waited" -lt 20 ]; do
     if ss -ltn "sport = :$listen" 2>/dev/null | grep -q LISTEN; then
@@ -13273,6 +13448,199 @@ start_taskboard() {
   return 1
 }
 
+hub_runtime_dir() {
+  local dir="$SESS_SHARE/hub"
+  [[ -n "$SESS_SHARE" && ! -L "$SESS_SHARE" && "$dir" != *$'\n'* && "$dir" != *$'\r'* ]] || return 1
+  printf '%s\n' "$dir"
+}
+
+hub_unit_description() {
+  printf 'opencode-vm hub %s %s\n' "$SESS_SHARE" "$OC_HUB_GENERATION"
+}
+
+# Only a matching generation may remove its own publication. This keeps an old
+# exit path from deleting a descriptor written by a later controller.
+hub_remove_current_file() {
+  local path="$1"
+  [[ -f "$path" && ! -L "$path" ]] || return 0
+  jq -e --arg generation "$OC_HUB_GENERATION" '.generation == $generation' "$path" >/dev/null 2>&1 || return 0
+  rm -f "$path"
+}
+
+hub_failure() {
+  local reason="$1" dir log tmp=""
+  dir="$(hub_runtime_dir 2>/dev/null || true)"
+  [[ -n "$dir" && ! -L "$dir" ]] || return 0
+  mkdir -p -m 700 "$dir" 2>/dev/null || return 0
+  chmod 700 "$dir" 2>/dev/null || true
+  log="$dir/server.log"
+  tmp="$(mktemp "$dir/.failure.XXXXXX" 2>/dev/null || true)"
+  [[ -n "$tmp" ]] || return 0
+  if jq -n --arg hash "$OC_OPENLIVE_PROJECT_HASH" --arg generation "$OC_HUB_GENERATION" --arg log "$log" --arg reason "$reason" \
+      '{schema:1,projectHash:$hash,generation:$generation,log:$log,reason:$reason}' > "$tmp" &&
+      chmod 600 "$tmp" && mv -f "$tmp" "$dir/failure.json"; then
+    return 0
+  fi
+  rm -f "$tmp"
+}
+
+hub_prepare_runtime() {
+  local dir log
+  dir="$(hub_runtime_dir)" || return 1
+  [[ ! -L "$dir" ]] || return 1
+  mkdir -p -m 700 "$dir" || return 1
+  chmod 700 "$dir" || return 1
+  hub_remove_current_file "$dir/runtime.json"
+  hub_remove_current_file "$dir/runtime-input.json"
+  hub_remove_current_file "$dir/failure.json"
+  log="$dir/server.log"
+  [[ ! -L "$log" ]] || return 1
+  touch "$log" || return 1
+  chmod 600 "$log" || return 1
+}
+
+stop_hub() {
+  local description dir
+  OC_HUB_READY=0
+  dir="$(hub_runtime_dir 2>/dev/null || true)"
+  [ "$(systemctl show ocvm-hub.service -p LoadState --value 2>/dev/null)" != not-found ] || {
+    [[ -z "$dir" ]] || {
+      hub_remove_current_file "$dir/runtime.json"
+      hub_remove_current_file "$dir/runtime-input.json"
+      hub_remove_current_file "$dir/failure.json"
+    }
+    return 0
+  }
+  description="$(systemctl show ocvm-hub.service -p Description --value 2>/dev/null)" || return 1
+  [ "$description" = "$(hub_unit_description)" ] || {
+    echo "[hub] Existing service belongs to another runtime; refusing to stop it." >&2
+    return 1
+  }
+  sudo -n systemctl stop ocvm-hub.service || return 1
+  [[ -z "$dir" ]] || {
+    hub_remove_current_file "$dir/runtime.json"
+    hub_remove_current_file "$dir/runtime-input.json"
+    hub_remove_current_file "$dir/failure.json"
+  }
+}
+
+hub_health() {
+  local port="$1"
+  curl -fsk --max-time 1 "https://127.0.0.1:$port/healthz" 2>/dev/null |
+    jq -e --arg hash "$OC_OPENLIVE_PROJECT_HASH" --arg generation "$OC_HUB_GENERATION" '
+      .status == "ok" and .service == "agent-connectivity-hub" and .readOnly == false and
+      .schema == 1 and .projectHash == $hash and .generation == $generation
+    ' >/dev/null 2>&1
+}
+
+# Prove the staged bytes still match the digests recorded at staging time.
+# Existence checks alone would accept a silently corrupted server.py.
+hub_verify_assets() {
+  local source="$1" want asset have seen=0
+  [[ -f "$source/.files.sha256" && ! -L "$source/.files.sha256" && -s "$source/.files.sha256" ]] || return 1
+  while read -r want asset; do
+    case " server.py policy.py catalog.py index.html styles.css app.js control.js " in
+      *" $asset "*) ;;
+      *) return 1 ;;
+    esac
+    [[ -f "$source/$asset" && ! -L "$source/$asset" ]] || return 1
+    have="$(sha256sum "$source/$asset" | cut -d' ' -f1)" || return 1
+    [[ "$have" == "$want" ]] || return 1
+    seen=$((seen + 1))
+  done < "$source/.files.sha256"
+  (( seen == 7 ))
+}
+
+start_hub() {
+  local dir source log port waited=0 tmp="" mcp_enabled=false auth_enabled=false tunnel_configured=false openlive_configured=false a2a_enabled=false
+  OC_HUB_READY=0
+  [ "${OC_HUB_ENABLED:-0}" = "1" ] || return 0
+  stop_hub || { hub_failure "Existing Hub service ownership could not be verified."; return 1; }
+  hub_prepare_runtime || { hub_failure "Could not prepare private Hub runtime state."; return 1; }
+  dir="$(hub_runtime_dir)"
+  source="${OC_HUB_ASSET_DIR:-}"
+  log="$dir/server.log"
+  if [[ "$source" != "$dir"/assets-* || -L "$source" ]]; then
+    hub_failure "Verified Hub assets are not staged for this session."
+    return 1
+  fi
+  local asset
+  for asset in server.py policy.py catalog.py index.html styles.css app.js control.js; do
+    if [[ ! -f "$source/$asset" || -L "$source/$asset" ]]; then
+      hub_failure "Verified Hub assets are incomplete."
+      return 1
+    fi
+  done
+  if ! hub_verify_assets "$source"; then
+    hub_failure "Verified Hub assets failed the content integrity check."
+    return 1
+  fi
+  local OC_TLS=1 OC_SCHEME=http OC_TLS_CERT="" OC_TLS_KEY=""
+  ensure_web_tls
+  if [ "$OC_SCHEME" != https ]; then
+    hub_failure "Hub requires the existing session HTTPS certificate."
+    return 1
+  fi
+  load_session_auth
+  [ -z "${OC_PASSWORD:-}" ] || auth_enabled=true
+  [ "${OC_MCP_ENABLED:-0}" != "1" ] || mcp_enabled=true
+  [ "${OC_A2A:-1}" != "1" ] || a2a_enabled=true
+  [[ -f "$SESS_SHARE/mcp/tunnel.yaml" && ! -L "$SESS_SHARE/mcp/tunnel.yaml" ]] && tunnel_configured=true
+  [[ -f "$SESS_SHARE/openlive/runtime.json" && ! -L "$SESS_SHARE/openlive/runtime.json" ]] && openlive_configured=true
+  port="$((OC_PORT + 7))"
+  if ss -ltn "sport = :$port" | grep -q LISTEN; then
+    hub_failure "Hub port $port is already occupied inside the VM."
+    return 1
+  fi
+  tmp="$(mktemp "$dir/.runtime-input.XXXXXX")" || { hub_failure "Could not allocate Hub runtime input."; return 1; }
+  if ! HUB_AUTH_USERNAME="${OC_USERNAME:-opencode}" HUB_AUTH_PASSWORD="${OC_PASSWORD:-}" \
+      jq -n --arg hash "$OC_OPENLIVE_PROJECT_HASH" --arg generation "$OC_HUB_GENERATION" --argjson port "$port" \
+      --argjson mcp_enabled "$mcp_enabled" --argjson mcp_port "${OC_MCP_PORT:-0}" --argjson auth_enabled "$auth_enabled" \
+      --argjson a2a_enabled "$a2a_enabled" --argjson tunnel_configured "$tunnel_configured" --argjson openlive_configured "$openlive_configured" \
+      '{schema:1,projectHash:$hash,generation:$generation,hubPort:$port,authEnabled:$auth_enabled,auth:(if $auth_enabled then {username:env.HUB_AUTH_USERNAME,password:env.HUB_AUTH_PASSWORD} else null end),a2aEnabled:$a2a_enabled,tunnelConfigured:$tunnel_configured,openliveConfigured:$openlive_configured,mcp:{enabled:$mcp_enabled,port:$mcp_port,generation:$generation}}' > "$tmp" ||
+      ! chmod 600 "$tmp" || ! mv -f "$tmp" "$dir/runtime-input.json"; then
+    rm -f "$tmp"
+    hub_failure "Could not publish Hub runtime input."
+    return 1
+  fi
+  sudo -n systemd-run --quiet --collect --unit=ocvm-hub --service-type=exec \
+    --description="$(hub_unit_description)" \
+    --property="User=$(id -un)" --property="Group=$(id -gn)" \
+    --property="WorkingDirectory=$PROJ_DIR" --property=UMask=0077 \
+    --property=KillMode=control-group --property=TimeoutStopSec=10 \
+    --property=Restart=on-failure --property=RestartSec=2 --property=StartLimitIntervalSec=60 --property=StartLimitBurst=3 \
+    --property=AppArmorProfile=opencode-sandbox \
+    --property="StandardOutput=append:$log" --property="StandardError=append:$log" \
+    --setenv="PYTHONDONTWRITEBYTECODE=1" -- \
+    python3 "$source/server.py" --host 127.0.0.1 --port "$port" --project "$PROJ_DIR" \
+      --project-hash "$OC_OPENLIVE_PROJECT_HASH" --runtime-input "$dir/runtime-input.json" \
+      --tls-cert "$OC_TLS_CERT" --tls-key "$OC_TLS_KEY" || {
+      hub_remove_current_file "$dir/runtime-input.json"
+      hub_failure "Hub systemd service could not be started."
+      return 1
+    }
+  while [ "$waited" -lt 100 ]; do
+    if systemctl is-active --quiet ocvm-hub.service && hub_health "$port"; then
+      tmp="$(mktemp "$dir/.runtime.XXXXXX")" || break
+      if jq -n --arg share "$SESS_SHARE" --arg hash "$OC_OPENLIVE_PROJECT_HASH" --arg generation "$OC_HUB_GENERATION" --argjson port "$port" \
+          '{schema:1,share:$share,projectHash:$hash,generation:$generation,hubPort:$port,ready:true}' > "$tmp" &&
+          chmod 600 "$tmp" && mv -f "$tmp" "$dir/runtime.json"; then
+        OC_HUB_READY=1
+        echo "[hub] Ready on HTTPS port $port."
+        return 0
+      fi
+      rm -f "$tmp"
+      break
+    fi
+    sleep 0.2
+    waited=$((waited + 1))
+  done
+  # Preserve the startup failure; cleanup may only stop the positively owned unit.
+  stop_hub || true
+  hub_failure "Hub readiness or runtime publication failed."
+  return 1
+}
+
 start_editor() {
   OC_EDITOR_READY=0
   [ "${OC_EDITOR_ENABLED:-0}" = "1" ] || return 0
@@ -13528,7 +13896,7 @@ start_web_proxies() {
   fi
   ensure_web_tls
   # The block is contiguous and relative to the effective base, so the internal
-  # ports move with it. The host reserved P..P+5 before handing P down here.
+  # ports move with it. The host reserved P..P+7 before handing P down here.
   OC_PORT_INTERNAL=$(( OC_PORT - 1 ))
   OC_A2A_INTERNAL=$(( OC_PORT - 2 ))
   # Run from /tmp rather than straight off the share: the supervisor re-reads
@@ -13541,7 +13909,7 @@ start_web_proxies() {
   fi
   if ! start_proxy web-tls "$OC_PORT" "$OC_PORT_INTERNAL" "$OC_DIR_KEY" "$OC_TLS_CERT" "$OC_TLS_KEY" \
     "$OC_OPENLIVE_REMOTE_TARGET" "$OC_OPENLIVE_PROJECT_HASH" "$OC_OPENLIVE_REMOTE_GENERATION" \
-    "$SESS_SHARE" "$OC_OPENLIVE_PROJECT_HASH" "${OC_LAUNCHER_ENABLED:-1}" "$(basename "$PROJ_DIR")" "${OCVM_TASKBOARD_RUNTIME_DIR:-}"; then
+    "$SESS_SHARE" "$OC_OPENLIVE_PROJECT_HASH" "${OC_LAUNCHER_ENABLED:-1}" "$(basename "$PROJ_DIR")" "${OCVM_TASKBOARD_RUNTIME_DIR:-}" "${OC_HUB_GENERATION:-}"; then
     echo "[web] Redirector did not bind port $OC_PORT — falling back to opencode on $OC_PORT directly."
     stop_all_proxies
     openlive_proxy_fallback
@@ -13558,7 +13926,7 @@ start_web_proxies() {
   # degrade at runtime (missing openssl, cert failure) in ways the host cannot
   # predict — which would leave LAN ports tunnelled to nothing.
   start_proxy web-plain "$(( OC_PORT + 1 ))" "$OC_PORT_INTERNAL" "$OC_DIR_KEY" "" "" \
-    0 "" "" "$SESS_SHARE" "$OC_OPENLIVE_PROJECT_HASH" "${OC_LAUNCHER_ENABLED:-1}" "$(basename "$PROJ_DIR")" "${OCVM_TASKBOARD_RUNTIME_DIR:-}" ||
+    0 "" "" "$SESS_SHARE" "$OC_OPENLIVE_PROJECT_HASH" "${OC_LAUNCHER_ENABLED:-1}" "$(basename "$PROJ_DIR")" "${OCVM_TASKBOARD_RUNTIME_DIR:-}" "${OC_HUB_GENERATION:-}" ||
     echo "[web] WARNING: plain-HTTP web endpoint on $(( OC_PORT + 1 )) did not come up."
 
   # The a2a listeners come up here too, even though the sidecar behind them is
@@ -13569,9 +13937,9 @@ start_web_proxies() {
   # Until the sidecar answers, these ports refuse connections rather than
   # accepting and hanging, which is the honest failure mode.
   if [ "${OC_A2A:-1}" = "1" ]; then
-    start_proxy a2a-tls   "$(( OC_PORT + 2 ))" "$OC_A2A_INTERNAL" "" "$OC_TLS_CERT" "$OC_TLS_KEY" ||
+    start_proxy a2a-tls   "$(( OC_PORT + 2 ))" "$OC_A2A_INTERNAL" "" "$OC_TLS_CERT" "$OC_TLS_KEY" 0 "" "" "" "" "" "" "" "${OC_HUB_GENERATION:-}" ||
       echo "[a2a] WARNING: HTTPS endpoint on $(( OC_PORT + 2 )) did not come up."
-    start_proxy a2a-plain "$(( OC_PORT + 3 ))" "$OC_A2A_INTERNAL" "" "" "" ||
+    start_proxy a2a-plain "$(( OC_PORT + 3 ))" "$OC_A2A_INTERNAL" "" "" "" 0 "" "" "" "" "" "" "" "" "${OC_HUB_GENERATION:-}" ||
       echo "[a2a] WARNING: HTTP endpoint on $(( OC_PORT + 3 )) did not come up."
   fi
   return 0
@@ -14530,10 +14898,8 @@ _attach_legacy_prompt() {
 
 _ATTACH_TUNNEL_VM=""
 _ATTACH_TUNNEL_BASE=""
-_ATTACH_HUB_SHARE=""
 _attach_tunnel_cleanup() {
   stop_mcp_host_watcher || true
-  agent_hub_stop "${_ATTACH_HUB_SHARE:-}" || true
   [[ -n "$_ATTACH_TUNNEL_VM" && -n "$_ATTACH_TUNNEL_BASE" ]] || return 0
   echo ""
   echo "[opencode-vm] Web session ended — closing LAN tunnels..."
@@ -14568,6 +14934,7 @@ attach_session() {
   # shellcheck disable=SC1090
   source "$senv"
   local old_auth_generation="${SESS_AUTH_GENERATION:-$SESS_NAME}"
+  local old_controller="${SESS_CONTROLLER:-$old_auth_generation}"
   local attach_was_stopped=0
   local attach_controller
   attach_controller="${SESS_NAME}-attach-$(date +%s)-$$"
@@ -14638,6 +15005,10 @@ attach_session() {
   local sess_taskboard_enabled=0
   if [[ ( "$sess_mode" == web || "$sess_mode" == tui-mcp ) && "${SESSION_TASKBOARD_MODE:-}" != disable ]]; then
     sess_taskboard_enabled=1
+  fi
+  local sess_hub_enabled=0 hub_asset_dir=""
+  if [[ "$sess_mode" == web && "${SESSION_HUB_MODE:-}" != disable ]]; then
+    sess_hub_enabled=1
   fi
   if [[ "$sess_mcp_enabled" == "1" ]]; then
     [[ "$sess_mode" == web || "$sess_mode" == tui-mcp ]] || {
@@ -14729,8 +15100,9 @@ attach_session() {
     }
     vm_exec "$SESS_NAME" '
       set -euo pipefail
-      PROJ_DIR="$1"; SESS_SHARE="$2"; OC_PORT="$3"; OC_HOST_IP="$4"; OC_TLS="${5:-0}"
+      PROJ_DIR="$1"; SESS_SHARE="$2"; OC_PORT="$3"; OC_HOST_IP="$4"; OC_TLS="${5:-0}"; OC_HUB_GENERATION="${6:-}"
       . "$SESS_SHARE/lib/web.sh"
+       stop_hub
        stop_editor
        stop_taskboard
        stop_mcp_adapter
@@ -14740,7 +15112,7 @@ attach_session() {
         reap_stale_opencode "$(( base - 1 ))"
         reap_stale_opencode "$base"
       done
-    ' "$proj" "$_web_share" "$sess_port" "$host_lan_ip" "$sess_tls" || {
+    ' "$proj" "$_web_share" "$sess_port" "$host_lan_ip" "$sess_tls" "$old_controller" || {
       echo "[attach] Could not stop the previous web/OpenLive runtime safely." >&2
       _attach_transition_fail
       return 1
@@ -14838,15 +15210,19 @@ attach_session() {
   # them down when this attach ends. Tunnel failure is non-fatal: the session
   # still runs, and opencode stays reachable via Lima's loopback auto-forward.
   # See start_web_tunnels for the block rationale.
-  local effective_base
+  local effective_base="$sess_port"
   local lan_up=1
   local reserved_mcp=""
   [[ "$sess_mcp_enabled" == "1" ]] && reserved_mcp="$sess_mcp_port"
-  effective_base="$(select_web_guest_base "$sess_port" "$reserved_mcp" "$sess_editor_enabled")" || return 1
-  if [[ "$effective_base" != "$sess_port" ]]; then
-    echo "[mcp] Web guest block moved from $sess_port to $effective_base to avoid private port $reserved_mcp."
+  if [[ "$sess_mode" == "tui-mcp" ]]; then
+    effective_base="$(select_web_guest_base "$sess_port" "$reserved_mcp")" || return 1
+    lan_up=0
   fi
   if [[ "$sess_mode" == "web" ]]; then
+    effective_base="$(select_web_guest_base "$sess_port" "$reserved_mcp" "$sess_editor_enabled" "$SESS_NAME")" || return 1
+    if [[ "$effective_base" != "$sess_port" ]]; then
+      echo "[mcp] Web guest block moved from $sess_port to $effective_base to avoid private port $reserved_mcp."
+    fi
     if start_web_tunnels "$SESS_NAME" "$sess_port" "$reserved_mcp" "$sess_editor_enabled"; then
       effective_base="$WEB_PORT_BASE"
       # A named function, not an interpolated trap body: the old form spliced
@@ -14867,11 +15243,12 @@ attach_session() {
     local _att_sess_share
     _att_sess_share="$(session_share_dir "$proj")"
     start_materialize_daemon "$SESS_NAME" "$_att_sess_share" || true
-    _ATTACH_HUB_SHARE="$_att_sess_share"
-    if [[ "${SESSION_HUB_MODE:-}" != disable ]]; then
-      agent_hub_start "$_att_sess_share" "$proj" || true
-    else
-      agent_hub_stop "$_att_sess_share" || true
+    if [[ "$sess_hub_enabled" == "1" ]]; then
+      if agent_hub_stage_assets "$_att_sess_share"; then
+        hub_asset_dir="$_att_sess_share/hub/assets-$HUB_ASSET_SHA256"
+      else
+        echo "[hub] Guest Hub assets could not be staged; the guest will publish an unavailable Hub state." >&2
+      fi
     fi
   fi
 
@@ -14953,8 +15330,11 @@ attach_session() {
      OC_TASKBOARD_LEGACY_EXPECTED="${22:-0}"
       OC_TASKBOARD_ENABLED=0
       if [ "$OC_MODE" = web ] || [ "$OC_MODE" = tui-mcp ]; then OC_TASKBOARD_ENABLED=1; fi
-      [ "${19:-1}" = "1" ] || OC_TASKBOARD_ENABLED=0
-      OC_LAUNCHER_ENABLED="${20:-1}"
+       [ "${19:-1}" = "1" ] || OC_TASKBOARD_ENABLED=0
+       OC_LAUNCHER_ENABLED="${20:-1}"
+       OC_HUB_ENABLED="${23:-0}"
+       OC_HUB_ASSET_DIR="${24:-}"
+       OC_HUB_GENERATION="$OC_MCP_GENERATION"
 
     # Shared in-VM web library (materialized into the session share by
     # install_web_lib on the host, and mounted here at the same path). It owns
@@ -14989,10 +15369,12 @@ attach_session() {
       start_mcp_adapter() { [ "${OC_MCP_ENABLED:-0}" != "1" ]; }
       stop_mcp_adapter()  { return 0; }
       mcp_watch_ready()   { [ "${OC_MCP_ENABLED:-0}" != "1" ]; }
-      stop_editor()      { return 0; }
-      start_editor()     { [ "${OC_EDITOR_ENABLED:-0}" != "1" ]; }
-      stop_taskboard()   { return 0; }
-      start_taskboard()  { [ "${OC_TASKBOARD_ENABLED:-0}" != "1" ]; }
+       stop_editor()      { return 0; }
+       start_editor()     { [ "${OC_EDITOR_ENABLED:-0}" != "1" ]; }
+       stop_taskboard()   { return 0; }
+       start_taskboard()  { [ "${OC_TASKBOARD_ENABLED:-0}" != "1" ]; }
+       stop_hub()         { return 0; }
+       start_hub()        { [ "${OC_HUB_ENABLED:-0}" != "1" ]; }
     fi
 
     export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/.config/composer/vendor/bin:/tmp/go/bin:/tmp/pnpm-store:$PATH"
@@ -15093,6 +15475,7 @@ attach_session() {
       # losing the history sync. Nothing below may die on a write error.
       set +e
       trap "" INT TERM HUP
+      stop_hub || echo "[hub] Could not stop Hub cleanly." >&2
       stop_editor || echo "[editor] Could not stop editor cleanly." >&2
       stop_taskboard || echo "[taskboard] Could not stop taskboard cleanly." >&2
       if ! stop_mcp_adapter; then
@@ -15157,6 +15540,7 @@ attach_session() {
     if [ "$OC_MODE" = "tui-mcp" ]; then
       run_mcp_tui
     elif [ "$OC_MODE" = "web" ]; then
+      stop_hub || echo "[hub] Existing Hub ownership could not be verified; leaving it untouched." >&2
       stop_mcp_adapter
        stop_all_proxies
        stop_openlive_gateway
@@ -15174,6 +15558,7 @@ attach_session() {
         echo "[mcp] ERROR: adapter preparation failed; refusing MCP-enabled startup." >&2
         exit 1
       fi
+      start_hub || echo "[hub] Unavailable; OpenCode continues without the Hub." >&2
       start_a2a
       start_editor || echo "[editor] Unavailable; OpenCode continues. See $SESS_SHARE/editor/server.log." >&2
       print_web_banner
@@ -15237,7 +15622,7 @@ attach_session() {
 
     # Sync-back happens via the EXIT trap installed above (covers Ctrl+C as
     # well as normal exit).
-    ' "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$effective_base" "$host_lan_ip" "${OC_WEB_TUI:-false}" "$sess_tls" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up" "$(proj_hash "$proj")" "$OCVM_VERSION" "$sess_mcp_enabled" "$sess_mcp_port" "$attach_controller" "$sess_editor_enabled" "$proj/.opencode-vm/taskboard/taskboard.db" "$sess_taskboard_enabled" "${SESSION_LAUNCHER_ENABLED:-1}" "$(project_state_dir "$proj")/taskboard/taskboard.db" "$(test -f "$(project_state_dir "$proj")/taskboard/taskboard.db" && printf 1 || printf 0)" || {
+    ' "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$effective_base" "$host_lan_ip" "${OC_WEB_TUI:-false}" "$sess_tls" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up" "$(proj_hash "$proj")" "$OCVM_VERSION" "$sess_mcp_enabled" "$sess_mcp_port" "$attach_controller" "$sess_editor_enabled" "$proj/.opencode-vm/taskboard/taskboard.db" "$sess_taskboard_enabled" "${SESSION_LAUNCHER_ENABLED:-1}" "$(project_state_dir "$proj")/taskboard/taskboard.db" "$(test -f "$(project_state_dir "$proj")/taskboard/taskboard.db" && printf 1 || printf 0)" "$sess_hub_enabled" "$hub_asset_dir" || {
     stop_mcp_host_watcher || true
     echo "[attach] Session command failed." >&2
     return 1
@@ -16082,10 +16467,14 @@ start_session() {
   local effective_mcp_enabled=0 effective_mcp_port=""
   local effective_editor_disabled=0 effective_editor_enabled
   local effective_taskboard_enabled=0
+  local effective_hub_enabled=0 hub_asset_dir=""
   [[ "${SESSION_EDITOR_MODE:-}" != disable ]] || effective_editor_disabled=1
   effective_editor_enabled="$(web_editor_enabled "$SESSION_MODE" "$effective_editor_disabled")"
   if [[ ( "$SESSION_MODE" == web || "$SESSION_MODE" == tui-mcp ) && "${SESSION_TASKBOARD_MODE:-}" != disable ]]; then
     effective_taskboard_enabled=1
+  fi
+  if [[ "$SESSION_MODE" == web && "${SESSION_HUB_MODE:-}" != disable ]]; then
+    effective_hub_enabled=1
   fi
   if [[ ( "$SESSION_MODE" == web || "$SESSION_MODE" == tui-mcp ) && "${SESSION_MCP_MODE:-}" != disable ]]; then
     effective_mcp_enabled=1
@@ -16285,6 +16674,13 @@ start_session() {
     else
       mcp_unstage_adapter "$sess_share"
     fi
+    if [[ "$effective_hub_enabled" == "1" ]]; then
+      if agent_hub_stage_assets "$sess_share"; then
+        hub_asset_dir="$sess_share/hub/assets-$HUB_ASSET_SHA256"
+      else
+        echo "[hub] Guest Hub assets could not be staged; the guest will publish an unavailable Hub state." >&2
+      fi
+    fi
   elif [[ "$effective_mcp_enabled" == 1 ]]; then
     resolve_session_auth "$sess_share" || return 1
     install_web_lib "$sess_share" || return 1
@@ -16441,7 +16837,6 @@ start_session() {
   cleanup() {
     trap - EXIT HUP TERM
     stop_mcp_host_watcher || true
-    agent_hub_stop "$sess_share" || true
     echo "[cleanup] Starting cleanup... $(_ts)"
     if ! lifecycle_lock_acquire "$proj"; then
       echo "[cleanup] Could not obtain lifecycle ownership; preserving the session." >&2
@@ -16763,10 +17158,6 @@ start_session() {
     fi
   fi
 
-  if [[ "$SESSION_MODE" == "web" && "${SESSION_HUB_MODE:-}" != disable ]]; then
-    agent_hub_start "$sess_share" "$proj" || true
-  fi
-
   echo "[run] Launching OpenCode inside VM (project: $proj) $(_ts)"
 
   local host_lan_ip
@@ -16784,7 +17175,7 @@ start_session() {
     lan_up=0
   fi
   if [[ "$SESSION_MODE" == "web" ]]; then
-    effective_base="$(select_web_guest_base "${SESSION_PORT:-0}" "${effective_mcp_port:-}" "$effective_editor_enabled")" || return 1
+    effective_base="$(select_web_guest_base "${SESSION_PORT:-0}" "${effective_mcp_port:-}" "$effective_editor_enabled" "$sess")" || return 1
     if [[ "$effective_base" != "${SESSION_PORT:-0}" ]]; then
       echo "[mcp] Web guest block moved from ${SESSION_PORT:-0} to $effective_base to avoid private port ${effective_mcp_port:-}."
     fi
@@ -16846,10 +17237,13 @@ start_session() {
      OC_TASKBOARD_LEGACY_EXPECTED="${22:-0}"
       OC_TASKBOARD_ENABLED=0
       if [ "$OC_MODE" = web ] || [ "$OC_MODE" = tui-mcp ]; then OC_TASKBOARD_ENABLED=1; fi
-      [ "${19:-1}" = "1" ] || OC_TASKBOARD_ENABLED=0
-      OC_LAUNCHER_ENABLED="${20:-1}"
+       [ "${19:-1}" = "1" ] || OC_TASKBOARD_ENABLED=0
+       OC_LAUNCHER_ENABLED="${20:-1}"
+       OC_HUB_ENABLED="${23:-0}"
+       OC_HUB_ASSET_DIR="${24:-}"
+       OC_HUB_GENERATION="$OC_MCP_GENERATION"
 
-     # Shared in-VM web library (materialized into the session share by
+      # Shared in-VM web library (materialized into the session share by
     # install_web_lib on the host, and mounted here at the same path). It owns
     # the TLS material, the proxy in front of opencode and the connect banner —
     # all of which attach_session needs identically. Fails safe: without it,
@@ -16882,10 +17276,12 @@ start_session() {
       start_mcp_adapter() { [ "${OC_MCP_ENABLED:-0}" != "1" ]; }
       stop_mcp_adapter()  { return 0; }
       mcp_watch_ready()   { [ "${OC_MCP_ENABLED:-0}" != "1" ]; }
-      stop_editor()      { return 0; }
-      start_editor()     { [ "${OC_EDITOR_ENABLED:-0}" != "1" ]; }
-      stop_taskboard()   { return 0; }
-      start_taskboard()  { [ "${OC_TASKBOARD_ENABLED:-0}" != "1" ]; }
+       stop_editor()      { return 0; }
+       start_editor()     { [ "${OC_EDITOR_ENABLED:-0}" != "1" ]; }
+       stop_taskboard()   { return 0; }
+       start_taskboard()  { [ "${OC_TASKBOARD_ENABLED:-0}" != "1" ]; }
+       stop_hub()         { return 0; }
+       start_hub()        { [ "${OC_HUB_ENABLED:-0}" != "1" ]; }
     fi
 
     export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/.config/composer/vendor/bin:/tmp/go/bin:/tmp/pnpm-store:$PATH"
@@ -17019,6 +17415,7 @@ EOF
       # losing the history sync. Nothing below may die on a write error.
       set +e
       trap "" INT TERM HUP
+      stop_hub || echo "[hub] Could not stop Hub cleanly." >&2
       stop_editor || echo "[editor] Could not stop editor cleanly." >&2
       if ! stop_mcp_adapter; then
         MCP_SHUTDOWN_FAILED=1
@@ -17129,6 +17526,7 @@ EOF
         echo "[openlive] Project session prepared."
         ;;
       web)
+        stop_hub || echo "[hub] Existing Hub ownership could not be verified; leaving it untouched." >&2
         stop_mcp_adapter
         stop_all_proxies
         stop_openlive_gateway
@@ -17147,6 +17545,7 @@ EOF
           echo "[mcp] ERROR: adapter preparation failed; refusing MCP-enabled startup." >&2
           exit 1
         fi
+        start_hub || echo "[hub] Unavailable; OpenCode continues without the Hub." >&2
         start_a2a
         start_editor || echo "[editor] Unavailable; OpenCode continues. See $SESS_SHARE/editor/server.log." >&2
         print_web_banner
@@ -17217,7 +17616,7 @@ EOF
 
     # Sync back happens via the EXIT trap installed above (covers both clean
     # exit and Ctrl+C-driven termination of the web server).
-    ' "$proj" "$sess_share" "$SESSION_MODE" "$effective_base" "${OC_WEB_TUI:-false}" "$host_lan_ip" "${SESSION_TLS:-0}" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up" "$(proj_hash "$proj")" "$OCVM_VERSION" "$effective_mcp_enabled" "${effective_mcp_port:-$DEFAULT_MCP_PORT}" "$controller_id" "$effective_editor_enabled" "$proj/.opencode-vm/taskboard/taskboard.db" "$effective_taskboard_enabled" "${SESSION_LAUNCHER_ENABLED:-1}" "$proj_state/taskboard/taskboard.db" "$(test -f "$proj_state/taskboard/taskboard.db" && printf 1 || printf 0)"; then
+    ' "$proj" "$sess_share" "$SESSION_MODE" "$effective_base" "${OC_WEB_TUI:-false}" "$host_lan_ip" "${SESSION_TLS:-0}" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up" "$(proj_hash "$proj")" "$OCVM_VERSION" "$effective_mcp_enabled" "${effective_mcp_port:-$DEFAULT_MCP_PORT}" "$controller_id" "$effective_editor_enabled" "$proj/.opencode-vm/taskboard/taskboard.db" "$effective_taskboard_enabled" "${SESSION_LAUNCHER_ENABLED:-1}" "$proj_state/taskboard/taskboard.db" "$(test -f "$proj_state/taskboard/taskboard.db" && printf 1 || printf 0)" "$effective_hub_enabled" "$hub_asset_dir"; then
     if ! stop_mcp_host_watcher; then
       echo "[mcp] Host readiness did not complete successfully; session failed closed." >&2
       return 1

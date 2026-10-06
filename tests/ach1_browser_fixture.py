@@ -15,10 +15,18 @@ if __name__ == "__main__":
     with tempfile.TemporaryDirectory(prefix="ach1-fixture-") as temporary:
         root = Path(temporary)
         server.PROJECT = root / "project"; server.PROJECT.mkdir()
-        server.SHARE_ROOT = root / "share"; server.SHARE_ROOT.mkdir()
+        server.SESSION_ROOT = root / "share"; server.SESSION_ROOT.mkdir(mode=0o700)
+        server.RUNTIME = {
+            "generation": "ach1-fixture",
+            "mcp": {"enabled": False, "port": 0, "generation": "ach1-fixture"},
+            "tunnelConfigured": False,
+            "openliveConfigured": False,
+            "a2aEnabled": False,
+        }
+        server.AUTH_CREDENTIALS = None
+        server.REQUEST_SCHEME = "http"
         server.read_catalog = lambda *args, **kwargs: CATALOG
         server.read_capabilities = lambda *args: True
-        server.vm_running = lambda *args: None
         http = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
         print(json.dumps({"port": http.server_port, "project": str(server.PROJECT)}), flush=True)
         try:

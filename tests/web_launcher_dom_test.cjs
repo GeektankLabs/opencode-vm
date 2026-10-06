@@ -55,7 +55,7 @@ class Node {
   focus() { if (this.ownerRoot) this.ownerRoot.activeElement = this; }
 }
 
-function fixture(apps, { mobile = false } = {}) {
+function fixture(apps, { mobile = false, hostname = "192.0.2.12" } = {}) {
   const host = new Node("div");
   host.dataset.apps = JSON.stringify(apps);
   const documentListeners = {};
@@ -73,7 +73,7 @@ function fixture(apps, { mobile = false } = {}) {
   const mediaListeners = [];
   const viewportListeners = [];
   const window = {
-    location: { href: "https://192.0.2.12:4096/project/session?id=ses_test" },
+    location: { href: `https://${hostname}:4096/project/session?id=ses_test`, hostname },
     innerHeight: 800,
     matchMedia() { return { matches: mobile, addEventListener(_name, handler) { mediaListeners.push(handler); } }; },
     visualViewport: { height: 800, addEventListener(_name, handler) { viewportListeners.push(handler); } },
@@ -136,15 +136,22 @@ test("brand, editor, and board entries use distinct compact SVG icons", () => {
   assert.match(css, /\.icon-svg/);
 });
 
-test("agent control hub opens the current private browser host in a new tab", () => {
-  const ui = fixture([{ id: "agent-hub", label: "Agent Control", icon: "hub", scheme: "http", port: 4182 }]);
+test("agent control hub opens through host loopback in a new tab", () => {
+  const ui = fixture([{ id: "agent-hub", label: "Agent Control", icon: "hub", scheme: "https", port: 4103, localOnly: true }], { hostname: "localhost" });
   ui.trigger.dispatch("click");
   assert.equal(ui.links.length, 1);
   assert.equal(ui.links[0].children[1].textContent, "Agent Control");
-  assert.equal(ui.links[0].href, "http://192.0.2.12:4182/");
+  assert.equal(ui.links[0].href, "https://localhost:4103/");
   assert.equal(ui.links[0].target, "_blank");
   assert.equal(ui.links[0].rel, "noopener noreferrer");
   assert.equal(ui.links[0].children[0].children[0].children[0].tagName, "circle");
+});
+
+test("host-loopback-only apps are visible but unavailable to LAN browsers", () => {
+  const ui = fixture([{ id: "agent-hub", label: "Agent Control", icon: "hub", scheme: "https", port: 4103, localOnly: true }]);
+  assert.equal(ui.links[0].getAttribute("aria-disabled"), "true");
+  assert.match(ui.links[0].title, /loopback/i);
+  assert.equal(ui.links[0].href, "");
 });
 
 test("launcher rejects untrusted hostname overrides", () => {
