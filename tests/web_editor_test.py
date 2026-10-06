@@ -160,10 +160,9 @@ ssh() {
             result = shell(code + '\nTEST_DIR="$1"\nstart_web_tunnels oc-editor-test 4096 "" 1\nprintf "BASE=%s\\n" "$WEB_PORT_BASE"', tmp)
             self.assertIn("BASE=4102", result.stdout)
             forwards = (Path(tmp) / "forward").read_text()
-            for port in range(4102, 4108):
+            for port in range(4102, 4110):
                 self.assertIn(f"0.0.0.0:{port}:127.0.0.1:{port}", forwards)
-            for port in range(4108, 4110):
-                self.assertIn(f"127.0.0.1:{port}:127.0.0.1:{port}", forwards)
+            self.assertNotIn("\n127.0.0.1:", forwards)
             self.assertNotIn("0.0.0.0:4100:", forwards)
             Path("/tmp/ocvm-tunnel-oc-editor-test-4102.pid").unlink(missing_ok=True)
 
@@ -184,10 +183,9 @@ ssh() { case " $* " in *" -f -N "*) printf '%s\n' "$@" > "$TEST_DIR/forward" ;; 
             result = shell(code + '\nTEST_DIR="$1"\nstart_web_tunnels oc-editor-guest-test 4096 "" 1\nprintf "BASE=%s\\n" "$WEB_PORT_BASE"', tmp)
             self.assertIn("BASE=4097", result.stdout)
             forwards = (Path(tmp) / "forward").read_text()
-            for port in range(4097, 4103):
+            for port in range(4097, 4105):
                 self.assertIn(f"0.0.0.0:{port}:127.0.0.1:{port}", forwards)
-            for port in range(4103, 4105):
-                self.assertIn(f"127.0.0.1:{port}:127.0.0.1:{port}", forwards)
+            self.assertNotIn("\n127.0.0.1:", forwards)
             self.assertNotIn("0.0.0.0:4096:", forwards)
             Path("/tmp/ocvm-tunnel-oc-editor-guest-test-4097.pid").unlink(missing_ok=True)
 
@@ -218,8 +216,55 @@ ssh() { case " $* " in *" -f -N "*) printf '%s\n' "$@" > "$TEST_DIR/forward" ;; 
             self.assertIn("BASE=4097", result.stdout)
             forwards = (Path(tmp) / "forward").read_text()
             self.assertNotIn("0.0.0.0:4096:", forwards)
-            self.assertIn("127.0.0.1:4104:127.0.0.1:4104", forwards)
+            self.assertIn("0.0.0.0:4104:127.0.0.1:4104", forwards)
+            self.assertNotIn("\n127.0.0.1:", forwards)
             Path("/tmp/ocvm-tunnel-oc-hub-guest-test-4097.pid").unlink(missing_ok=True)
+
+    def test_forward_block_binds_dashboard_and_hub_for_lan_without_auth_gating(self):
+        code = '\n'.join(function(name) for name in ["start_web_tunnels", "is_browser_unsafe_port"])
+        code += r'''
+BROWSER_UNSAFE_PORTS=()
+load_policy() { :; }
+lima_guest_user() { printf guest; }
+limactl() { printf 2222; }
+stop_web_tunnels() { :; }
+_port_free_for_bind() { return 0; }
+guest_port_available() { return 0; }
+pgrep() { printf 12345; }
+ssh() { case " $* " in *" -f -N "*) printf '%s\n' "$@" > "$TEST_DIR/forward" ;; esac; }
+'''
+        body = function("start_web_tunnels")
+        self.assertNotIn('bind="127.0.0.1"', body)
+        self.assertNotIn("PASSWORD", body)
+        with tempfile.TemporaryDirectory() as tmp:
+            result = shell(code + '\nTEST_DIR="$1"\nstart_web_tunnels oc-lan-test 4096 "" 0\nprintf "BASE=%s\\n" "$WEB_PORT_BASE"', tmp)
+            self.assertIn("BASE=4096", result.stdout)
+            forwards = (Path(tmp) / "forward").read_text()
+            for port in range(4096, 4104):
+                self.assertIn(f"0.0.0.0:{port}:127.0.0.1:{port}", forwards)
+            self.assertNotIn("\n127.0.0.1:", forwards)
+            Path("/tmp/ocvm-tunnel-oc-lan-test-4096.pid").unlink(missing_ok=True)
+
+    def test_tunnel_cleanup_sweeps_uniform_and_mixed_history_argv(self):
+        # The base-port pgrep/pkill pattern must keep matching tunnels started
+        # by older versions, where P+6/P+7 were still loopback-bound, while a
+        # foreign base or a foreign VM tunnel must never match.
+        code = function("stop_web_tunnels") + r'''
+limactl() { printf 2222; }
+pkill() { printf '%s\n' "$2" > "$TEST_DIR/pattern"; }
+stop_web_tunnels fixture-vm 4096
+pattern="$(cat "$TEST_DIR/pattern")"
+legacy='ssh -f -N -F /dev/null -L 0.0.0.0:4096:127.0.0.1:4096 -L 0.0.0.0:4101:127.0.0.1:4101 -L 127.0.0.1:4102:127.0.0.1:4102 -L 127.0.0.1:4103:127.0.0.1:4103 -p 2222 guest@127.0.0.1'
+uniform='ssh -f -N -F /dev/null -L 0.0.0.0:4096:127.0.0.1:4096 -L 0.0.0.0:4103:127.0.0.1:4103 -p 2222 guest@127.0.0.1'
+foreign_base='ssh -f -N -F /dev/null -L 0.0.0.0:4097:127.0.0.1:4097 -p 2222 guest@127.0.0.1'
+foreign_vm='ssh -f -N -F /dev/null -L 0.0.0.0:4096:127.0.0.1:4096 -p 3333 guest@127.0.0.1'
+printf '%s\n' "$legacy" | grep -qE -- "$pattern"
+printf '%s\n' "$uniform" | grep -qE -- "$pattern"
+if printf '%s\n' "$foreign_base" | grep -qE -- "$pattern"; then exit 1; fi
+if printf '%s\n' "$foreign_vm" | grep -qE -- "$pattern"; then exit 1; fi
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            shell('TEST_DIR="$1"\n' + code, tmp)
 
     def test_payload_syntax_and_preferences(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -249,7 +294,7 @@ ssh() { case " $* " in *" -f -N "*) printf '%s\n' "$@" > "$TEST_DIR/forward" ;; 
         self.assertIn('"label": "Repo Live"', registry)
         self.assertIn('"runtime_file": "dashboard/runtime.json"', registry)
         self.assertIn('"port_offset": 6', registry)
-        self.assertIn('"local_only": True', registry)
+        self.assertNotIn('"local_only"', registry)
         self.assertIn('"id": "editor"', registry)
         self.assertIn('"port_offset": 4', registry)
         self.assertIn('"id": "taskboard"', registry)

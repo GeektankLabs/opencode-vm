@@ -143,6 +143,38 @@ class HubReadModelTest(unittest.TestCase):
             http.server_close()
             thread.join()
 
+    def test_unauthenticated_mode_serves_reads_and_control_writes_for_lan_host(self):
+        # --no-auth sessions must be fully functional over the LAN forward:
+        # assets, status reads and existing PUT control writes without login.
+        # The LAN browser's Host/Origin pair is reproduced against the loopback
+        # server; the forward is what carries these headers in production.
+        self.write_runtime(authEnabled=False, auth=None)
+        server.configure_runtime(self.runtime_path, self.project, self.project_id)
+        server.REQUEST_SCHEME = "http"
+        http = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        thread = threading.Thread(target=http.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{http.server_port}"
+        lan_host = f"192.168.16.155:{http.server_port}"
+        try:
+            with urlopen(base + "/", timeout=3) as response:
+                self.assertEqual(response.status, 200)
+            with urlopen(base + "/api/status", timeout=3) as response:
+                self.assertEqual(json.load(response)["schema"], 2)
+            policy = server.PolicyStore(self.project).read()
+            body = json.dumps({"revision": policy["revision"], "selection": None}).encode()
+            request = Request(base + "/api/control/profiles/standard", data=body, method="PUT",
+                              headers={"Content-Type": "application/json", "Host": lan_host,
+                                       "Origin": "http://" + lan_host})
+            with urlopen(request, timeout=3) as response:
+                self.assertEqual(response.status, 200)
+                updated = json.load(response)
+            self.assertEqual(updated["policy"]["revision"], policy["revision"] + 1)
+        finally:
+            http.shutdown()
+            http.server_close()
+            thread.join()
+
     def test_private_peer_boundary(self):
         self.assertTrue(server.private_peer("192.168.3.4"))
         self.assertTrue(server.private_peer("100.90.1.2"))

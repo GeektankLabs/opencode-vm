@@ -108,6 +108,11 @@ test("GET boundary rejects mutation/view/foreign/Host/Origin/auth; detail and su
   assert.equal((await fetch(base+"/healthz",{headers:{...headers,origin:"https://evil"}})).status,403);
   const hostStatus = await new Promise(resolve => { const r=request(base+"/healthz",{headers:{...headers,host:"evil"}},response=>{response.resume();resolve(response.statusCode);});r.end(); });
   assert.equal(hostStatus,403);
+  const lan=`192.168.16.155:${config.listenPort}`;
+  const lanStatus = await new Promise(resolve => { const r=request(base+"/healthz",{headers:{...headers,host:lan,origin:`https://${lan}`}},response=>{response.resume();resolve(response.statusCode);});r.end(); });
+  assert.equal(lanStatus,200);
+  const publicStatus = await new Promise(resolve => { const r=request(base+"/healthz",{headers:{...headers,host:`93.184.216.34:${config.listenPort}`}},response=>{response.resume();resolve(response.statusCode);});r.end(); });
+  assert.equal(publicStatus,403);
   const parse = async (x: Response) => await x.json() as ReturnType<DashboardCollector["snapshot"]>;
   const [a,b]=await Promise.all([fetch(base+"/api/v1/status",{headers}).then(parse),fetch(base+"/api/v1/status?view=summary",{headers}).then(parse)]);
   assert.deepEqual(a.counts,b.counts);assert.equal(a.snapshot_id,b.snapshot_id);assert.equal(f.calls(),3);
