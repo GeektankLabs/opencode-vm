@@ -34,7 +34,7 @@ OPENLIVE_PREVIOUS_COMMAND="$OPENLIVE_DIR/previous-command"
 OPENLIVE_AUTH_MARKER="__opencode_vm_openlive__"
 OPENLIVE_LOCK_PATH=""
 OPENLIVE_ADAPTER_VERSION="0.1.7"
-OPENLIVE_ADAPTER_TAG="v0.7.11"
+OPENLIVE_ADAPTER_TAG="v0.7.12"
 OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.7.tar"
 OPENLIVE_ADAPTER_SHA256="39a50c5127b0a577b54e4790b5c3c1f463b35a52b42c4343aa639dcea53bad47"
 OPENLIVE_ACP_SDK_VERSION="1.2.1"
@@ -45,14 +45,14 @@ OPENLIVE_MANAGER_PROMPT="You manage an OpenLive voice call. The voice_sessions t
 MCP_CONNECTOR_DIR="$SHARE_ROOT/mcp-connector"
 MCP_ADAPTER_CACHE_ROOT="$MCP_CONNECTOR_DIR/adapters"
 MCP_ADAPTER_VERSION="0.1.26"
-MCP_ADAPTER_TAG="v0.7.11"
+MCP_ADAPTER_TAG="v0.7.12"
 MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.26.tar"
 MCP_ADAPTER_SHA256="985c8b6c4cac00d659eda36d6363778cefd63af74347e71be05ee0c6cad0e188"
 MCP_SDK_VERSION="1.30.1"
 MCP_OPENCODE_SDK_VERSION="1.18.21"
 MCP_TESTED_PROTOCOL_VERSION="2025-11-25"
 MCP_TUNNEL_DIR="$SHARE_ROOT/mcp-tunnel/openai"
-HUB_ASSET_TAG="v0.7.11"
+HUB_ASSET_TAG="v0.7.12"
 HUB_ASSET_FILENAME="opencode-vm-hub-1.tar"
 HUB_ASSET_SHA256="0d2f328ffda9ee3a0c8d61cfe303f7e479863a3f3af032d07d8650dd3eb1c84a"
 
@@ -286,7 +286,7 @@ TASKBOARD_ARM64_SHA256="3749fb985f544fdb6788ba1dff69761e599ff82b3fe86d39ca54307c
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.7.11"
+OCVM_VERSION="0.7.12"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -13630,7 +13630,7 @@ dashboard_failure() {
 
 start_dashboard() {
   [[ "$OC_MODE" == web ]] || return 0
-  local dir="$SESS_SHARE/dashboard" adapter="$SESS_SHARE/dashboard/adapter" tmp="" port waited=0 auth_enabled=false
+  local dir="$SESS_SHARE/dashboard" adapter="$SESS_SHARE/dashboard/adapter" tmp="" port waited=0 auth_enabled=false node_bin=""
   stop_dashboard || return 1
   [[ -d "$dir" && ! -L "$dir" && -d "$adapter" && ! -L "$adapter" ]] || return 1
   [[ -f "$adapter/.ocvm-managed" ]] && grep -qFx opencode-vm-mcp-staging-v1 "$adapter/.ocvm-managed" || return 1
@@ -13656,6 +13656,9 @@ start_dashboard() {
   [[ -z "${OC_PASSWORD:-}" ]] || auth_enabled=true
   port="$((OC_PORT + 6))"
   if ss -ltn "sport = :$port" | grep -q LISTEN; then dashboard_failure "Dashboard port occupied."; return 1; fi
+  # sudo/systemd-run resolves ExecStart against root's PATH, which lacks the NVM-managed node.
+  node_bin="$(command -v node 2>/dev/null || true)"
+  [[ -n "$node_bin" && -x "$node_bin" ]] || { dashboard_failure "Dashboard node executable could not be resolved."; return 1; }
   tmp="$(mktemp "$dir/.runtime-input.XXXXXX")" || return 1
   if ! DASH_AUTH_USERNAME="${OC_USERNAME:-opencode}" DASH_AUTH_PASSWORD="${OC_PASSWORD:-}" \
     jq -n --arg project "$(pwd -P)" --arg hash "$OC_OPENLIVE_PROJECT_HASH" --arg name "$(basename "$PROJ_DIR")" \
@@ -13673,7 +13676,7 @@ start_dashboard() {
     --property=UMask=0077 --property=KillMode=control-group --property=TimeoutStopSec=10 \
     --property=Restart=on-failure --property=RestartSec=2 --property=StartLimitIntervalSec=60 --property=StartLimitBurst=3 \
     --property=AppArmorProfile=opencode-sandbox --property="StandardOutput=append:$dir/server.log" --property="StandardError=append:$dir/server.log" \
-    -- node "$adapter/dist/dashboard-main.js" "$dir/runtime-input.json" || { dashboard_failure "Dashboard service start failed."; return 1; }
+    -- "$node_bin" "$adapter/dist/dashboard-main.js" "$dir/runtime-input.json" || { dashboard_failure "Dashboard service start failed."; return 1; }
   # Called after spawning OpenCode: no backend-readiness/startup dependency cycle.
   while [[ "$waited" -lt 40 ]]; do
     if systemctl is-active --quiet ocvm-dashboard.service &&
