@@ -26,10 +26,12 @@ function renderSession(s, key, parent) {
   field("status").textContent = `${labels[s.state] ?? s.state}${s.freshness !== "fresh" ? " · veraltet / letzter Stand" : ""}${s.anomaly ? " · archiviert und aktiv!" : ""}`;
   field("status").dataset.state = s.state;
   const latest = s.turns.at(-1);
-  field("runtime").textContent = `Einstellung: ${runtimeText(s.current_runtime)} · ${s.state === "idle" ? "Zuletzt belegt" : "Turn belegt"}: ${runtimeText(latest?.runtime)}${s.freshness !== "fresh" ? " · stale" : ""}`;
+  const evidenced = [...s.turns].reverse().find(t => t.active) ?? latest;
+  field("runtime").textContent = `Einstellung: ${runtimeText(s.current_runtime)} · ${s.state === "idle" ? "Zuletzt belegt" : "Turn belegt"}: ${runtimeText(evidenced?.runtime)}${s.freshness !== "fresh" ? " · stale" : ""}`;
   const other = [...new Set(s.associations.map(a => a.task_id))];
   field("meta").textContent = `${s.session_id}${s.parent_session_id ? ` · Parent ${s.parent_session_id}` : ""}${s.binding_state === "unknown" ? " · Taskzuordnung unbekannt" : s.binding_state === "unbound" ? " · Ohne Task" : other.length > 1 ? ` · Mehrfachbindung: ${other.join(", ")}` : ""}${s.associations.some(a => a.scope === "parent_indirect") ? " · indirekte Parentbindung" : ""}${s.current_turn_unbound ? " · aktueller Turn nicht zugeordnet" : ""}`;
   field("turns").textContent = s.turns.map(t => `${t.user_message_id}: ${labels[t.state] ?? t.state}${t.finish ? ` (${t.finish})` : ""}`).join(" · ");
+  if (s.turns_truncated || s.history_has_more) field("turns").textContent += " · Weitere Turnhistorie in der Session (Lesefenster begrenzt)";
   const link = row.querySelector("a"), target = sessionLink(s);
   if (target) { link.href = target.href; link.textContent = target.text; link.hidden = false; } else { link.removeAttribute("href"); link.textContent = "Navigation unbekannt"; }
   row.hidden = filter === "attention" ? !["input_required", "unknown"].includes(s.state) && !s.anomaly : filter === "running" ? !["running", "retry", "submitted"].includes(s.state) : false;

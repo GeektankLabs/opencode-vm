@@ -18,7 +18,7 @@ export function fixture() {
     backend_activity: "busy", pending_input: { permissions: 0, questions: 0, scope: "session" }, observed_at: new Date(time).toISOString(), last_activity_at: time,
     current_runtime: { provider_id: "new", model_id: "setting", variant: "medium", source: "session_setting" },
     turns: [{ user_message_id: "msg_new", state: "running", active: true, finish: null, completed_at: null,
-      runtime: { provider_id: "old", model_id: "used", variant: "high", source: "assistant_message", message_id: "assistant" } }], history_has_more: false });
+      runtime: { provider_id: "old", model_id: "used", variant: "high", source: "assistant_message", message_id: "assistant" } }], turns_truncated: false, history_has_more: false });
   const rows = new Map(inventory.sessions.map(s => [s.id,row(s.id)]));
   rows.get("ses_child")!.parent_session_id = "ses_A"; rows.get("ses_child")!.kind = "child";
   const tasks: Tasks = ["task_A","task_B"].map(task_id => ({ task_id, title: task_id, board_status: "done", board_project_id: "workstream", links: [{ session_id: "ses_A", message_id: "msg_old" }] }));
@@ -52,6 +52,12 @@ test("idle parent does not hide busy child; archived busy remains anomaly",async
   assert.equal(s.counts.active_sessions,2);
   assert.equal(s.sessions.find(x=>x.session_id==="ses_A")?.state,"idle");
   assert.equal(s.sessions.find(x=>x.session_id==="ses_child")?.anomaly,"ARCHIVED_ACTIVE");
+});
+test("an idle backend with older active turn evidence is unknown, not deceptively idle",async()=>{
+  const f=fixture(),s=f.rows.get("ses_A")!;s.backend_activity="idle";
+  s.turns.push({...s.turns[0]!,user_message_id:"latest",state:"completed",active:false,finish:"stop"});
+  await f.collector.tick();const snapshot=f.collector.snapshot(false);assert.ok("sessions" in snapshot);
+  assert.equal(snapshot.sessions.find(s=>s.session_id==="ses_A")?.state,"unknown");
 });
 test("Input, retry, terminal and idle are independent of Board Done",async()=>{
   const f=fixture(); f.rows.get("ses_A")!.pending_input.questions=1;

@@ -33,6 +33,9 @@ Child inheritance is labelled indirect. Unknown bindings are not “without Task
 Idle parents cannot hide busy children, and active archived rows remain anomalies.
 Current setting and evidenced assistant-message runtime have one small grey line;
 missing historical variant stays unknown, never inferred from today's setting.
+Older active/unresolved turns in the bounded message window are retained even
+when five newer turns exist; an idle backend with such evidence is unknown,
+not misleadingly idle. Omitted terminal history is explicitly labelled bounded.
 
 Collection: sessions 5s; discovery and Board 15s; 200 sessions, 500 tickets and
 50 active sessions are the supported read budget. Incomplete/gapped/error reads
@@ -62,5 +65,6 @@ Private checks: `node --test dist/dashboard*.test.js`,
 `PLAYWRIGHT_MODULE=/absolute/playwright/index.mjs node tests/dashboard-browser.mjs`
 in `adapters/mcp`. Artifacts default to `/tmp/opencode/wc-browser`, generated
 fixture certificates are test-only. Source mutation times are paired with actual
-production-UI DOM status/runtime renders, not producer polling constants.
+production-UI status/runtime renders in the following painted frame (DOM
+observation plus double requestAnimationFrame), not producer polling constants.
 Independent QC, integration and all external acceptance remain separate gates.

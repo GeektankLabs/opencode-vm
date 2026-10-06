@@ -148,7 +148,7 @@ export class DashboardCollector {
       const associations = [...direct, ...inherited];
       const latest = s.turns.at(-1);
       const rowFresh = fresh("sessions") && time - Date.parse(s.observed_at) <= 15000;
-      return { ...s, state: rowFresh ? s.pending_input.permissions + s.pending_input.questions > 0 ? "input_required" : s.backend_activity === "retry" ? "retry" : s.backend_activity === "busy" ? "running" : latest?.active ? "unknown" : latest?.state === "submitted" ? "submitted" : "idle" : "unknown",
+      return { ...s, state: rowFresh ? s.pending_input.permissions + s.pending_input.questions > 0 ? "input_required" : s.backend_activity === "retry" ? "retry" : s.backend_activity === "busy" ? "running" : latest?.state === "submitted" ? "submitted" : s.turns.some(t => t.active || t.state === "submitted") ? "unknown" : "idle" : "unknown",
         operational: operational(s), freshness: rowFresh ? "fresh" : "stale",
         binding_state: !fresh("board") ? "unknown" : associations.length ? "known" : "unbound",
         current_turn_unbound: latest ? !direct.some(a => a.message_id === latest.user_message_id) : null,

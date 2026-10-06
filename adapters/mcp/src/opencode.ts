@@ -1095,7 +1095,7 @@ export class OpenCodeGateway implements SessionGateway {
     const [activity, pending, history] = await Promise.all([this.activity(session.id, value.location.directory), this.pending(session.id), this.messages(session.id, 100, undefined, undefined, value.location.directory)]);
     if (history.items.some(item => item.info.sessionID !== session.id)) throw incompatible("Dashboard history belongs to another session.");
     const users = history.items.filter(item => item.info.role === "user");
-    const turns = users.slice(-5).map(user => {
+    const allTurns = users.map(user => {
       const status = this.correlatedStatus(session.id, user.info.id, history.items, activity, pending, false);
       const assistant = history.items.filter(item => item.info.role === "assistant" && item.info.parentID === user.info.id).at(-1)?.info;
       const info = assistant?.role === "assistant" ? assistant : undefined;
@@ -1108,6 +1108,9 @@ export class OpenCodeGateway implements SessionGateway {
           source: "assistant_message", message_id: info.id } : null,
       };
     });
+    // Bound recent terminal detail, never discard known active/unresolved turns
+    // merely because five newer user turns exist in the same 100-message window.
+    const turns = allTurns.filter((turn, index) => index >= allTurns.length - 5 || turn.active || turn.state === "submitted");
     return {
       session_id: value.id, title: value.title.slice(0, 240), parent_session_id: value.parentID ?? null,
       kind: value.parentID ? "child" : value.agent === OPENLIVE_MANAGER_AGENT || value.id === await this.managerSessionId() ? "manager" : "root",
@@ -1116,7 +1119,7 @@ export class OpenCodeGateway implements SessionGateway {
       observed_at: new Date().toISOString(), last_activity_at: value.time.updated,
       current_runtime: value.model ? { provider_id: value.model.providerID, model_id: value.model.id,
         variant: value.model.variant ?? null, source: "session_setting" } : null,
-      turns, history_has_more: Boolean(history.next),
+      turns, turns_truncated: turns.length < allTurns.length, history_has_more: Boolean(history.next),
     };
   }
 

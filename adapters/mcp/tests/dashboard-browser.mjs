@@ -23,14 +23,20 @@ try {
   await page.goto(url);await page.waitForSelector('.session');
   await page.evaluate(()=>{
     window.renderObserved={};
+    const pending=new Set();
+    const rendered=key=>{
+      if(window.renderObserved[key]||pending.has(key))return;pending.add(key);
+      // Observe the following painted frame, not only the DOM mutation callback.
+      requestAnimationFrame(()=>requestAnimationFrame(()=>{window.renderObserved[key]=Date.now();pending.delete(key);}));
+    };
     const observe=()=>{
       for(let i=0;i<20;i++){
         const id=`ses_${i}`,row=[...document.querySelectorAll('.session')].find(x=>x.dataset.sessionId===id);
         const title=row?.querySelector('[data-field=title]')?.textContent,state=row?.querySelector('.status')?.dataset.state;
-        if(title?.startsWith(`Measured ${i} ·`)&&state===(i%2?'retry':'input_required')&&row.querySelector('.runtime').textContent.includes('setting-switched'))window.renderObserved[`session:${id}`]??=Date.now();
+        if(title?.startsWith(`Measured ${i} ·`)&&state===(i%2?'retry':'input_required')&&row.querySelector('.runtime').textContent.includes('setting-switched'))rendered(`session:${id}`);
       }
-      for(let i=190;i<200;i++){if(document.querySelector(`[data-session-id=ses_${i}]`))window.renderObserved[`new:ses_${i}`]??=Date.now();}
-      for(let i=0;i<10;i++){if([...document.querySelectorAll('article h2')].some(x=>x.textContent===`Measured Board ${i}`))window.renderObserved[`board:task_${i}`]??=Date.now();}
+      for(let i=190;i<200;i++){if(document.querySelector(`[data-session-id=ses_${i}]`))rendered(`new:ses_${i}`);}
+      for(let i=0;i<10;i++){if([...document.querySelectorAll('article h2')].some(x=>x.textContent===`Measured Board ${i}`))rendered(`board:task_${i}`);}
     };
     new MutationObserver(observe).observe(document.querySelector('main'),{subtree:true,childList:true,characterData:true,attributes:true});observe();
   });
@@ -59,7 +65,7 @@ try {
   const stats={};
   for(const kind of ['session','new','board']){const values=timings.filter(t=>t.kind===kind).map(t=>t.latency_ms).sort((a,b)=>a-b);assert.equal(values.length,kind==='session'?20:10);assert.ok(values.every(v=>Number.isFinite(v)&&v>=0));stats[kind]={samples:values.length,p95_ms:values[Math.ceil(values.length*.95)-1],max_ms:values.at(-1)};assert.ok(stats[kind].p95_ms<=(kind==='session'?8000:20000),JSON.stringify(stats));}
   await page.screenshot({path:resolve(out,'updated-390.png'),fullPage:false});
-  await writeFile(resolve(out,'observations.json'),JSON.stringify({method:'real wall-clock source mutation to production UI MutationObserver after status+runtime DOM update; private healthy HTTPS collector fixture, final 200 sessions/50 active/500 tickets',stats,timings,layouts,before,after,errors},null,2));
+  await writeFile(resolve(out,'observations.json'),JSON.stringify({method:'real wall-clock source mutation to production UI status+runtime DOM update observed in the following painted frame (MutationObserver plus double requestAnimationFrame); private healthy HTTPS collector fixture, final 200 sessions/50 active/500 tickets',stats,timings,layouts,before,after,errors},null,2));
   console.log(JSON.stringify({stats,layouts,focusScroll:after,artifact_dir:out}));
 } finally {
   await writeFile(resolve(out,'producer.log'),wire);

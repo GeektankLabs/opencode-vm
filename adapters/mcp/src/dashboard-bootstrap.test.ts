@@ -30,7 +30,10 @@ test("packaged bootstrap uses real SDK GETs, private webauth and ALL inventory; 
     else if(/\/(permission|question)$/.test(url.pathname))body={data:[]};
     else if(url.pathname.endsWith("/message")){
       const id=url.pathname.split("/")[2]!;
-      body=Number(id.split("_")[1])<50?[{info:{id:"user",sessionID:id,role:"user",time:{created:1},model:{providerID:"requested",modelID:"requested"}},parts:[]},{info:{id:"assistant",sessionID:id,role:"assistant",parentID:"user",providerID:"openai",modelID:"used",variant:"high",time:{created:2}},parts:[{type:"text",text:"PRIVATE_PROMPT_BODY"}]}]:[];
+      body=Number(id.split("_")[1])<50?Array.from({length:id==="ses_0"?8:1},(_,i)=>[
+        {info:{id:`user_${i}`,sessionID:id,role:"user",time:{created:i*10+1},model:{providerID:"requested",modelID:"requested"}},parts:[]},
+        {info:{id:`assistant_${i}`,sessionID:id,role:"assistant",parentID:`user_${i}`,providerID:"openai",modelID:"used",variant:"high",time:i?{created:i*10+2,completed:i*10+3}:{created:2},...(i?{finish:"stop"}:{})},parts:[{type:"text",text:"PRIVATE_PROMPT_BODY"}]}
+      ]).flat():[];
     } else if(url.pathname==="/api/projects")body=[{id:"board",prefix:"B",name:"Board",status:"active"}];
     else if(url.pathname==="/api/tickets")body=Array.from({length:500},(_,i)=>({id:`ticket${i}`,projectId:"board",title:`Task ${i}`,status:"in_progress",priority:"medium",description:"PRIVATE_DESCRIPTION"}));
     else {res.writeHead(404);res.end();return;}
@@ -60,6 +63,9 @@ test("packaged bootstrap uses real SDK GETs, private webauth and ALL inventory; 
   assert.ok(detail.sessions.some((s:{kind:string})=>s.kind==="child"));
   assert.equal(detail.sessions[0].turns[0].runtime.model_id,"used");
   assert.equal(detail.sessions[0].turns[0].runtime.variant,"high");
+  assert.equal(detail.sessions[0].turns[0].user_message_id,"user_0");
+  assert.equal(detail.sessions[0].turns[0].active,true);
+  assert.equal(detail.sessions[0].turns.length,6);assert.equal(detail.sessions[0].turns_truncated,true);
   assert.equal(detail.sessions[0].current_runtime.model_id,"setting");
   assert.ok(calls.every(call=>call.startsWith("GET ")));
   assert.ok(!JSON.stringify(detail).includes("PRIVATE_"));

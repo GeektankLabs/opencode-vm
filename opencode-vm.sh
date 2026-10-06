@@ -47,7 +47,7 @@ MCP_ADAPTER_CACHE_ROOT="$MCP_CONNECTOR_DIR/adapters"
 MCP_ADAPTER_VERSION="0.1.25"
 MCP_ADAPTER_TAG="v0.7.9"
 MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.25.tar"
-MCP_ADAPTER_SHA256="0e8e54f76924317a64376514242fd58df644867cc88c24d7a4aec1ac7f97c57c"
+MCP_ADAPTER_SHA256="9156a9937808db56c96362bee514c98458eaef1b84590a54caffc9bb6bc9be15"
 MCP_SDK_VERSION="1.30.1"
 MCP_OPENCODE_SDK_VERSION="1.18.21"
 MCP_TESTED_PROTOCOL_VERSION="2025-11-25"
@@ -378,7 +378,7 @@ run_with_spinner() {
 #   P+1    web  HTTP       P+3    a2a HTTP
 #   P+4    editor HTTPS (optional)
 #   P+5    Taskboard HTTP
-#   P+6    Repo Dashboard HTTPS (reserved for its separate owner)
+#   P+6    Repo Dashboard HTTPS (host-loopback-only)
 #   P+7    Agent Control Hub HTTPS
 #
 # and inside the VM, never tunnelled to the LAN:
@@ -406,7 +406,7 @@ validate_web_port() {
     echo "  P+2  a2a HTTPS         P+3  a2a HTTP" >&2
     echo "  P+4  editor HTTPS      (unless --no-editor)" >&2
     echo "  P+5  Taskboard HTTP" >&2
-    echo "  P+6  Repo Dashboard HTTPS (reserved)" >&2
+    echo "  P+6  Repo Dashboard HTTPS (host loopback)" >&2
     echo "  P+7  Agent Control Hub HTTPS" >&2
     echo "so the base port must be between 1026 and $((65535 - last))." >&2
     exit 2
