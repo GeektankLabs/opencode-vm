@@ -456,7 +456,7 @@ need_out "$TMP/c19.out" "mcp-tunnel:"
 need_out "$TMP/c19.out" "guest=active"
 need_out "$TMP/c19.out" "restarts=2"
 need_out "$TMP/c19.out" "excerpt tunnel"
-grep -qF '[vm-doctor] versions:' "$TMP/c19.out" && fail "C19 tunnel area must stay focused" 
+grep -qF '[vm-doctor] versions:' "$TMP/c19.out" && fail "C19 tunnel area must stay focused"
 FIXTURE_TUNNEL_REFUSE=1
 rc="$(run_main tunnel "$TMP/c19b.out" "$TMP/c19b.err")"
 FIXTURE_TUNNEL_REFUSE=""
