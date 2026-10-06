@@ -288,6 +288,21 @@ export class ProjectBoardService {
     return task;
   }
 
+  /** Internal bounded projection; same IDs, transfer checks and metadata reader,
+   * one scan, no descriptions/comments/results and no read-side writes. */
+  async readDashboardTasks() {
+    const metadata = await this.loadMetadata();
+    this.requireNoPendingTransfer(metadata);
+    const [rows, projects] = await Promise.all([this.scanTasks(), this.projects(metadata)]);
+    if (rows.some(row => !projects.some(project => project.id === row.projectId))) throw metadataError();
+    return rows.map(row => {
+      const id = this.taskId(row.id, metadata);
+      return { task_id: id, title: row.title.slice(0, 240), board_status: row.status,
+        board_project_id: this.boardId(row.projectId, metadata),
+        links: (metadata.links[id] ?? []).map(link => ({ session_id: link.session_id, message_id: link.message_id ?? null })) };
+    });
+  }
+
   async addManagementNote(taskId: string, note: string): Promise<PublicTask & { management_note: {
     entry_id: string; sequence: number; generation: string; head_sequence: number;
   } }> {

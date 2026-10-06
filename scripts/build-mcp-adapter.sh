@@ -46,6 +46,8 @@ cp -p "$ADAPTER/dist/main.js" "$ADAPTER/dist/types.js" \
   "$ADAPTER/dist/attachments.js" "$STAGE/dist/"
 cp -p "$ADAPTER/dist/activity.js" "$ADAPTER/dist/attention.js" "$ADAPTER/dist/events.js" \
   "$ADAPTER/dist/content.js" "$ADAPTER/dist/diagnostics.js" "$STAGE/dist/"
+cp -p "$ADAPTER/dist/dashboard.js" "$ADAPTER/dist/dashboard-http.js" "$ADAPTER/dist/dashboard-main.js" "$STAGE/dist/"
+cp -Rp "$ADAPTER/dashboard" "$STAGE/dashboard"
 
 jq -n \
   --arg version "$VERSION" \

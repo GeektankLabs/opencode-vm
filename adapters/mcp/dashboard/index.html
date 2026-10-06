@@ -1,0 +1,7 @@
+<!doctype html>
+<html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Repo Live</title><link rel="stylesheet" href="/styles.css"><script src="/app.js" defer></script></head>
+<body><header><h1 id="project">Repo Live</h1><p id="counts">Status wird geladen …</p><p id="freshness">Noch keine Quellbeobachtung</p><details><summary>Quellen &amp; Zeitstempel</summary><p id="source-details" class="meta"></p></details></header>
+<main><p id="error" role="status"></p><nav aria-label="Live-Filter"><button id="all" aria-pressed="true">Alle</button><button id="attention" aria-pressed="false">Input / Attention</button><button id="running" aria-pressed="false">Läuft / Retry</button><a id="board">Taskboard (HTTP)</a></nav>
+<section aria-label="Aktive Arbeit" id="work"></section><details id="others"><summary>Weitere Sessions</summary><section id="idle"></section></details>
+<section><h2>Zuletzt beobachtet</h2><p id="recent">Keine belegte jüngste Aktivität</p></section>
+<p class="note">Boardstatus ≠ Laufstatus. Turn abgeschlossen ≠ Taskabnahme. Read-only · „Überblick“-UXreferenz unverifiziert.</p></main><p class="sr" id="announcement" aria-live="polite"></p></body></html>
