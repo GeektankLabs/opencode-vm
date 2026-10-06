@@ -97,7 +97,7 @@ class ReleaseMetadataTest(unittest.TestCase):
 
         result, output = self.run_metadata({
             "adapters/mcp/src/types.ts": [
-                ('export const ADAPTER_VERSION = "0.1.23";',
+                ('export const ADAPTER_VERSION = "0.1.24";',
                  'export const ADAPTER_VERSION = "0.0.0";')
             ],
         })
