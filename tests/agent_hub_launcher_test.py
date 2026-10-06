@@ -31,8 +31,9 @@ def shell(code, *args, check=True):
 class AgentHubLauncherTest(unittest.TestCase):
     def test_host_only_stages_verified_assets(self):
         hub_sha = re.search(r'^HUB_ASSET_SHA256="([^"]+)"', SCRIPT, re.M)[1]
-        code = '\n'.join(function(name) for name in ("agent_hub_source_dir", "legacy_hub_process_matches",
-                                                     "agent_hub_retire_legacy", "agent_hub_stage_assets"))
+        code = '\n'.join(function(name) for name in ("agent_hub_source_dir", "legacy_hub_process_matches", "agent_hub_retire_legacy",
+                                                     "_hub_file_sha256", "_hub_write_manifest", "_agent_hub_verify_manifest",
+                                                     "agent_hub_stage_assets"))
         code += f'''\nSCRIPT_DIR={str(ROOT)!r}
 SHARE_ROOT="$1/state"
 HUB_ASSET_SHA256={hub_sha!r}
@@ -44,6 +45,8 @@ test -d "$1/share/hub/assets-$HUB_ASSET_SHA256"
 test "$(cat "$1/share/hub/assets-$HUB_ASSET_SHA256/.sha256")" = "$HUB_ASSET_SHA256"
 stat -c %a "$1/share/hub" | grep -qx 700
 stat -c %a "$1/share/hub/assets-$HUB_ASSET_SHA256/server.py" | grep -qx 600
+stat -c %a "$1/share/hub/assets-$HUB_ASSET_SHA256/.files.sha256" | grep -qx 600
+_agent_hub_verify_manifest "$1/share/hub/assets-$HUB_ASSET_SHA256"
 '''
         with tempfile.TemporaryDirectory() as temporary:
             shell(code, temporary)
@@ -54,7 +57,8 @@ stat -c %a "$1/share/hub/assets-$HUB_ASSET_SHA256/server.py" | grep -qx 600
 
     def test_legacy_host_hub_is_retired_before_guest_assets_are_staged(self):
         hub_sha = re.search(r'^HUB_ASSET_SHA256="([^"]+)"', SCRIPT, re.M)[1]
-        names = ("agent_hub_source_dir", "legacy_hub_process_matches", "agent_hub_retire_legacy", "agent_hub_stage_assets")
+        names = ("agent_hub_source_dir", "legacy_hub_process_matches", "agent_hub_retire_legacy",
+                 "_hub_file_sha256", "_hub_write_manifest", "_agent_hub_verify_manifest", "agent_hub_stage_assets")
         code = '\n'.join(function(name) for name in names)
         code += f'''\nSCRIPT_DIR={str(ROOT)!r}
 SHARE_ROOT="$1/state"
@@ -91,15 +95,77 @@ mkdir -p "$share/hub"
 printf '%s\\n' 123 > "$share/hub/server.pid"
 ps() { printf '%s\\n' 'python3 /tmp/other.py'; }
 kill() { [ "$1" = -0 ] && return 0; exit 99; }
+        if agent_hub_retire_legacy "$share"; then exit 1; fi
+'''
+        with tempfile.TemporaryDirectory() as temporary:
+            shell(code, temporary)
+
+    def test_legacy_cleanup_rejects_invalid_watcher_before_any_signal(self):
+        code = '\n'.join(function(name) for name in ("legacy_hub_process_matches", "agent_hub_retire_legacy"))
+        code += '''\nshare="$1/0123456789abcdef0123456789abcdef"
+mkdir -p "$share/hub"
+printf '%s\\n' 123 > "$share/hub/server.pid"
+printf '%s\\n' invalid > "$share/hub/watcher.pid"
+ps() { printf '%s\\n' 'python3 /tmp/hub/server.py --host 0.0.0.0 --port 4180 --project-hash 0123456789abcdef0123456789abcdef'; }
+kill() { if [[ "$1" == -0 ]]; then return 0; fi; printf '%s\\n' "$*" >> "$share/signals"; }
+sleep() { :; }
 if agent_hub_retire_legacy "$share"; then exit 1; fi
+test ! -e "$share/signals"
+test -e "$share/hub/server.pid"
+test -e "$share/hub/watcher.pid"
+'''
+        with tempfile.TemporaryDirectory() as temporary:
+            shell(code, temporary)
+
+    def test_legacy_process_match_requires_exact_full_tokens(self):
+        code = function("legacy_hub_process_matches") + '''
+ps() { printf '%s\\n' "$PS_COMMAND"; }
+PS_COMMAND='python3 /tmp/hub/server.py --host 0.0.0.0 --port 4180 --project-hash 0123456789abcdef0123456789abcdefDIFFERENT'
+if legacy_hub_process_matches 123 0123456789abcdef0123456789abcdef; then exit 1; fi
+PS_COMMAND='python3 /tmp/hub/server.pyx --host 0.0.0.0 --project-hash 0123456789abcdef0123456789abcdef'
+if legacy_hub_process_matches 123 0123456789abcdef0123456789abcdef; then exit 1; fi
+PS_COMMAND='python3 /tmp/otherhub/server.py --host 0.0.0.0 --project-hash 0123456789abcdef0123456789abcdef'
+if legacy_hub_process_matches 123 0123456789abcdef0123456789abcdef; then exit 1; fi
+PS_COMMAND='python3 /tmp/hub/server.py --host 0.0.0.01 --project-hash 0123456789abcdef0123456789abcdef'
+if legacy_hub_process_matches 123 0123456789abcdef0123456789abcdef; then exit 1; fi
+PS_COMMAND='python3 /tmp/hub/server.py --host 0.0.0.0 --project-hash 0123456789abcdef0123456789abcdef --extra'
+legacy_hub_process_matches 123 0123456789abcdef0123456789abcdef
+'''
+        with tempfile.TemporaryDirectory() as temporary:
+            shell(code, temporary)
+
+    def test_corrupted_staged_assets_are_restaged_not_reused(self):
+        hub_sha = re.search(r'^HUB_ASSET_SHA256="([^"]+)"', SCRIPT, re.M)[1]
+        names = ("agent_hub_source_dir", "legacy_hub_process_matches", "agent_hub_retire_legacy",
+                 "_hub_file_sha256", "_hub_write_manifest", "_agent_hub_verify_manifest", "agent_hub_stage_assets")
+        code = '\n'.join(function(name) for name in names)
+        code += f'''\nSCRIPT_DIR={str(ROOT)!r}
+SHARE_ROOT="$1/state"
+HUB_ASSET_SHA256={hub_sha!r}
+OCVM_VERSION=fixture
+mkdir -p "$1/share"
+agent_hub_stage_assets "$1/share"
+target="$1/share/hub/assets-$HUB_ASSET_SHA256"
+printf '%s\\n' 'corrupted non-Python content' > "$target/server.py"
+if _agent_hub_verify_manifest "$target"; then exit 1; fi
+agent_hub_stage_assets "$1/share"
+cmp -s "$target/server.py" "$SCRIPT_DIR/hub/server.py"
+_agent_hub_verify_manifest "$target"
+printf '%s\\n' 'bogus' > "$target/.files.sha256"
+if _agent_hub_verify_manifest "$target"; then exit 1; fi
+agent_hub_stage_assets "$1/share"
+_agent_hub_verify_manifest "$target"
 '''
         with tempfile.TemporaryDirectory() as temporary:
             shell(code, temporary)
 
     def test_guest_service_publishes_generation_bound_runtime_after_tls_health(self):
         hub_sha = re.search(r'^HUB_ASSET_SHA256="([^"]+)"', SCRIPT, re.M)[1]
-        names = ("agent_hub_source_dir", "legacy_hub_process_matches", "agent_hub_retire_legacy", "agent_hub_stage_assets", "load_session_auth", "hub_runtime_dir", "hub_unit_description",
-                 "hub_remove_current_file", "hub_failure", "hub_prepare_runtime", "stop_hub", "hub_health", "start_hub")
+        names = ("agent_hub_source_dir", "legacy_hub_process_matches", "agent_hub_retire_legacy",
+                 "_hub_file_sha256", "_hub_write_manifest", "_agent_hub_verify_manifest", "agent_hub_stage_assets",
+                 "load_session_auth", "hub_runtime_dir", "hub_unit_description",
+                 "hub_remove_current_file", "hub_failure", "hub_prepare_runtime", "stop_hub", "hub_health",
+                 "hub_verify_assets", "start_hub")
         code = '\n'.join(function(name) for name in names)
         code += f'''\nSCRIPT_DIR={str(ROOT)!r}
 SHARE_ROOT="$1/state"
@@ -150,6 +216,42 @@ test "$OC_HUB_READY" = 1
             self.assertIn("AppArmorProfile=opencode-sandbox", arguments)
             self.assertIn("--setenv=PYTHONDONTWRITEBYTECODE=1", arguments)
             self.assertIn("Ready on HTTPS port 4103", result.stdout)
+
+    def test_guest_service_refuses_tampered_asset_contents(self):
+        hub_sha = re.search(r'^HUB_ASSET_SHA256="([^"]+)"', SCRIPT, re.M)[1]
+        names = ("agent_hub_source_dir", "legacy_hub_process_matches", "agent_hub_retire_legacy",
+                 "_hub_file_sha256", "_hub_write_manifest", "_agent_hub_verify_manifest", "agent_hub_stage_assets",
+                 "load_session_auth", "hub_runtime_dir", "hub_unit_description", "hub_remove_current_file",
+                 "hub_failure", "hub_prepare_runtime", "stop_hub", "hub_health", "hub_verify_assets", "start_hub")
+        code = '\n'.join(function(name) for name in names)
+        code += f'''\nSCRIPT_DIR={str(ROOT)!r}
+SHARE_ROOT="$1/state"
+HUB_ASSET_SHA256={hub_sha!r}
+OCVM_VERSION=fixture
+SESS_SHARE="$1/share"
+PROJ_DIR="$1/project"
+mkdir -p "$SESS_SHARE" "$PROJ_DIR"
+agent_hub_stage_assets "$SESS_SHARE"
+printf '%s\\n' 'tampered after staging' > "$SESS_SHARE/hub/assets-$HUB_ASSET_SHA256/server.py"
+OC_HUB_ENABLED=1
+OC_HUB_ASSET_DIR="$SESS_SHARE/hub/assets-$HUB_ASSET_SHA256"
+OC_HUB_GENERATION=generation
+OC_OPENLIVE_PROJECT_HASH=0123456789abcdef0123456789abcdef
+OC_PORT=4096
+OC_MCP_ENABLED=0
+OC_MCP_PORT=40960
+OC_A2A=1
+ensure_web_tls() {{ OC_SCHEME=https; OC_TLS_CERT=cert.pem; OC_TLS_KEY=key.pem; }}
+ss() {{ return 1; }}
+systemctl() {{ case "$1" in show) printf '%s\\n' not-found ;; esac; }}
+sudo() {{ printf '%s\\n' "$*" > "$TEST_ROOT/systemd-arguments"; return 0; }}
+if start_hub; then exit 1; fi
+test ! -e "$TEST_ROOT/systemd-arguments"
+'''
+        with tempfile.TemporaryDirectory() as temporary:
+            shell('TEST_ROOT="$1"\n' + code, temporary)
+            failure = json.loads((Path(temporary) / "share/hub/failure.json").read_text())
+        self.assertIn("content integrity", failure["reason"])
 
     def test_guest_service_publishes_failure_when_assets_are_not_staged(self):
         names = ("hub_runtime_dir", "hub_unit_description", "hub_remove_current_file", "hub_failure",

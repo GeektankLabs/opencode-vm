@@ -4,16 +4,24 @@
 import base64
 import hashlib
 import json
+import os
+import socket
+import ssl
+import subprocess
+import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 import hub.server as server
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class HubReadModelTest(unittest.TestCase):
@@ -140,6 +148,69 @@ class HubReadModelTest(unittest.TestCase):
         self.assertTrue(server.private_peer("100.90.1.2"))
         self.assertFalse(server.private_peer("8.8.8.8"))
         self.assertFalse(server.private_peer("192.0.2.1"))
+
+
+class HubRealTLSTest(unittest.TestCase):
+    def test_silent_tcp_client_cannot_stall_threaded_tls_health(self):
+        # The handshake must run in the per-connection thread. Wrapping the
+        # listening socket instead would let one client that opens a socket and
+        # then says nothing block every other connection, including /healthz.
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            share = root / "share"
+            hub = share / "hub"
+            hub.mkdir(parents=True, mode=0o700)
+            share.chmod(0o700)
+            project = root / "project"
+            project.mkdir()
+            with socket.socket() as probe:
+                probe.bind(("127.0.0.1", 0))
+                port = probe.getsockname()[1]
+            project_hash = hashlib.md5(os.fsencode(project.resolve())).hexdigest()
+            runtime = {"schema": 1, "projectHash": project_hash, "generation": "tls-regression",
+                       "hubPort": port, "authEnabled": False, "auth": None, "a2aEnabled": False,
+                       "tunnelConfigured": False, "openliveConfigured": False,
+                       "mcp": {"enabled": False, "port": 0, "generation": "tls-regression"}}
+            runtime_path = hub / "runtime-input.json"
+            runtime_path.write_text(json.dumps(runtime))
+            runtime_path.chmod(0o600)
+            cert, key = root / "cert.pem", root / "key.pem"
+            subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+                            "-subj", "/CN=localhost", "-keyout", str(key), "-out", str(cert)],
+                           check=True, capture_output=True)
+            process = subprocess.Popen(
+                [sys.executable, "-B", str(ROOT / "hub/server.py"), "--port", str(port),
+                 "--project", str(project), "--project-hash", project_hash,
+                 "--runtime-input", str(runtime_path), "--tls-cert", str(cert), "--tls-key", str(key)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            context = ssl._create_unverified_context()
+            base = f"https://127.0.0.1:{port}"
+            raw = None
+            try:
+                for _ in range(100):
+                    try:
+                        with urlopen(base + "/healthz", context=context, timeout=0.5) as response:
+                            health = json.load(response)
+                        break
+                    except (OSError, URLError):
+                        time.sleep(0.05)
+                else:
+                    self.fail("TLS Hub did not become ready")
+                self.assertEqual(health["generation"], "tls-regression")
+                raw = socket.create_connection(("127.0.0.1", port), timeout=2)
+                time.sleep(0.15)
+                with urlopen(base + "/healthz", context=context, timeout=2) as response:
+                    self.assertEqual(response.status, 200)
+                self.assertIsNone(process.poll())
+                raw.close()
+                raw = None
+                with urlopen(base + "/healthz", context=context, timeout=2) as response:
+                    self.assertEqual(response.status, 200)
+            finally:
+                if raw:
+                    raw.close()
+                process.terminate()
+                process.communicate(timeout=5)
 
 
 if __name__ == "__main__":

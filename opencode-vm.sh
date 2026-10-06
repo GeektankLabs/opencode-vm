@@ -54,7 +54,7 @@ MCP_TESTED_PROTOCOL_VERSION="2025-11-25"
 MCP_TUNNEL_DIR="$SHARE_ROOT/mcp-tunnel/openai"
 HUB_ASSET_TAG="v0.7.7"
 HUB_ASSET_FILENAME="opencode-vm-hub-1.tar"
-HUB_ASSET_SHA256="e5ec4ea0dc3e43cebcae10eed25c3aaeaa909abbc8c80b9534674862d6599194"
+HUB_ASSET_SHA256="0d2f328ffda9ee3a0c8d61cfe303f7e479863a3f3af032d07d8650dd3eb1c84a"
 
 # BEGIN GENERATED MANAGED RUNTIME
 OCVM_MANAGED_RUNTIME_GZIP_BASE64='H4sIAAAAAAAC/+19a3PbRrJoPvtXwKjUBrBBUHYSbw51FJUiMYluZElHUl5X1tIQAYqwQYABQNmKxP9++zFPAKTkze5W3TpiJRYxM+jp6enu6enpac6iPLpK
@@ -12727,7 +12727,10 @@ agent_hub_source_dir() {
       if [[ "$candidate" == "$SHARE_ROOT/hub" && "$(cat "$candidate/.ocvm-version" 2>/dev/null || true)" != "$OCVM_VERSION" ]]; then
         continue
       fi
-      if [[ "$candidate" == "$SHARE_ROOT/hub-assets/"* && "$(cat "${candidate%/hub}/.sha256" 2>/dev/null || true)" != "$HUB_ASSET_SHA256" ]]; then
+      if [[ "$candidate" == "$SHARE_ROOT/hub-assets/"* ]] && {
+           [[ "$(cat "${candidate%/hub}/.sha256" 2>/dev/null || true)" != "$HUB_ASSET_SHA256" ]] ||
+           ! _agent_hub_verify_manifest "$candidate"
+         }; then
         continue
       fi
       printf '%s\n' "$candidate"
@@ -12737,13 +12740,61 @@ agent_hub_source_dir() {
   return 1
 }
 
+_hub_file_sha256() {
+  local file="$1"
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | awk '{print $1}'
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 "$file" | awk '{print $NF}'
+  else
+    echo "[hub] No SHA-256 tool is available (shasum, sha256sum, or openssl)." >&2
+    return 1
+  fi
+}
+
+# Record one digest per shipped asset, in the canonical archive order. Marker
+# or existence checks alone cannot detect a silently corrupted file.
+_hub_write_manifest() {
+  local dir="$1" asset digest tmp
+  tmp="$dir/.files.sha256.tmp.$$"
+  for asset in server.py policy.py catalog.py index.html styles.css app.js control.js; do
+    [[ -f "$dir/$asset" && ! -L "$dir/$asset" ]] || { rm -f "$tmp"; return 1; }
+    digest="$(_hub_file_sha256 "$dir/$asset")" || { rm -f "$tmp"; return 1; }
+    printf '%s  %s\n' "$digest" "$asset"
+  done > "$tmp" || { rm -f "$tmp"; return 1; }
+  chmod 600 "$tmp" && mv "$tmp" "$dir/.files.sha256"
+}
+
+_agent_hub_verify_manifest() {
+  local dir="$1" want asset have seen=0
+  [[ -f "$dir/.files.sha256" && ! -L "$dir/.files.sha256" && -s "$dir/.files.sha256" ]] || return 1
+  while read -r want asset; do
+    [[ "$want" =~ ^[0-9a-f]{64}$ ]] || return 1
+    case " server.py policy.py catalog.py index.html styles.css app.js control.js " in
+      *" $asset "*) ;;
+      *) return 1 ;;
+    esac
+    [[ -f "$dir/$asset" && ! -L "$dir/$asset" ]] || return 1
+    have="$(_hub_file_sha256 "$dir/$asset")" || return 1
+    [[ "$have" == "$want" ]] || return 1
+    seen=$((seen + 1))
+  done < "$dir/.files.sha256"
+  (( seen == 7 ))
+}
+
 # Standalone installs have only opencode-vm.sh. Download the release's exact
 # read-only Hub assets when no adjacent development tree is available.
 agent_hub_prepare_cache() {
   local cache="$SHARE_ROOT/hub-assets/$HUB_ASSET_SHA256" stage archive expected
   [[ ! -L "$SHARE_ROOT/hub-assets" && ! -L "$cache" ]] || return 1
   mkdir -p "$SHARE_ROOT/hub-assets" || return 1
-  if [[ -f "$cache/.sha256" && "$(<"$cache/.sha256")" == "$HUB_ASSET_SHA256" ]]; then return 0; fi
+  if [[ -f "$cache/.sha256" && "$(<"$cache/.sha256")" == "$HUB_ASSET_SHA256" ]]; then
+    if _agent_hub_verify_manifest "$cache/hub"; then return 0; fi
+    echo "[hub] Cached Hub assets failed their content integrity check; refetching." >&2
+    rm -rf "$cache"
+  fi
   [[ ! -e "$cache" ]] || { echo "[hub] Unrecognized cache contents; refusing to overwrite." >&2; return 1; }
   stage="$(mktemp -d "$SHARE_ROOT/hub-assets/.stage.XXXXXX")" || return 1
   archive="$stage/assets.tar"
@@ -12765,6 +12816,7 @@ PY
   fi
   tar -xf "$archive" -C "$stage" || { rm -rf "$stage"; return 1; }
   rm -f "$archive"
+  _hub_write_manifest "$stage/hub" || { rm -rf "$stage"; return 1; }
   printf '%s\n' "$HUB_ASSET_SHA256" > "$stage/.sha256"
   mv "$stage" "$cache" || { rm -rf "$stage"; return 1; }
 }
@@ -12773,15 +12825,20 @@ legacy_hub_process_matches() {
   local pid="$1" hash="$2" command
   [[ "$pid" =~ ^[0-9]+$ && "$hash" =~ ^[0-9a-f]{32}$ ]] || return 1
   command="$(ps -ww -p "$pid" -o command= 2>/dev/null || true)"
-  [[ "$command" == *"/hub/server.py"* && "$command" == *"--host 0.0.0.0"* &&
-     "$command" == *"--project-hash $hash"* ]]
+  [[ -n "$command" ]] || return 1
+  # Exact argv tokens, never bare substrings: a prefix match would accept a
+  # longer, foreign --project-hash that merely starts with this session's hash,
+  # or a path like hub/server.pyx. Token boundaries make both fail closed.
+  [[ "$command" =~ (^|[[:space:]])/[^[:space:]]*/hub/server\.py([[:space:]]|$) ]] || return 1
+  [[ "$command" =~ (^|[[:space:]])--host[[:space:]]+0\.0\.0\.0([[:space:]]|$) ]] || return 1
+  [[ "$command" =~ (^|[[:space:]])--project-hash[[:space:]]+$hash([[:space:]]|$) ]]
 }
 
 # Version 0.7.6 ran a host-side Hub and watcher from these pid files. Retire
 # only a positively identified legacy server; its watcher exits after the
 # server is gone. Refuse to stage a guest Hub if that watcher cannot quiesce.
 agent_hub_retire_legacy() {
-  local share="$1" dir pid_file watcher_file runtime_file pid watcher hash waited marker legacy_seen=0
+  local share="$1" dir pid_file watcher_file runtime_file pid watcher hash waited marker server_target="" watcher_target="" legacy_seen=0
   [[ -n "$share" && ( -d "$share" || -L "$share" ) ]] || return 0
   [[ ! -L "$share" ]] || { echo "[hub] Refusing legacy cleanup through a symlinked session share." >&2; return 1; }
   dir="$share/hub"
@@ -12800,6 +12857,8 @@ agent_hub_retire_legacy() {
   hash="$(basename "$share")"
   [[ "$hash" =~ ^[0-9a-f]{32}$ ]] || { echo "[hub] Legacy Hub session identity is invalid." >&2; return 1; }
 
+  # Validate every marker and identity before the first signal. An invalid
+  # watcher marker must never be discovered after the server already died.
   if [[ -f "$pid_file" ]]; then
     legacy_seen=1
     pid="$(<"$pid_file")"
@@ -12809,37 +12868,46 @@ agent_hub_retire_legacy() {
         echo "[hub] Legacy Hub server ownership could not be verified." >&2
         return 1
       }
-      kill "$pid" 2>/dev/null || return 1
-      for waited in $(seq 1 20); do
-        kill -0 "$pid" 2>/dev/null || break
-        sleep 0.1
-      done
-      if kill -0 "$pid" 2>/dev/null; then
-        legacy_hub_process_matches "$pid" "$hash" || return 1
-        kill -KILL "$pid" 2>/dev/null || return 1
-        for waited in $(seq 1 10); do
-          kill -0 "$pid" 2>/dev/null || break
-          sleep 0.1
-        done
-      fi
-      kill -0 "$pid" 2>/dev/null && { echo "[hub] Legacy Hub server did not stop." >&2; return 1; }
+      server_target="$pid"
     fi
   fi
-
   if [[ -f "$watcher_file" ]]; then
     watcher="$(<"$watcher_file")"
     [[ "$watcher" =~ ^[0-9]+$ ]] || { echo "[hub] Legacy Hub watcher marker is invalid." >&2; return 1; }
     if kill -0 "$watcher" 2>/dev/null; then
       (( legacy_seen )) || { echo "[hub] Legacy Hub watcher ownership could not be verified." >&2; return 1; }
-      for waited in $(seq 1 25); do
-        kill -0 "$watcher" 2>/dev/null || break
+      watcher_target="$watcher"
+    fi
+  fi
+
+  if [[ -n "$server_target" ]]; then
+    kill "$server_target" 2>/dev/null || return 1
+    for waited in $(seq 1 20); do
+      kill -0 "$server_target" 2>/dev/null || break
+      sleep 0.1
+    done
+    if kill -0 "$server_target" 2>/dev/null; then
+      legacy_hub_process_matches "$server_target" "$hash" || return 1
+      kill -KILL "$server_target" 2>/dev/null || return 1
+      for waited in $(seq 1 10); do
+        kill -0 "$server_target" 2>/dev/null || break
         sleep 0.1
       done
-      kill -0 "$watcher" 2>/dev/null && {
-        echo "[hub] Legacy Hub watcher did not exit after its server stopped." >&2
-        return 1
-      }
     fi
+    kill -0 "$server_target" 2>/dev/null && { echo "[hub] Legacy Hub server did not stop." >&2; return 1; }
+  fi
+
+  # The legacy watcher must quiesce on its own once its server is gone; a
+  # positively-owned server alone authorises this wait, never a signal.
+  if [[ -n "$watcher_target" ]]; then
+    for waited in $(seq 1 25); do
+      kill -0 "$watcher_target" 2>/dev/null || break
+      sleep 0.1
+    done
+    kill -0 "$watcher_target" 2>/dev/null && {
+      echo "[hub] Legacy Hub watcher did not exit after its server stopped." >&2
+      return 1
+    }
   fi
 
   rm -f "$pid_file" "$watcher_file"
@@ -12877,11 +12945,14 @@ agent_hub_stage_assets() {
   mkdir -p -m 700 "$root" || return 1
   chmod 700 "$root" || return 1
   if [[ -d "$target" ]]; then
-    [[ -f "$target/.sha256" && "$(<"$target/.sha256")" == "$HUB_ASSET_SHA256" ]] || return 1
-    for asset in server.py policy.py catalog.py index.html styles.css app.js control.js; do
-      [[ -f "$target/$asset" && ! -L "$target/$asset" ]] || return 1
-    done
-    return 0
+    if [[ -f "$target/.sha256" && "$(<"$target/.sha256")" == "$HUB_ASSET_SHA256" ]] &&
+       _agent_hub_verify_manifest "$target"; then
+      return 0
+    fi
+    # Existence and marker checks alone would reuse a silently corrupted file.
+    # Treat any content mismatch as absent and re-stage from the verified
+    # source; the exact pinned directory name keeps this delete scoped.
+    rm -rf "$target"
   fi
   stage="$(mktemp -d "$root/.assets.XXXXXX")" || return 1
   for asset in server.py policy.py catalog.py index.html styles.css app.js control.js; do
@@ -12891,7 +12962,12 @@ agent_hub_stage_assets() {
     fi
     chmod 600 "$stage/$asset" || { rm -rf "$stage"; return 1; }
   done
-  printf '%s\n' "$HUB_ASSET_SHA256" > "$stage/.sha256" && chmod 600 "$stage/.sha256" && mv "$stage" "$target" || {
+  if ! _hub_write_manifest "$stage" || ! _agent_hub_verify_manifest "$stage" ||
+     ! printf '%s\n' "$HUB_ASSET_SHA256" > "$stage/.sha256" || ! chmod 600 "$stage/.sha256"; then
+    rm -rf "$stage"
+    return 1
+  fi
+  mv "$stage" "$target" || {
     rm -rf "$stage"
     return 1
   }
@@ -13457,6 +13533,24 @@ hub_health() {
     ' >/dev/null 2>&1
 }
 
+# Prove the staged bytes still match the digests recorded at staging time.
+# Existence checks alone would accept a silently corrupted server.py.
+hub_verify_assets() {
+  local source="$1" want asset have seen=0
+  [[ -f "$source/.files.sha256" && ! -L "$source/.files.sha256" && -s "$source/.files.sha256" ]] || return 1
+  while read -r want asset; do
+    case " server.py policy.py catalog.py index.html styles.css app.js control.js " in
+      *" $asset "*) ;;
+      *) return 1 ;;
+    esac
+    [[ -f "$source/$asset" && ! -L "$source/$asset" ]] || return 1
+    have="$(sha256sum "$source/$asset" | cut -d' ' -f1)" || return 1
+    [[ "$have" == "$want" ]] || return 1
+    seen=$((seen + 1))
+  done < "$source/.files.sha256"
+  (( seen == 7 ))
+}
+
 start_hub() {
   local dir source log port waited=0 tmp="" mcp_enabled=false auth_enabled=false tunnel_configured=false openlive_configured=false a2a_enabled=false
   OC_HUB_READY=0
@@ -13477,6 +13571,10 @@ start_hub() {
       return 1
     fi
   done
+  if ! hub_verify_assets "$source"; then
+    hub_failure "Verified Hub assets failed the content integrity check."
+    return 1
+  fi
   local OC_TLS=1 OC_SCHEME=http OC_TLS_CERT="" OC_TLS_KEY=""
   ensure_web_tls
   if [ "$OC_SCHEME" != https ]; then

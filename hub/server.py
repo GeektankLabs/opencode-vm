@@ -39,6 +39,7 @@ SESSION_ROOT: Path | None = None
 RUNTIME: dict[str, Any] = {}
 AUTH_CREDENTIALS: tuple[str, str] | None = None
 REQUEST_SCHEME = "https"
+HANDSHAKE_TIMEOUT_SECONDS = 5
 MAX_LOG_BYTES = 64 * 1024
 MAX_EVENTS = 12
 SECRET_PATTERNS = [
@@ -389,6 +390,35 @@ class Handler(BaseHTTPRequestHandler):
         return
 
 
+class HubServer(ThreadingHTTPServer):
+    """TLS handshake per connection, in the connection's own thread.
+
+    Wrapping the listening socket would run every handshake in the accept
+    loop, where one client that opens a socket and then says nothing stalls
+    the whole Hub — including /healthz — while the process stays alive. The
+    same rule as the session web proxy, which handshakes per worker thread.
+    """
+
+    daemon_threads = True
+    tls_context: ssl.SSLContext | None = None
+
+    def process_request_thread(self, request, client_address):
+        if self.tls_context is not None:
+            request.settimeout(HANDSHAKE_TIMEOUT_SECONDS)
+            try:
+                request = self.tls_context.wrap_socket(request, server_side=True)
+            except (ssl.SSLError, OSError):
+                # A stalled or invalid handshake ends quietly here; the accept
+                # loop already moved on and the service log stays usable.
+                try:
+                    request.close()
+                except OSError:
+                    pass
+                return
+            request.settimeout(None)
+        super().process_request_thread(request, client_address)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1")
@@ -409,8 +439,8 @@ def main() -> None:
         tls.load_cert_chain(args.tls_cert, args.tls_key)
     except (OSError, ValueError, ssl.SSLError) as error:
         parser.error(str(error))
-    server = ThreadingHTTPServer((args.host, args.port), Handler)
-    server.socket = tls.wrap_socket(server.socket, server_side=True)
+    server = HubServer((args.host, args.port), Handler)
+    server.tls_context = tls
     print(f"Agent Connectivity Hub: https://{args.host}:{args.port}", flush=True)
     try:
         server.serve_forever()
