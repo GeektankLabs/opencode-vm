@@ -34,7 +34,7 @@ OPENLIVE_PREVIOUS_COMMAND="$OPENLIVE_DIR/previous-command"
 OPENLIVE_AUTH_MARKER="__opencode_vm_openlive__"
 OPENLIVE_LOCK_PATH=""
 OPENLIVE_ADAPTER_VERSION="0.1.7"
-OPENLIVE_ADAPTER_TAG="v0.7.12"
+OPENLIVE_ADAPTER_TAG="v0.7.13"
 OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.7.tar"
 OPENLIVE_ADAPTER_SHA256="39a50c5127b0a577b54e4790b5c3c1f463b35a52b42c4343aa639dcea53bad47"
 OPENLIVE_ACP_SDK_VERSION="1.2.1"
@@ -44,15 +44,15 @@ OPENLIVE_MANAGER_DESCRIPTION="Read-only OpenLive voice session manager"
 OPENLIVE_MANAGER_PROMPT="You manage an OpenLive voice call. The voice_sessions tool is available and you must call it before listing, inspecting, summarizing, checking, attaching to, or creating project sessions. Never claim session details without a successful tool result. Ask for clarification if a requested session is ambiguous. Create a new work session only when the user explicitly asks for one. Apart from that explicit create action, you are read-only: do not edit files, run shell commands, create tasks, or mutate sessions. Keep responses brief and conversational: one or two plain sentences without Markdown, paths, URLs, code, or stray symbols. When attachment or creation succeeds, tell the user the next voice prompt will continue in that session."
 MCP_CONNECTOR_DIR="$SHARE_ROOT/mcp-connector"
 MCP_ADAPTER_CACHE_ROOT="$MCP_CONNECTOR_DIR/adapters"
-MCP_ADAPTER_VERSION="0.1.26"
-MCP_ADAPTER_TAG="v0.7.12"
-MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.26.tar"
-MCP_ADAPTER_SHA256="985c8b6c4cac00d659eda36d6363778cefd63af74347e71be05ee0c6cad0e188"
+MCP_ADAPTER_VERSION="0.1.27"
+MCP_ADAPTER_TAG="v0.7.13"
+MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.27.tar"
+MCP_ADAPTER_SHA256="e0a9d7772813dae57c0fde7e42e3759f14a1eb2e6bcfb20d8a10dcb94d5d3bf5"
 MCP_SDK_VERSION="1.30.1"
 MCP_OPENCODE_SDK_VERSION="1.18.21"
 MCP_TESTED_PROTOCOL_VERSION="2025-11-25"
 MCP_TUNNEL_DIR="$SHARE_ROOT/mcp-tunnel/openai"
-HUB_ASSET_TAG="v0.7.12"
+HUB_ASSET_TAG="v0.7.13"
 HUB_ASSET_FILENAME="opencode-vm-hub-1.tar"
 HUB_ASSET_SHA256="0d2f328ffda9ee3a0c8d61cfe303f7e479863a3f3af032d07d8650dd3eb1c84a"
 
@@ -286,7 +286,7 @@ TASKBOARD_ARM64_SHA256="3749fb985f544fdb6788ba1dff69761e599ff82b3fe86d39ca54307c
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.7.12"
+OCVM_VERSION="0.7.13"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -13630,7 +13630,7 @@ dashboard_failure() {
 
 start_dashboard() {
   [[ "$OC_MODE" == web ]] || return 0
-  local dir="$SESS_SHARE/dashboard" adapter="$SESS_SHARE/dashboard/adapter" tmp="" port waited=0 auth_enabled=false node_bin=""
+  local dir="$SESS_SHARE/dashboard" adapter="$SESS_SHARE/dashboard/adapter" tmp="" port waited=0 auth_enabled=false node_bin="" last_health="" data_coverage=""
   stop_dashboard || return 1
   [[ -d "$dir" && ! -L "$dir" && -d "$adapter" && ! -L "$adapter" ]] || return 1
   [[ -f "$adapter/.ocvm-managed" ]] && grep -qFx opencode-vm-mcp-staging-v1 "$adapter/.ocvm-managed" || return 1
@@ -13679,34 +13679,62 @@ start_dashboard() {
     -- "$node_bin" "$adapter/dist/dashboard-main.js" "$dir/runtime-input.json" || { dashboard_failure "Dashboard service start failed."; return 1; }
   # Called after spawning OpenCode: no backend-readiness/startup dependency cycle.
   while [[ "$waited" -lt 40 ]]; do
-    if systemctl is-active --quiet ocvm-dashboard.service &&
-      python3 - "$dir/runtime-input.json" <<'DASH_HEALTH'
-import base64,json,ssl,sys,urllib.request
+    if systemctl is-active --quiet ocvm-dashboard.service; then
+      if last_health="$(python3 - "$dir/runtime-input.json" <<'DASH_HEALTH'
+import base64,json,ssl,sys,urllib.request,urllib.error
 v=json.load(open(sys.argv[1])); port=v['runtime']['listenPort']
 h={}
 if v['authEnabled']:
     a=v['auth']; h['Authorization']='Basic '+base64.b64encode((a['username']+':'+a['password']).encode()).decode()
+def source_state(x, name):
+    s=(x.get('sources') or {}).get(name) or {}
+    return '%s=%s/%s' % (name, s.get('state'), s.get('complete'))
+def category(code, raw):
+    # Redacted readiness category: enums, booleans and HTTP codes only; never headers/bodies/URLs.
+    try:
+        x=json.loads(raw)
+        return 'http=%s status=%s coverage=%s %s %s' % (code, x.get('status'), x.get('coverage'),
+          source_state(x,'discovery'), source_state(x,'sessions'))
+    except Exception:
+        return 'http=%s unparsed' % code
 try:
     r=urllib.request.urlopen(urllib.request.Request('https://127.0.0.1:'+str(port)+'/healthz',headers=h),timeout=1,context=ssl.create_default_context(cafile=v['cert']))
-    x=json.loads(r.read(8193)); assert x['service']=='repo-dashboard' and x['status']=='ok' and x['readOnly'] is True and x['projectHash']==v['projectHash'] and x['generation']==v['generation']
-except Exception: sys.exit(1)
+    x=json.loads(r.read(8193))
+    assert x['service']=='repo-dashboard' and x['status']=='ok' and x['readOnly'] is True and x['projectHash']==v['projectHash'] and x['generation']==v['generation']
+    coverage=x.get('coverage'); print('READY coverage=%s' % (coverage if coverage in ('complete','partial','unknown') else 'unknown'))
+except urllib.error.HTTPError as e:
+    print(category(e.code, e.read(8193))); sys.exit(1)
+except Exception:
+    print('probe=unreachable'); sys.exit(1)
 DASH_HEALTH
-    then
-      tmp="$(mktemp "$dir/.runtime.XXXXXX")" || break
-      if jq -n --arg hash "$OC_OPENLIVE_PROJECT_HASH" --arg generation "$OC_HUB_GENERATION" --argjson port "$port" \
-        '{schema:1,projectHash:$hash,generation:$generation,dashboardPort:$port,ready:true}' > "$tmp" &&
-        chmod 600 "$tmp" && mv -f "$tmp" "$dir/runtime.json"; then
-        local dash_host="$OC_HOST_IP"
-        [[ "${OC_LAN_UP:-1}" == "1" ]] || dash_host="127.0.0.1"
-        echo "[dashboard] Repo Live: https://${dash_host}:$port"
-        return 0
+      )"; then
+        case "$last_health" in
+          'READY coverage=complete') data_coverage=complete ;;
+          'READY coverage=partial') data_coverage=partial ;;
+          *) data_coverage=unknown ;;
+        esac
+        tmp="$(mktemp "$dir/.runtime.XXXXXX")" || { last_health=runtime_publish_failed; break; }
+        if jq -n --arg hash "$OC_OPENLIVE_PROJECT_HASH" --arg generation "$OC_HUB_GENERATION" --argjson port "$port" --arg coverage "$data_coverage" \
+          '{schema:1,projectHash:$hash,generation:$generation,dashboardPort:$port,ready:true,dataCoverage:$coverage}' > "$tmp" &&
+          chmod 600 "$tmp" && mv -f "$tmp" "$dir/runtime.json"; then
+          local dash_host="$OC_HOST_IP"
+          [[ "${OC_LAN_UP:-1}" == "1" ]] || dash_host="127.0.0.1"
+          if [[ "$data_coverage" == complete ]]; then
+            echo "[dashboard] Repo Live: https://${dash_host}:$port"
+          else
+            echo "[dashboard] Repo Live: https://${dash_host}:$port (data coverage: ${data_coverage})"
+          fi
+          return 0
+        fi
+        rm -f "$tmp"; last_health=runtime_publish_failed; break
       fi
-      rm -f "$tmp"; break
+    else
+      last_health="unit=inactive"
     fi
     sleep 0.5; waited=$((waited + 1))
   done
   stop_dashboard || true
-  dashboard_failure "Dashboard readiness failed; workers continue independently."
+  dashboard_failure "Dashboard readiness failed (${last_health:0:180}); workers continue independently."
   return 1
 }
 

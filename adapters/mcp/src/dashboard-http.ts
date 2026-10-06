@@ -58,9 +58,21 @@ export function dashboardHandler(config: DashboardConfig, collector: DashboardCo
       const url = new URL(request.url ?? "/", "https://localhost");
       if (url.pathname === "/healthz" && !url.search) {
         const snapshot = collector.snapshot(true);
-        const ready = snapshot.generation === config.generation && snapshot.sources.sessions?.state === "fresh" && snapshot.sources.discovery?.state === "fresh";
+        // Service readiness = valid generation + demonstrated backend reads + HTTP serving.
+        // Data coverage is reported separately and honestly; partial or stale coverage
+        // degrades the data view, not the service. A listening socket alone is never ok.
+        const demonstrated = (source: { observed_at: string | null; error: string | null } | undefined) =>
+          Boolean(source && source.observed_at !== null && source.error !== "SOURCE_UNAVAILABLE");
+        const ready = snapshot.generation === config.generation &&
+          demonstrated(snapshot.sources.discovery) && demonstrated(snapshot.sources.sessions);
+        const coverage = !ready ? "unknown" :
+          snapshot.sources.discovery?.complete && snapshot.sources.sessions?.complete ? "complete" : "partial";
+        const sourceState = (source: { state: string; complete: boolean; error: string | null; observed_at: string | null; last_success_at: string | null } | undefined) =>
+          source ? { state: source.state, complete: source.complete, error: source.error,
+            observed_at: source.observed_at, last_success_at: source.last_success_at } : null;
         return send(ready ? 200 : 503, { schema: 1, status: ready ? "ok" : "not_ready", service: "repo-dashboard", readOnly: true,
-          projectHash: config.projectHash, generation: config.generation, authEnabled: config.authEnabled });
+          projectHash: config.projectHash, generation: config.generation, authEnabled: config.authEnabled, coverage,
+          sources: { discovery: sourceState(snapshot.sources.discovery), sessions: sourceState(snapshot.sources.sessions) } });
       }
       if (url.pathname === "/api/v1/status") {
         if ([...url.searchParams.keys()].some(k => k !== "view") || url.searchParams.getAll("view").length > 1 ||
