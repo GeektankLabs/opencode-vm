@@ -34,7 +34,7 @@ OPENLIVE_PREVIOUS_COMMAND="$OPENLIVE_DIR/previous-command"
 OPENLIVE_AUTH_MARKER="__opencode_vm_openlive__"
 OPENLIVE_LOCK_PATH=""
 OPENLIVE_ADAPTER_VERSION="0.1.7"
-OPENLIVE_ADAPTER_TAG="v0.7.8"
+OPENLIVE_ADAPTER_TAG="v0.7.9"
 OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.7.tar"
 OPENLIVE_ADAPTER_SHA256="39a50c5127b0a577b54e4790b5c3c1f463b35a52b42c4343aa639dcea53bad47"
 OPENLIVE_ACP_SDK_VERSION="1.2.1"
@@ -44,15 +44,15 @@ OPENLIVE_MANAGER_DESCRIPTION="Read-only OpenLive voice session manager"
 OPENLIVE_MANAGER_PROMPT="You manage an OpenLive voice call. The voice_sessions tool is available and you must call it before listing, inspecting, summarizing, checking, attaching to, or creating project sessions. Never claim session details without a successful tool result. Ask for clarification if a requested session is ambiguous. Create a new work session only when the user explicitly asks for one. Apart from that explicit create action, you are read-only: do not edit files, run shell commands, create tasks, or mutate sessions. Keep responses brief and conversational: one or two plain sentences without Markdown, paths, URLs, code, or stray symbols. When attachment or creation succeeds, tell the user the next voice prompt will continue in that session."
 MCP_CONNECTOR_DIR="$SHARE_ROOT/mcp-connector"
 MCP_ADAPTER_CACHE_ROOT="$MCP_CONNECTOR_DIR/adapters"
-MCP_ADAPTER_VERSION="0.1.24"
-MCP_ADAPTER_TAG="v0.7.8"
-MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.24.tar"
-MCP_ADAPTER_SHA256="34f16d96abc37a0942792a278363c15491bdfd64b318dae3df9737690a06ef34"
+MCP_ADAPTER_VERSION="0.1.25"
+MCP_ADAPTER_TAG="v0.7.9"
+MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.25.tar"
+MCP_ADAPTER_SHA256="9156a9937808db56c96362bee514c98458eaef1b84590a54caffc9bb6bc9be15"
 MCP_SDK_VERSION="1.30.1"
 MCP_OPENCODE_SDK_VERSION="1.18.21"
 MCP_TESTED_PROTOCOL_VERSION="2025-11-25"
 MCP_TUNNEL_DIR="$SHARE_ROOT/mcp-tunnel/openai"
-HUB_ASSET_TAG="v0.7.8"
+HUB_ASSET_TAG="v0.7.9"
 HUB_ASSET_FILENAME="opencode-vm-hub-1.tar"
 HUB_ASSET_SHA256="0d2f328ffda9ee3a0c8d61cfe303f7e479863a3f3af032d07d8650dd3eb1c84a"
 
@@ -286,7 +286,7 @@ TASKBOARD_ARM64_SHA256="3749fb985f544fdb6788ba1dff69761e599ff82b3fe86d39ca54307c
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.7.8"
+OCVM_VERSION="0.7.9"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -378,7 +378,7 @@ run_with_spinner() {
 #   P+1    web  HTTP       P+3    a2a HTTP
 #   P+4    editor HTTPS (optional)
 #   P+5    Taskboard HTTP
-#   P+6    Repo Dashboard HTTPS (reserved for its separate owner)
+#   P+6    Repo Dashboard HTTPS (host-loopback-only)
 #   P+7    Agent Control Hub HTTPS
 #
 # and inside the VM, never tunnelled to the LAN:
@@ -406,7 +406,7 @@ validate_web_port() {
     echo "  P+2  a2a HTTPS         P+3  a2a HTTP" >&2
     echo "  P+4  editor HTTPS      (unless --no-editor)" >&2
     echo "  P+5  Taskboard HTTP" >&2
-    echo "  P+6  Repo Dashboard HTTPS (reserved)" >&2
+    echo "  P+6  Repo Dashboard HTTPS (host loopback)" >&2
     echo "  P+7  Agent Control Hub HTTPS" >&2
     echo "so the base port must be between 1026 and $((65535 - last))." >&2
     exit 2
@@ -8862,12 +8862,42 @@ mcp_prepare_adapter_cache() {
   rm -f "$lock" || true
 }
 
+dashboard_stage_assets() {
+  local share="$1"
+  mcp_prepare_adapter_cache || return 1
+  mcp_stage_adapter "$share" dashboard || return 1
+  [[ ! -L "$share/dashboard/auth.choice" ]] || return 1
+  ( umask 077
+    if [[ -n "${SESSION_PASSWORD:-}" ]]; then printf 'enabled\n'; else printf 'none\n'; fi > "$share/dashboard/auth.choice"
+  ) || return 1
+  python3 - "$share/dashboard/adapter" <<'DASH_MANIFEST'
+import hashlib,os,pathlib,sys
+p=pathlib.Path(sys.argv[1]); entries=[]
+for f in sorted(p.rglob('*')):
+    if f.is_symlink(): raise RuntimeError('Symlink in dashboard package')
+    if f.is_file() and f.name != '.files.sha256':
+        entries.append(hashlib.sha256(f.read_bytes()).hexdigest()+'  '+f.relative_to(p).as_posix())
+if not entries: raise RuntimeError('Empty dashboard package')
+(p/'.files.sha256').write_text('\n'.join(entries)+'\n')
+os.chmod(p/'.files.sha256',0o600)
+DASH_MANIFEST
+}
+
 mcp_stage_adapter() {
-  local share="$1" source parent="$1/mcp" target="$1/mcp/adapter" staging
+  local share="$1" source kind="${2:-mcp}" parent target staging
+  [[ "$kind" == mcp || "$kind" == dashboard ]] || return 1
+  parent="$share/$kind"; target="$parent/adapter"
+  if [[ "$kind" == dashboard ]]; then
+    [[ -d "$share" && -O "$share" && ! -L "$share" && ! -L "$parent" ]] || return 1
+    mkdir -p -m 700 "$parent" || return 1
+    [[ -O "$parent" ]] || return 1
+    chmod 700 "$parent" || return 1
+  else
   validate_mcp_credential "$share" || {
     echo "[mcp] Refusing to stage through an unsafe connector state directory." >&2
     return 1
   }
+  fi
   source="$(mcp_adapter_source_dir)" || return 1
   if [[ -e "$target" || -L "$target" ]]; then
     if [[ -L "$target" || ! -d "$target" || ! -f "$target/.ocvm-managed" ]] ||
@@ -11701,6 +11731,12 @@ SEED_RESPONSE = (
 # One catalog keeps launcher layout, icons and endpoint resolution extensible.
 LAUNCHER_APP_REGISTRY = (
     {
+        "id": "repo-dashboard", "label": "Repo Live", "icon": "board",
+        "runtime_file": "dashboard/runtime.json", "failure_file": "dashboard/failure.json",
+        "port_field": "dashboardPort", "port_offset": 6, "local_only": True,
+        "scheme": "https", "health_path": "/healthz",
+    },
+    {
         "id": "editor",
         "label": "Editor",
         "icon": "editor",
@@ -12312,7 +12348,7 @@ def launcher_app_ready(app, runtime):
         valid_port = port == WEB_BASE_PORT + app.get("port_offset", 0)
     if not valid_port:
         return False
-    if app.get("id") == "agent-hub":
+    if app.get("id") in ("agent-hub", "repo-dashboard"):
         generation = runtime.get("generation")
         if (runtime.get("ready") is not True or not isinstance(generation, str) or not generation
                 or generation != LAUNCHER_GENERATION):
@@ -12320,10 +12356,20 @@ def launcher_app_ready(app, runtime):
         sock = None
         try:
             sock = socket.create_connection(("127.0.0.1", port), timeout=0.5)
-            context = ssl._create_unverified_context()
+            context = (ssl.create_default_context(cafile=os.path.join(LAUNCHER_SHARE, "tls", "cert.pem"))
+                       if app.get("id") == "repo-dashboard" else ssl._create_unverified_context())
             sock = context.wrap_socket(sock, server_hostname="localhost")
             sock.settimeout(0.5)
-            sock.sendall(b"GET /healthz HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            authorization = ""
+            if app.get("id") == "repo-dashboard":
+                private = read_launcher_runtime("dashboard/runtime-input.json")
+                if not private or private.get("generation") != generation:
+                    return False
+                if private.get("authEnabled"):
+                    auth = private.get("auth") or {}
+                    pair = (auth.get("username", "") + ":" + auth.get("password", "")).encode("utf-8")
+                    authorization = "Authorization: Basic " + base64.b64encode(pair).decode("ascii") + "\r\n"
+            sock.sendall(("GET /healthz HTTP/1.0\r\nHost: 127.0.0.1:" + str(port) + "\r\n" + authorization + "Connection: close\r\n\r\n").encode("ascii"))
             response = b""
             while len(response) <= 8192:
                 chunk = sock.recv(8192 - len(response) + 1)
@@ -12335,7 +12381,8 @@ def launcher_app_ready(app, runtime):
             if not separator or len(status) < 2 or status[1] != b"200":
                 return False
             health = json.loads(body.decode("utf-8"))
-            return (health.get("status") == "ok" and health.get("service") == "agent-connectivity-hub"
+            expected_service = "repo-dashboard" if app.get("id") == "repo-dashboard" else "agent-connectivity-hub"
+            return (health.get("status") == "ok" and health.get("service") == expected_service
                     and health.get("schema") == 1 and health.get("projectHash") == LAUNCHER_PROJECT_HASH
                     and health.get("generation") == generation)
         except (OSError, ssl.SSLError, ValueError, TypeError):
@@ -13445,6 +13492,114 @@ start_taskboard() {
   stop_taskboard || true
   taskboard_failure "Taskboard readiness timed out: GET /api/projects on port $port failed."
   echo "[taskboard] Startup failed; inspect $log." >&2
+  return 1
+}
+
+dashboard_remove_current() {
+  local path="$1"
+  [[ -f "$path" && ! -L "$path" ]] || return 0
+  jq -e --arg generation "$OC_HUB_GENERATION" '.generation == $generation' "$path" >/dev/null 2>&1 || return 0
+  rm -f "$path"
+}
+
+stop_dashboard() (
+  exec 8>/tmp/ocvm-dashboard.lock
+  flock -w 10 8 || return 1
+  local description state dir="$SESS_SHARE/dashboard"
+  state="$(systemctl show ocvm-dashboard.service -p LoadState --value 2>/dev/null)" || return 1
+  if [[ "$state" != not-found ]]; then
+    description="$(systemctl show ocvm-dashboard.service -p Description --value 2>/dev/null)" || return 1
+    [[ "$description" == "opencode-vm dashboard $SESS_SHARE $OC_HUB_GENERATION" ]] || return 1
+    sudo -n timeout 12 systemctl stop ocvm-dashboard.service || return 1
+  fi
+  dashboard_remove_current "$dir/runtime.json"
+  dashboard_remove_current "$dir/runtime-input.json"
+  dashboard_remove_current "$dir/failure.json"
+)
+
+dashboard_failure() {
+  local dir="$SESS_SHARE/dashboard" tmp=""
+  [[ -d "$dir" && ! -L "$dir" ]] || return 0
+  tmp="$(mktemp "$dir/.failure.XXXXXX")" || return 0
+  if jq -n --arg hash "$OC_OPENLIVE_PROJECT_HASH" --arg generation "$OC_HUB_GENERATION" --arg reason "$1" \
+    '{schema:1,projectHash:$hash,generation:$generation,reason:$reason}' > "$tmp" &&
+    chmod 600 "$tmp" && mv -f "$tmp" "$dir/failure.json"; then return 0; fi
+  rm -f "$tmp"
+}
+
+start_dashboard() {
+  [[ "$OC_MODE" == web ]] || return 0
+  local dir="$SESS_SHARE/dashboard" adapter="$SESS_SHARE/dashboard/adapter" tmp="" port waited=0 auth_enabled=false
+  stop_dashboard || return 1
+  [[ -d "$dir" && ! -L "$dir" && -d "$adapter" && ! -L "$adapter" ]] || return 1
+  [[ -f "$adapter/.ocvm-managed" ]] && grep -qFx opencode-vm-mcp-staging-v1 "$adapter/.ocvm-managed" || return 1
+  [[ -f "$adapter/.files.sha256" && ! -L "$adapter/.files.sha256" ]] || return 1
+  ( cd "$adapter" && sha256sum -c .files.sha256 >/dev/null ) || return 1
+  if [[ -f "$adapter/manifest.json" ]]; then
+    ( cd "$adapter" && npm ci --omit=dev --ignore-scripts --no-audit --no-fund --loglevel=error ) || return 1
+  else
+    ( cd "$adapter" && npm ci --ignore-scripts --no-audit --no-fund --loglevel=error && npm run build --silent ) || return 1
+  fi
+  [[ -f "$adapter/dist/dashboard-main.js" && -f "$adapter/dashboard/index.html" ]] || return 1
+  local OC_TLS=1 OC_SCHEME=http OC_TLS_CERT="" OC_TLS_KEY=""
+  ensure_web_tls
+  [[ "$OC_SCHEME" == https ]] || { dashboard_failure "Existing HTTPS certificate unavailable."; return 1; }
+  [[ -f "$dir/auth.choice" && ! -L "$dir/auth.choice" && -O "$dir/auth.choice" ]] || { dashboard_failure "Explicit web authentication choice unavailable."; return 1; }
+  case "$(cat "$dir/auth.choice")" in
+    enabled) [[ -f "$SESS_SHARE/auth.env" && ! -L "$SESS_SHARE/auth.env" && -O "$SESS_SHARE/auth.env" ]] || { dashboard_failure "Existing web credential unavailable."; return 1; } ;;
+    none) [[ ! -e "$SESS_SHARE/auth.env" && ! -L "$SESS_SHARE/auth.env" ]] || return 1 ;;
+    *) return 1 ;;
+  esac
+  load_session_auth
+  [[ "$(cat "$dir/auth.choice")" != enabled || -n "${OC_PASSWORD:-}" ]] || return 1
+  [[ -z "${OC_PASSWORD:-}" ]] || auth_enabled=true
+  port="$((OC_PORT + 6))"
+  if ss -ltn "sport = :$port" | grep -q LISTEN; then dashboard_failure "Dashboard port occupied."; return 1; fi
+  tmp="$(mktemp "$dir/.runtime-input.XXXXXX")" || return 1
+  if ! DASH_AUTH_USERNAME="${OC_USERNAME:-opencode}" DASH_AUTH_PASSWORD="${OC_PASSWORD:-}" \
+    jq -n --arg project "$(pwd -P)" --arg hash "$OC_OPENLIVE_PROJECT_HASH" --arg name "$(basename "$PROJ_DIR")" \
+      --arg generation "$OC_HUB_GENERATION" --arg backend "http://127.0.0.1:$OC_PORT_INTERNAL" \
+      --arg board "http://127.0.0.1:$((OC_PORT + 5))" --arg metadata "${OC_TASKBOARD_METADATA_FILE:-}" --arg manager "$SESS_SHARE/openlive/manager.json" \
+      --arg version "$(opencode --version 2>/dev/null || true)" --arg cert "$OC_TLS_CERT" --arg key "$OC_TLS_KEY" \
+      --argjson port "$port" --argjson web_port "$OC_PORT" --argjson board_port "$((OC_PORT + 5))" --argjson auth_enabled "$auth_enabled" \
+      '{schema:1,projectHash:$hash,generation:$generation,authEnabled:$auth_enabled,auth:(if $auth_enabled then {username:env.DASH_AUTH_USERNAME,password:env.DASH_AUTH_PASSWORD} else null end),cert:$cert,key:$key,navigation:{web_port:$web_port,board_port:$board_port,opencode_version:$version},runtime:{schema:1,project:$project,projectHash:$hash,projectName:$name,generation:$generation,backendUrl:$backend,opencodeVersion:$version,listenHost:"127.0.0.1",listenPort:$port,credentialFile:"",managerFile:$manager,taskboardUrl:$board,taskboardMetadataFile:$metadata}}' > "$tmp" ||
+      ! chmod 600 "$tmp" || ! mv -f "$tmp" "$dir/runtime-input.json"; then
+    rm -f "$tmp"; dashboard_failure "Runtime input could not be published."; return 1
+  fi
+  sudo -n systemd-run --quiet --collect --unit=ocvm-dashboard --service-type=exec \
+    --description="opencode-vm dashboard $SESS_SHARE $OC_HUB_GENERATION" \
+    --property="User=$(id -un)" --property="Group=$(id -gn)" --property="WorkingDirectory=$PROJ_DIR" \
+    --property=UMask=0077 --property=KillMode=control-group --property=TimeoutStopSec=10 \
+    --property=Restart=on-failure --property=RestartSec=2 --property=StartLimitIntervalSec=60 --property=StartLimitBurst=3 \
+    --property=AppArmorProfile=opencode-sandbox --property="StandardOutput=append:$dir/server.log" --property="StandardError=append:$dir/server.log" \
+    -- node "$adapter/dist/dashboard-main.js" "$dir/runtime-input.json" || { dashboard_failure "Dashboard service start failed."; return 1; }
+  # Called after spawning OpenCode: no backend-readiness/startup dependency cycle.
+  while [[ "$waited" -lt 40 ]]; do
+    if systemctl is-active --quiet ocvm-dashboard.service &&
+      python3 - "$dir/runtime-input.json" <<'DASH_HEALTH'
+import base64,json,ssl,sys,urllib.request
+v=json.load(open(sys.argv[1])); port=v['runtime']['listenPort']
+h={}
+if v['authEnabled']:
+    a=v['auth']; h['Authorization']='Basic '+base64.b64encode((a['username']+':'+a['password']).encode()).decode()
+try:
+    r=urllib.request.urlopen(urllib.request.Request('https://127.0.0.1:'+str(port)+'/healthz',headers=h),timeout=1,context=ssl.create_default_context(cafile=v['cert']))
+    x=json.loads(r.read(8193)); assert x['service']=='repo-dashboard' and x['status']=='ok' and x['readOnly'] is True and x['projectHash']==v['projectHash'] and x['generation']==v['generation']
+except Exception: sys.exit(1)
+DASH_HEALTH
+    then
+      tmp="$(mktemp "$dir/.runtime.XXXXXX")" || break
+      if jq -n --arg hash "$OC_OPENLIVE_PROJECT_HASH" --arg generation "$OC_HUB_GENERATION" --argjson port "$port" \
+        '{schema:1,projectHash:$hash,generation:$generation,dashboardPort:$port,ready:true}' > "$tmp" &&
+        chmod 600 "$tmp" && mv -f "$tmp" "$dir/runtime.json"; then
+        echo "[dashboard] Repo Live: https://127.0.0.1:$port (host loopback forward)"; return 0
+      fi
+      rm -f "$tmp"; break
+    fi
+    sleep 0.5; waited=$((waited + 1))
+  done
+  stop_dashboard || true
+  dashboard_failure "Dashboard readiness failed; workers continue independently."
   return 1
 }
 
@@ -15103,6 +15258,7 @@ attach_session() {
       PROJ_DIR="$1"; SESS_SHARE="$2"; OC_PORT="$3"; OC_HOST_IP="$4"; OC_TLS="${5:-0}"; OC_HUB_GENERATION="${6:-}"
       . "$SESS_SHARE/lib/web.sh"
        stop_hub
+       stop_dashboard
        stop_editor
        stop_taskboard
        stop_mcp_adapter
@@ -15243,6 +15399,7 @@ attach_session() {
     local _att_sess_share
     _att_sess_share="$(session_share_dir "$proj")"
     start_materialize_daemon "$SESS_NAME" "$_att_sess_share" || true
+    dashboard_stage_assets "$_att_sess_share" || echo "[dashboard] Staging unavailable; OpenCode continues." >&2
     if [[ "$sess_hub_enabled" == "1" ]]; then
       if agent_hub_stage_assets "$_att_sess_share"; then
         hub_asset_dir="$_att_sess_share/hub/assets-$HUB_ASSET_SHA256"
@@ -15374,6 +15531,8 @@ attach_session() {
        stop_taskboard()   { return 0; }
        start_taskboard()  { [ "${OC_TASKBOARD_ENABLED:-0}" != "1" ]; }
        stop_hub()         { return 0; }
+       stop_dashboard()   { return 0; }
+       start_dashboard()  { return 1; }
        start_hub()        { [ "${OC_HUB_ENABLED:-0}" != "1" ]; }
     fi
 
@@ -15476,6 +15635,7 @@ attach_session() {
       set +e
       trap "" INT TERM HUP
       stop_hub || echo "[hub] Could not stop Hub cleanly." >&2
+      stop_dashboard || echo "[dashboard] Owned cleanup could not be verified." >&2
       stop_editor || echo "[editor] Could not stop editor cleanly." >&2
       stop_taskboard || echo "[taskboard] Could not stop taskboard cleanly." >&2
       if ! stop_mcp_adapter; then
@@ -15541,6 +15701,7 @@ attach_session() {
       run_mcp_tui
     elif [ "$OC_MODE" = "web" ]; then
       stop_hub || echo "[hub] Existing Hub ownership could not be verified; leaving it untouched." >&2
+      stop_dashboard || echo "[dashboard] Existing ownership could not be verified; leaving it untouched." >&2
       stop_mcp_adapter
        stop_all_proxies
        stop_openlive_gateway
@@ -15567,6 +15728,7 @@ attach_session() {
       if [ "$OC_WEB_TUI" = "true" ]; then
         aa-exec -p opencode-sandbox -- opencode web --hostname 127.0.0.1 --port "$OC_PORT_INTERNAL" &
         OC_WEB_PID=$!
+        start_dashboard || echo "[dashboard] Unavailable; OpenCode continues." >&2
         sleep 2
         echo ""
         echo "Press Enter to start TUI (web server continues running)..."
@@ -15592,6 +15754,7 @@ attach_session() {
           set +e
           aa-exec -p opencode-sandbox -- opencode web --hostname 127.0.0.1 --port "$OC_PORT_INTERNAL" &
           OC_WEB_PID=$!
+          start_dashboard || echo "[dashboard] Unavailable; OpenCode continues." >&2
           wait "$OC_WEB_PID"
           rc=$?
           if [ "$shutdown_requested" = "1" ]; then
@@ -16681,6 +16844,7 @@ start_session() {
         echo "[hub] Guest Hub assets could not be staged; the guest will publish an unavailable Hub state." >&2
       fi
     fi
+    dashboard_stage_assets "$sess_share" || echo "[dashboard] Staging unavailable; OpenCode continues." >&2
   elif [[ "$effective_mcp_enabled" == 1 ]]; then
     resolve_session_auth "$sess_share" || return 1
     install_web_lib "$sess_share" || return 1
@@ -17281,6 +17445,8 @@ start_session() {
        stop_taskboard()   { return 0; }
        start_taskboard()  { [ "${OC_TASKBOARD_ENABLED:-0}" != "1" ]; }
        stop_hub()         { return 0; }
+       stop_dashboard()   { return 0; }
+       start_dashboard()  { return 1; }
        start_hub()        { [ "${OC_HUB_ENABLED:-0}" != "1" ]; }
     fi
 
@@ -17416,6 +17582,7 @@ EOF
       set +e
       trap "" INT TERM HUP
       stop_hub || echo "[hub] Could not stop Hub cleanly." >&2
+      stop_dashboard || echo "[dashboard] Owned cleanup could not be verified." >&2
       stop_editor || echo "[editor] Could not stop editor cleanly." >&2
       if ! stop_mcp_adapter; then
         MCP_SHUTDOWN_FAILED=1
@@ -17527,6 +17694,7 @@ EOF
         ;;
       web)
         stop_hub || echo "[hub] Existing Hub ownership could not be verified; leaving it untouched." >&2
+        stop_dashboard || echo "[dashboard] Existing ownership could not be verified; leaving it untouched." >&2
         stop_mcp_adapter
         stop_all_proxies
         stop_openlive_gateway
@@ -17554,6 +17722,7 @@ EOF
         if [ "$OC_WEB_TUI" = "true" ]; then
           aa-exec -p opencode-sandbox -- opencode web --hostname 127.0.0.1 --port "$OC_PORT_INTERNAL" &
           OC_WEB_PID=$!
+          start_dashboard || echo "[dashboard] Unavailable; OpenCode continues." >&2
           sleep 2
           echo ""
           echo "Press Enter to start TUI (web server continues running)..."
@@ -17583,6 +17752,7 @@ EOF
             set +e
             aa-exec -p opencode-sandbox -- opencode web --hostname 127.0.0.1 --port "$OC_PORT_INTERNAL" &
             OC_WEB_PID=$!
+            start_dashboard || echo "[dashboard] Unavailable; OpenCode continues." >&2
             wait "$OC_WEB_PID"
             rc=$?
             if [ "$shutdown_requested" = "1" ]; then

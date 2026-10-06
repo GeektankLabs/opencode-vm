@@ -38,11 +38,17 @@ def shell(code, *args, check=True):
 
 def stage(directory):
     # Materialize exactly the production payload, including the managed extension.
+    # The combined payloads exceed Linux MAX_ARG_STRLEN when passed as one
+    # bash -c argument; production carries them inside the script file, so the
+    # test sources them from a temporary file instead of argv.
     variables = []
     for name, marker in [("OCVM_WEB_LIB_SH", "WEBLIB"), ("OCVM_WEB_REDIRECT_PY", "PYSRC"),
                          ("OCVM_EDITOR_INSTALL_SH", "EDITOR_INSTALL"), ("OCVM_EDITOR_EXTENSION_JS", "EDITOR_JS")]:
         variables.append(f"read -r -d '' {name} <<'PAYLOAD' || true\n{payload(name, marker)}\nPAYLOAD")
-    shell("\n".join(variables) + "\n" + function("install_web_lib") + '\ninstall_web_lib "$1"', directory)
+    with tempfile.TemporaryDirectory() as tmp:
+        source = Path(tmp) / "payloads.sh"
+        source.write_text("\n".join(variables) + "\n")
+        shell(f'. "{source}"\n' + function("install_web_lib") + '\ninstall_web_lib "$1"', directory)
 
 
 class EditorTest(unittest.TestCase):
@@ -238,7 +244,12 @@ ssh() { case " $* " in *" -f -N "*) printf '%s\n' "$@" > "$TEST_DIR/forward" ;; 
         redirector = payload("OCVM_WEB_REDIRECT_PY", "PYSRC")
         launcher = SCRIPT.split('LAUNCHER_JS = r"""\n', 1)[1].split('\n"""\n\nLAUNCHER_CSS', 1)[0]
         registry = SCRIPT.split("LAUNCHER_APP_REGISTRY = (", 1)[1].split("\n)", 1)[0]
-        self.assertEqual(registry.count('"id":'), 3)
+        self.assertEqual(registry.count('"id":'), 4)
+        self.assertIn('"id": "repo-dashboard"', registry)
+        self.assertIn('"label": "Repo Live"', registry)
+        self.assertIn('"runtime_file": "dashboard/runtime.json"', registry)
+        self.assertIn('"port_offset": 6', registry)
+        self.assertIn('"local_only": True', registry)
         self.assertIn('"id": "editor"', registry)
         self.assertIn('"port_offset": 4', registry)
         self.assertIn('"id": "taskboard"', registry)
@@ -247,6 +258,7 @@ ssh() { case " $* " in *" -f -N "*) printf '%s\n' "$@" > "$TEST_DIR/forward" ;; 
         self.assertIn('"port_offset": 5', registry)
         self.assertIn('"id": "agent-hub"', registry)
         self.assertIn('"label": "Agent Control"', registry)
+        self.assertLess(registry.index('"id": "repo-dashboard"'), registry.index('"id": "editor"'))
         self.assertLess(registry.index('"id": "editor"'), registry.index('"id": "taskboard"'))
         self.assertLess(registry.index('"id": "taskboard"'), registry.index('"id": "agent-hub"'))
         self.assertIn('"port_offset": 7', registry)

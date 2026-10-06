@@ -1028,6 +1028,101 @@ export class OpenCodeGateway implements SessionGateway {
     };
   }
 
+  /** Internal dashboard read, never registered as an MCP tool. No admission,
+   * journal writes or public exposure-filter changes. Native project directories
+   * and recursively admitted parents establish worktree/child ancestry. */
+  async readDashboardInventory() {
+    const deadline = Date.now() + 10000;
+    try { await this.compatibilityCheck(); }
+    catch (error) {
+      // An initial backend boot/read outage must not poison the independent
+      // dashboard forever. Retry only this read probe on the next collector tick.
+      this.compatibilityPromise = undefined;
+      throw error;
+    }
+    const [identity, health] = await Promise.all([
+      this.client.project.current({ directory: this.runtime.project }, { signal: this.deadline() }),
+      this.client.global.health({ signal: this.deadline() }),
+    ]);
+    if (identity.data?.id !== this.requiredProjectId() || health.data?.healthy !== true) throw incompatible("Dashboard backend identity changed.");
+    const directories = await this.client.project.directories(
+      { projectID: this.requiredProjectId(), directory: this.runtime.project },
+      { signal: this.deadline() },
+    );
+    if (!Array.isArray(directories.data)) throw incompatible("Project directories are unavailable.");
+    const locations = new Set([this.runtime.project, ...directories.data.map(item => item.directory)]);
+    const sessions: SessionV2Info[] = [];
+    let cursor: string | undefined;
+    const seen = new Set<string>();
+    let complete = true;
+    for (let page = 0; page < 11; page++) {
+      if (Date.now() > deadline) { complete = false; break; }
+      const response = await this.client.v2.session.list(
+        { directory: this.runtime.project, project: this.requiredProjectId(), limit: 20, order: "desc", ...(cursor ? { cursor } : {}) },
+        { signal: this.deadline() },
+      );
+      if (!Array.isArray(response.data?.data)) throw incompatible("Session inventory is unavailable.");
+      sessions.push(...response.data.data);
+      cursor = response.data?.cursor?.next ?? undefined;
+      if (sessions.length > 200) { complete = false; break; }
+      if (!cursor) break;
+      if (seen.has(cursor)) throw incompatible("Repeated inventory cursor.");
+      seen.add(cursor);
+      if (page === 10) { complete = false; break; }
+    }
+    const admitted = new Map<string, SessionV2Info>();
+    for (const item of sessions) {
+      if (item.projectID === this.requiredProjectId() && locations.has(item.location.directory)) admitted.set(item.id, item);
+    }
+    for (let pass = 0; pass < sessions.length; pass++) {
+      let changed = false;
+      for (const item of sessions) {
+        if (!admitted.has(item.id) && item.projectID === this.requiredProjectId() && item.parentID && admitted.has(item.parentID)) {
+          admitted.set(item.id, item); changed = true;
+        }
+      }
+      if (!changed) break;
+    }
+    if (sessions.some(item => item.projectID === this.requiredProjectId() && !admitted.has(item.id))) complete = false;
+    return { sessions: [...admitted.values()].slice(0, 200), complete, observed_at: new Date().toISOString() };
+  }
+
+  async readDashboardSession(session: SessionV2Info) {
+    // Revalidate identity/location against the admitted native inventory each tick.
+    const current = await this.client.v2.session.get({ sessionID: session.id }, { signal: this.deadline() });
+    const value = current.data?.data;
+    if (!value || value.id !== session.id || value.projectID !== this.requiredProjectId() || value.location.directory !== session.location.directory || value.parentID !== session.parentID) throw sessionNotFound();
+    const [activity, pending, history] = await Promise.all([this.activity(session.id, value.location.directory), this.pending(session.id), this.messages(session.id, 100, undefined, undefined, value.location.directory)]);
+    if (history.items.some(item => item.info.sessionID !== session.id)) throw incompatible("Dashboard history belongs to another session.");
+    const users = history.items.filter(item => item.info.role === "user");
+    const allTurns = users.map(user => {
+      const status = this.correlatedStatus(session.id, user.info.id, history.items, activity, pending, false);
+      const assistant = history.items.filter(item => item.info.role === "assistant" && item.info.parentID === user.info.id).at(-1)?.info;
+      const info = assistant?.role === "assistant" ? assistant : undefined;
+      return {
+        user_message_id: user.info.id, state: status.state,
+        active: (status.active_assistant_message_ids?.length ?? 0) > 0,
+        finish: info?.finish ?? null, completed_at: info?.time.completed ?? null,
+        runtime: info ? { provider_id: info.providerID, model_id: info.modelID,
+          variant: isRecord(info) && typeof info.variant === "string" ? info.variant : null,
+          source: "assistant_message", message_id: info.id } : null,
+      };
+    });
+    // Bound recent terminal detail, never discard known active/unresolved turns
+    // merely because five newer user turns exist in the same 100-message window.
+    const turns = allTurns.filter((turn, index) => index >= allTurns.length - 5 || turn.active || turn.state === "submitted");
+    return {
+      session_id: value.id, title: value.title.slice(0, 240), parent_session_id: value.parentID ?? null,
+      kind: value.parentID ? "child" : value.agent === OPENLIVE_MANAGER_AGENT || value.id === await this.managerSessionId() ? "manager" : "root",
+      archived: Boolean(value.time.archived), backend_activity: activity,
+      pending_input: { ...pendingCounts(pending), scope: "session" },
+      observed_at: new Date().toISOString(), last_activity_at: value.time.updated,
+      current_runtime: value.model ? { provider_id: value.model.providerID, model_id: value.model.id,
+        variant: value.model.variant ?? null, source: "session_setting" } : null,
+      turns, turns_truncated: turns.length < allTurns.length, history_has_more: Boolean(history.next),
+    };
+  }
+
   async getSessionDetails(
     sessionId: string,
     includeArchived = false,
@@ -1257,6 +1352,7 @@ export class OpenCodeGateway implements SessionGateway {
     messages: MessageWithParts[],
     activity: SessionActivity,
     pending: PendingDetails,
+    retire = true,
   ): SessionStatusResult {
     const base = {
       session_id: sessionId,
@@ -1332,7 +1428,7 @@ export class OpenCodeGateway implements SessionGateway {
       state = "unknown";
     }
 
-    if (state === "completed" || state === "failed" || state === "aborted") {
+    if (retire && (state === "completed" || state === "failed" || state === "aborted")) {
       this.retireReceipt(sessionId, messageId);
       if (this.uncertainSubmissions.get(sessionId)?.messageId === messageId)
         this.uncertainSubmissions.delete(sessionId);
@@ -2339,11 +2435,11 @@ export class OpenCodeGateway implements SessionGateway {
     }
   }
 
-  private async activities(): Promise<Map<string, SessionActivity>> {
+  private async activities(directory = this.runtime.project): Promise<Map<string, SessionActivity>> {
     const response = await this.backendCall(
       () =>
         this.client.session.status(
-          { directory: this.runtime.project },
+          { directory },
           { signal: this.deadline() },
         ),
       "Could not read OpenCode session activity.",
@@ -2358,8 +2454,8 @@ export class OpenCodeGateway implements SessionGateway {
     return result;
   }
 
-  private async activity(sessionId: string): Promise<SessionActivity> {
-    return (await this.activities()).get(sessionId) ?? "idle";
+  private async activity(sessionId: string, directory = this.runtime.project): Promise<SessionActivity> {
+    return (await this.activities(directory)).get(sessionId) ?? "idle";
   }
 
   private async pending(sessionId: string): Promise<PendingDetails> {
@@ -2399,13 +2495,14 @@ export class OpenCodeGateway implements SessionGateway {
     limit: number,
     before?: string,
     signal?: AbortSignal,
+    directory = this.runtime.project,
   ): Promise<MessagePage> {
     let response: Awaited<ReturnType<OpenCodeClient["session"]["messages"]>>;
     try {
       response = await this.client.session.messages(
         {
           sessionID: sessionId,
-          directory: this.runtime.project,
+          directory,
           limit,
           ...(before ? { before } : {}),
         },

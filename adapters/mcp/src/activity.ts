@@ -71,6 +71,21 @@ export class ActivityJournal {
     private readonly maximum: number,
   ) {}
 
+  /** Dashboard consumes the already validated journal without opening a writer,
+   * migration, commit, prefetch, event subscription or receipt acknowledgement. */
+  static async readDashboard(path: string, project: string, sessions: Set<string>) {
+    const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const info = await file.stat();
+      if (!info.isFile() || info.uid !== process.getuid?.() || (info.mode & 0o777) !== 0o600 || info.size > 32 * 1024 * 1024) throw new Error("Unsafe activity journal");
+      const store = JSON.parse(await file.readFile("utf8")) as Store;
+      if (!validStore(store, project) || !validEvents(store)) throw new Error("Invalid activity journal");
+      return { epoch: store.epoch, recent: store.events.filter(event => sessions.has(event.session_id ?? ""))
+        .slice(-10).map(event => ({ event_id: event.event_id, session_id: event.session_id,
+          message_id: event.message_id ?? null, type: event.type, timestamp: event.timestamp })) };
+    } finally { await file.close(); }
+  }
+
   static async open(
     path: string,
     project: string,

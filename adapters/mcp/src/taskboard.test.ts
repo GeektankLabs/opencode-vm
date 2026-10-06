@@ -64,6 +64,24 @@ function fakeBoard(rows: Array<{ id: string; projectId: string; title: string; d
   return { calls, failPutOnce: () => { failNextPut = true; }, failMoveOnce: () => { failNextMove = true; }, restore: () => { globalThis.fetch = originalFetch; } };
 }
 
+test("internal dashboard scans 500 tickets once using canonical IDs, no descriptions or metadata writes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ocvm-dashboard-board-"));
+  const rows = Array.from({length:500},(_,i)=>({id:`ticket-${i}`,projectId:"backend-project",title:`Task ${i}`,description:"private prompt",status:"in_progress",priority:"medium"}));
+  const board = fakeBoard(rows);
+  try {
+    const state = runtime(directory); const service = new ProjectBoardService(state);
+    const projection = await service.readDashboardTasks();
+    assert.equal(projection.length,500);
+    assert.equal(board.calls.filter(c=>c.path==="/api/tickets").length,1);
+    assert.ok(board.calls.every(c=>c.method==="GET"));
+    assert.equal(JSON.stringify(projection).includes("private prompt"),false);
+    assert.equal(projection[0]?.task_id,(await service.getTask(projection[0]!.task_id)).task_id);
+    await assert.rejects(stat(state.taskboardMetadataFile),{code:"ENOENT"});
+    rows.push({...rows[0]!,id:"overflow"});
+    await assert.rejects(service.readDashboardTasks(),{code:"TASK_SEARCH_INCOMPLETE"});
+  } finally {board.restore();await rm(directory,{recursive:true,force:true});}
+});
+
 test("management journal appends compatibly without growing Description and preserves legacy notes", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ocvm-board-note-"));
   const rows = [{ id: "backend-1", projectId: "backend-project", title: "Unchanged", description: "Original\n\n",
