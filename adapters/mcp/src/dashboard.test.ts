@@ -152,3 +152,79 @@ test("internal read rejects rebound session identity and foreign history; worktr
   wrongId=true;await assert.rejects(gateway.readDashboardSession(s));wrongId=false;
   wrongHistory=true;await assert.rejects(gateway.readDashboardSession(s));
 });
+
+// OCVM-DASHBOARD-READINESS-CORRECTION-20261006-2258: real-start evidence showed the service
+// running the full 20s window (started, CPU used, clean scripted stop, empty server.log) while
+// the pre-fix health contract refused readiness for partial coverage. Corrected contract:
+// service readiness (valid generation + demonstrated backend + HTTP serving) is separated from
+// data coverage, which stays honest (degraded/incomplete + timestamps). Undemonstrated backend,
+// unticked collector and revoked generation remain refused; a socket alone is never ok.
+test("readiness separates demonstrated service from data coverage; partial stays ready, undemonstrated stays refused",async t=>{
+  const native=(id:string):Inventory["sessions"][number]=>({id,title:id,projectID:"native",
+    time:{created:1,updated:2},location:{directory:"/project"},cost:0,
+    tokens:{input:0,output:0,reasoning:0,cache:{read:0,write:0}}});
+  const row=(id:string):Session=>({session_id:id,title:id,parent_session_id:null,kind:"root",archived:false,
+    backend_activity:"idle",pending_input:{permissions:0,questions:0,scope:"session"},observed_at:new Date(100000).toISOString(),
+    last_activity_at:100000,current_runtime:null,turns:[],turns_truncated:false,history_has_more:false});
+  const health=async(collector:DashboardCollector)=>{
+    const config={projectHash:"project",generation:"generation",listenPort:0,authEnabled:false,auth:null,cert:"",key:"",assets:"/missing"};
+    const server=createServer(dashboardHandler(config,collector));server.listen(0,"127.0.0.1");await once(server,"listening");
+    t.after(()=>server.close());config.listenPort=(server.address() as {port:number}).port;
+    const response=await fetch(`http://127.0.0.1:${config.listenPort}/healthz`);
+    const body=await response.json() as {status:string,coverage:string,
+      sources:Record<string,{state:string,complete:boolean,error:string|null,observed_at:string|null,last_success_at:string|null}>};
+    return {status:response.status,body};
+  };
+  // A: discovery coverage gap (inventory scale/unadmitted remainder) although every read succeeded.
+  const partialDiscovery=new DashboardCollector({id:"project",name:"T"},"generation",{
+    inventory:async()=>({sessions:[native("ses_A")],complete:false,observed_at:new Date(100000).toISOString()}),
+    session:async s=>row(s.id),board:async()=>[],activity:async()=>({epoch:"e",recent:[]})},()=>100000);
+  await partialDiscovery.tick();
+  const a=await health(partialDiscovery);
+  assert.equal(a.status,200);assert.equal(a.body.status,"ok");assert.equal(a.body.coverage,"partial");
+  assert.equal(a.body.sources.discovery!.state,"degraded");
+  assert.equal(a.body.sources.discovery!.complete,false);
+  assert.equal(a.body.sources.discovery!.error,"READ_COVERAGE_INCOMPLETE");
+  assert.notEqual(a.body.sources.discovery!.observed_at,null);
+  assert.equal(a.body.sources.sessions!.state,"fresh");
+  assert.equal(a.body.sources.sessions!.complete,true);
+  // B: one per-session read races (churn) while the sweep itself succeeds.
+  const partialSessions=new DashboardCollector({id:"project",name:"T"},"generation",{
+    inventory:async()=>({sessions:[native("ses_A"),native("ses_B")],complete:true,observed_at:new Date(100000).toISOString()}),
+    session:async s=>{if(s.id==="ses_B")throw new Error("rebind race");return row(s.id);},
+    board:async()=>[],activity:async()=>({epoch:"e",recent:[]})},()=>100000);
+  await partialSessions.tick();
+  const b=await health(partialSessions);
+  assert.equal(b.status,200);assert.equal(b.body.coverage,"partial");
+  assert.equal(b.body.sources.sessions!.state,"degraded");
+  assert.equal(b.body.sources.sessions!.complete,false);
+  assert.notEqual(b.body.sources.sessions!.last_success_at,null);
+  // C: backend never demonstrated — both sources unavailable; a listening socket is not a valid app.
+  const down=new DashboardCollector({id:"project",name:"T"},"generation",{
+    inventory:async()=>{throw new Error("backend down");},
+    session:async s=>row(s.id),board:async()=>[],activity:async()=>({epoch:"e",recent:[]})},()=>100000);
+  await down.tick();
+  const c=await health(down);
+  assert.equal(c.status,503);assert.equal(c.body.status,"not_ready");assert.equal(c.body.coverage,"unknown");
+  assert.equal(c.body.sources.discovery!.error,"SOURCE_UNAVAILABLE");
+  // D: unticked collector — nothing observed yet.
+  const unticked=new DashboardCollector({id:"project",name:"T"},"generation",{
+    inventory:async()=>({sessions:[native("ses_A")],complete:true,observed_at:new Date(100000).toISOString()}),
+    session:async s=>row(s.id),board:async()=>[],activity:async()=>({epoch:"e",recent:[]})},()=>100000);
+  const d=await health(unticked);
+  assert.equal(d.status,503);assert.equal(d.body.coverage,"unknown");
+  assert.equal(d.body.sources.sessions!.observed_at,null);
+  // E: revoked/mismatched generation never serves ok even with demonstrated sources.
+  const revoked=new DashboardCollector({id:"project",name:"T"},"unverified",{
+    inventory:async()=>({sessions:[native("ses_A")],complete:true,observed_at:new Date(100000).toISOString()}),
+    session:async s=>row(s.id),board:async()=>[],activity:async()=>({epoch:"e",recent:[]})},()=>100000);
+  await revoked.tick();
+  const e=await health(revoked);
+  assert.equal(e.status,503);assert.equal(e.body.status,"not_ready");assert.equal(e.body.coverage,"unknown");
+  // F: healthy complete coverage stays ok/complete.
+  const f=fixture();await f.collector.tick();
+  const g=await health(f.collector);
+  assert.equal(g.status,200);assert.equal(g.body.status,"ok");assert.equal(g.body.coverage,"complete");
+  assert.equal(g.body.sources.discovery!.state,"fresh");
+  assert.equal(g.body.sources.sessions!.complete,true);
+});
