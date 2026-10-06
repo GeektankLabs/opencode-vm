@@ -212,12 +212,22 @@ pass "standalone cache refresh failures, offline reuse, incomplete payloads and 
   guest_auth="$TMP/resume-guest-auth.json"
   cp "$share/xdg-data/opencode/auth.json" "$guest_auth"
   launches=0
+  doctor_installs=0
   # Capture and seed are VM calls too, but neither launches OpenCode. Keep
   # real host finalization and assert skill contents only at the launch boundary.
   resume_vm_call() {
     # Match literal guest code, not variables from this fixture.
     # shellcheck disable=SC2016
     case "$2" in
+      *'install_doctor_wrapper'*)
+        # The VM-local doctor install payload also contains `cat > "$tmp"`,
+        # but that write materializes the wrapper file, never an auth seed.
+        # Recognize the payload by its own marker BEFORE the broad heuristic
+        # and leave the auth fixture (and every auth assertion) untouched.
+        [[ "$2" == *'ocvm-doctor-wrapper v1'* ]] || fail "doctor payload lost its wrapper marker"
+        jq -e 'type == "object"' "$guest_auth" >/dev/null || fail "doctor routing corrupted the auth fixture"
+        doctor_installs=$((doctor_installs + 1))
+        return 0 ;;
       *'lock=/tmp/ocvm-runtime.lock'*) jq -e 'type == "object"' "$guest_auth" >/dev/null; cat "$guest_auth" ;;
       *'cat > "$tmp"'*) cat > "$guest_auth"; jq -e 'type == "object"' "$guest_auth" >/dev/null ;;
       *) fail "unexpected resume VM call" ;;
@@ -238,6 +248,7 @@ pass "standalone cache refresh failures, offline reuse, incomplete payloads and 
   }
   attach_session >/dev/null
   [[ "$launches" == 1 ]] || fail "resume did not reach the runtime launch"
+  [[ "$doctor_installs" == 1 ]] || fail "reconnect did not install the VM-local doctor wrapper"
   printf '\nUpdated package content.\n' >> "$SCRIPT_DIR/skills/besprechung/commands/besprechung.md"
   attach_session >/dev/null
   # An edited managed command must survive both updates and opt-out.
@@ -258,5 +269,6 @@ pass "standalone cache refresh failures, offline reuse, incomplete payloads and 
   }
   attach_session >/dev/null 2>/dev/null
   [[ "$launches" == 4 ]] || fail "not every resume reached the runtime launch"
+  [[ "$doctor_installs" == 4 ]] || fail "not every reconnect installed the doctor wrapper"
 )
 pass "actual reconnect installs, refreshes and removes owned files while preserving edits"
