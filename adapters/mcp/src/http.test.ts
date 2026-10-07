@@ -8,9 +8,10 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { McpHttpServer, MAX_REQUEST_BODY_BYTES } from "./http.js";
 import { MCP_EVENT_DEFINITIONS } from "./events.js";
+import { lastToolRoundtrips, traceToolCall } from "./diagnostics.js";
 import type { SessionGateway } from "./opencode.js";
 import type { AttachmentDescriptor } from "./attachments.js";
-import { AdapterError } from "./types.js";
+import { AdapterError, ADAPTER_VERSION } from "./types.js";
 import type {
   AttentionResult,
   ActivityQuery,
@@ -1338,6 +1339,250 @@ test("official MCP client cancellation rejects a pending tool call", async () =>
     releaseList?.();
     await client.close().catch(() => undefined);
     await server.close();
+  }
+});
+
+test("pre-dispatch rejections carry bounded redacted correlation per phase without wire changes", async (t) => {
+  const adapter = new McpHttpServer(runtime(), token, new FakeGateway());
+  const port = await adapter.start();
+  t.after(() => adapter.close());
+  const sentinels = ["SENTINEL-HEADER-VALUE", "SENTINEL-BODY-SECRET", "SENTINEL-URL-PART", "SENTINEL-TOKEN-VALUE", token];
+  const stderrLines: string[] = [];
+  const originalWrite = process.stderr.write;
+  process.stderr.write = ((chunk: unknown) => {
+    if (typeof chunk === "string") stderrLines.push(chunk);
+    return true;
+  }) as typeof process.stderr.write;
+  t.after(() => { process.stderr.write = originalWrite; });
+
+  const raw = (path: string, method: string, headers: Record<string, string>, body?: string) =>
+    new Promise<{ status: number; headers: http.IncomingHttpHeaders; body: string }>((resolve, reject) => {
+      const request = http.request({ hostname: "127.0.0.1", port, path, method, headers }, (response) => {
+        let text = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk) => { text += chunk; });
+        response.on("end", () => resolve({ status: response.statusCode ?? 0, headers: response.headers, body: text }));
+      });
+      request.on("error", reject);
+      if (body !== undefined) request.write(body);
+      request.end();
+    });
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+  const expectCorrelation = (correlation: unknown, phase: string, code: string, reason: string): Record<string, unknown> => {
+    assert.ok(correlation && typeof correlation === "object", "correlation object missing");
+    const value = correlation as Record<string, unknown>;
+    assert.deepEqual(Object.keys(value).sort(), ["adapterVersion", "code", "generation", "phase", "reason", "request", "time"]);
+    assert.equal(value.phase, phase);
+    assert.equal(value.code, code);
+    assert.equal(value.reason, reason);
+    assert.equal(value.generation, "generation");
+    assert.equal(value.adapterVersion, ADAPTER_VERSION);
+    assert.match(String(value.request), uuid);
+    assert.ok(!Number.isNaN(Date.parse(String(value.time))));
+    assert.ok(Buffer.byteLength(JSON.stringify(value), "utf8") < 512, "correlation must stay bounded");
+    return value;
+  };
+  const expectRejectionLog = (correlation: Record<string, unknown>) => {
+    const line = stderrLines.find((entry) => entry.startsWith("[mcp] rejection="));
+    assert.ok(line, "expected one stderr rejection trace");
+    assert.deepEqual(JSON.parse(String(line).slice("[mcp] rejection=".length)), correlation);
+  };
+  const expectNoSentinel = (body: string) => {
+    for (const sentinel of sentinels) {
+      assert.ok(!body.includes(sentinel), `response leaked ${sentinel}`);
+      for (const line of stderrLines) assert.ok(!line.includes(sentinel), `stderr leaked ${sentinel}`);
+    }
+  };
+  const authorized = { "X-Sentinel": "SENTINEL-HEADER-VALUE", "X-OCVM-MCP-Token": token, Host: `127.0.0.1:${port}` };
+  type WireBody = { error?: string | { code?: number; message?: string; data?: Record<string, unknown> }; id?: unknown; correlation?: unknown };
+
+  // header phase: invalid Host
+  stderrLines.length = 0;
+  let reply = await raw("/healthz", "GET", { ...authorized, Host: "evil.example:9999" });
+  assert.equal(reply.status, 403);
+  let body = JSON.parse(reply.body) as WireBody;
+  assert.equal(body.error, "Invalid Host header.");
+  expectRejectionLog(expectCorrelation(body.correlation, "header", "403", "invalid_host"));
+  expectNoSentinel(reply.body);
+
+  // method phase: unknown route with a sentinel query
+  stderrLines.length = 0;
+  reply = await raw("/mcp?q=SENTINEL-URL-PART", "GET", authorized);
+  assert.equal(reply.status, 404);
+  body = JSON.parse(reply.body) as WireBody;
+  assert.equal(body.error, "Not found.");
+  expectCorrelation(body.correlation, "method", "404", "not_found");
+  expectNoSentinel(reply.body);
+
+  // header phase: invalid Origin
+  stderrLines.length = 0;
+  reply = await raw("/healthz", "GET", { ...authorized, Origin: "http://evil.example" });
+  assert.equal(reply.status, 403);
+  body = JSON.parse(reply.body) as WireBody;
+  assert.equal(body.error, "Invalid Origin header.");
+  expectCorrelation(body.correlation, "header", "403", "invalid_origin");
+  expectNoSentinel(reply.body);
+
+  // auth phase: wrong token sentinel, wire authenticate header preserved
+  stderrLines.length = 0;
+  reply = await raw("/healthz", "GET", { ...authorized, "X-OCVM-MCP-Token": "SENTINEL-TOKEN-VALUE" });
+  assert.equal(reply.status, 401);
+  assert.equal(reply.headers["www-authenticate"], 'Token realm="opencode-vm-mcp"');
+  body = JSON.parse(reply.body) as WireBody;
+  assert.equal(body.error, "Authentication required.");
+  expectCorrelation(body.correlation, "auth", "401", "authentication_required");
+  expectNoSentinel(reply.body);
+
+  // method phase: wrong verb keeps the exact -32000 wire body plus allow header
+  stderrLines.length = 0;
+  reply = await raw("/mcp", "GET", authorized);
+  assert.equal(reply.status, 405);
+  assert.equal(reply.headers.allow, "POST");
+  body = JSON.parse(reply.body) as WireBody;
+  const methodError = body.error as { code?: number; message?: string; data?: Record<string, unknown> };
+  assert.equal(methodError.code, -32000);
+  assert.equal(methodError.message, "Method not allowed.");
+  expectRejectionLog(expectCorrelation(methodError.data?.correlation, "method", "-32000", "method_not_allowed"));
+  expectNoSentinel(reply.body);
+
+  // transport phase: wrong content type
+  stderrLines.length = 0;
+  reply = await raw("/mcp", "POST", { ...authorized, "content-type": "text/plain" }, "SENTINEL-BODY-SECRET");
+  assert.equal(reply.status, 415);
+  body = JSON.parse(reply.body) as WireBody;
+  assert.equal(body.error, "Content-Type must be application/json.");
+  expectCorrelation(body.correlation, "transport", "415", "invalid_content_type");
+  expectNoSentinel(reply.body);
+
+  // transport phase: malformed JSON
+  stderrLines.length = 0;
+  reply = await raw("/mcp", "POST", { ...authorized, "content-type": "application/json" }, "SENTINEL-BODY-SECRET{not json");
+  assert.equal(reply.status, 400);
+  body = JSON.parse(reply.body) as WireBody;
+  assert.equal(body.error, "Malformed JSON request.");
+  expectCorrelation(body.correlation, "transport", "400", "malformed_json");
+  expectNoSentinel(reply.body);
+
+  // protocol phase: unsupported version keeps -32022 wire data
+  stderrLines.length = 0;
+  reply = await raw("/mcp", "POST", { ...authorized, "content-type": "application/json", "mcp-protocol-version": "1999-01-01" },
+    JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: { _meta: { note: "SENTINEL-BODY-SECRET" } } }));
+  assert.equal(reply.status, 400);
+  body = JSON.parse(reply.body) as WireBody;
+  let wire = body.error as { code?: number; message?: string; data?: Record<string, unknown> };
+  assert.equal(wire.code, -32022);
+  assert.equal(wire.message, "Unsupported protocol version.");
+  assert.equal(wire.data?.requested, "1999-01-01");
+  expectCorrelation(wire.data?.correlation, "protocol", "-32022", "unsupported_protocol_version");
+  expectNoSentinel(reply.body);
+
+  // header phase: modern header mismatch keeps the -32020 wire message
+  stderrLines.length = 0;
+  reply = await raw("/mcp", "POST", { ...authorized, "content-type": "application/json", "mcp-protocol-version": "2026-07-28", "mcp-method": "tools/call" },
+    JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: { _meta: { "io.modelcontextprotocol/protocolVersion": "2026-07-28" } } }));
+  assert.equal(reply.status, 400);
+  body = JSON.parse(reply.body) as WireBody;
+  wire = body.error as { code?: number; message?: string; data?: Record<string, unknown> };
+  assert.equal(wire.code, -32020);
+  assert.equal(wire.message, "Header mismatch: standard MCP request headers must match the request metadata.");
+  expectCorrelation(wire.data?.correlation, "header", "-32020", "header_mismatch");
+  expectNoSentinel(reply.body);
+
+  // protocol phase: oversized JSON-RPC id stays unreflected
+  stderrLines.length = 0;
+  reply = await raw("/mcp", "POST", { ...authorized, "content-type": "application/json" },
+    JSON.stringify({ jsonrpc: "2.0", id: "x".repeat(2000), method: "tools/list" }));
+  assert.equal(reply.status, 400);
+  body = JSON.parse(reply.body) as WireBody;
+  wire = body.error as { code?: number; data?: Record<string, unknown> };
+  assert.equal(wire.code, -32600);
+  assert.equal(body.id, null);
+  expectCorrelation(wire.data?.correlation, "protocol", "-32600", "request_id_too_large");
+  expectNoSentinel(reply.body);
+
+  // protocol phase: invalid events JSON-RPC inside the 200 envelope
+  stderrLines.length = 0;
+  reply = await raw("/mcp", "POST", { ...authorized, "content-type": "application/json" },
+    JSON.stringify({ jsonrpc: "2.0", method: "events/list" }));
+  assert.equal(reply.status, 200);
+  body = JSON.parse(reply.body) as WireBody;
+  wire = body.error as { code?: number; message?: string; data?: Record<string, unknown> };
+  assert.equal(wire.code, -32600);
+  assert.equal(wire.message, "Invalid JSON-RPC request.");
+  expectCorrelation(wire.data?.correlation, "protocol", "-32600", "invalid_jsonrpc");
+  expectNoSentinel(reply.body);
+
+  // protocol phase: events method on a legacy protocol header keeps the -32022 event wire data
+  stderrLines.length = 0;
+  reply = await raw("/mcp", "POST", { ...authorized, "content-type": "application/json", "mcp-protocol-version": "2025-11-25", "mcp-method": "events/list" },
+    JSON.stringify({ jsonrpc: "2.0", id: 3, method: "events/list", params: { _meta: { "io.modelcontextprotocol/protocolVersion": "2025-11-25" } } }));
+  assert.equal(reply.status, 400);
+  body = JSON.parse(reply.body) as WireBody;
+  wire = body.error as { code?: number; message?: string; data?: Record<string, unknown> };
+  assert.equal(wire.code, -32022);
+  assert.deepEqual(wire.data?.supported, ["2026-07-28"]);
+  expectCorrelation(wire.data?.correlation, "protocol", "-32022", "unsupported_protocol_version");
+  expectNoSentinel(reply.body);
+});
+
+test("healthz granularity is additive, connectivity-backed and never fabricates tool evidence", async (t) => {
+  const adapter = new McpHttpServer(runtime(), token, new FakeGateway());
+  const port = await adapter.start();
+  t.after(() => adapter.close());
+  const getHealth = async () => (await fetch(`http://127.0.0.1:${port}/healthz`,
+    { headers: { "X-OCVM-MCP-Token": token } })).json() as Promise<Record<string, unknown>>;
+  const health = await getHealth();
+  assert.equal(health.healthy, true);
+  assert.equal(health.schema, 1);
+  assert.equal(health.generation, "generation");
+  assert.equal(health.adapterVersion, ADAPTER_VERSION);
+  const granularity = health.granularity as Record<string, unknown>;
+  assert.deepEqual(Object.keys(granularity).sort(),
+    ["backend_connectivity", "configuration", "events_channel", "last_tool_error", "last_tool_success", "listener", "process"]);
+  assert.equal(granularity.configuration, "validated");
+  assert.equal(granularity.process, "up");
+  assert.equal(granularity.listener, "bound");
+  assert.equal(granularity.backend_connectivity, "unverified");
+  assert.equal(granularity.events_channel, "enabled");
+  const before = structuredClone(lastToolRoundtrips());
+  await getHealth(); await getHealth(); await getHealth();
+  assert.deepEqual(lastToolRoundtrips(), before, "health polling alone must not create roundtrip evidence");
+
+  const stderrLines: string[] = [];
+  const originalWrite = process.stderr.write;
+  process.stderr.write = ((chunk: unknown) => {
+    if (typeof chunk === "string") stderrLines.push(chunk);
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    await traceToolCall("list_sessions", { session_id: "ses_roundtrip" }, (async () => ({
+      content: [{ type: "text", text: "SECRET-PAYLOAD-SENTINEL" }],
+      structuredContent: { sessions: ["SECRET-STRUCT-SENTINEL"] },
+      isError: false,
+    })) as never);
+    const afterSuccess = lastToolRoundtrips();
+    assert.equal(afterSuccess.last_success?.tool, "list_sessions");
+    assert.match(String(afterSuccess.last_success?.request), /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu);
+    assert.ok(!Number.isNaN(Date.parse(String(afterSuccess.last_success?.time))));
+    assert.ok(afterSuccess.last_success && !("code" in afterSuccess.last_success));
+    assert.ok(!JSON.stringify(afterSuccess).includes("SECRET-"));
+    await traceToolCall("get_session", {}, (async () => ({
+      content: [],
+      isError: true,
+      _meta: { "opencode-vm/error": { code: "SESSION_NOT_FOUND", message: "SECRET-REASON-SENTINEL" } },
+      structuredContent: {},
+    })) as never);
+    const afterError = lastToolRoundtrips();
+    assert.equal(afterError.last_error?.code, "SESSION_NOT_FOUND");
+    assert.equal(afterError.last_error?.tool, "get_session");
+    assert.ok(!JSON.stringify(afterError).includes("SECRET-"));
+    assert.ok(!stderrLines.join("").includes("SECRET-"));
+    const refreshed = await getHealth();
+    const refreshedGranularity = refreshed.granularity as Record<string, unknown>;
+    assert.deepEqual(refreshedGranularity.last_tool_success, afterSuccess.last_success);
+    assert.deepEqual(refreshedGranularity.last_tool_error, afterError.last_error);
+  } finally {
+    process.stderr.write = originalWrite;
   }
 });
 

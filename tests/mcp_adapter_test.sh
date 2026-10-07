@@ -327,26 +327,53 @@ grep -qF 'oauth obs:' "$SCRIPT" || fail "OAuth warning observation missing"
 pass "start/attach/doctor name exactly one honest MCP end state with concrete causes"
 
 # STARTREST P1: provenance report classifies the invocation and names gaps.
+# Self-contained throwaway git fixture: classification never depends on the
+# checkout/export layout the test suite itself runs from.
 (
   export HOME="$TMP/provenance-home"
   export OCVM_INTERNAL_SOURCE_ONLY=1 OCVM_DISABLE_UPDATE_CHECK=1
   mkdir -p "$HOME"
   # shellcheck disable=SC1090
   source "$SCRIPT"
+  fixture_git="$TMP/provenance-git"
+  fixture_plain="$TMP/provenance-plain"
+  mkdir -p "$fixture_git" "$fixture_plain" "$HOME/bin"
+  git -C "$fixture_git" init -q
+  printf 'x\n' > "$fixture_git/opencode-vm"
+  printf 'x\n' > "$fixture_plain/opencode-vm"
+  cp "$fixture_plain/opencode-vm" "$HOME/bin/opencode-vm"
+  PROVENANCE_TARGET=""
+  ocvm_resolve_script_path() { printf '%s\n' "$PROVENANCE_TARGET"; }
   SCRIPT_DIR="$ROOT"
+  PROVENANCE_TARGET="$fixture_git/opencode-vm"
   out="$(script_provenance_report)"
   grep -qF 'invocation: git checkout' <<<"$out" || exit 1
   grep -qF 'mcp assets: source checkout, valid' <<<"$out" || exit 1
   grep -qF 'hub assets: source checkout' <<<"$out" || exit 1
-  grep -qF 'integrity:  no gaps detected' <<<"$out" || exit 1
-  SCRIPT_DIR="$TMP/standalone"
+  PROVENANCE_TARGET="$fixture_plain/opencode-vm"
+  out="$(script_provenance_report)"
+  grep -qF 'invocation: standalone script' <<<"$out" || exit 1
+  grep -qF "installed:  $HOME/bin/opencode-vm (vunknown)" <<<"$out" || exit 1
+  grep -qF "gap:        installed version vunknown differs from running v$OCVM_VERSION" <<<"$out" || exit 1
+  out="$(script_provenance_report)"
+  grep -qF 'digest:     installed copy byte-identical' <<<"$out" || exit 1
+  printf '\n# drift\n' >> "$HOME/bin/opencode-vm"
+  out="$(script_provenance_report)"
+  grep -qF 'digest:     installed copy differs from the running script' <<<"$out" || exit 1
+  PROVENANCE_TARGET="$HOME/bin/opencode-vm"
+  out="$(script_provenance_report)"
+  grep -qF 'invocation: managed install' <<<"$out" || exit 1
+  rm -f "$HOME/bin/opencode-vm"
+  # Standalone layout without assets: concrete named gaps, no repair/download.
+  SCRIPT_DIR="$TMP/provenance-standalone"
   mkdir -p "$SCRIPT_DIR"
+  PROVENANCE_TARGET="$fixture_plain/opencode-vm"
   out="$(script_provenance_report)"
   grep -qF 'mcp assets: GAP' <<<"$out" || exit 1
   grep -qF 'hub assets: GAP' <<<"$out" || exit 1
   grep -qF 'openlive:   not installed' <<<"$out" || exit 1
   grep -qF 'integrity:  named gaps above' <<<"$out" || exit 1
-) || fail "provenance report did not classify checkout vs standalone gaps"
+) || fail "provenance report did not classify invocations or name gaps"
 pass "provenance report classifies invocation and names concrete asset gaps read-only"
 
 printf 'All MCP adapter lifecycle tests passed.\n'

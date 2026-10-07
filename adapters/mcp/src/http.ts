@@ -132,8 +132,12 @@ export class McpHttpServer {
 
       if (pathname === "/healthz") {
         if (request.method !== "GET") {
-          traceRejection({ ...correlationBase, phase: "method", code: "405", reason: "method_not_allowed" });
-          methodNotAllowed(response, "GET");
+          response.setHeader("allow", "GET");
+          this.rejectWith(response, correlationBase, 405, {
+            jsonrpc: "2.0",
+            error: { code: -32000, message: "Method not allowed." },
+            id: null,
+          }, "method", "method_not_allowed");
           return;
         }
         const roundtrips = lastToolRoundtrips();
@@ -165,8 +169,12 @@ export class McpHttpServer {
       }
 
       if (request.method !== "POST") {
-        traceRejection({ ...correlationBase, phase: "method", code: "405", reason: "method_not_allowed" });
-        methodNotAllowed(response, "POST");
+        response.setHeader("allow", "POST");
+        this.rejectWith(response, correlationBase, 405, {
+          jsonrpc: "2.0",
+          error: { code: -32000, message: "Method not allowed." },
+          id: null,
+        }, "method", "method_not_allowed");
         return;
       }
       const contentType = request.headers["content-type"];
@@ -480,15 +488,6 @@ function readJsonBody(request: IncomingMessage): Promise<unknown> {
     });
     request.on("aborted", () => fail(new MalformedBodyError()));
     request.on("error", () => fail(new MalformedBodyError()));
-  });
-}
-
-function methodNotAllowed(response: ServerResponse, allow: string): void {
-  response.setHeader("allow", allow);
-  writeJson(response, 405, {
-    jsonrpc: "2.0",
-    error: { code: -32000, message: "Method not allowed." },
-    id: null,
   });
 }
 

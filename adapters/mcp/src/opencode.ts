@@ -205,7 +205,11 @@ export class OpenCodeGateway implements SessionGateway {
   private eventBridge?: McpEventBridge;
   private attentionProcessing?: Promise<void>;
   private readonly attentionEpisodes = new Map<string, { attempts: number; nextAllowedAt: number; alerted: boolean }>();
+  // Test seam: episode cadence defaults; behavior with defaults is the shipped contract.
+  private attentionRetryDelaysMs: number[] = [5_000, 15_000, 45_000];
   private backendHealthCache?: { at: number; state: "ok" | "unreachable" };
+  private backendHealthCacheTtlMs = 5000;
+  private backendHealthProbeTimeoutMs = 500;
   private readonly collectorStop = new AbortController();
   private collector?: Promise<void>;
   private sweeper?: Promise<void>;
@@ -320,15 +324,15 @@ export class OpenCodeGateway implements SessionGateway {
    */
   async backendConnectivity(): Promise<"ok" | "unreachable" | "unverified"> {
     const now = Date.now();
-    if (this.backendHealthCache && now - this.backendHealthCache.at < 5000)
+    if (this.backendHealthCache && now - this.backendHealthCache.at < this.backendHealthCacheTtlMs)
       return this.backendHealthCache.state;
     try {
-      const health = await this.client.global.health({ signal: AbortSignal.timeout(500) });
+      const health = await this.client.global.health({ signal: AbortSignal.timeout(this.backendHealthProbeTimeoutMs) });
       const state = health.data?.healthy === true ? "ok" : "unreachable";
-      this.backendHealthCache = { at: now, state };
+      this.backendHealthCache = { at: Date.now(), state };
       return state;
     } catch {
-      this.backendHealthCache = { at: now, state: "unreachable" };
+      this.backendHealthCache = { at: Date.now(), state: "unreachable" };
       return "unreachable";
     }
   }
@@ -350,7 +354,7 @@ export class OpenCodeGateway implements SessionGateway {
       // attempt instead of re-running on every backend event; the episode
       // budget is finite and never replenished by success of other entries.
       const episode = this.attentionEpisodes.get(entry.event_id);
-      if (episode && (episode.attempts >= 3 || Date.now() < episode.nextAllowedAt)) continue;
+      if (episode && (episode.attempts >= this.attentionRetryDelaysMs.length || Date.now() < episode.nextAllowedAt)) continue;
       try {
         if (entry.event_type === "session.input_required") {
           const status = await this.getSessionStatus(entry.session_id, entry.submitted_message_id);
@@ -391,8 +395,8 @@ export class OpenCodeGateway implements SessionGateway {
         this.tracking.partial = true;
         const prior = this.attentionEpisodes.get(entry.event_id);
         const attempts = (prior?.attempts ?? 0) + 1;
-        const delays = [5_000, 15_000, 45_000];
-        const exhausted = attempts >= 3;
+        const delays = this.attentionRetryDelaysMs;
+        const exhausted = attempts >= delays.length;
         this.attentionEpisodes.set(entry.event_id, {
           attempts,
           nextAllowedAt: Date.now() + delays[Math.min(attempts - 1, delays.length - 1)]!,
