@@ -241,3 +241,82 @@ cmp -s "$HOST" "$TMP/host-before.json" || fail 'missing jq changed host config'
 cmp -s "$pub_project" "$TMP/project-before.json" || fail 'missing jq changed project config'
 [[ -d "$sess_share" && ! -s "$TMP/lima.log" ]] || fail 'missing jq discarded session'
 pass 'unavailable jq cannot silently bypass removal filtering during destroy'
+
+# ---------------------------------------------------------------------------
+# Canonical OpenAI headerTimeout default (fill-only, 60000 ms) on both config
+# composition paths. Mutation controls: required-default-dropped, explicit-
+# override-clobber and other-provider-pollution must fail these assertions.
+# ---------------------------------------------------------------------------
+cfg="$TMP/hdr.json"
+
+# (a) Absent provider.openai -> minimal entry with the default; nothing else moves.
+printf '%s\n' '{"provider":{"siliconflow":{"options":{"baseURL":"https://api.siliconflow.cn/v1"}}},"model":"siliconflow/x"}' > "$cfg"
+jq -S '.provider.openai = {"options":{"headerTimeout":60000}}' "$cfg" > "$TMP/hdr-expected.json"
+apply_openai_header_timeout_default "$cfg"
+check "$cfg" '.provider.openai.options.headerTimeout == 60000'
+jq -S . "$cfg" > "$TMP/hdr-after.json"
+cmp -s "$TMP/hdr-expected.json" "$TMP/hdr-after.json" || fail 'fill changed unrelated bytes (default dropped or pollution)'
+pass 'absent OpenAI entry gets the 60000 ms default and nothing else changes'
+
+# (b) Existing OpenAI entry without options -> only the missing path is added.
+printf '%s\n' '{"provider":{"openai":{"name":"openai","models":{"gpt-5":{}}},"other":{"options":{"timeout":123}}}}' > "$cfg"
+jq -S '.provider.openai.options = {"headerTimeout":60000}' "$cfg" > "$TMP/hdr-expected.json"
+apply_openai_header_timeout_default "$cfg"
+check "$cfg" '.provider.openai.options.headerTimeout == 60000 and .provider.openai.name == "openai" and (.provider.openai.models | has("gpt-5")) and .provider.other.options.timeout == 123'
+jq -S . "$cfg" > "$TMP/hdr-after.json"
+cmp -s "$TMP/hdr-expected.json" "$TMP/hdr-after.json" || fail 'custom OpenAI fields changed'
+pass 'existing OpenAI entry only gains the missing key'
+
+# (c) Existing options -> siblings untouched, headerTimeout filled.
+printf '%s\n' '{"provider":{"openai":{"options":{"timeout":123456,"apiKey":"opaque"}}}}' > "$cfg"
+jq -S '.provider.openai.options.headerTimeout = 60000' "$cfg" > "$TMP/hdr-expected.json"
+apply_openai_header_timeout_default "$cfg"
+jq -S . "$cfg" > "$TMP/hdr-after.json"
+cmp -s "$TMP/hdr-expected.json" "$TMP/hdr-after.json" || fail 'sibling option keys changed'
+pass 'sibling option keys stay untouched while headerTimeout is filled'
+
+# (d) Explicit values (number, 0, null) are never overwritten.
+for explicit in '12345' '0' 'null'; do
+  printf '{"provider":{"openai":{"options":{"headerTimeout":%s}}}}\n' "$explicit" > "$cfg"
+  apply_openai_header_timeout_default "$cfg"
+  check "$cfg" ".provider.openai.options.headerTimeout == $explicit"
+done
+pass 'explicit headerTimeout values including 0 and null are never overwritten'
+
+# (e) Non-OpenAI providers never gain the key.
+printf '%s\n' '{"provider":{"anthropic":{"options":{"timeout":99}},"alibaba":{"models":{}}}}' > "$cfg"
+jq -S '.provider' "$cfg" > "$TMP/hdr-others-before.json"
+apply_openai_header_timeout_default "$cfg"
+jq -S '.provider | del(.openai)' "$cfg" > "$TMP/hdr-others-after.json"
+cmp -s "$TMP/hdr-others-before.json" "$TMP/hdr-others-after.json" || fail 'non-OpenAI providers were modified'
+pass 'non-OpenAI providers stay byte-identical (no pollution)'
+
+# (f) Repeated fill is an idempotent no-op at byte level.
+printf '%s\n' '{"provider":{"openai":{"options":{"headerTimeout":60000}}}}' > "$cfg"
+apply_openai_header_timeout_default "$cfg"
+cp -p "$cfg" "$TMP/hdr-idem.json"
+apply_openai_header_timeout_default "$cfg"
+cmp -s "$cfg" "$TMP/hdr-idem.json" || fail 'repeated fill changed bytes'
+pass 'repeated fill is an idempotent no-op'
+
+# (g) Fresh and attach composition mirrors resolve identically; auth.json untouched.
+printf '%s\n' '{"provider":{"ai-gateway":{"models":{"gpt-5":{"name":"gpt-5"}}}},"model":"ai-gateway/gpt-5"}' > "$TMP/hdr-src.json"
+printf '%s\n' '{"openai":{"type":"oauth","refresh":"opaque-probe"}}' > "$TMP/auth.json"
+cp -p "$TMP/auth.json" "$TMP/auth-before.json"
+cp -p "$TMP/hdr-src.json" "$TMP/hdr-fresh.json"
+apply_model_enrichment "$TMP/hdr-fresh.json"
+apply_openai_header_timeout_default "$TMP/hdr-fresh.json"
+check "$TMP/hdr-fresh.json" '.provider.openai.options.headerTimeout == 60000 and .provider["ai-gateway"].models["gpt-5"].limit.context == 272000'
+cp -p "$TMP/hdr-src.json" "$TMP/hdr-attach.json"
+apply_model_enrichment "$TMP/hdr-attach.json"
+apply_openai_header_timeout_default "$TMP/hdr-attach.json"
+cmp -s "$TMP/hdr-fresh.json" "$TMP/hdr-attach.json" || fail 'fresh and attach composition diverged'
+cmp -s "$TMP/auth.json" "$TMP/auth-before.json" || fail 'auth.json changed'
+pass 'fresh and attach composition resolve identically with auth.json untouched'
+
+# (h) Structural guard: both production composition paths invoke the fill.
+grep -q 'apply_openai_header_timeout_default "$_att_cfg"' "$ROOT/opencode-vm.sh" \
+  || fail 'attach composition path lost the fill'
+grep -q 'apply_openai_header_timeout_default "$sess_cfg_file"' "$ROOT/opencode-vm.sh" \
+  || fail 'fresh composition path lost the fill'
+pass 'both fresh and attach composition paths invoke the fill'

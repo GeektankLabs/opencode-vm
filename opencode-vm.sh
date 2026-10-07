@@ -34,7 +34,7 @@ OPENLIVE_PREVIOUS_COMMAND="$OPENLIVE_DIR/previous-command"
 OPENLIVE_AUTH_MARKER="__opencode_vm_openlive__"
 OPENLIVE_LOCK_PATH=""
 OPENLIVE_ADAPTER_VERSION="0.1.7"
-OPENLIVE_ADAPTER_TAG="v0.7.15"
+OPENLIVE_ADAPTER_TAG="v0.7.16"
 OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.7.tar"
 OPENLIVE_ADAPTER_SHA256="39a50c5127b0a577b54e4790b5c3c1f463b35a52b42c4343aa639dcea53bad47"
 OPENLIVE_ACP_SDK_VERSION="1.2.1"
@@ -45,14 +45,14 @@ OPENLIVE_MANAGER_PROMPT="You manage an OpenLive voice call. The voice_sessions t
 MCP_CONNECTOR_DIR="$SHARE_ROOT/mcp-connector"
 MCP_ADAPTER_CACHE_ROOT="$MCP_CONNECTOR_DIR/adapters"
 MCP_ADAPTER_VERSION="0.1.29"
-MCP_ADAPTER_TAG="v0.7.15"
+MCP_ADAPTER_TAG="v0.7.16"
 MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.29.tar"
 MCP_ADAPTER_SHA256="d12e2495ca5b84c8d32d72a700f79eab3939d907ec52b1575aa9f16f20ffee81"
 MCP_SDK_VERSION="1.30.1"
 MCP_OPENCODE_SDK_VERSION="1.18.21"
 MCP_TESTED_PROTOCOL_VERSION="2025-11-25"
 MCP_TUNNEL_DIR="$SHARE_ROOT/mcp-tunnel/openai"
-HUB_ASSET_TAG="v0.7.15"
+HUB_ASSET_TAG="v0.7.16"
 HUB_ASSET_FILENAME="opencode-vm-hub-1.tar"
 HUB_ASSET_SHA256="a6a742d051492cb71b85dadfdea47f2a4e4d72116b08a8127733fd7b11331cb0"
 
@@ -286,7 +286,7 @@ TASKBOARD_ARM64_SHA256="3749fb985f544fdb6788ba1dff69761e599ff82b3fe86d39ca54307c
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.7.15"
+OCVM_VERSION="0.7.16"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -16290,6 +16290,9 @@ attach_session() {
   local _att_cfg
   _att_cfg="$(session_share_dir "$proj")/config/opencode/opencode.json"
   [[ -f "$_att_cfg" ]] && apply_model_enrichment "$_att_cfg"
+  # Same consistency contract for the canonical OpenAI headerTimeout default
+  # (fill-only on an absent key; resumes older shares consistently).
+  [[ -f "$_att_cfg" ]] && apply_openai_header_timeout_default "$_att_cfg"
 
   local sess_mode
   sess_mode="$(mcp_session_mode "${SESSION_LAUNCH_MODE:-${SESS_MODE:-tui}}" "$proj")" || { lifecycle_lock_release; return 1; }
@@ -17750,6 +17753,32 @@ apply_model_enrichment() {
   fi
 }
 
+# Canonical OpenAI provider default: headerTimeout 60000 ms. Fill-only —
+# creates provider.openai.options.headerTimeout ONLY when that exact key is
+# absent; any explicit user value (including 0 or null) is preserved verbatim.
+# Sibling option keys and all other providers stay byte-identical. Runs on the
+# same config composition/merge points as apply_model_enrichment (fresh session
+# config plus attach/reconnect of an existing share) so the resolved OpenCode
+# configuration is consistent on both paths. Non-fatal; needs jq.
+apply_openai_header_timeout_default() {
+  local cfg_file="$1"
+  command -v jq >/dev/null 2>&1 || return 0
+  [[ -f "$cfg_file" ]] || return 0
+  if ! jq_inplace "$cfg_file" '
+    .provider = (.provider // {})
+    | if ((.provider | type) != "object") then .
+      elif (.provider.openai == null) then .provider.openai = { options: { headerTimeout: 60000 } }
+      elif ((.provider.openai | type) != "object") then .
+      elif (.provider.openai.options == null) then .provider.openai.options = { headerTimeout: 60000 }
+      elif ((.provider.openai.options | type) != "object") then .
+      elif (.provider.openai.options | has("headerTimeout")) then .
+      else .provider.openai.options += { headerTimeout: 60000 }
+      end
+  '; then
+    echo "[run] WARN: OpenAI headerTimeout default fill failed; leaving config unchanged." >&2
+  fi
+}
+
 start_session() {
   proj="$(pwd)"
   SESSION_MODE="$(mcp_session_mode "$SESSION_MODE" "$proj")" || return 1
@@ -17966,6 +17995,10 @@ start_session() {
     # disabling auto-compaction), media modalities (image/pdf input), and reasoning
     # options. Fill-only — never overwrites explicit user fields. Mutates in place.
     apply_model_enrichment "$sess_cfg_file"
+
+    # Canonical OpenAI default: headerTimeout 60000 ms when the user has not set
+    # one (fill-only; explicit values incl. 0/null are preserved).
+    apply_openai_header_timeout_default "$sess_cfg_file"
 
     cp -p "$sess_cfg_file" "$sess_share/config/opencode/.opencode.json"
   fi
