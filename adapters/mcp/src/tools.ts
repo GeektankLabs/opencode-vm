@@ -14,6 +14,14 @@ import { traceToolCall } from "./diagnostics.js";
 import { SUPPORTED_ATTACHMENT_TYPES } from "./attachments.js";
 import { PROFILE_NAMES, describePolicy, readPolicy, resolveProfile } from "./agent-control.js";
 import {
+  defaultMonitorRecord,
+  monitorHistory,
+  readRegistrySnapshot,
+  withRegistry,
+} from "./monitor.js";
+import type { MonitorRecord } from "./monitor.js";
+
+import {
   ACTIVITY_TYPES,
   ADAPTER_VERSION,
   AdapterError,
@@ -936,6 +944,137 @@ const abortSessionTurnOutputSchema = z
     guidance: z.string().optional(),
   })
   .strict();
+
+const monitorIdSchema = z.string().regex(/^monitor_[0-9a-f]{32}$/);
+const monitorIdInput = z.object({ monitor_id: monitorIdSchema }).strict();
+const monitorAnchorTaskId = z.string().regex(/^task_[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/);
+const monitorWorkStateSchema = z.enum(["active", "parked_input_required", "complete_pass", "stopped"]);
+const monitorAutonomySchema = z.enum(["conservative", "sandbox", "mvp", "yolo"]);
+const monitorRuntimeProfileSchema = z.enum(["deep", "standard", "execution", "design", "review"]);
+const monitorSummaryOutput = z
+  .object({
+    monitor_id: z.string(),
+    title: z.string(),
+    anchor_task_id: z.string(),
+    scheduler: z
+      .object({
+        enabled: z.boolean(),
+        interval_seconds: z.number().int(),
+        next_run_at: z.number().nullable(),
+        expiry_at: z.number().nullable(),
+      })
+      .strict(),
+    autonomy_profile: monitorAutonomySchema,
+    runtime_profile: monitorRuntimeProfileSchema,
+    session_id: z.string().nullable(),
+    work_state: monitorWorkStateSchema,
+    parked_reason: z.string().optional(),
+    run_active: z.boolean(),
+    last_run_at: z.string().nullable(),
+    updated_at: z.string(),
+  })
+  .strict();
+const listMonitorsInput = z
+  .object({
+    cursor: z.string().min(1).max(64).optional(),
+    limit: z.number().int().min(1).max(50).optional(),
+    work_state: monitorWorkStateSchema.optional(),
+  })
+  .strict();
+const listMonitorsOutput = z
+  .object({
+    monitors: z.array(monitorSummaryOutput),
+    total: z.number().int(),
+    next_cursor: z.string().optional(),
+    generation: z.number().int(),
+    completeness: z.enum(["complete", "paged"]),
+    observed_at: z.string(),
+  })
+  .strict();
+const getMonitorInput = z.object({ monitor_id: monitorIdSchema }).strict();
+const getMonitorOutput = z
+  .object({
+    monitor: monitorSummaryOutput,
+    anchor: z.object({ task_id: z.string() }).strict(),
+    effective: z
+      .object({
+        interval_seconds: z.number().int(),
+        runtime_profile: monitorRuntimeProfileSchema,
+        autonomy_profile: monitorAutonomySchema,
+      })
+      .strict(),
+    last_event: z.object({ at: z.string(), type: z.string() }).strict().nullable(),
+    next_run_at: z.number().nullable(),
+    observed_at: z.string(),
+  })
+  .strict();
+const createMonitorInput = z
+  .object({
+    title: z.string().trim().min(1).max(160),
+    task_id: monitorAnchorTaskId,
+    interval_seconds: z.number().int().min(5).max(86400).optional(),
+    autonomy_profile: monitorAutonomySchema.optional(),
+    runtime_profile: monitorRuntimeProfileSchema.optional(),
+    expiry_at: z.number().int().positive().nullable().optional(),
+  })
+  .strict();
+const monitorMutationOutput = z
+  .object({
+    monitor: monitorSummaryOutput,
+    generation: z.number().int(),
+    observed_at: z.string(),
+  })
+  .strict();
+const updateMonitorInput = z
+  .object({
+    monitor_id: monitorIdSchema,
+    expected_generation: z.number().int().nonnegative().optional(),
+    title: z.string().trim().min(1).max(160).optional(),
+    interval_seconds: z.number().int().min(5).max(86400).optional(),
+    autonomy_profile: monitorAutonomySchema.optional(),
+    runtime_profile: monitorRuntimeProfileSchema.optional(),
+    expiry_at: z.number().int().positive().nullable().optional(),
+  })
+  .strict();
+const triggerMonitorInput = z
+  .object({ monitor_id: monitorIdSchema, reason: z.string().trim().min(1).max(200).optional() })
+  .strict();
+const monitorDeleteOutput = z
+  .object({ monitor_id: z.string(), deleted: z.literal(true), generation: z.number().int() })
+  .strict();
+const monitorHistoryInput = z
+  .object({
+    monitor_id: monitorIdSchema,
+    limit: z.number().int().min(1).max(100).optional(),
+    include_logs: z.boolean().optional(),
+  })
+  .strict();
+const monitorHistoryOutput = z
+  .object({
+    monitor_id: z.string(),
+    history: z.array(
+      z.object({ at: z.string(), type: z.string(), detail: z.record(z.string(), z.unknown()).optional() }).strict(),
+    ),
+    logs: z
+      .array(z.object({ at: z.string(), level: z.enum(["info", "warn", "error"]), message: z.string() }).strict())
+      .optional(),
+    last_run_at: z.string().nullable(),
+    next_run_at: z.number().nullable(),
+    freshness: z.enum(["fresh", "stale", "unknown"]),
+    coverage: z.enum(["complete", "paged"]),
+    observed_at: z.string(),
+  })
+  .strict();
+const monitorAbortOutput = z
+  .object({
+    monitor_id: z.string(),
+    state: z.enum(["aborted", "no_active_run", "abort_uncertain"]),
+    run_active_after: z.boolean(),
+    observed_at: z.string(),
+    guidance: z.string().optional(),
+  })
+  .strict();
+
 const createSessionOutputSchema = z
   .object({
     project: projectSchema,
@@ -1472,6 +1611,306 @@ export function createMcpServer(
     },
   );
 
+
+  const monitorRuntime = () => {
+    if (!runtime)
+      throw new AdapterError(
+        "UNSUPPORTED_CONFIGURATION",
+        "Monitor management requires the project runtime descriptor.",
+      );
+    return runtime;
+  };
+  const monitorSummary = (monitor: MonitorRecord) => {
+    const last = [...monitor.history]
+      .reverse()
+      .find(
+        (entry) =>
+          entry.type === "dispatched" ||
+          entry.type === "recovery-continued" ||
+          entry.type === "compaction-continued",
+      );
+    return {
+      monitor_id: monitor.id,
+      title: monitor.title,
+      anchor_task_id: monitor.anchor.task_id,
+      scheduler: {
+        enabled: monitor.scheduler.enabled,
+        interval_seconds: monitor.scheduler.interval_seconds,
+        next_run_at: monitor.scheduler.next_run_at,
+        expiry_at: monitor.scheduler.expiry_at,
+      },
+      autonomy_profile: monitor.autonomy_profile,
+      runtime_profile: monitor.runtime_profile,
+      session_id: monitor.session.session_id,
+      work_state: monitor.state.work,
+      ...(monitor.state.parked_reason ? { parked_reason: monitor.state.parked_reason } : {}),
+      run_active: monitor.run.active,
+      last_run_at: last?.at ?? null,
+      updated_at: monitor.updated_at,
+    };
+  };
+  const monitorHistoryFreshness = (monitor: MonitorRecord, now: number): "fresh" | "stale" | "unknown" => {
+    const last = [...monitor.history]
+      .reverse()
+      .find(
+        (entry) =>
+          entry.type === "dispatched" ||
+          entry.type === "recovery-continued" ||
+          entry.type === "compaction-continued",
+      );
+    if (!last) return "unknown";
+    const at = Date.parse(last.at);
+    if (!Number.isFinite(at)) return "unknown";
+    return now - at <= monitor.scheduler.interval_seconds * 2 * 1000 ? "fresh" : "stale";
+  };
+  const listMonitorsHandler = safeHandler(async (input: z.output<typeof listMonitorsInput>) => {
+    const project = monitorRuntime().project;
+    const snapshot = await readRegistrySnapshot(project);
+    const monitors = [...snapshot.registry.monitors]
+      .filter((monitor) => input.work_state === undefined || monitor.state.work === input.work_state)
+      .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id));
+    const total = monitors.length;
+    const start = input.cursor ? Number(input.cursor) : 0;
+    if (!Number.isSafeInteger(start) || start < 0 || (input.cursor !== undefined && String(start) !== input.cursor))
+      throw new AdapterError("INVALID_ARGUMENT", "cursor is invalid.");
+    const limit = input.limit ?? 20;
+    const page = monitors.slice(start, start + limit);
+    const next = start + limit < total ? String(start + limit) : undefined;
+    return success(
+      {
+        monitors: page.map(monitorSummary),
+        total,
+        ...(next ? { next_cursor: next } : {}),
+        generation: snapshot.registry.generation,
+        completeness: next ? "paged" : "complete",
+        observed_at: new Date().toISOString(),
+      },
+      `Returned ${page.length} of ${total} monitor(s)${next ? "; continue with next_cursor" : "; inventory complete (all states included)"}.`,
+    );
+  });
+  const getMonitorHandler = safeHandler(async ({ monitor_id }: z.output<typeof getMonitorInput>) => {
+    const snapshot = await readRegistrySnapshot(monitorRuntime().project);
+    const monitor = snapshot.registry.monitors.find((entry) => entry.id === monitor_id);
+    if (!monitor) throw new AdapterError("MONITOR_NOT_FOUND", "Monitor does not exist in this project registry.");
+    const last = [...monitor.history].reverse().find((entry) => entry.type.startsWith("dispatch") || entry.type === "recovery-continued");
+    return success(
+      {
+        monitor: monitorSummary(monitor),
+        anchor: { task_id: monitor.anchor.task_id },
+        effective: {
+          interval_seconds: monitor.scheduler.interval_seconds,
+          runtime_profile: monitor.runtime_profile,
+          autonomy_profile: monitor.autonomy_profile,
+        },
+        last_event: last ? { at: last.at, type: last.type } : null,
+        next_run_at: monitor.scheduler.next_run_at,
+        observed_at: new Date().toISOString(),
+      },
+      `Monitor ${monitor.id} is ${monitor.state.work}; scheduler ${monitor.scheduler.enabled ? "enabled" : "disabled"}.`,
+    );
+  });
+  const findMonitor = (source: { monitors: MonitorRecord[] }, id: string): MonitorRecord | undefined =>
+    source.monitors.find((entry) => entry.id === id);
+  const createMonitorHandler = safeHandler(async (input: z.output<typeof createMonitorInput>) => {
+    const project = monitorRuntime().project;
+    const now = Date.now();
+    const created = await withRegistry(project, (registry) => {
+      if (registry.monitors.some((monitor) => monitor.anchor.task_id === input.task_id))
+        throw new AdapterError(
+          "MONITOR_CONFLICT",
+          "This canonical task already has a monitor (unique master-task binding).",
+        );
+      const record = defaultMonitorRecord(
+        input.title,
+        input.task_id,
+        {
+          ...(input.interval_seconds !== undefined ? { interval_seconds: input.interval_seconds } : {}),
+          ...(input.autonomy_profile !== undefined ? { autonomy_profile: input.autonomy_profile } : {}),
+          ...(input.runtime_profile !== undefined ? { runtime_profile: input.runtime_profile } : {}),
+          ...(input.expiry_at !== undefined ? { expiry_at: input.expiry_at } : {}),
+        },
+        now,
+      );
+      monitorHistory(record, "created", { interval_seconds: record.scheduler.interval_seconds }, now);
+      registry.monitors.push(record);
+      return registry;
+    });
+    const monitor = created.monitors.find((entry) => entry.anchor.task_id === input.task_id)!;
+    return success(
+      { monitor: monitorSummary(monitor), generation: created.generation, observed_at: new Date().toISOString() },
+      `Created monitor ${monitor.id} for task ${input.task_id}.`,
+    );
+  });
+  const updateMonitorHandler = safeHandler(async (input: z.output<typeof updateMonitorInput>) => {
+    const project = monitorRuntime().project;
+    const now = Date.now();
+    const updated = await withRegistry(
+      project,
+      (registry) => {
+        const monitor = registry.monitors.find((entry) => entry.id === input.monitor_id);
+        if (!monitor) throw new AdapterError("MONITOR_NOT_FOUND", "Monitor does not exist in this project registry.");
+        if (input.title !== undefined) monitor.title = input.title;
+        if (input.interval_seconds !== undefined) monitor.scheduler.interval_seconds = input.interval_seconds;
+        if (input.autonomy_profile !== undefined) monitor.autonomy_profile = input.autonomy_profile;
+        if (input.runtime_profile !== undefined) monitor.runtime_profile = input.runtime_profile;
+        if (input.expiry_at !== undefined) monitor.scheduler.expiry_at = input.expiry_at;
+        monitor.updated_at = new Date().toISOString();
+        monitorHistory(monitor, "updated", undefined, now);
+        return registry;
+      },
+      { ...(input.expected_generation !== undefined ? { expected: input.expected_generation } : {}), now },
+    );
+    const monitor = findMonitor(updated, input.monitor_id)!;
+    return success(
+      { monitor: monitorSummary(monitor), generation: updated.generation, observed_at: new Date().toISOString() },
+      `Updated monitor ${monitor.id}.`,
+    );
+  });
+  const setMonitorEnabledHandler = (enabled: boolean) =>
+    safeHandler(async ({ monitor_id }: z.output<typeof monitorIdInput>) => {
+      const project = monitorRuntime().project;
+      const now = Date.now();
+      const updated = await withRegistry(project, (registry) => {
+        const monitor = registry.monitors.find((entry) => entry.id === monitor_id);
+        if (!monitor) throw new AdapterError("MONITOR_NOT_FOUND", "Monitor does not exist in this project registry.");
+        monitor.scheduler.enabled = enabled;
+        monitor.scheduler.next_run_at = enabled ? now + monitor.scheduler.interval_seconds * 1000 : null;
+        monitor.updated_at = new Date().toISOString();
+        monitorHistory(monitor, enabled ? "enabled" : "disabled", undefined, now);
+        return registry;
+      });
+      const monitor = findMonitor(updated, monitor_id)!;
+      return success(
+        { monitor: monitorSummary(monitor), generation: updated.generation, observed_at: new Date().toISOString() },
+        `Monitor ${monitor.id} scheduler ${enabled ? "enabled" : "disabled"}; work state unchanged (${monitor.state.work}).`,
+      );
+    });
+  const enableMonitorHandler = setMonitorEnabledHandler(true);
+  const disableMonitorHandler = setMonitorEnabledHandler(false);
+  const triggerMonitorHandler = safeHandler(async (input: z.output<typeof triggerMonitorInput>) => {
+    const project = monitorRuntime().project;
+    const now = Date.now();
+    const at = new Date(now).toISOString();
+    const updated = await withRegistry(project, (registry) => {
+      const monitor = registry.monitors.find((entry) => entry.id === input.monitor_id);
+      if (!monitor) throw new AdapterError("MONITOR_NOT_FOUND", "Monitor does not exist in this project registry.");
+      monitor.wake_request = { requested_at: at, reason: input.reason ?? "operator-trigger" };
+      monitor.updated_at = at;
+      monitorHistory(monitor, "trigger-requested", { reason: input.reason ?? "operator-trigger" }, now);
+      return registry;
+    });
+    const monitor = findMonitor(updated, input.monitor_id)!;
+    return success(
+      { monitor: monitorSummary(monitor), generation: updated.generation, observed_at: new Date().toISOString() },
+      `Wake requested for ${monitor.id}; the engine takes the next bounded action (no immediate model call from this tool).`,
+    );
+  });
+  const cancelMonitorFutureHandler = safeHandler(async ({ monitor_id }: z.output<typeof monitorIdInput>) => {
+    const project = monitorRuntime().project;
+    const now = Date.now();
+    const updated = await withRegistry(project, (registry) => {
+      const monitor = registry.monitors.find((entry) => entry.id === monitor_id);
+      if (!monitor) throw new AdapterError("MONITOR_NOT_FOUND", "Monitor does not exist in this project registry.");
+      monitor.wake_request = null;
+      if (monitor.scheduler.enabled)
+        monitor.scheduler.next_run_at = now + monitor.scheduler.interval_seconds * 1000;
+      monitor.updated_at = new Date().toISOString();
+      monitorHistory(monitor, "future-cancelled", undefined, now);
+      return registry;
+    });
+    const monitor = findMonitor(updated, monitor_id)!;
+    return success(
+      { monitor: monitorSummary(monitor), generation: updated.generation, observed_at: new Date().toISOString() },
+      `Pending future wake cancelled for ${monitor.id}; a still-running worker turn is separate (use abort_monitor_run).`,
+    );
+  });
+  const abortMonitorRunHandler = safeHandler(async ({ monitor_id }: z.output<typeof monitorIdInput>) => {
+    const project = monitorRuntime().project;
+    const snapshot = await readRegistrySnapshot(project);
+    const monitor = findMonitor(snapshot.registry, monitor_id);
+    if (!monitor) throw new AdapterError("MONITOR_NOT_FOUND", "Monitor does not exist in this project registry.");
+    if (!monitor.run.active || !monitor.session.session_id)
+      return success(
+        {
+          monitor_id,
+          state: "no_active_run" as const,
+          run_active_after: monitor.run.active,
+          observed_at: new Date().toISOString(),
+          guidance: "No monitor action is running; nothing was aborted (non-destructive).",
+        },
+        `Monitor ${monitor_id} has no running action; nothing was aborted.`,
+      );
+    if (!gateway.abortSessionTurn)
+      throw new AdapterError("UNSUPPORTED_CONFIGURATION", "Turn abort is not available on this connector.");
+    const abort = await gateway.abortSessionTurn(monitor.session.session_id);
+    const state: "aborted" | "abort_uncertain" =
+      abort.state === "aborted" || abort.state === "no_active_turn" ? "aborted" : "abort_uncertain";
+    await withRegistry(project, (registry) => {
+      const record = registry.monitors.find((entry) => entry.id === monitor_id);
+      if (!record) return registry;
+      monitorHistory(record, state === "aborted" ? "run-aborted" : "run-abort-uncertain", { abort: abort.state }, Date.now());
+      record.updated_at = new Date().toISOString();
+      return registry;
+    });
+    const after = await readRegistrySnapshot(project);
+    const runActiveAfter = findMonitor(after.registry, monitor_id)?.run.active ?? false;
+    return success(
+      {
+        monitor_id,
+        state,
+        run_active_after: runActiveAfter,
+        observed_at: new Date().toISOString(),
+        ...(state === "abort_uncertain"
+          ? { guidance: "Abort was accepted but not verified; inspect the monitor session state before further actions." }
+          : { guidance: "Running worker turn aborted and verified; already executed changes remain (no rollback)." }),
+      },
+      state === "aborted"
+        ? `Monitor run for ${monitor_id} was aborted and verified.`
+        : `Abort for ${monitor_id} was requested but not verified.`,
+    );
+  });
+  const deleteMonitorHandler = safeHandler(async ({ monitor_id }: z.output<typeof monitorIdInput>) => {
+    const project = monitorRuntime().project;
+    const updated = await withRegistry(project, (registry) => {
+      const monitor = registry.monitors.find((entry) => entry.id === monitor_id);
+      if (!monitor) throw new AdapterError("MONITOR_NOT_FOUND", "Monitor does not exist in this project registry.");
+      if (monitor.run.active)
+        throw new AdapterError(
+          "MONITOR_STATE_CONFLICT",
+          "The monitor has a running action; abort or finish it before deletion.",
+        );
+      registry.monitors = registry.monitors.filter((entry) => entry.id !== monitor_id);
+      return registry;
+    });
+    return success(
+      { monitor_id, deleted: true as const, generation: updated.generation },
+      `Deleted monitor ${monitor_id}.`,
+    );
+  });
+  const monitorHistoryHandler = safeHandler(async (input: z.output<typeof monitorHistoryInput>) => {
+    const project = monitorRuntime().project;
+    const now = Date.now();
+    const snapshot = await readRegistrySnapshot(project);
+    const monitor = findMonitor(snapshot.registry, input.monitor_id);
+    if (!monitor) throw new AdapterError("MONITOR_NOT_FOUND", "Monitor does not exist in this project registry.");
+    const limit = input.limit ?? 50;
+    const history = monitor.history.slice(Math.max(0, monitor.history.length - limit));
+    const last = [...monitor.history].reverse().find((entry) => entry.type.startsWith("dispatch") || entry.type === "recovery-continued");
+    return success(
+      {
+        monitor_id: monitor.id,
+        history,
+        ...(input.include_logs ? { logs: monitor.logs.slice(Math.max(0, monitor.logs.length - limit)) } : {}),
+        last_run_at: last?.at ?? null,
+        next_run_at: monitor.scheduler.next_run_at,
+        freshness: monitorHistoryFreshness(monitor, now),
+        coverage: monitor.history.length > limit ? ("paged" as const) : ("complete" as const),
+        observed_at: new Date().toISOString(),
+      },
+      `Returned ${history.length} history entr${history.length === 1 ? "y" : "ies"} for ${monitor.id}; last run ${last?.at ?? "unknown"}.`,
+    );
+  });
+
   const uploadAttachmentHandler = safeHandler(
     async ({
       session_id,
@@ -1818,6 +2257,151 @@ export function createMcpServer(
     abortSessionTurnHandler,
   );
 
+
+  server.registerTool(
+    "list_monitors",
+    {
+      title: "List Project Monitors",
+      description:
+        "List all monitors of the connected project including disabled and parked ones. Pagination completeness is explicit (completeness/next_cursor); every entry carries its stable monitor_id and unique master-task binding. Read-only.",
+      inputSchema: listMonitorsInput,
+      outputSchema: listMonitorsOutput,
+      annotations: readOnlyAnnotations,
+    },
+    listMonitorsHandler,
+  );
+
+  server.registerTool(
+    "get_monitor",
+    {
+      title: "Get Project Monitor",
+      description:
+        "Read one monitor's configured/effective interval, autonomy profile, runtime profile, scheduler state, work state, session binding and next run. Scheduler enabled/disabled, work state and technical run activity stay separate. Read-only.",
+      inputSchema: getMonitorInput,
+      outputSchema: getMonitorOutput,
+      annotations: readOnlyAnnotations,
+    },
+    getMonitorHandler,
+  );
+
+  server.registerTool(
+    "create_monitor",
+    {
+      title: "Create Project Monitor",
+      description:
+        "Create a project monitor bound to exactly one canonical board task (unique master binding). Default interval 60 s, autonomy profile mvp, runtime profile deep. Non-idempotent: do not retry automatically.",
+      inputSchema: createMonitorInput,
+      outputSchema: monitorMutationOutput,
+      annotations: writeAnnotations,
+    },
+    createMonitorHandler,
+  );
+
+  server.registerTool(
+    "update_monitor",
+    {
+      title: "Update Project Monitor",
+      description:
+        "Update monitor title, interval, autonomy profile, runtime profile or expiry (explicit expiry only). Optional expected_generation rejects a concurrent change instead of overwriting it.",
+      inputSchema: updateMonitorInput,
+      outputSchema: monitorMutationOutput,
+      annotations: writeAnnotations,
+    },
+    updateMonitorHandler,
+  );
+
+  server.registerTool(
+    "enable_monitor",
+    {
+      title: "Enable Project Monitor Scheduler",
+      description:
+        "Enable the monitor scheduler. Work state (active/parked/completed/stopped) is unchanged; enabling never creates work.",
+      inputSchema: monitorIdInput,
+      outputSchema: monitorMutationOutput,
+      annotations: writeAnnotations,
+    },
+    enableMonitorHandler,
+  );
+
+  server.registerTool(
+    "disable_monitor",
+    {
+      title: "Disable Project Monitor Scheduler",
+      description:
+        "Disable the monitor scheduler without changing business work state or aborting a running worker. Use abort_monitor_run for a running turn; cancel_monitor_future for a pending wake.",
+      inputSchema: monitorIdInput,
+      outputSchema: monitorMutationOutput,
+      annotations: writeAnnotations,
+    },
+    disableMonitorHandler,
+  );
+
+  server.registerTool(
+    "trigger_monitor",
+    {
+      title: "Trigger Project Monitor Wake",
+      description:
+        "Request the next bounded monitor wake (operator trigger). The engine takes at most one bounded action; an unchanged parked monitor remains a no-op without a model call.",
+      inputSchema: triggerMonitorInput,
+      outputSchema: monitorMutationOutput,
+      annotations: writeAnnotations,
+    },
+    triggerMonitorHandler,
+  );
+
+  server.registerTool(
+    "cancel_monitor_future",
+    {
+      title: "Cancel Future Monitor Runs",
+      description:
+        "Cancel a pending wake request and skip the currently due run (scheduler stays enabled). Distinct from abort_monitor_run (running turn) and disable_monitor (scheduler off).",
+      inputSchema: monitorIdInput,
+      outputSchema: monitorMutationOutput,
+      annotations: writeAnnotations,
+    },
+    cancelMonitorFutureHandler,
+  );
+
+  server.registerTool(
+    "abort_monitor_run",
+    {
+      title: "Abort Running Monitor Action",
+      description:
+        "Abort the running worker turn of a monitor through the verified native abort and report the stored outcome (aborted/no_active_run/abort_uncertain). No rollback claim; idle is a non-destructive no_active_run.",
+      inputSchema: monitorIdInput,
+      outputSchema: monitorAbortOutput,
+      annotations: { ...writeAnnotations, idempotentHint: true },
+    },
+    abortMonitorRunHandler,
+  );
+
+  server.registerTool(
+    "delete_monitor",
+    {
+      title: "Delete Project Monitor",
+      description:
+        "Delete a monitor from the project registry. Refuses while the monitor has a running action (MONITOR_STATE_CONFLICT). Run history is removed with the monitor.",
+      inputSchema: monitorIdInput,
+      outputSchema: monitorDeleteOutput,
+      annotations: writeAnnotations,
+    },
+    deleteMonitorHandler,
+  );
+
+  server.registerTool(
+    "get_monitor_history",
+    {
+      title: "Get Project Monitor History",
+      description:
+        "Read bounded run history (most recent entries), optional bounded logs, last/next run timestamps and explicit freshness (fresh/stale/unknown). Calendar freshness alone is no health guarantee.",
+      inputSchema: monitorHistoryInput,
+      outputSchema: monitorHistoryOutput,
+      annotations: readOnlyAnnotations,
+    },
+    monitorHistoryHandler,
+  );
+
+
   server.server.setRequestHandler(
     CallToolRequestSchema,
     async (request, extra) => {
@@ -1976,6 +2560,28 @@ export function createMcpServer(
               input,
               abortSessionTurnHandler,
             );
+          case "list_monitors":
+            return validatedToolCall(listMonitorsInput, listMonitorsOutput, input, listMonitorsHandler);
+          case "get_monitor":
+            return validatedToolCall(getMonitorInput, getMonitorOutput, input, getMonitorHandler);
+          case "create_monitor":
+            return validatedToolCall(createMonitorInput, monitorMutationOutput, input, createMonitorHandler);
+          case "update_monitor":
+            return validatedToolCall(updateMonitorInput, monitorMutationOutput, input, updateMonitorHandler);
+          case "enable_monitor":
+            return validatedToolCall(monitorIdInput, monitorMutationOutput, input, enableMonitorHandler);
+          case "disable_monitor":
+            return validatedToolCall(monitorIdInput, monitorMutationOutput, input, disableMonitorHandler);
+          case "trigger_monitor":
+            return validatedToolCall(triggerMonitorInput, monitorMutationOutput, input, triggerMonitorHandler);
+          case "cancel_monitor_future":
+            return validatedToolCall(monitorIdInput, monitorMutationOutput, input, cancelMonitorFutureHandler);
+          case "abort_monitor_run":
+            return validatedToolCall(monitorIdInput, monitorAbortOutput, input, abortMonitorRunHandler);
+          case "delete_monitor":
+            return validatedToolCall(monitorIdInput, monitorDeleteOutput, input, deleteMonitorHandler);
+          case "get_monitor_history":
+            return validatedToolCall(monitorHistoryInput, monitorHistoryOutput, input, monitorHistoryHandler);
           case "upload_attachment":
             return validatedToolCall(
               uploadAttachmentInputSchema,

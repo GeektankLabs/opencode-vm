@@ -457,7 +457,7 @@ test("MCP 2.0 discovery and Events methods stay on the authenticated loopback en
   assert.equal((await post("events/list", "events/list", false)).status, 401);
 });
 
-test("official MCP client discovers twenty-four stateless HTTP tools and invokes session tools by ID", async () => {
+test("official MCP client discovers thirty-five stateless HTTP tools and invokes session tools by ID", async () => {
   const gateway = new FakeGateway();
   const server = new McpHttpServer(runtime(), token, gateway);
   const port = await server.start();
@@ -470,11 +470,19 @@ test("official MCP client discovers twenty-four stateless HTTP tools and invokes
     await client.connect(transport);
     const listed = await client.listTools();
     assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), [
+      "abort_monitor_run",
       "abort_session_turn",
       "acknowledge_project_attention",
       "archive_session",
+      "cancel_monitor_future",
+      "create_monitor",
       "create_session",
+      "delete_monitor",
+      "disable_monitor",
+      "enable_monitor",
       "get_message",
+      "get_monitor",
+      "get_monitor_history",
       "get_project_activity",
       "get_project_attention",
       "get_project_model_policy",
@@ -485,12 +493,15 @@ test("official MCP client discovers twenty-four stateless HTTP tools and invokes
       "get_session_runtime_options",
       "get_session_status",
       "get_task_result",
+      "list_monitors",
       "list_sessions",
       "read_message_content",
       "rename_session",
       "send_message",
       "send_session_followup",
       "supersede_unresolved_submission",
+      "trigger_monitor",
+      "update_monitor",
       "update_session_runtime",
       "upload_attachment",
       "wait_for_project_activity",

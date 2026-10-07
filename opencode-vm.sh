@@ -34,7 +34,7 @@ OPENLIVE_PREVIOUS_COMMAND="$OPENLIVE_DIR/previous-command"
 OPENLIVE_AUTH_MARKER="__opencode_vm_openlive__"
 OPENLIVE_LOCK_PATH=""
 OPENLIVE_ADAPTER_VERSION="0.1.7"
-OPENLIVE_ADAPTER_TAG="v0.7.16"
+OPENLIVE_ADAPTER_TAG="v0.7.17"
 OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.7.tar"
 OPENLIVE_ADAPTER_SHA256="39a50c5127b0a577b54e4790b5c3c1f463b35a52b42c4343aa639dcea53bad47"
 OPENLIVE_ACP_SDK_VERSION="1.2.1"
@@ -44,15 +44,15 @@ OPENLIVE_MANAGER_DESCRIPTION="Read-only OpenLive voice session manager"
 OPENLIVE_MANAGER_PROMPT="You manage an OpenLive voice call. The voice_sessions tool is available and you must call it before listing, inspecting, summarizing, checking, attaching to, or creating project sessions. Never claim session details without a successful tool result. Ask for clarification if a requested session is ambiguous. Create a new work session only when the user explicitly asks for one. Apart from that explicit create action, you are read-only: do not edit files, run shell commands, create tasks, or mutate sessions. Keep responses brief and conversational: one or two plain sentences without Markdown, paths, URLs, code, or stray symbols. When attachment or creation succeeds, tell the user the next voice prompt will continue in that session."
 MCP_CONNECTOR_DIR="$SHARE_ROOT/mcp-connector"
 MCP_ADAPTER_CACHE_ROOT="$MCP_CONNECTOR_DIR/adapters"
-MCP_ADAPTER_VERSION="0.1.29"
-MCP_ADAPTER_TAG="v0.7.16"
-MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.29.tar"
-MCP_ADAPTER_SHA256="d12e2495ca5b84c8d32d72a700f79eab3939d907ec52b1575aa9f16f20ffee81"
+MCP_ADAPTER_VERSION="0.1.30"
+MCP_ADAPTER_TAG="v0.7.17"
+MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.30.tar"
+MCP_ADAPTER_SHA256="cb156f42d764ddfff63cbc009e270429082d3ab93e2d45a68535f7f4306f3f3d"
 MCP_SDK_VERSION="1.30.1"
 MCP_OPENCODE_SDK_VERSION="1.18.21"
 MCP_TESTED_PROTOCOL_VERSION="2025-11-25"
 MCP_TUNNEL_DIR="$SHARE_ROOT/mcp-tunnel/openai"
-HUB_ASSET_TAG="v0.7.16"
+HUB_ASSET_TAG="v0.7.17"
 HUB_ASSET_FILENAME="opencode-vm-hub-1.tar"
 HUB_ASSET_SHA256="a6a742d051492cb71b85dadfdea47f2a4e4d72116b08a8127733fd7b11331cb0"
 
@@ -286,7 +286,7 @@ TASKBOARD_ARM64_SHA256="3749fb985f544fdb6788ba1dff69761e599ff82b3fe86d39ca54307c
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.7.16"
+OCVM_VERSION="0.7.17"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -13733,6 +13733,66 @@ dashboard_failure() {
   rm -f "$tmp"
 }
 
+start_monitor() {
+  [[ "$OC_MODE" == web ]] || return 0
+  local dir="$SESS_SHARE/monitor" adapter="$SESS_SHARE/dashboard/adapter" tmp="" waited=0 node_bin=""
+  stop_monitor || return 1
+  [[ -d "$adapter" && ! -L "$adapter" ]] || return 1
+  [[ -f "$adapter/.ocvm-managed" ]] && grep -qFx 'opencode-vm-mcp-staging-v1' "$adapter/.ocvm-managed" || return 1
+  [[ -f "$adapter/dist/monitor-main.js" && ! -L "$adapter/dist/monitor-main.js" ]] || return 1
+  ( umask 077; mkdir -p "$dir" ) || return 1
+  [[ -O "$dir" && ! -L "$dir" ]] || return 1
+  load_session_auth
+  node_bin="$(command -v node 2>/dev/null || true)"
+  [[ -n "$node_bin" && -x "$node_bin" ]] || return 1
+  tmp="$(mktemp "$dir/.runtime-input.XXXXXX")" || return 1
+  if ! MON_AUTH_USERNAME="${OC_USERNAME:-opencode}" MON_AUTH_PASSWORD="${OC_PASSWORD:-}" \
+    jq -n --arg project "$(pwd -P)" --arg hash "$OC_OPENLIVE_PROJECT_HASH" --arg name "$(basename "$PROJ_DIR")" \
+      --arg generation "$OC_HUB_GENERATION" --arg backend "http://127.0.0.1:$OC_PORT_INTERNAL" \
+      --arg board "http://127.0.0.1:$((OC_PORT + 5))" --arg metadata "${OC_TASKBOARD_METADATA_FILE:-}" \
+      --arg version "$(opencode --version 2>/dev/null || true)" --argjson listen_port "$OC_PORT_INTERNAL" \
+      --argjson auth_enabled "$([[ -n "${OC_PASSWORD:-}" ]] && printf true || printf false)" \
+      '{schema:1,auth:(if $auth_enabled then {username:env.MON_AUTH_USERNAME,password:env.MON_AUTH_PASSWORD} else null end),runtime:{schema:1,project:$project,projectHash:$hash,projectName:$name,generation:$generation,backendUrl:$backend,opencodeVersion:$version,listenHost:"127.0.0.1",listenPort:$listen_port,credentialFile:"",taskboardUrl:$board,taskboardMetadataFile:$metadata}}' > "$tmp" ||
+     ! chmod 600 "$tmp" || ! mv -f "$tmp" "$dir/runtime-input.json"; then
+    rm -f "$tmp"
+    echo "[monitor] Runtime input could not be published." >&2
+    return 1
+  fi
+  sudo -n systemd-run --quiet --collect --unit=ocvm-monitor --service-type=exec \
+    --description="opencode-vm monitor engine $SESS_SHARE $OC_HUB_GENERATION" \
+    --property="User=$(id -un)" --property="Group=$(id -gn)" --property="WorkingDirectory=$PROJ_DIR" \
+    --property=UMask=0077 --property=KillMode=control-group --property=TimeoutStopSec=10 \
+    --property=Restart=on-failure --property=RestartSec=2 --property=StartLimitIntervalSec=60 --property=StartLimitBurst=3 \
+    --property=AppArmorProfile=opencode-sandbox --property="StandardOutput=append:$dir/server.log" --property="StandardError=append:$dir/server.log" \
+    --setenv="OCVM_MANAGED_POLICY_SOCKET=${OCVM_MANAGED_POLICY_SOCKET:-}" \
+    -- "$node_bin" "$adapter/dist/monitor-main.js" "$dir/runtime-input.json" || return 1
+  while [[ "$waited" -lt 20 ]]; do
+    [[ -f "$dir/heartbeat.json" ]] && break
+    sleep 1
+    waited=$((waited + 1))
+  done
+  [[ -f "$dir/heartbeat.json" ]] || { echo "[monitor] Engine heartbeat unavailable; OpenCode continues." >&2; return 1; }
+  echo "[monitor] Engine active (project registry; no listener, no port)."
+}
+
+stop_monitor() {
+  local dir="$SESS_SHARE/monitor"
+  if systemctl is-active --quiet ocvm-monitor.service 2>/dev/null; then
+    local description=""
+    description="$(systemctl show -p Description --value ocvm-monitor.service 2>/dev/null || true)"
+    case "$description" in
+      *"$SESS_SHARE"*"$OC_HUB_GENERATION") : ;;
+      *)
+        echo "[monitor] Existing monitor ownership could not be verified; leaving it untouched." >&2
+        return 1
+        ;;
+    esac
+    sudo -n systemctl stop ocvm-monitor.service 2>/dev/null || return 1
+  fi
+  rm -f "$dir/runtime-input.json" "$dir/heartbeat.json"
+  return 0
+}
+
 start_dashboard() {
   [[ "$OC_MODE" == web ]] || return 0
   local dir="$SESS_SHARE/dashboard" adapter="$SESS_SHARE/dashboard/adapter" tmp="" port waited=0 auth_enabled=false node_bin="" last_health="" data_coverage=""
@@ -16812,6 +16872,7 @@ attach_session() {
       trap "" INT TERM HUP
       stop_hub || echo "[hub] Could not stop Hub cleanly." >&2
       stop_dashboard || echo "[dashboard] Owned cleanup could not be verified." >&2
+      stop_monitor || echo "[monitor] Owned cleanup could not be verified." >&2
       stop_editor || echo "[editor] Could not stop editor cleanly." >&2
       stop_taskboard || echo "[taskboard] Could not stop taskboard cleanly." >&2
       if ! stop_mcp_adapter; then
@@ -16878,6 +16939,7 @@ attach_session() {
     elif [ "$OC_MODE" = "web" ]; then
       stop_hub || echo "[hub] Existing Hub ownership could not be verified; leaving it untouched." >&2
       stop_dashboard || echo "[dashboard] Existing ownership could not be verified; leaving it untouched." >&2
+      stop_monitor || echo "[monitor] Existing ownership could not be verified; leaving it untouched." >&2
       stop_mcp_adapter
        stop_all_proxies
        stop_openlive_gateway
@@ -16905,6 +16967,7 @@ attach_session() {
         aa-exec -p opencode-sandbox -- opencode web --hostname 127.0.0.1 --port "$OC_PORT_INTERNAL" &
         OC_WEB_PID=$!
         start_dashboard || echo "[dashboard] Unavailable; OpenCode continues." >&2
+        start_monitor || echo "[monitor] Unavailable; OpenCode continues." >&2
         sleep 2
         echo ""
         echo "Press Enter to start TUI (web server continues running)..."
@@ -16931,6 +16994,7 @@ attach_session() {
           aa-exec -p opencode-sandbox -- opencode web --hostname 127.0.0.1 --port "$OC_PORT_INTERNAL" &
           OC_WEB_PID=$!
           start_dashboard || echo "[dashboard] Unavailable; OpenCode continues." >&2
+          start_monitor || echo "[monitor] Unavailable; OpenCode continues." >&2
           wait "$OC_WEB_PID"
           rc=$?
           if [ "$shutdown_requested" = "1" ]; then
@@ -18819,6 +18883,7 @@ EOF
       trap "" INT TERM HUP
       stop_hub || echo "[hub] Could not stop Hub cleanly." >&2
       stop_dashboard || echo "[dashboard] Owned cleanup could not be verified." >&2
+      stop_monitor || echo "[monitor] Owned cleanup could not be verified." >&2
       stop_editor || echo "[editor] Could not stop editor cleanly." >&2
       if ! stop_mcp_adapter; then
         MCP_SHUTDOWN_FAILED=1
@@ -18931,6 +18996,7 @@ EOF
       web)
         stop_hub || echo "[hub] Existing Hub ownership could not be verified; leaving it untouched." >&2
         stop_dashboard || echo "[dashboard] Existing ownership could not be verified; leaving it untouched." >&2
+        stop_monitor || echo "[monitor] Existing ownership could not be verified; leaving it untouched." >&2
         stop_mcp_adapter
         stop_all_proxies
         stop_openlive_gateway
@@ -18959,6 +19025,7 @@ EOF
           aa-exec -p opencode-sandbox -- opencode web --hostname 127.0.0.1 --port "$OC_PORT_INTERNAL" &
           OC_WEB_PID=$!
           start_dashboard || echo "[dashboard] Unavailable; OpenCode continues." >&2
+          start_monitor || echo "[monitor] Unavailable; OpenCode continues." >&2
           sleep 2
           echo ""
           echo "Press Enter to start TUI (web server continues running)..."
@@ -18989,6 +19056,7 @@ EOF
             aa-exec -p opencode-sandbox -- opencode web --hostname 127.0.0.1 --port "$OC_PORT_INTERNAL" &
             OC_WEB_PID=$!
             start_dashboard || echo "[dashboard] Unavailable; OpenCode continues." >&2
+            start_monitor || echo "[monitor] Unavailable; OpenCode continues." >&2
             wait "$OC_WEB_PID"
             rc=$?
             if [ "$shutdown_requested" = "1" ]; then
