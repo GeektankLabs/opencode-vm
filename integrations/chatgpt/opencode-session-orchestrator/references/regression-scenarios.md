@@ -16,7 +16,7 @@ These are instruction-level/synthetic cases, not permission to create live sched
 | Monitor FAIL has unknown cause | One bounded read-only diagnosis with suitable verified worker profile; no blind full retry. |
 | Monitor diagnosis proves allowed harness fault | One scoped repair, focused regression before full rerun, then evidenced Resume or controlled Fresh; no acceptance weakening. |
 | Monitor product/schema/security/architecture blocker | PARKED_INPUT_REQUIRED with evidence/question/options/safe recovery; no permission bypass or semantic fix. |
-| Monitor same fingerprint after two no-progress repairs | Park; no third repair, no reset from message/time/model/harness revision alone. |
+| Monitor same fingerprint after two production-code no-progress repairs | Park; no third product-code repair, no reset from message/time/model/harness revision alone; management/read/result/receipt/docs/planning/tests/fixtures/harness/test-environment/infrastructure work never counts. |
 | Monitor focused regression passes but full run repeats original failure | Retain fingerprint/cycle history unless material progress resolving failure is evidenced. |
 | Monitor parked with no new authority | Read master/latest checkpoint/newer decisions before silent no-op; no deep scans, messages, sends or notes; preserve cadence. |
 | Monitor parked with later free-form Operator Resume note | Correct canonical anchor's current bounded decision can release one revalidated step; text elsewhere or a label alone cannot. No separate provenance mechanism. |
@@ -623,3 +623,14 @@ Instruction/source-bound synthetic traces must use the shipped dispatch preceden
 | Fallback step completed; next separately started order | Fresh regular profile from current policy with exact readback (model-switch evidence); no permanent profile change, no blanket reset, no switch-back during a running fallback step. |
 | Exact structured input-length rejection (reported range pattern) | No immediate resubmission; native version-verified compaction relied upon, then exactly one aligned continuation in the previous regular profile/thinking stage at the active runtime; repeated context failure or compaction error → documented `INPUT_REQUIRED`, no loop. |
 | Design/Review work routed through technical fallback profiles | Business role unchanged: design requirements persist; reviewer independence and no self-implementation/self-acceptance preserved. |
+
+## Production-code-only repair budget and finite read episodes (W2 override)
+
+| Scenario | Required behavior |
+|---|---|
+| Transient read errors followed by success | Normal care; the finite read episode's backoff is silent and bounded; success ends the episode; no repair-counter consumption, no operator approval, no persistent alert. |
+| Historical read errors plus a later healthy Go/turn/wakeup while reads work | No `2/2` park and no repair-park from reads; the new turn is admitted under its own authorization with remaining budgets; historical read errors remain recorded but do not block healthy reads. |
+| Persistent read unavailability | Bounded causal backoff with exactly one concise persistent-impact alert per exhausted episode; only dependent steps are held back while unavailability persists; recovery continues without an invented acceptance or budget reset; worker status is never fabricated as FAIL/PASS from a read gap. |
+| Two production-code repairs of the same fingerprint without evidenced progress | Park (`PARKED_INPUT_REQUIRED`); no third production-code repair; no silent reset across session/model/pause/message/time; history retained; mutation control: an infrastructure/test/doc/management fix of the same fingerprint must not count toward the cap or trigger the park. |
+| Mixed read errors, repair attempts, Pause/Resume and an uncertain non-idempotent receipt | Separate handling: reads use the read episode, real product repairs use the repair counter; the uncertain write/send is reconciled by exact receipt readback, never blindly retried or duplicated; Resume neither replenishes nor resets budgets. |
+| Repo/skill structural check versus host/scheduler E2E | Clearly labeled separately: repository/spec/protocol simulations (inventoried source traces, fake connectors, mutation controls) are not a production-engine (W3) or real-hosted acceptance proof; no synthetic E2E PASS. |

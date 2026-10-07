@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-10-07-r43
+
+- Scope the repair-loop budget to production code (Production-Code-Only override): at most two same-fingerprint production-code repairs without evidenced progress, then park; management, reads/result fetch, receipt reconciliation, planning/documentation, tests/fixtures/harness/test environments and infrastructure fixes are excluded and never count. Evidenced material progress ends the no-progress series and is not a no-progress failure; history survives sessions/models/pauses and is never reset.
+- Separate finite read episodes from the repair counter: bounded causal backoff, success ends the episode, only persistently current unavailability holds dependent steps back, historical read errors never park a later healthy Go/wakeup, and worker status is never fabricated FAIL/PASS from a read gap.
+- Keep uncertain non-idempotent writes/sends receipt-reconciled without blind retry or duplicates (distinct from read backoff), and keep the scheduler clock independent of ACTIVE/PARKED_INPUT_REQUIRED/COMPLETE_PASS/STOPPED work state with no automatic Work-Scheduler enrollment.
+- Unify the override wording across SKILL.md, regression scenarios, events/attention, optimistic MVP, monitor tasks, integration-test monitor and work packages; add the six mandatory W2 regression cases as source traces plus fake-connector/mutation-control tests; preserve r39–r42 coverage. Hosted behavior and the production engine (W3) remain separate acceptance.
+
 ## 2026-10-07-r42
 
 - Add cooperative Pause/Weiter-Go: a bare contextual Pause releases only the current chat/management/poll turn at the next safe Tool/Receipt return, preserving contracts, receipts and accepted workers (no abort/stop/archive, no scheduler or subscription change, no `USER_PAUSED`/`PARKED_INPUT_REQUIRED`); Go resumes the exact contract with remaining budgets and no replay or permission expansion.
