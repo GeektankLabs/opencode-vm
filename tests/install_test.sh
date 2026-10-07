@@ -13,7 +13,7 @@ limactl() { :; }
 
 source_file="$TMP/source/opencode-vm.sh"
 ocvm_resolve_script_path() { printf '%s\n' "$source_file"; }
-for asset in server.py policy.py catalog.py index.html styles.css app.js control.js; do
+for asset in server.py policy.py catalog.py index.html styles.css app.js monitor.py monitor.js control.js; do
   printf '%s\n' "$asset" > "$TMP/source/hub/$asset"
 done
 printf '#!/usr/bin/env bash\n# first version\n' > "$source_file"
@@ -22,7 +22,7 @@ ln -s "$source_file" "$HOME/bin/opencode-vm"
 install_cmd > "$TMP/install.log"
 [[ -f "$HOME/bin/opencode-vm" && ! -L "$HOME/bin/opencode-vm" && -x "$HOME/bin/opencode-vm" ]]
 cmp -s "$source_file" "$HOME/bin/opencode-vm"
-for asset in server.py policy.py catalog.py index.html styles.css app.js control.js; do
+for asset in server.py policy.py catalog.py index.html styles.css app.js monitor.py monitor.js control.js; do
   cmp -s "$TMP/source/hub/$asset" "$SHARE_ROOT/hub/$asset"
 done
 [[ ! -e "$SHARE_ROOT/hub/__pycache__" ]]

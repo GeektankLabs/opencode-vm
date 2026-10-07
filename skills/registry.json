@@ -23,6 +23,17 @@
         "cache_var": "SSH_SKILL_CACHE"
       }
     },
+    "orchestrator": {
+      "description": "Canonical OpenCode session orchestrator skill (integrations/chatgpt/opencode-session-orchestrator, revision r43) for local Monitor/management sessions",
+      "default_active": false,
+      "resolver": "single_bundled",
+      "skill_dir_name": "opencode-session-orchestrator",
+      "install": {
+        "type": "bundled",
+        "sparse_path": "integrations/chatgpt/opencode-session-orchestrator",
+        "cache_var": "ORCHESTRATOR_SKILL_CACHE"
+      }
+    },
     "besprechung": {
       "description": "Session-aware review documents and guided decision dialogues for text and voice conversations",
       "default_active": true,

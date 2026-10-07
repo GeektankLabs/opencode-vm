@@ -78,6 +78,7 @@ export type MonitorRecord = {
     message_id: string | null;
   } | null;
   wake_request: { requested_at: string; reason: string } | null;
+  abort_request: { requested_at: string; reason?: string } | null;
   history: MonitorHistoryEntry[];
   logs: MonitorLogEntry[];
   created_at: string;
@@ -148,6 +149,7 @@ export function defaultMonitorRecord(
     recovery: { active: false, started_at: null, last_error_fingerprint: null },
     dispatch_wal: null,
     wake_request: null,
+    abort_request: null,
     history: [],
     logs: [],
     created_at: at,

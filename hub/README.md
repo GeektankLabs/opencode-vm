@@ -20,7 +20,14 @@ Entwürfe, offene Editoren und Fokus bleiben bei Refresh/anderen Saves/GETfehler
 
 Manueller Rollback ist keine Hubaktion: vor ausdrücklich autorisiertem Restore Originalbackup gegen aktuelle Policy vergleichen, spätere Änderungen sichern/reconciliieren und passende Reader sicherstellen. Niemals eine alte Sicherung blind zurückkopieren; die Revision ist kein automatischer Downgradepfad.
 
-## Ehrliche Connectionzustände
+## Monitorbereich (W3/W4)
+
+- `GET /api/monitor?limit=&cursor=&work_state=`: alle Monitore der verbundenen kanonischen Registry (`<projekt>/.opencode-vm/monitor/registry.json`, dieselbe Datei wie Engine und MCP) inklusive deaktiviert/parkend; `total`, `generation`, `completeness` und `next_cursor` machen die Pagination vollständig erkennbar. Jeder Eintrag trägt stabilen `monitor_id` und exakten `anchor_task_id` (eindeutige Masterbindung).
+- `GET /api/monitor/{id}` / `.../history?limit=&include_logs=1`: Konfiguration/Effektivwerte, Sessionbindung, letzter/nächster Lauf, `freshness` (`fresh`/`stale`/`unknown`) und begrenzter Verlauf/Logs; ein aktiver Takt ist keine Gesundheitsgarantie.
+- `POST /api/monitor` (anlegen), `PUT /api/monitor/{id}` (Titel/Intervall/Autonomie/Runtime/Expiry; `generation` Pflicht, 409 `MONITOR_REVISION_CONFLICT`), `POST /api/monitor/{id}/{enable|disable|trigger|cancel|abort|delete}`: dieselben Regeln wie die MCP-Tools. Takt, fachlicher Arbeitszustand und laufender Turn bleiben getrennt; Park/Abschluss/Stop deaktiviert den Takt nie; nur explizite Expiry deaktiviert. `abort` fordert den nativen, verifizierten Abbruch an (Engine schreibt das Ergebnis in den Verlauf; keine Rollback-Behauptung). Löschen wird bei laufender Aktion mit 409 `MONITOR_STATE_CONFLICT` verweigert.
+- Die UI (`monitor.js`) konsumiert ausschließlich diese APIs: Entwürfe/Fokus bleiben bei Refresh erhalten, Revisionskonflikte erfordern bewussten Abgleich, unbestätigte Writes werden zurückgelesen statt automatisch wiederholt — dieselbe CAS-/Draft-/Readback-Disziplin wie die Profilroute. Keine zweite Registry, kein zweiter Wahrheitsstand.
+
+
 
 Read-model **schema 2** liefert vier stabile Typenkarten mit `configured:boolean|null`, `state`, `statusReason`, `checkScope`, `lastCheck` (Hub-Beobachtung, kein Heartbeat) und `setupRef`. Zustände: `not_configured`, `unverified`, `not_ready`, `ready`. Unlesbare Quelle ist unverified/configured null. Kompatible alte Healthfelder bleiben konservativ, die UI verwendet `state`.
 

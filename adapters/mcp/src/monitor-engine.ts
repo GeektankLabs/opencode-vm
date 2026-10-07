@@ -158,11 +158,14 @@ export class MonitorEngine {
       const snapshot = await this.snapshot();
       const due = snapshot.registry.monitors
         .filter((monitor) => monitor.scheduler.enabled && monitor.state.work !== "stopped")
-        .filter((monitor) => monitor.wake_request !== null || (monitor.scheduler.next_run_at ?? 0) <= now)
+        .filter((monitor) => (monitor.wake_request !== null && monitor.scheduler.enabled)
+          || (monitor.abort_request !== null && monitor.scheduler.enabled)
+          || (monitor.scheduler.next_run_at ?? 0) <= now)
         .sort((a, b) => {
-          const triggerA = a.wake_request ? 0 : 1;
-          const triggerB = b.wake_request ? 0 : 1;
-          if (triggerA !== triggerB) return triggerA - triggerB;
+          const rank = (monitor: MonitorRecord) => (monitor.abort_request ? 0 : monitor.wake_request ? 1 : 2);
+          const rankA = rank(a);
+          const rankB = rank(b);
+          if (rankA !== rankB) return rankA - rankB;
           return (a.scheduler.next_run_at ?? 0) - (b.scheduler.next_run_at ?? 0) || a.id.localeCompare(b.id);
         });
       const next = due[0];
@@ -243,6 +246,30 @@ export class MonitorEngine {
   }
 
   private async runWake(id: string, now: number, monitor: MonitorRecord): Promise<WakeOutcome> {
+    // ---- operator abort request: verified native abort, no canonical read ----
+    if (monitor.abort_request) {
+      const ensured = await this.ensureSession(monitor, now);
+      if (ensured.kind === "session-error") {
+        await this.release(id, now, null, (record) => {
+          monitorHistory(record, "session-unavailable", { reason: ensured.reason }, now);
+        });
+        return "error";
+      }
+      const aborted = await this.abortAndVerify(ensured.sessionId, id, now);
+      if (aborted.kind === "cleared") {
+        await this.release(id, now, "run-aborted", (record) => {
+          record.abort_request = null;
+          monitorHistory(record, "run-aborted", { abort: aborted.state, source: "operator-request" }, now);
+        });
+        return "recovery-parked";
+      }
+      await this.release(id, now, "run-abort-uncertain", (record) => {
+        record.abort_request = null;
+        monitorHistory(record, "run-abort-uncertain", { abort: aborted.state, source: "operator-request" }, now);
+      });
+      return "recovery-parked";
+    }
+
     // ---- canonical snapshot (bounded, honest coverage) ----
     const canonical = await this.snapshotCanonical(id, now, monitor);
     if (canonical.kind === "unavailable") return "board-unavailable";

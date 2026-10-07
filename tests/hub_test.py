@@ -245,5 +245,148 @@ class HubRealTLSTest(unittest.TestCase):
                 process.communicate(timeout=5)
 
 
+class HubMonitorTest(HubReadModelTest):
+    def serve(self):
+        server.REQUEST_SCHEME = "http"
+        http = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        thread = threading.Thread(target=http.serve_forever, daemon=True)
+        thread.start()
+        return http, thread
+
+    def request(self, base, path, method="GET", payload=None, lan=False):
+        headers = {}
+        if payload is not None:
+            headers["Content-Type"] = "application/json"
+        if method != "GET" and lan:
+            host = f"192.168.16.155:{base.rsplit(':', 1)[1]}"
+            headers["Host"] = host
+            headers["Origin"] = "http://" + host
+        request = Request(base + path, data=json.dumps(payload).encode() if payload is not None else None,
+                          method=method, headers=headers)
+        try:
+            with urlopen(request, timeout=5) as response:
+                return response.status, json.load(response)
+        except HTTPError as error:
+            return error.code, json.loads(error.read() or b"{}")
+
+    def test_monitor_roundtrip_cas_actions_and_states(self):
+        self.write_runtime(authEnabled=False, auth=None)
+        server.configure_runtime(self.runtime_path, self.project, self.project_id)
+        http, thread = self.serve()
+        base = f"http://127.0.0.1:{http.server_port}"
+        task = "task_11111111-1111-4111-8111-111111111111"
+        try:
+            status, created = self.request(base, "/api/monitor", "POST", {
+                "title": "Fixture Monitor", "task_id": task}, lan=True)
+            self.assertEqual(status, 201)
+            monitor = created["monitor"]
+            self.assertTrue(monitor["monitor_id"].startswith("monitor_"))
+            self.assertTrue(monitor["scheduler"]["enabled"])
+            self.assertEqual(monitor["work_state"], "active")
+            self.assertEqual(monitor["autonomy_profile"], "mvp")
+            self.assertEqual(monitor["runtime_profile"], "deep")
+            generation = created["generation"]
+            status, listed = self.request(base, "/api/monitor?limit=50")
+            self.assertEqual(status, 200)
+            self.assertEqual(listed["total"], 1)
+            self.assertEqual(listed["completeness"], "complete")
+            self.assertEqual(listed["monitors"][0]["anchor_task_id"], task)
+            status, updated = self.request(base, f"/api/monitor/{monitor['monitor_id'][8:]}", "PUT",
+                                           {"generation": generation, "interval_seconds": 90}, lan=True)
+            self.assertEqual(status, 200)
+            self.assertEqual(updated["monitor"]["scheduler"]["interval_seconds"], 90)
+            status, conflict = self.request(base, f"/api/monitor/{monitor['monitor_id'][8:]}", "PUT",
+                                            {"generation": generation, "interval_seconds": 30}, lan=True)
+            self.assertEqual(status, 409)
+            self.assertEqual(conflict["code"], "MONITOR_REVISION_CONFLICT")
+            generation = updated["generation"]
+            status, disabled = self.request(base, f"/api/monitor/{monitor['monitor_id'][8:]}/disable", "POST",
+                                            {"generation": generation}, lan=True)
+            self.assertEqual(status, 200)
+            self.assertFalse(disabled["monitor"]["scheduler"]["enabled"])
+            self.assertEqual(disabled["monitor"]["work_state"], "active")
+            generation = disabled["generation"]
+            status, enabled = self.request(base, f"/api/monitor/{monitor['monitor_id'][8:]}/enable", "POST",
+                                           {"generation": generation}, lan=True)
+            self.assertEqual(status, 200)
+            self.assertTrue(enabled["monitor"]["scheduler"]["enabled"])
+            generation = enabled["generation"]
+            status, triggered = self.request(base, f"/api/monitor/{monitor['monitor_id'][8:]}/trigger", "POST",
+                                             {"generation": generation}, lan=True)
+            self.assertEqual(status, 200)
+            generation = triggered["generation"]
+            status, abort_requested = self.request(base, f"/api/monitor/{monitor['monitor_id'][8:]}/abort", "POST",
+                                                   {"generation": generation}, lan=True)
+            self.assertEqual(status, 200)
+            self.assertEqual(abort_requested["state"], "requested")
+            status, listed = self.request(base, "/api/monitor?limit=50")
+            self.assertTrue(listed["monitors"][0]["abort_requested"])
+            generation = abort_requested["generation"]
+            monitor_store = sys.modules["hub.monitor"]
+            monitor_store.mutate(self.project, lambda registry: registry["monitors"][0]["run"].update({"active": True}))
+            status, refused = self.request(base, f"/api/monitor/{monitor['monitor_id'][8:]}/delete", "POST",
+                                           {"generation": None}, lan=True)
+            self.assertEqual(status, 409)
+            self.assertEqual(refused["code"], "MONITOR_STATE_CONFLICT")
+            monitor_store.mutate(self.project, lambda registry: registry["monitors"][0]["run"].update({"active": False}))
+            status, deleted = self.request(base, f"/api/monitor/{monitor['monitor_id'][8:]}/delete", "POST",
+                                           {"generation": None}, lan=True)
+            self.assertEqual(status, 200)
+            self.assertTrue(deleted["deleted"])
+        finally:
+            http.shutdown()
+            http.server_close()
+            thread.join()
+
+    def test_monitor_inventory_pagination_states_and_history(self):
+        import hub.monitor as monitor_store
+        first = monitor_store.default_monitor("Aktiv", "task_11111111-1111-4111-8111-111111111111", 60, "mvp", "deep", None)
+        parked = monitor_store.default_monitor("Parked", "task_22222222-2222-4222-8222-222222222222", 60, "conservative", "deep", None)
+        parked["state"]["work"] = "parked_input_required"
+        parked["state"]["parked_reason"] = "repair-budget-exhausted"
+        disabled = monitor_store.default_monitor("Disabled", "task_33333333-3333-4333-8333-333333333333", 60, "yolo", "standard", None)
+        disabled["scheduler"]["enabled"] = False
+        monitor_store.mutate(self.project, lambda registry: registry["monitors"].extend([first, parked, disabled]))
+        monitor_store.mutate(self.project, lambda registry: monitor_store.history_entry(
+            next(item for item in registry["monitors"] if item["id"] == first["id"]), "dispatched",
+            {"message_id": "msg_fixture"}))
+        self.write_runtime(authEnabled=False, auth=None)
+        server.configure_runtime(self.runtime_path, self.project, self.project_id)
+        http, thread = self.serve()
+        base = f"http://127.0.0.1:{http.server_port}"
+        try:
+            status, page = self.request(base, "/api/monitor?limit=2")
+            self.assertEqual(status, 200)
+            self.assertEqual(page["total"], 3)
+            self.assertEqual(page["completeness"], "paged")
+            self.assertEqual(len(page["monitors"]), 2)
+            self.assertIn("next_cursor", page)
+            status, rest = self.request(base, f"/api/monitor?limit=2&cursor={page['next_cursor']}")
+            self.assertEqual(rest["completeness"], "complete")
+            self.assertEqual(len(rest["monitors"]), 1)
+            states = {item["monitor_id"]: item for item in page["monitors"] + rest["monitors"]}
+            self.assertEqual(states[parked["id"]]["work_state"], "parked_input_required")
+            self.assertEqual(states[parked["id"]]["parked_reason"], "repair-budget-exhausted")
+            self.assertFalse(states[disabled["id"]]["scheduler"]["enabled"])
+            self.assertIsNotNone(states[first["id"]]["last_run_at"])
+            status, history = self.request(base, f"/api/monitor/{first['id'][8:]}/history?include_logs=1")
+            self.assertEqual(status, 200)
+            self.assertEqual(history["freshness"], "fresh")
+            self.assertEqual(history["coverage"], "complete")
+        finally:
+            http.shutdown()
+            http.server_close()
+            thread.join()
+
+    def test_monitor_ui_uses_the_canonical_api_only(self):
+        index = (ROOT / "hub/index.html").read_text(encoding="utf-8")
+        ui = (ROOT / "hub/monitor.js").read_text(encoding="utf-8")
+        self.assertIn('id="monitors"', index)
+        self.assertIn('/monitor.js', index)
+        for marker in ("/api/monitor?limit=", "MONITOR_REVISION_CONFLICT", "generation: snapshot.generation",
+                       "Engine verifiziert", "Abort angefordert"):
+            self.assertIn(marker, ui)
+        self.assertNotIn("localStorage", ui, "no second UI-side registry")
+
 if __name__ == "__main__":
     unittest.main()

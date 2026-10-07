@@ -476,3 +476,27 @@ test("inventory: all monitor states are returned with stable ids and unique mast
     await cleanup();
   }
 });
+test("engine: operator abort request performs a verified native abort without a dispatch", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    const { gateway, board } = fakes(state);
+    const engine = new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => 100_000 });
+    await withRegistry(project, (registry) => {
+      const monitor = defaultMonitorRecord("M", TASK, {}, 100_000);
+      monitor.abort_request = { requested_at: new Date(0).toISOString(), reason: "hub-ui" };
+      monitor.scheduler.next_run_at = 0;
+      registry.monitors.push(monitor);
+      return registry;
+    });
+    await engine.tick();
+    assert.deepEqual(state.abortResults, ["aborted"]);
+    assert.equal(state.sends.length, 0, "abort request never dispatches a prompt");
+    const snapshot = await readRegistrySnapshot(project);
+    assert.equal(snapshot.registry.monitors[0]!.abort_request, null);
+    assert.ok(snapshot.registry.monitors[0]!.history.some((entry) => entry.type === "run-aborted"));
+    assert.equal(snapshot.registry.monitors[0]!.scheduler.enabled, true);
+  } finally {
+    await cleanup();
+  }
+});
