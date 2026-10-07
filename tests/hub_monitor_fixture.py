@@ -24,6 +24,22 @@ TITLES = {
     7: "Deletable Monitor",
 }
 
+# Declared master tasks/work packages served through the candidates endpoint:
+# only tasks with registered canonical document bindings (compact_context or
+# concept_plan) count, and the terminal status done is excluded upstream.
+DECLARED_TASKS = [
+    {"task_id": "task_000000aa-0000-4000-8000-0000000000aa", "title": "Open Declared WP", "status": "in_progress", "declared": True},
+    {"task_id": "task_000000ab-0000-4000-8000-0000000000ab", "title": "Second Declared WP", "status": "todo", "declared": True},
+    {"task_id": "task_000000ac-0000-4000-8000-0000000000ac", "title": "Normal Ticket", "status": "in_progress", "declared": False},
+]
+
+
+def fixture_tasks(*_args, **_kwargs):
+    override = Path(server.PROJECT) / ".fixture-tasks.json"
+    if override.exists():
+        return json.loads(override.read_text(encoding="utf-8"))
+    return DECLARED_TASKS
+
 
 def seed(project: Path, count: int = 52) -> None:
     now = int(time.time())
@@ -74,6 +90,7 @@ if __name__ == "__main__":
         server.REQUEST_SCHEME = "http"
         server.read_catalog = lambda *args, **kwargs: {"providers": [], "models": [], "truncated": False}
         server.read_capabilities = lambda *args: True
+        server.read_board_tasks = fixture_tasks
         seed(server.PROJECT)
         http = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
         print(json.dumps({"port": http.server_port, "project": str(server.PROJECT)}), flush=True)

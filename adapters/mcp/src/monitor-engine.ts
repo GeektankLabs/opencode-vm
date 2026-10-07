@@ -53,7 +53,7 @@ export type MonitorBoardLike = {
   getTask(taskId: string): Promise<MonitorBoardTask>;
   getManagementHistory(
     taskId: string,
-    options: { mode: "recent"; limit?: number } | { mode: "latest_checkpoint" },
+    options: { mode: "recent"; limit: number } | { mode: "latest_checkpoint"; limit: number },
   ): Promise<{
     entries?: MonitorJournalEntry[];
     checkpoint?: { entry_id?: unknown; sequence?: unknown } | null;
@@ -130,7 +130,13 @@ function errorCode(error: unknown): string | undefined {
 }
 function isPersistentReadFailure(error: unknown): boolean {
   const code = errorCode(error);
-  return code === "TASKBOARD_UNAVAILABLE" || code === "BACKEND_UNAVAILABLE" || code === "ACTIVITY_UNAVAILABLE";
+  return code === "TASKBOARD_UNAVAILABLE" || code === "BACKEND_UNAVAILABLE" || code === "ACTIVITY_UNAVAILABLE"
+    || isDeterministicReadFailure(error);
+}
+/** Deterministic contract/validation rejections are not fixed by waiting. */
+function isDeterministicReadFailure(error: unknown): boolean {
+  const code = errorCode(error);
+  return code === "INVALID_ARGUMENT" || code === "UNSUPPORTED_CONFIGURATION";
 }
 
 export class MonitorEngine {
@@ -463,7 +469,7 @@ export class MonitorEngine {
     try {
       const task = await this.board.getTask(monitor.anchor.task_id);
       const recent = await this.board.getManagementHistory(monitor.anchor.task_id, { mode: "recent", limit: 20 });
-      const checkpoint = await this.board.getManagementHistory(monitor.anchor.task_id, { mode: "latest_checkpoint" });
+      const checkpoint = await this.board.getManagementHistory(monitor.anchor.task_id, { mode: "latest_checkpoint", limit: 1 });
       let documents: CanonicalSummary["documents"] = [];
       let coverage: CanonicalSummary["coverage"] = "complete";
       if (this.board.getDocuments) {
@@ -527,6 +533,8 @@ export class MonitorEngine {
       return { kind: "ok", summary, decisionsSince };
     } catch (error) {
       const persistent = isPersistentReadFailure(error);
+      const deterministic = isDeterministicReadFailure(error);
+      const code = errorCode(error) ?? null;
       const decision = await withRegistry(
         this.project,
         (registry) => {
@@ -536,10 +544,15 @@ export class MonitorEngine {
           monitorHistory(
             record,
             episode.outcome === "exhausted-alert" ? "read-exhausted" : "read-backoff",
-            { persistent, message: (error instanceof Error ? error.message : "read failed").slice(0, 120) },
+            { persistent, deterministic, code, message: (error instanceof Error ? error.message : "read failed").slice(0, 120) },
             now,
           );
-          if (episode.outcome === "exhausted-alert") monitorLog(record, "warn", "canonical read episode exhausted; dependent monitor action held back", now);
+          if (deterministic) {
+            monitorLog(record, "error",
+              `canonical read rejected by deterministic contract error ${code ?? "unknown"}; dependent monitor action held back`, now);
+          } else if (episode.outcome === "exhausted-alert") {
+            monitorLog(record, "warn", "canonical read episode exhausted; dependent monitor action held back", now);
+          }
           record.run = { active: false, started_at: null, action: record.run.action };
           if (
             record.scheduler.expiry_at !== null &&

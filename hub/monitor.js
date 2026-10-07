@@ -2,10 +2,12 @@
 (() => {
   const $ = id => document.getElementById(id);
   const esc = value => String(value ?? "").replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
-  const workLabels = { active: "Aktiv", parked_input_required: "Parked · Input erforderlich", complete_pass: "Abgeschlossen", stopped: "Gestoppt" };
+  const workLabels = { active: "aktiv", parked_input_required: "Parked · Input erforderlich", complete_pass: "Abgeschlossen", stopped: "Gestoppt" };
   const autonomyLabels = { conservative: "Conservative", sandbox: "Sandbox (Autonomie, keine Isolation)", mvp: "MVP (Standard)", yolo: "YOLO" };
   const runtimeLabels = { deep: "Deep", standard: "Standard", execution: "Execution", design: "Design", review: "Review" };
+  const fieldCaptions = { interval_seconds: "Intervall", autonomy_profile: "Autonomieprofil", runtime_profile: "Monitor-Runtime", expiry_at: "Expiry" };
   let snapshot = null, nextCursor = null, loading = false, writing = false, uncertain = null, expired = false;
+  let candidates = [], candidateTitles = new Map(), candidatesStale = false;
   const cards = new Map();
   const node = (tag, text, className) => { const element = document.createElement(tag); if (text) element.textContent = text; if (className) element.className = className; return element; };
   const msToLocal = value => value ? new Date(Number(value)).toLocaleString("de-DE") : "—";
@@ -16,6 +18,14 @@
     return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
   };
   const localInputToEpoch = value => value ? new Date(value).getTime() : null;
+  const readField = (kind, input) => kind === "number" ? Number(input.value)
+    : kind === "datetime-local" ? localInputToEpoch(input.value)
+    : input.value;
+
+  function newState(id) {
+    return { monitor_id: id, draft: null, pending: new Set(), conflict: false, saving: false,
+      editorOpen: false, detailsOpen: false, touched: false, feedback: "", historyEntries: [], historyStatus: "" };
+  }
 
   function focusTarget() {
     const active = document.activeElement;
@@ -56,63 +66,104 @@
     return { status: response.status, ok: response.ok, body };
   }
 
+  function setFeedback(state, text) {
+    state.feedback = text;
+    const card = document.getElementById(`monitor-${state.monitor_id}`);
+    const element = card?.querySelector(".monitor-feedback");
+    if (element) element.textContent = text;
+  }
+
+  function summaryText() {
+    return `${snapshot.monitors.length} von ${snapshot.total} Monitor(en) · Registry-Generation ${snapshot.generation}`;
+  }
+
   function renderList() {
     const container = $("monitor-cards");
     container.replaceChildren();
     const alive = new Set();
     for (const monitor of snapshot.monitors) { alive.add(monitor.monitor_id); container.append(buildCard(monitor)); }
     for (const id of [...cards.keys()]) if (!alive.has(id)) cards.delete(id);
-    const summary = `${snapshot.monitors.length} von ${snapshot.total} Monitor(en) · Registry-Generation ${snapshot.generation}`;
     $("monitor-status").textContent = expired
-      ? `${summary} · Abruf abgelaufen; MCP als Wahrheit lesen.`
-      : summary;
+      ? `${summaryText()} · Abruf abgelaufen; MCP als Wahrheit lesen.`
+      : summaryText();
     $("monitor-more").hidden = !nextCursor;
   }
 
+  function renderHistory(state, list) {
+    list.replaceChildren();
+    for (const entry of state.historyEntries.slice(0, 80)) {
+      list.append(node("div", `${entry.at} · ${entry.text}`, `event${entry.error ? " error" : ""}`));
+    }
+    if (!state.historyEntries.length) list.append(node("p", "Keine Einträge.", "muted"));
+  }
+
   function buildCard(monitor) {
-    const card = node("article", "", "card monitor-card");
-    card.id = `monitor-${monitor.monitor_id}`;
-    const state = cards.get(monitor.monitor_id) || {
-      monitor_id: monitor.monitor_id,
-      draft: null, dirty: false, conflict: false, compared: false, saving: false,
-    };
+    const state = cards.get(monitor.monitor_id) || newState(monitor.monitor_id);
     cards.set(monitor.monitor_id, state);
     if (!state.draft) {
       state.draft = {
-        title: monitor.title,
         interval_seconds: monitor.scheduler.interval_seconds,
         autonomy_profile: monitor.autonomy_profile,
         runtime_profile: monitor.runtime_profile,
         expiry_at: monitor.scheduler.expiry_at ?? null,
       };
     }
-    const title = node("h3", monitor.title);
-    const badges = node("p");
-    badges.append(node("span", monitor.scheduler.enabled ? "Takt aktiv" : "Takt deaktiviert", `badge ${monitor.scheduler.enabled ? "healthy" : "unknown"}`));
+    const card = node("article", "", "card monitor-card");
+    card.id = `monitor-${monitor.monitor_id}`;
+    card.append(node("h3", monitor.title));
+    const badges = node("p", "", "monitor-badges");
+    badges.append(node("span", monitor.scheduler.enabled ? "Aktiv" : "Pausiert", `badge ${monitor.scheduler.enabled ? "healthy" : "unknown"}`));
     badges.append(document.createTextNode(" "));
-    badges.append(node("span", workLabels[monitor.work_state] || monitor.work_state, `badge ${monitor.work_state === "active" ? "healthy" : monitor.work_state === "parked_input_required" ? "warning" : "unknown"}`));
+    badges.append(node("span", `Arbeitszustand: ${workLabels[monitor.work_state] || monitor.work_state}`, `badge ${monitor.work_state === "active" ? "healthy" : monitor.work_state === "parked_input_required" ? "warning" : "unknown"}`));
     if (monitor.run_active) { badges.append(document.createTextNode(" ")); badges.append(node("span", "Lauf aktiv", "badge warning")); }
     if (monitor.abort_requested) { badges.append(document.createTextNode(" ")); badges.append(node("span", "Abort angefordert", "badge warning")); }
-    card.append(title, badges);
+    card.append(badges);
     card.append(node("p", `Anker: ${monitor.anchor_task_id}`, "muted"));
     if (monitor.parked_reason) card.append(node("p", `Parkgrund: ${monitor.parked_reason}`, "muted"));
     card.append(node("p", `Takt ${monitor.scheduler.interval_seconds} s · ${autonomyLabels[monitor.autonomy_profile]} · Runtime ${runtimeLabels[monitor.runtime_profile]}`, "muted"));
     card.append(node("p", `Nächster Lauf: ${msToLocal(monitor.scheduler.next_run_at)} · Letzter Lauf: ${monitor.last_run_at ? new Date(monitor.last_run_at).toLocaleString("de-DE") : "unbekannt"} · Frische: ${freshness(monitor)}${monitor.scheduler.expiry_at ? ` · Expiry ${msToLocal(monitor.scheduler.expiry_at)}` : ""}`, "muted"));
     card.append(node("p", `Session: ${monitor.session_id || "noch nicht primed"}`, "muted"));
 
-    const editor = node("details", "monitor-editor");
+    const actions = node("div", "", "monitor-actions");
+    const toggle = node("button", monitor.scheduler.enabled ? "Takt deaktivieren" : "Takt aktivieren", "button secondary"); toggle.type = "button";
+    const trigger = node("button", "Jetzt auslösen", "button secondary"); trigger.type = "button";
+    const remove = node("button", "Löschen", "button secondary"); remove.type = "button";
+    actions.append(toggle, trigger, remove);
+    card.append(actions);
+    const feedback = node("p", state.feedback || "", "monitor-feedback muted"); feedback.setAttribute("role", "status");
+    card.append(feedback);
+
+    const details = node("details", "", "monitor-details");
+    details.open = Boolean(state.detailsOpen);
+    details.addEventListener("toggle", () => {
+      if (details.open === state.detailsOpen) return;
+      state.detailsOpen = details.open;
+      if (details.open) void loadHistory(state);
+    });
+    details.append(node("summary", "Details"));
+    const detailsHead = node("div", "", "monitor-details-head");
+    const historyStatus = node("span", state.historyStatus || "Verlauf wird beim Aufklappen geladen.", "muted monitor-history-status");
+    const historyRefresh = node("button", "Aktualisieren", "button secondary monitor-details-refresh"); historyRefresh.type = "button";
+    historyRefresh.addEventListener("click", () => void loadHistory(state));
+    detailsHead.append(historyStatus, historyRefresh);
+    const historyList = node("div", "", "events monitor-history");
+    renderHistory(state, historyList);
+    details.append(detailsHead, historyList);
+    card.append(details);
+
+    const editor = node("details", "", "monitor-editor");
     editor.open = Boolean(state.editorOpen);
     editor.addEventListener("toggle", () => { state.editorOpen = editor.open; });
     editor.append(node("summary", "Bearbeiten"));
     const form = node("form"); form.noValidate = true;
+    const fieldset = node("fieldset"); fieldset.append(node("legend", "Änderungen speichern automatisch nach gültiger Eingabe."));
+    const grid = node("div", "", "monitor-grid");
     const fields = [
-      ["title", "Titel", "text"],
       ["interval_seconds", "Intervall (Sekunden)", "number"],
       ["autonomy_profile", "Autonomieprofil", "select"],
       ["runtime_profile", "Monitor-Runtime", "select"],
       ["expiry_at", "Expiry (optional)", "datetime-local"],
     ];
-    const inputs = {};
     for (const [field, caption, kind] of fields) {
       const label = node("label", caption);
       let input;
@@ -127,43 +178,115 @@
       input.name = field;
       input.value = kind === "datetime-local" ? epochToLocalInput(state.draft[field]) : String(state.draft[field] ?? "");
       input.addEventListener("input", () => {
-        state.draft[field] = kind === "number" ? Number(input.value)
-          : kind === "datetime-local" ? localInputToEpoch(input.value)
-          : input.value;
-        state.dirty = true;
-        feedback.textContent = "Ungespeicherte Änderung.";
+        state.draft[field] = readField(kind, input);
+        state.touched = true;
+        setFeedback(state, "Ungespeicherte Änderung.");
       });
-      label.append(input); form.append(label);
-      inputs[field] = input;
+      input.addEventListener("change", () => {
+        state.draft[field] = readField(kind, input);
+        state.pending.add(field);
+        state.conflict = false;
+        state.touched = true;
+        setFeedback(state, `${fieldCaptions[field]} wird gespeichert …`);
+        void flush(state);
+      });
+      label.append(input); grid.append(label);
     }
-    const feedback = node("p", "", "monitor-feedback muted");
-    const actions = node("div", "monitor-actions");
-    const save = node("button", "Speichern (CAS)", "button"); save.type = "submit";
-    const reload = node("button", "Aktuellen Stand vergleichen", "button secondary"); reload.type = "button";
-    const enable = node("button", monitor.scheduler.enabled ? "Takt deaktivieren" : "Takt aktivieren", "button secondary"); enable.type = "button";
-    const trigger = node("button", "Jetzt auslösen", "button secondary"); trigger.type = "button";
-    const cancel = node("button", "Nächsten Lauf abbrechen", "button secondary"); cancel.type = "button";
-    const abort = node("button", "Laufenden Turn abbrechen", "button secondary"); abort.type = "button";
-    const remove = node("button", "Löschen", "button secondary"); remove.type = "button";
-    const history = node("button", "Verlauf laden", "button secondary"); history.type = "button";
-    actions.append(save, reload, enable, trigger, cancel, abort, remove, history);
-    form.append(feedback, actions); editor.append(form); card.append(editor);
+    fieldset.append(grid); form.append(fieldset); editor.append(form); card.append(editor);
 
-    form.addEventListener("submit", event => { event.preventDefault(); void saveDraft(state); });
-    reload.addEventListener("click", async () => { if (await load(true)) { state.conflict = state.compared = false; state.dirty = false; state.draft = null; renderList(); } });
-    enable.addEventListener("click", () => void act(monitor.monitor_id, monitor.scheduler.enabled ? "disable" : "enable"));
-    trigger.addEventListener("click", () => void act(monitor.monitor_id, "trigger"));
-    cancel.addEventListener("click", () => void act(monitor.monitor_id, "cancel"));
-    abort.addEventListener("click", () => {
-      if (window.confirm("Abort des laufenden Worker-Turns anfordern? Der Engine verifiziert den tatsächlichen Abbruch; bereits ausgeführte Änderungen bleiben bestehen."))
-        void act(monitor.monitor_id, "abort");
-    });
+    toggle.addEventListener("click", () => void act(state, monitor.scheduler.enabled ? "disable" : "enable"));
+    trigger.addEventListener("click", () => void act(state, "trigger"));
     remove.addEventListener("click", () => {
-      if (window.confirm("Monitor wirklich löschen? Der Verlauf wird mit entfernt.")) void act(monitor.monitor_id, "delete");
+      if (window.confirm("Monitor wirklich löschen? Der Verlauf wird mit entfernt.")) void act(state, "delete");
     });
-    history.addEventListener("click", () => void loadHistory(monitor.monitor_id));
-    if (state.conflict) feedback.textContent = "Registry anderweitig geändert; Entwurf bleibt. Aktuellen Stand vergleichen und bewusst erneut speichern.";
     return card;
+  }
+
+  async function flush(state) {
+    if (writing || loading || state.saving || state.conflict || !state.pending.size) return;
+    const fields = [...state.pending];
+    const payload = {};
+    for (const field of fields) payload[field] = state.draft[field];
+    const target = focusTarget();
+    writing = true; state.saving = true;
+    try {
+      const { status, ok, body } = await api(`/api/monitor/${state.monitor_id.slice(8)}`, {
+        method: "PUT",
+        body: JSON.stringify({ generation: snapshot.generation, ...payload }),
+      });
+      if (ok && body?.monitor) {
+        for (const field of fields) state.pending.delete(field);
+        state.conflict = false;
+        await load(true, true);
+        if (!state.pending.size && !state.conflict) {
+          state.draft = null; state.touched = false; state.editorOpen = false;
+          setFeedback(state, `Gespeichert · Generation ${snapshot.generation}.`);
+        } else if (state.pending.size) {
+          void flush(state);
+        }
+      } else if (body?.code === "MONITOR_REVISION_CONFLICT") {
+        state.conflict = true;
+        await load(true, true);
+        state.conflict = true;
+        setFeedback(state, "Registry anderweitig geändert; dein Entwurf bleibt. Eine weitere bewusste Änderung speichert erneut.");
+      } else {
+        uncertain = state.monitor_id;
+        setFeedback(state, `Speichern nicht bestätigt (${esc(body?.code || status || "Netzwerk")}); zurücklesen und vergleichen, kein automatischer Wiederholungswrite.`);
+      }
+    } finally {
+      writing = false; state.saving = false; renderList(); restoreFocus(target);
+    }
+  }
+
+  async function act(state, action) {
+    if (writing || loading) return;
+    writing = true;
+    try {
+      const { ok, body } = await api(`/api/monitor/${state.monitor_id.slice(8)}/${action}`, {
+        method: "POST",
+        body: JSON.stringify({ generation: snapshot.generation }),
+      });
+      if (ok) {
+        setFeedback(state, `Aktion ${action} bestätigt (Generation ${body?.generation}).`);
+        await load(true, true);
+      } else if (body?.code === "MONITOR_REVISION_CONFLICT") {
+        await load(true, true);
+        setFeedback(state, "Registry anderweitig geändert; aktueller Stand geladen. Aktion bewusst wiederholen.");
+      } else {
+        setFeedback(state, `Aktion nicht bestätigt: ${esc(body?.code || body?.error || "unbekannt")}.`);
+      }
+    } finally { writing = false; renderList(); }
+  }
+
+  async function loadHistory(state) {
+    const card = document.getElementById(`monitor-${state.monitor_id}`);
+    const status = card?.querySelector(".monitor-history-status");
+    const list = card?.querySelector(".monitor-history");
+    const button = card?.querySelector(".monitor-details-refresh");
+    if (!card || !list || !button || button.disabled) return;
+    button.disabled = true; button.textContent = "Aktualisiere …";
+    state.historyStatus = "Verlauf wird geladen …";
+    if (status) status.textContent = state.historyStatus;
+    try {
+      const { ok, body } = await api(`/api/monitor/${state.monitor_id.slice(8)}/history?limit=50&include_logs=1`);
+      if (!ok || !body) throw new Error(body?.error || "Verlauf nicht lesbar.");
+      const entries = [];
+      for (const entry of body.history.slice().reverse()) {
+        entries.push({ at: entry.at, text: `${entry.type}${entry.detail ? ` · ${JSON.stringify(entry.detail)}` : ""}`, error: false });
+      }
+      for (const log of (body.logs || []).slice().reverse()) {
+        entries.push({ at: log.at, text: `${log.level} · ${log.message}`, error: log.level === "error" });
+      }
+      state.historyEntries = entries;
+      state.historyStatus = `Stand ${new Date().toLocaleTimeString("de-DE")} · Abdeckung ${body.coverage} · Letzter Lauf ${body.last_run_at || "unbekannt"}`;
+      if (status) status.textContent = state.historyStatus;
+      renderHistory(state, list);
+      button.textContent = "Aktualisieren";
+    } catch (error) {
+      state.historyStatus = `Verlauf nicht lesbar: ${error.message}`;
+      if (status) status.textContent = state.historyStatus;
+      button.textContent = "Aktualisieren";
+    } finally { button.disabled = false; }
   }
 
   async function load(force, internal) {
@@ -196,63 +319,61 @@
       snapshot.completeness = body.completeness;
       nextCursor = body.next_cursor || null;
       renderList();
+      return true;
     } finally { loading = false; }
   }
 
-  async function saveDraft(state) {
-    if (writing || loading || state.conflict) return;
-    const target = focusTarget();
-    writing = true; state.saving = true;
-    try {
-      const { ok, body } = await api(`/api/monitor/${state.monitor_id.slice(8)}`, {
-        method: "PUT",
-        body: JSON.stringify({ generation: snapshot.generation, ...state.draft }),
-      });
-      if (ok && body?.monitor) {
-        state.dirty = false; state.draft = null; state.conflict = false; expired = false;
-        await load(true, true);
-      } else if (body?.code === "MONITOR_REVISION_CONFLICT") {
-        state.conflict = true;
-        await load(true, true);
-        state.conflict = true; renderList();
-      } else {
-        uncertain = state.monitor_id;
-        $("monitor-status").textContent = `Speichern nicht bestätigt (${esc(body?.code || "Netzwerk")}); zurücklesen und vergleichen, kein automatischer Wiederholungswrite.`;
-      }
-    } finally {
-      writing = false; state.saving = false; renderList(); restoreFocus(target);
-    }
+  function updateCreateState() {
+    const select = $("monitor-create-task");
+    const valid = Boolean(select.value) && (candidates.some(item => item.task_id === select.value) || candidatesStale);
+    $("monitor-create-form").querySelector('button[type="submit"]').disabled = writing || !valid;
   }
 
-  async function act(monitorId, action) {
-    if (writing || loading) return;
-    writing = true;
+  async function loadCandidates() {
+    const select = $("monitor-create-task");
+    const status = $("monitor-create-candidates-status");
+    status.textContent = "Mastertasks werden geladen …";
+    const previous = select.value;
+    const previousTitle = candidateTitles.get(previous);
     try {
-      const { ok, body } = await api(`/api/monitor/${monitorId.slice(8)}/${action}`, {
-        method: "POST",
-        body: JSON.stringify({ generation: snapshot.generation }),
-      });
-      if (ok) {
-        $("monitor-status").textContent = action === "abort"
-          ? "Abort angefordert; der Engine verifiziert den nativen Abbruch und schreibt das Ergebnis in den Verlauf."
-          : `Aktion ${action} bestätigt (Generation ${body?.generation}).`;
-        await load(true, true);
-      } else if (body?.code === "MONITOR_REVISION_CONFLICT") {
-        await load(true, true);
-        $("monitor-status").textContent = "Registry anderweitig geändert; aktueller Stand geladen. Aktion bewusst wiederholen.";
+      const { ok, body } = await api("/api/monitor/candidates");
+      if (!ok || !body || !Array.isArray(body.candidates)) throw new Error(body?.error || "Liste nicht lesbar.");
+      candidates = body.candidates;
+      candidatesStale = false;
+      candidateTitles = new Map(candidates.map(item => [item.task_id, item.title]));
+      select.replaceChildren(...(candidates.length
+        ? [new Option("— Bitte wählen —", ""), ...candidates.map(item => new Option(`${item.title} · ${item.task_id}`, item.task_id))]
+        : [new Option("Keine offenen deklarierten Mastertasks/Work Packages ohne Monitorbindung", "")]));
+      const previousValid = Boolean(previous) && candidates.some(item => item.task_id === previous);
+      if (previousValid) select.value = previous;
+      if (previous && !previousValid) {
+        status.textContent = `Die bisherige Auswahl${previousTitle ? ` „${previousTitle}“` : ""} ist nicht mehr verfügbar (inzwischen abgeschlossen oder an einen Monitor gebunden). Bitte eine gültige Auswahl treffen.`;
       } else {
-        $("monitor-status").textContent = `Aktion nicht bestätigt: ${esc(body?.code || body?.error || "unbekannt")}.`;
+        status.textContent = candidates.length
+          ? `${candidates.length} offene deklarierte Mastertask(s) ohne Monitorbindung.`
+          : "Keine offenen deklarierten Mastertasks/Work Packages ohne Monitorbindung gefunden.";
       }
-    } finally { writing = false; renderList(); }
+      updateCreateState();
+      return true;
+    } catch (error) {
+      candidatesStale = true;
+      status.textContent = `Mastertask-Liste nicht aktuell: ${error.message}. Vorhandene Optionen bleiben sichtbar; die Anlage prüft die Bindung erneut.`;
+      updateCreateState();
+      return false;
+    }
   }
 
   async function createMonitor(event) {
     event.preventDefault();
     if (writing || loading) return;
+    const select = $("monitor-create-task");
+    const taskId = select.value;
+    const title = candidateTitles.get(taskId);
     const feedback = $("monitor-create-feedback");
-    const form = $("monitor-create-form");
-    const title = $("monitor-create-title").value.trim();
-    const taskId = $("monitor-create-task").value.trim();
+    if (!taskId || !title) {
+      feedback.textContent = "Bitte einen gültigen Mastertask/Work Package auswählen.";
+      return;
+    }
     const interval = Number($("monitor-create-interval").value || 60);
     const autonomy = $("monitor-create-autonomy").value;
     const runtime = $("monitor-create-runtime").value;
@@ -268,47 +389,50 @@
         const detail = await api(`/api/monitor/${monitorId.slice(8)}`);
         const created = detail.ok ? detail.body?.monitor : null;
         await load(true, true);
+        await loadCandidates();
+        $("monitor-create").open = false;
+        $("monitor-status").textContent = `${summaryText()} · Monitor „${title}“ erstellt (Generation ${snapshot.generation}).`;
         feedback.textContent = created
-          ? `Erstellt und zurückgelesen: ${created.monitor_id} · Takt ${created.scheduler.interval_seconds} s · ${autonomyLabels[created.autonomy_profile]} · Runtime ${runtimeLabels[created.runtime_profile]}${created.scheduler.expiry_at ? ` · Expiry ${msToLocal(created.scheduler.expiry_at)}` : ""} · Generation ${snapshot.generation}.`
+          ? `Erstellt und zurückgelesen: ${created.monitor_id} · Takt ${created.scheduler.interval_seconds} s · ${autonomyLabels[created.autonomy_profile]} · Runtime ${runtimeLabels[created.runtime_profile]}${created.scheduler.expiry_at ? ` · Expiry ${msToLocal(created.scheduler.expiry_at)}` : ""}.`
           : `Erstellt (${monitorId}); Rücklesen ausstehend.`;
-        form.reset();
+        $("monitor-create-form").reset();
         fillOptions($("monitor-create-autonomy"), autonomyLabels, "mvp");
         fillOptions($("monitor-create-runtime"), runtimeLabels, "deep");
+        updateCreateState();
+      } else if (body?.code === "MONITOR_TASK_BOUND") {
+        feedback.textContent = `Dieser Mastertask ist bereits an einen Monitor gebunden${body.monitor_id ? ` (${body.monitor_id})` : ""}. Bitte „Aktualisieren“ und einen anderen Task wählen.`;
       } else {
         feedback.textContent = `Erstellen nicht bestätigt (${esc(body?.code || status || "Netzwerk")}); Eingaben bleiben stehen.`;
       }
-    } finally { writing = false; renderList(); }
+    } finally { writing = false; }
   }
 
-  async function loadHistory(monitorId) {
-    const panel = $("monitor-history");
-    panel.hidden = false;
-    panel.replaceChildren(node("p", "Verlauf wird geladen …", "muted"));
-    const { ok, body } = await api(`/api/monitor/${monitorId.slice(8)}/history?limit=50&include_logs=1`);
-    if (!ok || !body) { panel.replaceChildren(node("p", "Verlauf nicht lesbar.", "muted")); return; }
-    const head = node("div");
-    head.append(node("h3", `Verlauf ${monitorId}`));
-    head.append(node("p", `Letzter Lauf: ${body.last_run_at || "unbekannt"} · Nächster Lauf: ${msToLocal(body.next_run_at)} · Frische: ${body.freshness} · Abdeckung: ${body.coverage}`, "muted"));
-    panel.replaceChildren(head);
-    const list = node("div", "events");
-    for (const entry of body.history.slice().reverse()) {
-      const item = node("div", `${entry.at} · ${entry.type}${entry.detail ? ` · ${esc(JSON.stringify(entry.detail))}` : ""}`, "event");
-      list.append(item);
+  async function refreshAll() {
+    const button = $("monitor-refresh");
+    if (button.disabled) return;
+    button.disabled = true; button.textContent = "Aktualisiere …";
+    try {
+      const monitorsOk = await load(true);
+      const candidatesOk = await loadCandidates();
+      if (monitorsOk) {
+        const stamp = new Date().toLocaleTimeString("de-DE");
+        $("monitor-status").textContent = `${summaryText()} · Zuletzt erfolgreich aktualisiert ${stamp}${candidatesOk ? "" : " · Mastertask-Liste nicht aktuell"}`;
+      }
+    } finally {
+      button.disabled = false; button.textContent = "Aktualisieren";
     }
-    if (body.logs?.length) {
-      for (const log of body.logs.slice().reverse()) list.append(node("div", `${log.at} · ${log.level} · ${log.message}`, `event ${log.level === "error" ? "error" : ""}`));
-    }
-    panel.append(list);
   }
 
-  $("monitor-refresh").addEventListener("click", () => void load(true));
+  $("monitor-refresh").addEventListener("click", () => void refreshAll());
   $("monitor-more").addEventListener("click", () => void loadMore());
   fillOptions($("monitor-create-autonomy"), autonomyLabels, "mvp");
   fillOptions($("monitor-create-runtime"), runtimeLabels, "deep");
+  $("monitor-create-task").addEventListener("change", () => { updateCreateState(); $("monitor-create-feedback").textContent = "Der Titel wird beim Anlegen automatisch aus dem gewählten Mastertask übernommen."; });
   $("monitor-create-form").addEventListener("submit", event => { void createMonitor(event); });
   window.addEventListener("beforeunload", event => {
-    if (uncertain || [...cards.values()].some(state => state.dirty)) { event.preventDefault(); event.returnValue = ""; }
+    if (uncertain || [...cards.values()].some(state => state.touched || state.pending.size)) { event.preventDefault(); event.returnValue = ""; }
   });
   window.addEventListener("hub-control-loaded", () => { void load(false); });
   void load(false);
+  void loadCandidates();
 })();

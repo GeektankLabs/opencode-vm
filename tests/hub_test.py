@@ -383,9 +383,12 @@ class HubMonitorTest(HubReadModelTest):
         ui = (ROOT / "hub/monitor.js").read_text(encoding="utf-8")
         self.assertIn('id="monitors"', index)
         self.assertIn('/monitor.js', index)
-        for marker in ("/api/monitor?limit=", "MONITOR_REVISION_CONFLICT", "generation: snapshot.generation",
-                       "Engine verifiziert", "Abort angefordert"):
+        for marker in ("/api/monitor?limit=", "/api/monitor/candidates", "MONITOR_REVISION_CONFLICT",
+                       "generation: snapshot.generation", "Abort angefordert", "monitor-details-refresh"):
             self.assertIn(marker, ui)
+        for removed in ("Nächsten Lauf abbrechen", "Laufenden Turn abbrechen", "Speichern (CAS)",
+                        "Aktuellen Stand vergleichen"):
+            self.assertNotIn(removed, ui, "the contracted UI removal must stay effective")
         self.assertNotIn("localStorage", ui, "no second UI-side registry")
 
 if __name__ == "__main__":

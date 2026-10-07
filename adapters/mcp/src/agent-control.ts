@@ -16,6 +16,10 @@ type Policy = {
   finalFallback: FinalFallback;
 };
 
+export type PolicySelection = Selection;
+export type PolicyFinalFallback = FinalFallback;
+export type AgentControlPolicy = Policy;
+
 const id = (value: unknown): value is string =>
   typeof value === "string" && value.length > 0 && value.length <= 256 &&
   !/[\s\x00-\x1f\x7f]/u.test(value) &&

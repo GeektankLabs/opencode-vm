@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-08-r44
+
+- Document operator-directed configuration of the final error-fallback slot through the discovered write capability (adapter 0.1.31 adds `set_project_model_policy_fallback`): read the current revision, use an exact catalog-validated selection and mode decided by the operator, write with revision CAS, and confirm the committed readback. No invented provider/model, no silent auto-configuration; an unconfigured slot still yields a precise `INPUT_REQUIRED`.
+
 ## 2026-10-07-r43
 
 - Scope the repair-loop budget to production code (Production-Code-Only override): at most two same-fingerprint production-code repairs without evidenced progress, then park; management, reads/result fetch, receipt reconciliation, planning/documentation, tests/fixtures/harness/test environments and infrastructure fixes are excluded and never count. Evidenced material progress ends the no-progress series and is not a no-progress failure; history survives sessions/models/pauses and is never reset.

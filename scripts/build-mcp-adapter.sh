@@ -43,7 +43,7 @@ cp -p "$ROOT/LICENSE" "$STAGE/LICENSE"
 cp -p "$ADAPTER/dist/main.js" "$ADAPTER/dist/types.js" \
   "$ADAPTER/dist/opencode.js" "$ADAPTER/dist/tools.js" \
   "$ADAPTER/dist/http.js" "$ADAPTER/dist/taskboard.js" "$ADAPTER/dist/management-journal.js" "$ADAPTER/dist/agent-control.js" \
-  "$ADAPTER/dist/attachments.js" "$STAGE/dist/"
+  "$ADAPTER/dist/policy-commit.js" "$ADAPTER/dist/attachments.js" "$STAGE/dist/"
 cp -p "$ADAPTER/dist/activity.js" "$ADAPTER/dist/attention.js" "$ADAPTER/dist/events.js" \
   "$ADAPTER/dist/content.js" "$ADAPTER/dist/diagnostics.js" "$STAGE/dist/"
 cp -p "$ADAPTER/dist/monitor.js" "$ADAPTER/dist/monitor-engine.js" "$ADAPTER/dist/monitor-main.js" "$STAGE/dist/"

@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { createInterface } from "node:readline";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 const { chromium, webkit } = await import(process.env.PLAYWRIGHT_MODULE || "playwright");
 const fixture = spawn("python3", ["-B", "tests/ach1_browser_fixture.py"], { cwd: process.cwd(), env: { ...process.env, PYTHONPATH: "." }, stdio: ["ignore", "pipe", "inherit"] });
 const lines = createInterface({ input: fixture.stdout });
@@ -18,8 +18,9 @@ try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
     const errors = []; page.on("pageerror", error => errors.push(error.message));
     await page.goto(base); await page.waitForSelector("#profile-review");
-    assert.deepEqual(await page.locator("section[id]").evaluateAll(items => items.map(i => i.id)), ["profiles", "connections-section", "logs"]);
+    assert.deepEqual(await page.locator("section[id]").evaluateAll(items => items.map(i => i.id)), ["profiles", "connections-section", "monitors", "logs"]);
     assert.equal(await page.locator(".profile-card").count(), 5);
+    assert.equal(await page.locator(".fallback-card").count(), 1);
     assert.equal(await page.locator(".connection-card").count(), 4);
     assert.equal(await page.locator("#notices, #tabs, #show-logs").count(), 0);
     const contrast = await page.evaluate(() => {
@@ -149,6 +150,39 @@ try {
     await page.unroute("**/api/control");
     await page.locator("#refresh-control").click();
     await page.waitForFunction(() => document.querySelector("#control-status").textContent.includes("geprüft"));
+    // Final error fallback: schema 3 upgrade with backup, readback, explicit refusal and reset.
+    assert.match(await page.locator("#profile-final-fallback .profile-summary").innerText(), /Nicht konfiguriert/);
+    await page.locator("#profile-final-fallback .profile-editor summary").click();
+    await page.locator("#fallback-mode").selectOption("degrading");
+    await page.locator("#fallback-provider_id").selectOption("fixture");
+    await page.locator("#fallback-model_id").selectOption("family/model");
+    await page.locator("#fallback-variant").selectOption("high");
+    await page.locator("#profile-final-fallback button[type=submit]").click();
+    await page.waitForFunction(() => document.querySelector("#profile-final-fallback .profile-feedback").textContent.includes("gespeichert · Revision"));
+    let storedPolicy = JSON.parse(await readFile(`${project}/.opencode-vm/agent-control.json`));
+    assert.equal(storedPolicy.schemaVersion, 3);
+    assert.deepEqual(storedPolicy.finalFallback, { mode: "degrading", selection: tuple });
+    assert.ok((await readdir(`${project}/.opencode-vm`)).some(name => /^agent-control\.schema2-rev\d+\.backup\.json$/u.test(name)),
+      "the schema 2 original must be backed up before the schema 3 upgrade");
+    await page.locator("#refresh-control").click();
+    await page.waitForFunction(() => document.querySelector("#profile-final-fallback .profile-summary").textContent.includes("Degrading Fallback"));
+    assert.match(await page.locator("#profile-final-fallback .profile-summary").innerText(), /Im aktuellen Katalog verfügbar/);
+    assert.equal(await page.locator("#fallback-mode").inputValue(), "degrading");
+    assert.equal(await page.locator("#fallback-variant").inputValue(), "high");
+    await page.locator("#fallback-variant").selectOption("default");
+    const beforeRefusal = await readFile(`${project}/.opencode-vm/agent-control.json`, "utf8");
+    await page.route("**/api/control/fallback", route => route.fulfill({ status: 422, json: { code: "SELECTION_UNAVAILABLE", reason: "variant_unavailable" } }));
+    await page.locator("#profile-final-fallback button[type=submit]").click();
+    await page.waitForFunction(() => document.querySelector("#profile-final-fallback .profile-feedback").textContent.includes("Nicht gespeichert"));
+    assert.equal(await page.locator("#fallback-variant").inputValue(), "default");
+    assert.equal(await readFile(`${project}/.opencode-vm/agent-control.json`, "utf8"), beforeRefusal);
+    await page.unroute("**/api/control/fallback");
+    await page.locator("#profile-final-fallback").getByRole("button", { name: "Fallback entfernen" }).click();
+    await page.waitForFunction(() => document.querySelector("#profile-final-fallback .profile-feedback").textContent.includes("Fallback entfernt"));
+    storedPolicy = JSON.parse(await readFile(`${project}/.opencode-vm/agent-control.json`));
+    assert.equal(storedPolicy.schemaVersion, 3);
+    assert.equal(storedPolicy.finalFallback, null);
+    assert.match(await page.locator("#profile-final-fallback .profile-summary").innerText(), /Nicht konfiguriert/);
     const long = "family/long-" + "model-name-".repeat(15); await select("design", "high", long);
     // Four state labels/local help, source filter and disclosure/focus survive status refresh.
     await page.route("**/api/control", async route => {

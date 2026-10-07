@@ -1,17 +1,16 @@
-// W5 UI evidence: a real browser executes the production hub/monitor.js against a
-// disposable Hub. The other surface is the canonical monitor store (hub.monitor),
-// i.e. the same registry file the Monitor Engine and the MCP monitor tools use.
+// UI evidence for the monitor surface: a real browser executes the production
+// hub/monitor.js against a disposable Hub. The other surface is the canonical
+// monitor store (hub.monitor), i.e. the same registry file the Monitor Engine
+// and the MCP monitor tools use. Candidate master tasks come from the same
+// declaration rule the Hub endpoint uses (registered compact_context/concept_plan
+// document bindings), served through a deterministic fixture.
 //
 // Run: PLAYWRIGHT_MODULE=/abs/path/to/playwright/index.mjs node --test tests/hub_monitor_browser_test.mjs
-//
-// The suite intentionally contains three FINDING tests that encode binding
-// acceptance items which the current production UI does not satisfy. They are
-// expected to stay red until the Root-admitted correction wave; they are the
-// exact reproducers.
 import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
 import { once } from "node:events";
 import { createInterface } from "node:readline";
+import { writeFile } from "node:fs/promises";
 import test, { before, after } from "node:test";
 
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright");
@@ -29,6 +28,16 @@ const registryMonitors = () => storeCli("snapshot").monitors;
 const registryGeneration = () => storeCli("snapshot").generation;
 const idByTitle = title => Object.values(registryMonitors()).find(item => item.title === title)?.id;
 const card = title => page.locator(".monitor-card", { hasText: title }).first();
+
+const taskAA = "task_000000aa-0000-4000-8000-0000000000aa";
+const taskAB = "task_000000ab-0000-4000-8000-0000000000ab";
+const taskAC = "task_000000ac-0000-4000-8000-0000000000ac";
+const defaultTasks = [
+  { task_id: taskAA, title: "Open Declared WP", status: "in_progress", declared: true },
+  { task_id: taskAB, title: "Second Declared WP", status: "todo", declared: true },
+  { task_id: taskAC, title: "Normal Ticket", status: "in_progress", declared: false },
+];
+const writeFixtureTasks = tasks => writeFile(`${project}/.fixture-tasks.json`, JSON.stringify(tasks));
 
 async function openAll() {
   while (await page.locator("#monitor-more").isVisible()) {
@@ -48,9 +57,10 @@ async function waitStore(predicate, timeout = 6000) {
 }
 
 async function refresh() {
-  const done = page.waitForResponse(r => r.url().includes("/api/monitor?limit=50") && r.request().method() === "GET");
+  const monitors = page.waitForResponse(r => r.url().includes("/api/monitor?limit=50") && r.request().method() === "GET");
+  const candidates = page.waitForResponse(r => r.url().includes("/api/monitor/candidates") && r.request().method() === "GET");
   await page.locator("#monitor-refresh").click();
-  await done.catch(() => {});
+  await Promise.all([monitors.catch(() => {}), candidates.catch(() => {})]);
   await page.waitForTimeout(150);
 }
 
@@ -59,31 +69,52 @@ async function openCreate() {
 }
 
 async function openEditor(title) {
-  await card(title).locator("details").first().evaluate(element => { element.open = true; });
+  await card(title).locator("details.monitor-editor").evaluate(element => { element.open = true; });
 }
 
-async function openAllEditorsAfterRefresh() { await openAll(); }
+async function openDetails(title) {
+  await card(title).locator("details.monitor-details").evaluate(element => { element.open = true; });
+}
 
-async function saveEditor(title, interval, autonomy, runtime) {
+const editorOpen = title => card(title).locator("details.monitor-editor").evaluate(element => element.open);
+
+async function setInterval(title, value) {
   await openEditor(title);
-  await card(title).locator("input[type=number]").fill(String(interval));
-  if (autonomy) await card(title).locator("select").first().selectOption(autonomy);
-  if (runtime) await card(title).locator("select").nth(1).selectOption(runtime);
+  const input = card(title).locator('input[name="interval_seconds"]');
+  await input.fill(String(value));
   const done = page.waitForResponse(r => r.url().includes("/api/monitor/") && r.request().method() === "PUT");
-  await card(title).locator('button[type=submit]').click();
-  await done.catch(() => {});
+  await input.blur();
+  const response = await done;
   await page.waitForTimeout(200);
+  return response.status();
+}
+
+async function setProfile(title, name, value) {
+  await openEditor(title);
+  const done = page.waitForResponse(r => r.url().includes("/api/monitor/") && r.request().method() === "PUT");
+  await card(title).locator(`select[name="${name}"]`).selectOption(value);
+  const response = await done;
+  await page.waitForTimeout(200);
+  return response.status();
+}
+
+async function setExpiry(title, value) {
+  await openEditor(title);
+  const input = card(title).locator('input[name="expiry_at"]');
+  await input.fill(value);
+  const done = page.waitForResponse(r => r.url().includes("/api/monitor/") && r.request().method() === "PUT");
+  await input.blur();
+  const response = await done;
+  await page.waitForTimeout(200);
+  return response.status();
 }
 
 async function clickAction(title, label) {
-  await openEditor(title);
   const done = page.waitForResponse(r => r.url().includes("/api/monitor/") && r.request().method() === "POST");
   await card(title).locator("button", { hasText: label }).click();
   await done.catch(() => {});
   await page.waitForTimeout(200);
 }
-
-async function submitDraft(title, interval) { return saveEditor(title, interval); }
 
 before(async () => {
   fixture = spawn("python3", ["-B", "tests/hub_monitor_fixture.py"], {
@@ -114,17 +145,18 @@ test("inventory lists disabled and parked monitors with stable ids and master bi
   const ids = await page.locator(".monitor-card").evaluateAll(items => items.map(item => item.id));
   assert.equal(new Set(ids).size, 50, "monitor ids are unique");
   assert.match(await page.locator("#monitor-status").textContent(), /50 von 52 Monitor\(en\) · Registry-Generation \d+/);
-  assert.equal(await card("Disabled Monitor").locator(".badge", { hasText: "Takt deaktiviert" }).count(), 1);
-  assert.equal(await card("Parked Monitor").locator(".badge", { hasText: "Parked" }).count(), 1);
+  assert.equal(await card("Disabled Monitor").locator(".badge", { hasText: /^Pausiert$/u }).count(), 1);
+  assert.match(await card("Parked Monitor").locator(".badge", { hasText: /^Arbeitszustand: /u }).innerText(), /Parked/);
   assert.match(await card("Alpha Monitor").locator(".muted", { hasText: "Anker:" }).textContent(), /Anker: task_[0-9a-f]{8}/);
   assert.deepEqual(pageErrors, []);
 });
 
-test("scheduler, business state and running turn stay separate", async () => {
-  assert.equal(await card("Parked Monitor").locator(".badge", { hasText: "Takt aktiv" }).count(), 1, "parking keeps the schedule enabled");
+test("one scheduler badge, separate business state and running turn", async () => {
+  assert.equal(await card("Parked Monitor").locator(".badge", { hasText: /^Aktiv$/u }).count(), 1, "parking keeps the schedule enabled");
   assert.equal(await card("Parked Monitor").locator(".muted", { hasText: "Parkgrund:" }).count(), 1);
   assert.equal(await card("Running Monitor").locator(".badge", { hasText: "Lauf aktiv" }).count(), 1);
   assert.equal(await card("Abort Monitor").locator(".badge", { hasText: "Abort angefordert" }).count(), 1);
+  assert.equal(await page.getByText("Takt aktiv", { exact: true }).count(), 0, "the duplicate generic badge is gone");
 });
 
 test("freshness never fakes health from an active schedule", async () => {
@@ -141,17 +173,26 @@ test("pagination completeness keeps stable ids", async () => {
   assert.equal(await page.locator("#monitor-more").isHidden(), true);
 });
 
-test("UI update reaches the canonical registry (UI -> store)", async () => {
+test("a committed field change autosaves partially, confirms and collapses the editor", async () => {
   await refresh();
   const id = idByTitle("Alpha Monitor");
-  await saveEditor("Alpha Monitor", 300, "yolo", "standard");
+  await openEditor("Alpha Monitor");
+  assert.equal(await editorOpen("Alpha Monitor"), true);
+  assert.equal(await setInterval("Alpha Monitor", 300), 200);
   assert.ok(await waitStore(items => items[id].scheduler.interval_seconds === 300));
+  await card("Alpha Monitor").locator(".monitor-feedback", { hasText: "Gespeichert" }).waitFor();
+  assert.equal(await editorOpen("Alpha Monitor"), false, "a confirmed save collapses the editor");
+  assert.equal(await setProfile("Alpha Monitor", "autonomy_profile", "yolo"), 200);
+  assert.equal(await setProfile("Alpha Monitor", "runtime_profile", "standard"), 200);
   const stored = registryMonitors()[id];
+  assert.equal(stored.scheduler.interval_seconds, 300, "unrelated fields are preserved by the partial write");
   assert.equal(stored.autonomy_profile, "yolo");
   assert.equal(stored.runtime_profile, "standard");
+  assert.equal(await editorOpen("Alpha Monitor"), false);
+  assert.match(await card("Alpha Monitor").textContent(), /Takt 300 s/);
 });
 
-test("external canonical write appears after an explicit refresh (store -> UI)", async () => {
+test("external canonical write appears after an explicit refresh", async () => {
   const id = idByTitle("Alpha Monitor");
   storeCli("update", id, JSON.stringify({ scheduler: { interval_seconds: 900 } }));
   await refresh();
@@ -172,36 +213,30 @@ test("default interval 60 is surfaced for a new canonical monitor", async () => 
   assert.equal(await card("New Monitor").locator(".muted", { hasText: "Session: noch nicht primed" }).count(), 1);
 });
 
-test("a stale write is rejected (409) and changes nothing", async () => {
-  const id = idByTitle("Alpha Monitor");
+test("a stale write is rejected (409), keeps the draft and a later change retries deliberately", async () => {
   await refresh();
+  const id = idByTitle("Alpha Monitor");
   await openEditor("Alpha Monitor");
-  await card("Alpha Monitor").locator("input[type=number]").fill("111");
+  const input = card("Alpha Monitor").locator('input[name="interval_seconds"]');
+  await input.fill("111");
   storeCli("bump");
   const response = page.waitForResponse(r => r.url().includes("/api/monitor/") && r.request().method() === "PUT");
-  await card("Alpha Monitor").locator('button[type=submit]').click();
+  await input.blur();
   assert.equal((await response).status(), 409);
-  await page.waitForTimeout(200);
+  await card("Alpha Monitor").locator(".monitor-feedback", { hasText: "anderweitig geändert" }).waitFor();
+  assert.equal(await editorOpen("Alpha Monitor"), true, "a conflict keeps the editor open");
+  assert.equal(await input.inputValue(), "111", "the draft survives");
   assert.equal(registryMonitors()[id].scheduler.interval_seconds, 900, "the rejected write changed nothing");
-  await clickAction("Alpha Monitor", "Aktuellen Stand vergleichen");
-  await card("Alpha Monitor").locator(".monitor-feedback", { hasText: "Registry anderweitig geändert" }).waitFor({ state: "detached" });
+  await input.fill("222");
+  const retry = page.waitForResponse(r => r.url().includes("/api/monitor/") && r.request().method() === "PUT");
+  await input.blur();
+  assert.equal((await retry).status(), 200);
+  assert.ok(await waitStore(items => items[id].scheduler.interval_seconds === 222));
+  await card("Alpha Monitor").locator(".monitor-feedback", { hasText: "Gespeichert" }).waitFor();
+  assert.equal(await editorOpen("Alpha Monitor"), false);
 });
 
-test("conflict notice and draft survive a rejected write", async () => {
-  await refresh();
-  await openEditor("Alpha Monitor");
-  await card("Alpha Monitor").locator('input[name="interval_seconds"]').fill("444");
-  storeCli("bump");
-  const done = page.waitForResponse(r => r.url().includes("/api/monitor/") && r.request().method() === "PUT");
-  await card("Alpha Monitor").locator('button[type=submit]').click();
-  assert.equal((await done).status(), 409);
-  await card("Alpha Monitor").locator(".monitor-feedback", { hasText: "Registry anderweitig geändert" }).waitFor();
-  assert.equal(await card("Alpha Monitor").locator('input[name="interval_seconds"]').inputValue(), "444", "the draft survives");
-  await clickAction("Alpha Monitor", "Aktuellen Stand vergleichen");
-  await card("Alpha Monitor").locator(".monitor-feedback", { hasText: "Registry anderweitig geändert" }).waitFor({ state: "detached" });
-});
-
-test("scheduler enable/disable, trigger and cancel act on the canonical registry", async () => {
+test("scheduler toggle and trigger act on the canonical registry; removed actions are gone", async () => {
   await refresh();
   const id = idByTitle("Disabled Monitor");
   const before = registryMonitors()[id].scheduler.enabled;
@@ -212,29 +247,8 @@ test("scheduler enable/disable, trigger and cancel act on the canonical registry
   const target = idByTitle("Filler 10 Monitor");
   await clickAction("Filler 10 Monitor", "Jetzt auslösen");
   assert.ok(await waitStore(items => Boolean(items[target].wake_request)), "trigger records a wake request");
-  await refresh();
-  await clickAction("Filler 10 Monitor", "Nächsten Lauf abbrechen");
-  assert.ok(await waitStore(items => items[target].wake_request === null), "cancel clears the pending wake request");
-});
-
-test("abort running turn is confirm-gated and requests the verified native abort", async () => {
-  await refresh();
-  const id = idByTitle("Running Monitor");
-  await clickAction("Running Monitor", "Laufenden Turn abbrechen");
-  assert.ok(await waitStore(items => Boolean(items[id].abort_request)));
-});
-
-test("history panel shows bounded history and logs", async () => {
-  await refresh();
-  await openEditor("Alpha Monitor");
-  const done = page.waitForResponse(r => r.url().includes("/history") && r.request().method() === "GET");
-  await card("Alpha Monitor").locator("button", { hasText: "Verlauf laden" }).click();
-  await done.catch(() => {});
-  await page.locator("#monitor-history", { hasText: /Verlauf monitor_[0-9a-f]{32}/ }).waitFor();
-  const text = await page.locator("#monitor-history").textContent();
-  assert.match(text, /updated/);
-  assert.match(text, /Frische:/);
-  assert.match(text, /Abdeckung:/);
+  assert.equal(await page.getByRole("button", { name: "Nächsten Lauf abbrechen" }).count(), 0);
+  assert.equal(await page.getByRole("button", { name: "Laufenden Turn abbrechen" }).count(), 0);
 });
 
 test("delete removes the monitor from the canonical registry", async () => {
@@ -245,117 +259,132 @@ test("delete removes the monitor from the canonical registry", async () => {
   assert.equal(idByTitle("Deletable Monitor"), undefined);
 });
 
-// ---------------------------------------------------------------------------
-// Positive regressions for the W5 UI findings (fixed in this correction).
-// ---------------------------------------------------------------------------
-
-test("post-write readback keeps UI and store generation identical and shows the new value", async () => {
+test("details starts closed, loads fresh history newest first and has its own refresh feedback", async () => {
   await refresh();
   const id = idByTitle("Alpha Monitor");
-  await saveEditor("Alpha Monitor", 333);
-  assert.ok(await waitStore(items => items[id].scheduler.interval_seconds === 333));
-  await page.locator(".monitor-card", { hasText: "Takt 333 s" }).first().waitFor();
-  const statusGeneration = Number((await page.locator("#monitor-status").textContent()).match(/Generation (\d+)/)[1]);
-  assert.equal(statusGeneration, registryGeneration());
+  assert.equal(await card("Alpha Monitor").locator("details.monitor-details").evaluate(element => element.open), false);
+  const history = page.waitForResponse(r => r.url().includes("/history") && r.request().method() === "GET");
+  await openDetails("Alpha Monitor");
+  await history;
+  await card("Alpha Monitor").locator(".monitor-history .event").first().waitFor();
+  const entries = registryMonitors()[id].history;
+  const firstEvent = await card("Alpha Monitor").locator(".monitor-history .event").first().textContent();
+  assert.ok(firstEvent.startsWith(entries[entries.length - 1].at), "newest entry first");
+  assert.match(await card("Alpha Monitor").locator(".monitor-history-status").innerText(), /Stand .* Abdeckung/);
+  // Own refresh button: visible reaction and explicit error instead of false success.
+  await page.route("**/history**", route => route.fulfill({ status: 503, body: "offline" }));
+  await card("Alpha Monitor").locator(".monitor-details-refresh").click();
+  await card("Alpha Monitor").locator(".monitor-history-status", { hasText: "Verlauf nicht lesbar" }).waitFor();
+  assert.equal(await card("Alpha Monitor").locator(".monitor-details-refresh").isEnabled(), true);
+  await page.unroute("**/history**");
+  const again = page.waitForResponse(r => r.url().includes("/history") && r.request().method() === "GET");
+  await card("Alpha Monitor").locator(".monitor-details-refresh").click();
+  await again;
+  await card("Alpha Monitor").locator(".monitor-history-status", { hasText: "Stand" }).waitFor();
 });
 
-test("a follow-up UI action after a UI write succeeds without conflict", async () => {
-  const id = idByTitle("Alpha Monitor");
-  const before = registryMonitors()[id].scheduler.enabled;
-  await clickAction("Alpha Monitor", /Takt (de)?aktivieren/);
-  assert.ok(await waitStore(items => items[id].scheduler.enabled === !before));
-});
-
-test("create form creates a monitor with defaults and a confirmed readback", async () => {
-  await refresh();
-  await openCreate();
-  await page.locator("#monitor-create-title").fill("UI Created Monitor");
-  await page.locator("#monitor-create-task").fill("task_0000ffff-0000-4000-8000-00000000ffff");
-  const done = page.waitForResponse(r => r.url().endsWith("/api/monitor") && r.request().method() === "POST");
-  await page.locator("#monitor-create-form button[type=submit]").click();
-  assert.equal((await done).status(), 201);
-  await page.locator("#monitor-create-feedback", { hasText: /Erstellt und zurückgelesen/ }).waitFor();
-  await openAll();
-  await page.locator(".monitor-card", { hasText: "UI Created Monitor" }).first().waitFor();
-  const text = await card("UI Created Monitor").textContent();
-  assert.match(text, /Takt 60 s/);
-  assert.match(text, /MVP \(Standard\)/);
-  assert.match(text, /Runtime Deep/);
-  const stored = Object.values(registryMonitors()).find(item => item.title === "UI Created Monitor");
-  assert.equal(stored.scheduler.interval_seconds, 60);
-  assert.equal(stored.autonomy_profile, "mvp");
-  assert.equal(stored.runtime_profile, "deep");
-  assert.equal(stored.anchor.task_id, "task_0000ffff-0000-4000-8000-00000000ffff");
-});
-
-test("duplicate master-task binding is rejected honestly", async () => {
-  await refresh();
-  await openCreate();
-  const task = "task_0000fffe-0000-4000-8000-00000000fffe";
-  const submit = async title => {
-    await page.locator("#monitor-create-title").fill(title);
-    await page.locator("#monitor-create-task").fill(task);
-    const done = page.waitForResponse(r => r.url().endsWith("/api/monitor") && r.request().method() === "POST");
-    await page.locator("#monitor-create-form button[type=submit]").click();
-    return (await done).status();
-  };
-  assert.equal(await submit("Duplicate A"), 201);
-  assert.equal(await submit("Duplicate B"), 409);
-  assert.match(await page.locator("#monitor-create-feedback").textContent(), /MONITOR_REVISION_CONFLICT/);
-  const bound = Object.values(registryMonitors()).filter(item => item.anchor.task_id === task);
-  assert.equal(bound.length, 1);
-  assert.equal(bound[0].title, "Duplicate A");
-});
-
-test("expiry is editable and clears back to null", async () => {
+test("expiry is editable, commits on blur and clears back to null", async () => {
   await refresh();
   const id = idByTitle("Alpha Monitor");
   const value = "2030-01-02T03:04";
-  await openEditor("Alpha Monitor");
-  await card("Alpha Monitor").locator('input[name="expiry_at"]').fill(value);
-  const done = page.waitForResponse(r => r.url().includes("/api/monitor/") && r.request().method() === "PUT");
-  await card("Alpha Monitor").locator('button[type=submit]').click();
-  assert.equal((await done).status(), 200);
+  assert.equal(await setExpiry("Alpha Monitor", value), 200);
   assert.ok(await waitStore(items => items[id].scheduler.expiry_at === new Date(value).getTime()));
   assert.match(await card("Alpha Monitor").textContent(), /Expiry /);
-  await openEditor("Alpha Monitor");
-  await card("Alpha Monitor").locator('input[name="expiry_at"]').fill("");
-  const done2 = page.waitForResponse(r => r.url().includes("/api/monitor/") && r.request().method() === "PUT");
-  await card("Alpha Monitor").locator('button[type=submit]').click();
-  assert.equal((await done2).status(), 200);
+  assert.equal(await setExpiry("Alpha Monitor", ""), 200);
   assert.ok(await waitStore(items => items[id].scheduler.expiry_at === null));
 });
 
-test("focus and draft survive a save", async () => {
+test("create offers only open declared unbound tasks and derives the title automatically", async () => {
+  await writeFixtureTasks(defaultTasks);
   await refresh();
-  await openEditor("Alpha Monitor");
-  const input = card("Alpha Monitor").locator('input[name="interval_seconds"]');
-  await input.focus();
-  await input.fill("654");
-  const done = page.waitForResponse(r => r.url().includes("/api/monitor/") && r.request().method() === "PUT");
-  await card("Alpha Monitor").locator("form").evaluate(form => form.requestSubmit());
-  assert.equal((await done).status(), 200);
-  await page.waitForTimeout(200);
-  const active = await page.evaluate(() => ({ name: document.activeElement?.name || "", value: document.activeElement?.value || "" }));
-  assert.equal(active.name, "interval_seconds");
-  assert.equal(active.value, "654");
+  await openCreate();
+  assert.equal(await page.locator("#monitor-create-title").count(), 0, "no manual title field");
+  const options = await page.locator("#monitor-create-task option").evaluateAll(items => items.map(item => ({ value: item.value, text: item.textContent })));
+  const values = options.map(option => option.value);
+  assert.ok(values.includes(taskAA) && values.includes(taskAB), "declared open tasks are offered");
+  assert.ok(!values.includes(taskAC), "a normal ticket is not a master task");
+  assert.ok(!values.includes("task_00000000-0000-4000-8000-000000000000"), "already bound tasks are excluded");
+  const option = options.find(item => item.value === taskAA);
+  assert.match(option.text, /Open Declared WP · task_000000aa-/);
+  const submit = page.locator("#monitor-create-form button[type=submit]");
+  assert.equal(await submit.isDisabled(), true, "no valid selection means no creation");
+  await page.locator("#monitor-create-task").selectOption(taskAA);
+  assert.equal(await submit.isEnabled(), true);
+  assert.match(await page.locator("#monitor-create-candidates-status").innerText(), /offene deklarierte Mastertask/);
 });
 
-test("pending writes are single-flight", async () => {
+test("create collapses the form, keeps the readback and removes the bound task from the list", async () => {
+  await openCreate();
+  await page.locator("#monitor-create-task").selectOption(taskAA);
+  const done = page.waitForResponse(r => r.url().endsWith("/api/monitor") && r.request().method() === "POST");
+  await page.locator("#monitor-create-form button[type=submit]").click();
+  assert.equal((await done).status(), 201);
+  await page.locator("#monitor-status", { hasText: /erstellt \(Generation/ }).waitFor();
+  assert.match(await page.locator("#monitor-create-feedback").textContent(), /Erstellt und zurückgelesen/);
+  assert.equal(await page.locator("#monitor-create").evaluate(element => element.open), false, "a confirmed creation collapses the form");
+  await openAll();
+  await page.locator(".monitor-card", { hasText: "Open Declared WP" }).first().waitFor();
+  const stored = Object.values(registryMonitors()).find(item => item.anchor.task_id === taskAA);
+  assert.equal(stored.title, "Open Declared WP", "the title comes from the selected master task");
+  await openCreate();
+  const values = await page.locator("#monitor-create-task option").evaluateAll(items => items.map(item => item.value));
+  assert.ok(!values.includes(taskAA), "the newly bound task is removed from the create list");
+});
+
+test("duplicate binding is rejected honestly in the shared creation path", async () => {
+  const body = {
+    title: "Second Try", task_id: taskAA, interval_seconds: 60, autonomy_profile: "mvp", runtime_profile: "deep", expiry_at: null,
+  };
+  const response = await page.request.post(`${base}/api/monitor`, { headers: { Origin: base }, data: body });
+  assert.equal(response.status(), 409);
+  const result = await response.json();
+  assert.equal(result.code, "MONITOR_TASK_BOUND");
+  assert.match(result.monitor_id || "", /^monitor_[0-9a-f]{32}$/);
+  const bound = Object.values(registryMonitors()).filter(item => item.anchor.task_id === taskAA);
+  assert.equal(bound.length, 1, "at most one monitor per master task");
+});
+
+test("refresh re-reads the board list: vanished selections are explicit and errors are never an empty list", async () => {
   await refresh();
-  const id = idByTitle("Alpha Monitor");
-  let puts = 0;
-  await page.route("**/api/monitor/*", async route => {
-    if (route.request().method() === "PUT") { puts += 1; await new Promise(resolve => setTimeout(resolve, 700)); }
-    await route.continue();
+  await openCreate();
+  await page.locator("#monitor-create-task").selectOption(taskAB);
+  // The task disappears upstream (for example it became done); the selection must be reported.
+  await writeFixtureTasks([{ task_id: taskAA, title: "Open Declared WP", status: "in_progress", declared: true }]);
+  await refresh();
+  await page.locator("#monitor-create-candidates-status", { hasText: "nicht mehr verfügbar" }).waitFor();
+  assert.match(await page.locator("#monitor-create-candidates-status").innerText(), /Second Declared WP/);
+  assert.equal(await page.locator("#monitor-create-form button[type=submit]").isDisabled(), true);
+  // A board read error is an explicit error, and retained options are marked stale.
+  await writeFixtureTasks(defaultTasks);
+  await refresh();
+  await page.locator("#monitor-create-task").selectOption(taskAB);
+  await page.route("**/api/monitor/candidates", route => route.fulfill({ status: 503, body: "offline" }));
+  await refresh();
+  await page.locator("#monitor-create-candidates-status", { hasText: "nicht aktuell" }).waitFor();
+  assert.equal(await page.locator("#monitor-create-task").inputValue(), taskAB, "the previous selection survives a failed board read");
+  await page.unroute("**/api/monitor/candidates");
+  await refresh();
+  await page.locator("#monitor-create-candidates-status", { hasText: "offene deklarierte Mastertask" }).waitFor();
+});
+
+test("refresh reacts visibly, monitors use the full content width and narrow views do not overflow", async () => {
+  await refresh();
+  assert.match(await page.locator("#monitor-status").innerText(), /Zuletzt erfolgreich aktualisiert \d{2}:\d{2}:\d{2}/);
+  assert.equal(await page.locator("#monitor-refresh").isEnabled(), true);
+  const widths = await page.evaluate(() => {
+    const container = document.getElementById("monitor-cards").getBoundingClientRect().width;
+    const cardWidth = document.querySelector(".monitor-card").getBoundingClientRect().width;
+    return { container, cardWidth };
   });
-  await openEditor("Alpha Monitor");
-  await card("Alpha Monitor").locator('input[name="interval_seconds"]').fill("765");
-  const submit = card("Alpha Monitor").locator('button[type=submit]');
-  await submit.click();
-  await submit.click().catch(() => {});
-  await page.waitForTimeout(1600);
-  await page.unroute("**/api/monitor/*");
-  assert.equal(puts, 1);
-  assert.equal(registryMonitors()[id].scheduler.interval_seconds, 765);
+  assert.ok(Math.abs(widths.container - widths.cardWidth) < 2, `monitor card uses the full content width (${JSON.stringify(widths)})`);
+  const markerText = await page.evaluate(() => ({
+    editor: document.body.innerText.includes("monitor-editor"),
+    actions: document.body.innerText.includes("monitor-actions"),
+  }));
+  assert.deepEqual(markerText, { editor: false, actions: false }, "internal marker class names are not rendered as user text");
+  for (const width of [1280, 700, 320]) {
+    await page.setViewportSize({ width, height: 900 });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, `${width}px overflow`);
+  }
+  assert.deepEqual(pageErrors, []);
 });

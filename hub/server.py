@@ -27,11 +27,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 try:
     from .policy import PolicyStore, PolicyError, PolicyConflict, PolicyCapabilityError, PROFILES, FALLBACKS, FALLBACK_MODES, check_selection, validate_selection, resolve_profile
-    from .catalog import read_catalog, mcp_connection, read_capabilities
+    from .catalog import read_catalog, mcp_connection, read_capabilities, read_board_tasks
     from . import monitor as monitor_store
 except ImportError:  # Executed directly as hub/server.py by the guest service.
     from policy import PolicyStore, PolicyError, PolicyConflict, PolicyCapabilityError, PROFILES, FALLBACKS, FALLBACK_MODES, check_selection, validate_selection, resolve_profile
-    from catalog import read_catalog, mcp_connection, read_capabilities
+    from catalog import read_catalog, mcp_connection, read_capabilities, read_board_tasks
     import monitor as monitor_store
 
 
@@ -241,7 +241,9 @@ def control_snapshot():
     catalog = read_catalog(RUNTIME["mcp"], SESSION_ROOT, project_hash(), connection=connection)
     return {"policy": policy, "catalog": catalog, "validation": {
         name: check_selection(policy["profiles"][name], catalog) for name in PROFILES
-    }, "resolutions": {name: resolve_profile(policy, name, catalog) for name in PROFILES},
+    }, "finalFallbackStatus": check_selection(
+        (policy.get("finalFallback") or {}).get("selection") if policy.get("finalFallback") else None, catalog),
+        "resolutions": {name: resolve_profile(policy, name, catalog) for name in PROFILES},
         "fallbacks": FALLBACKS,
         "capabilities": {"mcp": "supported", "optionalProfiles": read_capabilities(connection),
                          "a2a": "unsupported", "openlive": "unsupported"},
@@ -305,6 +307,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(409, {"code": "POLICY_FORMAT_UNSUPPORTED", "error": "Unsupported or invalid project policy."})
         elif path == "/api/monitor":
             self.handle_monitor_list()
+        elif path == "/api/monitor/candidates":
+            self.handle_monitor_candidates()
         elif re.fullmatch(r"/api/monitor/[0-9a-f]{32}/history", path):
             self.handle_monitor_history()
         elif re.fullmatch(r"/api/monitor/[0-9a-f]{32}", path):
@@ -527,6 +531,24 @@ class Handler(BaseHTTPRequestHandler):
             payload["next_cursor"] = next_cursor
         self.send_json(200, payload)
 
+    def handle_monitor_candidates(self) -> None:
+        try:
+            registry = monitor_store.snapshot(PROJECT)
+        except monitor_store.MonitorError:
+            self.send_json(503, {"code": "MONITOR_UNAVAILABLE", "error": "Monitor registry is unavailable."})
+            return
+        connection = mcp_connection(RUNTIME["mcp"], SESSION_ROOT, project_hash())
+        tasks = read_board_tasks(RUNTIME["mcp"], SESSION_ROOT, project_hash(), connection=connection)
+        if tasks is None:
+            self.send_json(503, {"code": "MONITOR_CANDIDATES_UNAVAILABLE",
+                                 "error": "The project board task list is not readable; no candidates were confirmed."})
+            return
+        bound = {item["anchor"]["task_id"] for item in registry["monitors"]}
+        candidates = [{"task_id": task["task_id"], "title": task["title"]}
+                      for task in tasks if task["declared"] and task["task_id"] not in bound]
+        self.send_json(200, {"schema": 1, "candidates": candidates, "total": len(candidates),
+                             "generation": registry["generation"], "observed_at": now()})
+
     def handle_monitor_get(self) -> None:
         monitor_id = self.path.split("?", 1)[0].rsplit("/", 1)[1]
         try:
@@ -645,7 +667,20 @@ class Handler(BaseHTTPRequestHandler):
                 body["state"] = "requested"
                 body["guidance"] = "Abort requested; the engine verifies the native abort and records the stored outcome."
             self.send_json(200, body)
-        except monitor_store.MonitorConflict:
+        except monitor_store.MonitorConflict as error:
+            message = str(error)
+            if path == "/api/monitor" and "already has a monitor" in message:
+                existing = None
+                try:
+                    existing = next((item["id"] for item in monitor_store.snapshot(PROJECT)["monitors"]
+                                     if item["anchor"]["task_id"] == payload.get("task_id")), None)
+                except (monitor_store.MonitorError, AttributeError, TypeError):
+                    existing = None
+                body = {"code": "MONITOR_TASK_BOUND", "error": message}
+                if existing:
+                    body["monitor_id"] = existing
+                self.send_json(409, body)
+                return
             self.send_json(409, {"code": "MONITOR_REVISION_CONFLICT", "error": "Monitor changed; reload before saving."})
         except monitor_store.MonitorError as error:
             message = str(error)

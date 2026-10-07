@@ -3107,7 +3107,7 @@ class TaskDoneArchiveTraceTest(unittest.TestCase):
         monitor = (source / "references/monitor-tasks.md").read_text()
         content = (source / "references/content-protocol.md").read_text()
         scenarios = (source / "references/regression-scenarios.md").read_text()
-        self.assertIn("2026-10-07-r43", skill)
+        self.assertIn("2026-10-08-r44", skill)
         self.assertIn("## Cooperative Pause and Weiter/Go", skill)
         self.assertIn("references/pause-go.md", skill)
         for required in ("next safe Tool/Receipt return",
@@ -3333,8 +3333,8 @@ class TaskDoneArchiveTraceTest(unittest.TestCase):
         monitor = (source / "references/monitor-tasks.md").read_text()
         packages = (source / "references/work-packages.md").read_text()
         mvp = (source / "references/optimistic-mvp.md").read_text()
-        self.assertIn("2026-10-07-r43", skill)
-        self.assertIn("## 2026-10-07-r43", (source / "CHANGELOG.md").read_text())
+        self.assertIn("2026-10-08-r44", skill)
+        self.assertIn("## 2026-10-08-r44", (source / "CHANGELOG.md").read_text())
         # Production-Code-Only cap with excluded classes, progress and no-reset.
         for required in ("at most two autonomous PRODUCTION-CODE repair cycles",
                          "they never count and never park",

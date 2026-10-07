@@ -68,6 +68,7 @@ type FakeState = {
   combinedThrows: boolean;
   abortPendingAfter: { permissions: number; questions: number } | null;
   abortActivityAfter: "idle" | "busy" | "retry";
+  readFailCode: string | null;
 };
 
 function fakes(state: FakeState) {
@@ -136,7 +137,10 @@ function fakes(state: FakeState) {
     async getTask() {
       return { id: TASK, title: "Anchor", status: state.taskStatus, updated_at: state.taskUpdated };
     },
-    async getManagementHistory(_taskId: string, options: { mode: string }) {
+    async getManagementHistory(_taskId: string, options: { mode: "recent" | "latest_checkpoint"; limit: number }) {
+      if (state.readFailCode) throw Object.assign(new Error("History limit must be between 1 and 50."), { code: state.readFailCode });
+      if (!Number.isInteger(options.limit) || options.limit < 1 || options.limit > 50)
+        throw Object.assign(new Error("History limit must be between 1 and 50."), { code: "INVALID_ARGUMENT" });
       if (options.mode === "latest_checkpoint") return { checkpoint: state.checkpoint };
       return { entries: state.entries };
     },
@@ -171,6 +175,7 @@ function baseState(): FakeState {
     combinedThrows: false,
     abortPendingAfter: { permissions: 0, questions: 0 },
     abortActivityAfter: "idle",
+    readFailCode: null,
   };
 }
 
@@ -310,6 +315,45 @@ test("engine: unchanged monitor is a cheap no-op without a model call; changed c
     const noop = await engine2.tick();
     assert.equal(noop, "noop-unchanged");
     assert.equal(state.sends.length, 1, "unchanged canonical must not call the model again");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("engine: canonical read passes a bounded limit and reports deterministic contract errors honestly", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    const { gateway, board } = fakes(state);
+    const engine = new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => 100_000 });
+    await withRegistry(project, (registry) => {
+      const monitor = defaultMonitorRecord("M", TASK, {}, 100_000);
+      monitor.scheduler.next_run_at = 0;
+      registry.monitors.push(monitor);
+      return registry;
+    });
+    // The board double rejects a missing/oversized limit exactly like the journal
+    // contract; a valid canonical read still succeeds and never enters a read episode.
+    const first = await engine.tick();
+    assert.notEqual(first, "read-backoff");
+    assert.notEqual(first, "read-exhausted");
+    const ok = await readRegistrySnapshot(project);
+    assert.ok(!ok.registry.monitors[0]!.history.some((entry) => entry.type.startsWith("read-")));
+
+    state.readFailCode = "INVALID_ARGUMENT";
+    await withRegistry(project, (registry) => {
+      registry.monitors[0]!.scheduler.next_run_at = 0;
+      return registry;
+    });
+    assert.equal(await engine.tick(), "read-backoff");
+    const snapshot = await readRegistrySnapshot(project);
+    const record = snapshot.registry.monitors[0]!;
+    const last = record.history[record.history.length - 1]!;
+    assert.equal(last.type, "read-backoff");
+    assert.equal((last.detail as { persistent?: boolean }).persistent, true);
+    assert.equal((last.detail as { deterministic?: boolean }).deterministic, true);
+    assert.equal((last.detail as { code?: string }).code, "INVALID_ARGUMENT");
+    assert.ok(record.logs.some((entry) => entry.level === "error" && entry.message.includes("deterministic contract error INVALID_ARGUMENT")));
   } finally {
     await cleanup();
   }

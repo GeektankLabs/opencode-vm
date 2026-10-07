@@ -272,7 +272,10 @@ export class ProjectBoardService {
       (since === undefined || (row.updatedAt !== undefined && Date.parse(row.updatedAt) >= since)) &&
       (!input.sessionId || (metadata.links[this.taskId(row.id, metadata)] ?? [])
         .some((link) => link.session_id === input.sessionId)),
-    ).map((row) => this.publicTask(row, metadata));
+    ).map((row) => {
+      const taskId = this.taskId(row.id, metadata);
+      return { ...this.publicTask(row, metadata), documents: metadata.documents[taskId] ?? [] };
+    });
     if (tasks.length > TASK_RESULT_LIMIT || Buffer.byteLength(JSON.stringify({ tasks }), "utf8") > MAX_TASK_OUTPUT_BYTES) {
       throw searchIncomplete();
     }

@@ -10,6 +10,7 @@
     catalog_unavailable: "Gespeichert · derzeit nicht prüfbar", catalog_incomplete: "Gespeichert · Katalog unvollständig",
     provider_unavailable: "Provider nicht verfügbar", model_unavailable: "Modell nicht verfügbar", variant_unavailable: "Variante nicht verfügbar" };
   const fields = { provider_id: "Provider", model_id: "Modell", variant: "Variante / Effort" };
+  const fallbackModes = { total: "Total Fallback (Standard)", degrading: "Degrading Fallback (Option)" };
   const $ = id => document.getElementById(id);
   const equal = (a, b) => !a || !b ? a === b : Object.keys(fields).every(field => a[field] === b[field]);
   const tuple = selection => selection ? `${selection.provider_id} / ${selection.model_id} · ${selection.variant}` : "Keine eigene Zuordnung";
@@ -20,8 +21,10 @@
     return `${model?.name || selection.model_id} · ${provider?.name || selection.provider_id} · ${selection.variant}`;
   };
   const blank = () => ({ provider_id: "", model_id: "", variant: "" });
+  const blankFallback = () => ({ mode: "total", provider_id: "", model_id: "", variant: "" });
   const cards = {};
-  let snapshot, writing = false, uncertain = null, formatBlocked = false, loading = false;
+  let snapshot, writing = false, uncertain = null, fallbackUncertain = null, formatBlocked = false, loading = false;
+  let fallbackCard = null;
   const node = (tag, text, className) => {
     const element = document.createElement(tag); if (text) element.textContent = text;
     if (className) element.className = className; return element;
@@ -123,18 +126,168 @@
     const compatible = snapshot.capabilities.optionalProfiles || (!optional && snapshot.policy.schemaVersion === 1);
     c.hint.textContent = `${c.dirty ? "Ungespeicherte Änderungen. " : ""}${snapshot.catalogStatus !== "complete" ? "Kein vollständiger Katalog; Zuordnung kann nicht gespeichert werden. " : ""}${!compatible ? "Aktiver MCP-Adapter bestätigt Format 2 / Optionalprofile nicht. Normalen autorisierten Reconnect und Tooldiscovery prüfen. " : ""}${optional && snapshot.policy.schemaVersion === 1 ? "Beim ersten Zuordnungssave wird die Policy auf Format 2 erweitert; vorhandenes Original wird gesichert. Ältere Connectoren können Format 2 nicht lesen." : ""}`;
     c.save.textContent = optional && snapshot.policy.schemaVersion === 1 ? `${roles[profile][0]} speichern und Policy erweitern` : "Profil speichern";
-    c.save.disabled = writing || !!uncertain || formatBlocked || c.conflict || !compatible || snapshot.catalogStatus !== "complete";
-    c.remove.disabled = writing || !!uncertain || formatBlocked || c.conflict || !stored;
-    c.cancel.disabled = c.saving || !!uncertain;
+    c.save.disabled = writing || !!(uncertain || fallbackUncertain) || formatBlocked || c.conflict || !compatible || snapshot.catalogStatus !== "complete";
+    c.remove.disabled = writing || !!(uncertain || fallbackUncertain) || formatBlocked || c.conflict || !stored;
+    c.cancel.disabled = c.saving || !!(uncertain || fallbackUncertain);
     c.fieldset.disabled = !!c.saving;
     c.recovery.hidden = !c.conflict && uncertain?.profile !== profile;
     c.recovery.disabled = writing || loading || formatBlocked;
+  }
+
+  const storedFallback = () => snapshot?.policy?.finalFallback
+    ? { mode: snapshot.policy.finalFallback.mode, ...snapshot.policy.finalFallback.selection } : null;
+  const sameFallback = (a, b) => {
+    if (!a || !b) return a === b;
+    return a.mode === b.mode && Object.keys(fields).every(field => a[field] === b[field]);
+  };
+  function fillModes(select, value) {
+    select.replaceChildren(...Object.entries(fallbackModes).map(([id, name]) => new Option(name, id)));
+    select.value = value in fallbackModes ? value : "total";
+  }
+  function createFallbackCard() {
+    const card = node("article", "", "card fallback-card"); card.id = "profile-final-fallback";
+    card.append(node("h3", "Finales Fehler-Fallback"), node("p",
+      "Abschließende Runtime bei bestätigtem Provider-Timeout/-Quota (Total oder Degrading). Strikt getrennt von der regulären Design-/Review-Auflösung; nicht konfiguriert bedeutet eine präzise INPUT_REQUIRED-Meldung statt automatischer Providerwahl.",
+      "muted"));
+    const summary = node("p", "", "profile-summary"); card.append(summary);
+    const details = node("details", "", "profile-editor");
+    details.append(node("summary", "Fallback konfigurieren"));
+    const form = node("form"); form.noValidate = true;
+    const fieldset = node("fieldset"); fieldset.append(node("legend", "Strategie und Runtime"));
+    const hint = node("p", "", "muted"); hint.id = "fallback-hint";
+    const errors = node("div", "", "error-summary"); errors.tabIndex = -1; errors.hidden = true;
+    const controls = {};
+    for (const [field, caption] of [["mode", "Strategie"], ["provider_id", "Provider"], ["model_id", "Modell"], ["variant", "Variante / Effort"]]) {
+      const label = node("label", caption); label.htmlFor = `fallback-${field}`;
+      const select = node("select"); select.id = label.htmlFor; select.name = field;
+      select.setAttribute("aria-describedby", hint.id);
+      controls[field] = select; fieldset.append(label, select);
+    }
+    const actions = node("div", "", "profile-actions");
+    const save = node("button", "Fallback speichern", "button"); save.type = "submit";
+    const clear = node("button", "Fallback entfernen", "button secondary"); clear.type = "button";
+    actions.append(save, clear);
+    const feedback = node("p", "", "profile-feedback"); feedback.setAttribute("role", "status");
+    const recovery = node("button", "Speicherstand zurücklesen", "button secondary"); recovery.type = "button"; recovery.hidden = true;
+    form.append(errors, fieldset, hint, actions, feedback, recovery);
+    details.append(form); card.append(details); $("control-profiles").append(card);
+    fallbackCard = { summary, form, fieldset, controls, save, clear, hint, feedback, errors, recovery,
+      draft: blankFallback(), baseline: null, dirty: false, conflict: false, compared: false, saving: false };
+    for (const [field, select] of Object.entries(controls)) {
+      select.addEventListener("change", () => {
+        fallbackCard.draft[field] = select.value;
+        if (field === "provider_id") { fallbackCard.draft.model_id = ""; fallbackCard.draft.variant = ""; }
+        if (field === "model_id") fallbackCard.draft.variant = "";
+        fallbackCard.dirty = !sameFallback(fallbackCard.draft, fallbackCard.baseline);
+        clearFallbackErrors(); updateFallbackCard();
+      });
+    }
+    form.addEventListener("submit", event => { event.preventDefault(); void saveFallback("save"); });
+    clear.addEventListener("click", () => void saveFallback("clear"));
+    recovery.addEventListener("click", async () => {
+      if (fallbackCard.compared && !fallbackUncertain) {
+        fallbackCard.conflict = fallbackCard.compared = false; fallbackCard.baseline = storedFallback();
+        fallbackCard.dirty = !sameFallback(fallbackCard.draft, fallbackCard.baseline);
+        recovery.hidden = true; fallbackCard.feedback.textContent = "Abgleich bestätigt. Ein neuer Save ist jetzt bewusst möglich."; updateAll(); return;
+      }
+      const wasUncertain = !!fallbackUncertain;
+      if (await load()) {
+        if (wasUncertain && !fallbackCard.conflict) return;
+        fallbackCard.compared = true; fallbackCard.conflict = true;
+        const stored = storedFallback();
+        fallbackCard.feedback.textContent = `Aktuell gespeichert: ${stored ? `${fallbackModes[stored.mode]} · ${tuple(stored)}` : "Kein Fallback"}. Dein Entwurf: ${sameFallback(fallbackCard.draft, blankFallback()) ? "Kein Fallback" : `${fallbackModes[fallbackCard.draft.mode]} · ${tuple(fallbackCard.draft)}`}. Vor erneutem Speichern bewusst abgleichen.`;
+        recovery.textContent = "Entwurf nach Abgleich freigeben"; updateAll();
+      }
+    });
+  }
+  function clearFallbackErrors() {
+    const c = fallbackCard; if (!c) return;
+    c.errors.hidden = true; c.errors.replaceChildren();
+    Object.values(c.controls).forEach(select => { select.removeAttribute("aria-invalid"); select.setAttribute("aria-describedby", c.hint.id); });
+  }
+  function validateFallbackDraft(c) {
+    clearFallbackErrors();
+    const missing = ["provider_id", "model_id", "variant"].filter(field => !c.draft[field]);
+    if (!missing.length) return true;
+    c.errors.append(node("p", "Bitte vervollständige die Fallback-Zuordnung:"));
+    for (const field of missing) {
+      const link = node("a", `Wähle ${fields[field]}.`); link.href = `#${c.controls[field].id}`;
+      link.addEventListener("click", event => { event.preventDefault(); c.controls[field].focus(); });
+      const error = node("p"); error.id = `${c.controls[field].id}-error`; error.append(link); c.errors.append(error);
+      c.controls[field].setAttribute("aria-invalid", "true"); c.controls[field].setAttribute("aria-describedby", `${c.hint.id} ${error.id}`);
+    }
+    c.errors.hidden = false; c.errors.focus(); return false;
+  }
+  function updateFallbackCard() {
+    const c = fallbackCard; if (!c || !snapshot) return;
+    const stored = storedFallback();
+    c.summary.textContent = stored
+      ? `${fallbackModes[stored.mode] || stored.mode} · ${friendlyTuple(stored)} · ${states[snapshot.finalFallbackStatus || "unconfigured"]}`
+      : "Nicht konfiguriert — das Management-Routing meldet eine präzise INPUT_REQUIRED-Anweisung; keine automatische Providerwahl.";
+    const upgradeNeeded = snapshot.policy.schemaVersion === 1;
+    const compatible = snapshot.capabilities.optionalProfiles || !upgradeNeeded;
+    c.hint.textContent = `${c.dirty ? "Ungespeicherte Änderungen. " : ""}${snapshot.catalogStatus !== "complete" ? "Kein vollständiger Katalog; eine neue Fallback-Zuordnung kann nicht gespeichert werden (Entfernen bleibt möglich). " : ""}${upgradeNeeded && !snapshot.capabilities.optionalProfiles ? "Aktiver MCP-Adapter bestätigt die Erweiterung auf Format 3 nicht. Normalen autorisierten Reconnect und Tooldiscovery prüfen. " : ""}${upgradeNeeded ? "Beim ersten Fallback-Save wird die Policy auf Format 3 erweitert; das vorhandene Original wird gesichert. Ältere Connectoren können Format 3 nicht lesen. " : ""}`;
+    fillModes(c.controls.mode, c.draft.mode);
+    populate(c.controls.provider_id, (snapshot.catalog?.providers || []).map(p => [p.provider_id, p.name]), c.draft.provider_id);
+    const models = (snapshot.catalog?.models || []).filter(m => m.provider_id === c.draft.provider_id);
+    populate(c.controls.model_id, models.map(m => [m.model_id, m.name]), c.draft.model_id);
+    const variants = models.find(m => m.model_id === c.draft.model_id)?.variants || [];
+    populate(c.controls.variant, variants.map(v => [v, v]), c.draft.variant);
+    c.save.textContent = upgradeNeeded ? "Fallback speichern und Policy erweitern" : "Fallback speichern";
+    c.save.disabled = writing || !!(uncertain || fallbackUncertain) || formatBlocked || c.conflict || !compatible || snapshot.catalogStatus !== "complete";
+    c.clear.disabled = writing || !!(uncertain || fallbackUncertain) || formatBlocked || c.conflict || !stored;
+    c.fieldset.disabled = !!c.saving;
+    c.recovery.hidden = !c.conflict && !fallbackUncertain;
+    c.recovery.disabled = writing || loading || formatBlocked;
+  }
+  async function saveFallback(kind) {
+    const c = fallbackCard;
+    if (!c || writing || loading || uncertain || fallbackUncertain || formatBlocked || c.conflict) return;
+    const submitted = kind === "clear" ? null
+      : { mode: c.draft.mode, selection: { provider_id: c.draft.provider_id, model_id: c.draft.model_id, variant: c.draft.variant } };
+    if (submitted && !validateFallbackDraft(c)) return;
+    const revision = snapshot.policy.revision;
+    const previousFocus = document.activeElement;
+    writing = true; c.saving = true;
+    c.feedback.textContent = kind === "clear" ? "Fallback wird entfernt …" : "Fallback wird gespeichert …"; updateAll();
+    try {
+      const response = await fetch("/api/control/fallback", { method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ revision, fallback: submitted }), signal: AbortSignal.timeout(20000) });
+      const result = await response.json().catch(() => null);
+      if (!response.ok) {
+        if (result?.code === "POLICY_SAVE_UNCONFIRMED") throw new Error("Unconfirmed");
+        if (result?.code === "POLICY_REVISION_CONFLICT") { c.conflict = true; c.compared = false; c.feedback.textContent = "Policy anderweitig geändert; dein Entwurf bleibt. Aktuellen Stand vergleichen und bewusst erneut speichern."; }
+        else if (result?.code === "POLICY_FORMAT_UNSUPPORTED") { formatBlocked = true; c.feedback.textContent = "Policyformat nicht unterstützt. Bearbeitung gesperrt; Version/Format prüfen."; }
+        else c.feedback.textContent = result?.code === "SELECTION_UNAVAILABLE" ? `Nicht gespeichert: ${states[result.reason]}. Entwurf erhalten; Katalog aktualisieren.` :
+          result?.code === "CATALOG_UNAVAILABLE" ? "Aktuell kein vollständiger Katalog; Fallback nicht gespeichert. Entwurf erhalten." :
+          result?.code === "POLICY_CAPABILITY_UNAVAILABLE" ? "Aktiver Adapter bestätigt die Formaterweiterung nicht. Nicht gespeichert." :
+          `Service-/Requestfehler ${response.status}; Entwurf erhalten. ${result?.error || ""}`;
+      } else {
+        if (!result?.policy) throw new Error("Unconfirmed");
+        snapshot.policy = result.policy;
+        c.baseline = storedFallback(); c.draft = c.baseline ? { ...c.baseline } : blankFallback();
+        c.dirty = c.conflict = c.compared = false;
+        snapshot.finalFallbackStatus = result.policy.finalFallback ? "available" : "unconfigured";
+        c.feedback.textContent = kind === "clear"
+          ? `Fallback entfernt · Revision ${result.policy.revision}. Das Management-Routing meldet bis zur Neukonfiguration INPUT_REQUIRED.`
+          : `Fallback gespeichert · Revision ${result.policy.revision}. Strategie: ${fallbackModes[result.policy.finalFallback.mode]}.`;
+      }
+    } catch {
+      fallbackUncertain = { submitted, revision };
+      c.feedback.textContent = "Speicherergebnis nicht bestätigt. Zurücklesen und abgleichen; kein automatischer Wiederholungswrite.";
+      c.recovery.textContent = "Speicherstand zurücklesen";
+    } finally {
+      writing = false; c.saving = false; updateAll();
+      if (document.activeElement === document.body && previousFocus?.isConnected) previousFocus.focus();
+    }
   }
   function updateAll() {
     if (!snapshot) return;
     $("control-status").textContent = `Katalog: ${ { complete: "geprüft", incomplete: "unvollständig", unavailable: "nicht verfügbar" }[snapshot.catalogStatus]} · Format ${snapshot.policy.schemaVersion} · Revision ${snapshot.policy.revision}`;
     $("control-catalog").textContent = snapshot.catalog ? `${snapshot.catalog.providers.length} Provider · ${snapshot.catalog.models.length} Modelle. ${snapshot.catalog.providers.map(p => p.name).join(" · ")}` : "Katalog nicht verfügbar. MCP bei den Verbindungen prüfen; gespeicherte Profile bleiben erhalten.";
+    if (!fallbackCard) createFallbackCard();
     Object.keys(roles).forEach(updateCard);
+    updateFallbackCard();
   }
   function accept(next) {
     for (const profile of Object.keys(roles)) {
@@ -142,6 +295,12 @@
       const c = cards[profile], stored = next.policy.profiles[profile];
       if (!c.dirty && !c.conflict && uncertain?.profile !== profile) { c.draft = { ...(stored || blank()) }; c.baseline = stored; }
       else if (!equal(c.baseline, stored)) { c.conflict = true; c.compared = false; c.recovery.textContent = "Aktuellen Stand vergleichen"; }
+    }
+    if (!fallbackCard) createFallbackCard();
+    if (!fallbackCard.dirty && !fallbackCard.conflict && !fallbackUncertain) {
+      const stored = next.policy.finalFallback ? { mode: next.policy.finalFallback.mode, ...next.policy.finalFallback.selection } : null;
+      fallbackCard.draft = stored ? { ...stored } : blankFallback();
+      fallbackCard.baseline = stored;
     }
     snapshot = next; formatBlocked = false; updateAll();
   }
@@ -161,6 +320,15 @@
           c.feedback.textContent = `Passender Tuple bei fortgeschrittener Revision ${next.policy.revision} aktuell gespeichert; Urheberschaft nicht bewiesen.`;
         } else { c.conflict = true; c.compared = false; c.feedback.textContent = "Speicherergebnis nicht bestätigt. Aktuellen Stand und Entwurf vor erneutem Save vergleichen."; }
       }
+      if (fallbackUncertain) {
+        const { submitted, revision } = fallbackUncertain, c = fallbackCard;
+        fallbackUncertain = null;
+        const stored = next.policy.finalFallback ? { mode: next.policy.finalFallback.mode, ...next.policy.finalFallback.selection } : null;
+        if (next.policy.revision > revision && sameFallback(stored, submitted)) {
+          c.baseline = stored; c.draft = stored ? { ...stored } : blankFallback(); c.dirty = c.conflict = c.compared = false;
+          c.feedback.textContent = `Passender Fallback-Stand bei fortgeschrittener Revision ${next.policy.revision} gespeichert; Urheberschaft nicht bewiesen.`;
+        } else { c.conflict = true; c.compared = false; c.feedback.textContent = "Fallback-Speicherergebnis nicht bestätigt. Aktuellen Stand und Entwurf vor erneutem Save vergleichen."; }
+      }
       updateAll(); return true;
     } catch (error) {
       updateAll(); $("control-status").textContent = `${error.message} ${snapshot ? "Letzte bekannte Beobachtung; Entwürfe erhalten." : "Noch keine Policy geladen."}`;
@@ -169,7 +337,7 @@
     } finally { loading = false; Object.values(cards).forEach(c => { c.recovery.disabled = formatBlocked; }); }
   }
   async function saveProfile(profile, selection) {
-    const c = cards[profile]; if (writing || loading || uncertain || formatBlocked || c.conflict) return;
+    const c = cards[profile]; if (writing || loading || uncertain || fallbackUncertain || formatBlocked || c.conflict) return;
     if (selection && !validate(c)) return;
     const submitted = selection ? { ...selection } : null, revision = snapshot.policy.revision;
     const previousFocus = document.activeElement;
@@ -214,6 +382,6 @@
     } finally { writing = false; c.saving = false; updateAll();
       if (document.activeElement === document.body && previousFocus?.isConnected) previousFocus.focus(); }
   }
-  window.addEventListener("beforeunload", event => { if (uncertain || Object.values(cards).some(c => c.dirty)) { event.preventDefault(); event.returnValue = ""; } });
+  window.addEventListener("beforeunload", event => { if (uncertain || fallbackUncertain || fallbackCard?.dirty || Object.values(cards).some(c => c.dirty)) { event.preventDefault(); event.returnValue = ""; } });
   $("refresh-control").addEventListener("click", load); $("refresh").addEventListener("click", load); void load();
 })();

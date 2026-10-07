@@ -12,7 +12,8 @@ import { ProjectBoardService, MAX_TASK_DESCRIPTION_LENGTH } from "./taskboard.js
 import type { DocumentRole } from "./taskboard.js";
 import { traceToolCall } from "./diagnostics.js";
 import { SUPPORTED_ATTACHMENT_TYPES } from "./attachments.js";
-import { PROFILE_NAMES, describePolicy, readPolicy, resolveProfile } from "./agent-control.js";
+import { PROFILE_NAMES, describePolicy, profileState, readPolicy, resolveProfile, type PolicySelection } from "./agent-control.js";
+import { commitFinalFallback } from "./policy-commit.js";
 import {
   defaultMonitorRecord,
   monitorHistory,
@@ -485,6 +486,10 @@ const recommendedOutput = z.object({
   profile: z.enum(PROFILE_NAMES), policy_revision: z.number().int().nonnegative(), status: profileStatus,
   runtime: profileSelection.optional(),
   resolution_path: z.array(z.enum(PROFILE_NAMES)), resolved_profile: z.enum(PROFILE_NAMES).optional(),
+}).strict();
+const policyFallbackInput = z.object({
+  revision: z.number().int().nonnegative(),
+  fallback: z.object({ mode: z.enum(["total", "degrading"]).optional(), selection: profileSelection }).strict().nullable(),
 }).strict();
 const runtimeUpdateOutput = z
   .object({
@@ -2051,6 +2056,25 @@ export function createMcpServer(
     { title: "Get Recommended Runtime", description: "Resolve an exact runtime. Design falls back to standard; review to deep then standard. Only null is skipped; configured unavailable/incomplete mappings stop. Review evaluates without automatically implementing findings. Does not switch any session.",
       inputSchema: recommendedInput, outputSchema: recommendedOutput, annotations: readOnlyAnnotations },
     recommendedHandler,
+  );
+  const setFallbackHandler = safeHandler(async ({ revision, fallback }: z.output<typeof policyFallbackInput>) => {
+    if (!runtime) throw new AdapterError("UNSUPPORTED_CONFIGURATION", "Project runtime is unavailable.");
+    const catalog = await gateway.getSessionRuntimeOptions().catch(() => undefined);
+    const normalized = fallback === null ? null : { mode: fallback.mode ?? "total", selection: fallback.selection as PolicySelection };
+    if (normalized !== null) {
+      if (!catalog || catalog.truncated) throw new AdapterError("CATALOG_UNAVAILABLE", "A complete runtime catalog is required to validate the final fallback; the policy was not changed.");
+      const status = profileState(normalized.selection, catalog);
+      if (status !== "available") throw new AdapterError("SELECTION_UNAVAILABLE", `Final fallback selection is ${status}; the policy was not changed.`);
+    }
+    const updated = await commitFinalFallback(runtime, revision, normalized);
+    return success(describePolicy(runtime, updated, catalog), "Final fallback committed; this response is the policy readback. It is separate from the design/review resolution fallbacks.");
+  });
+  server.registerTool(
+    "set_project_model_policy_fallback",
+    { title: "Set Project Model Policy Final Fallback",
+      description: "Set, change, or clear (fallback:null) the configured final error-fallback runtime in the project policy. Mode total is the default, degrading is optional; both are separate from the design/review resolution fallbacks. An exact provider/model/variant from the current catalog is required when setting. Uses revision CAS with an exact-bytes backup on the first schema 3 upgrade; clearing never downgrades the schema, and regular profile mappings are preserved. The response is the committed policy readback.",
+      inputSchema: policyFallbackInput, outputSchema: modelPolicyOutput, annotations: { ...writeAnnotations, openWorldHint: false } },
+    setFallbackHandler,
   );
   server.registerTool(
     "get_project_activity",

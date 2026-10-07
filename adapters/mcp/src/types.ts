@@ -1,7 +1,7 @@
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { dirname, isAbsolute } from "node:path";
 
-export const ADAPTER_VERSION = "0.1.30";
+export const ADAPTER_VERSION = "0.1.31";
 export const MCP_TRANSPORT = "streamable-http-stateless";
 
 export type RuntimeDescriptor = {
@@ -609,6 +609,11 @@ export const ADAPTER_ERROR_CODES = [
   "MONITOR_NOT_FOUND",
   "MONITOR_CONFLICT",
   "MONITOR_STATE_CONFLICT",
+  "POLICY_REVISION_CONFLICT",
+  "POLICY_COMMIT_UNAVAILABLE",
+  "POLICY_SAVE_UNCONFIRMED",
+  "SELECTION_UNAVAILABLE",
+  "CATALOG_UNAVAILABLE",
 ] as const;
 
 export type AdapterErrorCode = (typeof ADAPTER_ERROR_CODES)[number];

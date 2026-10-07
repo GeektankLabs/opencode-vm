@@ -82,6 +82,45 @@ def read_capabilities(connection):
         return False
 
 
+def read_board_tasks(runtime, session_root, project_hash, *, connection=None):
+    """Bounded project-local task read for the monitor master-task candidates.
+
+    A task counts as a declared master task/work package when the existing
+    canonical document sidecar binds a `compact_context` or `concept_plan`
+    role; the terminal native status `done` is excluded by the existing
+    include_terminal filter of list_project_tasks. Returns None when the
+    list is not confirmable — never an empty list disguised as success.
+    """
+    connection = connection if connection is not None else mcp_connection(runtime, session_root, project_hash)
+    if connection.get("state") != "ready":
+        return None
+    try:
+        base, token = connection["base"], connection["token"]
+        result = _request(base + "/mcp", token, {"jsonrpc": "2.0", "id": 3,
+                          "method": "tools/call", "params": {"name": "list_project_tasks",
+                                                             "arguments": {"include_terminal": False}}})
+        content = result.get("result", {}).get("structuredContent")
+        if not isinstance(content, dict) or result.get("result", {}).get("isError"):
+            return None
+        tasks = content.get("tasks")
+        if not isinstance(tasks, list):
+            return None
+        parsed = []
+        declared_roles = {"compact_context", "concept_plan"}
+        for item in tasks:
+            if (not isinstance(item, dict) or not isinstance(item.get("task_id"), str)
+                    or not isinstance(item.get("title"), str) or not isinstance(item.get("status"), str)):
+                return None
+            documents = item.get("documents")
+            roles = {reference.get("role") for reference in documents if isinstance(reference, dict)} \
+                if isinstance(documents, list) else set()
+            parsed.append({"task_id": item["task_id"], "title": item["title"], "status": item["status"],
+                           "declared": bool(roles & declared_roles)})
+        return parsed
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, CatalogUnavailable):
+        return None
+
+
 def read_catalog(runtime, session_root, project_hash, *, connection=None):
     connection = connection if connection is not None else mcp_connection(runtime, session_root, project_hash)
     if connection.get("state") == "ready":

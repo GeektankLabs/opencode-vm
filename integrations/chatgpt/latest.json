@@ -1,9 +1,9 @@
 {
   "schema": 1,
   "name": "opencode-session-orchestrator",
-  "revision": "2026-10-07-r43",
+  "revision": "2026-10-08-r44",
   "download": "https://github.com/GeektankLabs/opencode-vm/raw/refs/heads/main/integrations/chatgpt/opencode-session-orchestrator.zip",
-  "sha256": "eda1abac30c24835bf75a08f72422415a6acb71aa7ce978aeb3acfea2fb409bc",
+  "sha256": "61eaa39806eb94bab947ca8e5969148f95a66e26ffa7b745b966f487af69288c",
   "checksum": "integrations/chatgpt/opencode-session-orchestrator.zip.sha256",
   "docs": "https://github.com/GeektankLabs/opencode-vm/blob/main/docs/CHATGPT.md"
 }
