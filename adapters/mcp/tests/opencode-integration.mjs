@@ -20,7 +20,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { createOpencodeClient } from "@opencode-ai/sdk/v2";
 import { OpenCodeGateway } from "../dist/opencode.js";
 
-const OPEN_CODE_VERSION = "1.18.21";
+const OPEN_CODE_VERSION = "1.18.34";
 const here = dirname(fileURLToPath(import.meta.url));
 const adapter = resolve(here, "..");
 const temporary = await mkdtemp(join(tmpdir(), "ocvm-mcp-integration-"));
@@ -103,8 +103,16 @@ try {
               .map((part) => part.text)
               .join("")
           : "";
-    if (lastText === "parallel-A" || lastText === "parallel-B") {
+    if (
+      lastText === "parallel-A" ||
+      lastText === "parallel-B" ||
+      lastText === "w1-main"
+    ) {
       await new Promise((resolve) => heldPrompts.set(lastText, resolve));
+      // A verified abort cancels the in-flight provider stream; releasing the
+      // hold afterwards must not crash the fake provider.
+      response.on("error", () => {});
+      if (response.destroyed) return;
     }
     response.writeHead(200, {
       "content-type": "text/event-stream",
@@ -1265,6 +1273,159 @@ try {
     }),
   );
   assert.ok(runtimeEvents.events.length >= 3);
+
+  // -------------------------------------------------------------------
+  // W1 Session-Control (task_557c6f74): native busy follow-up admission and
+  // verified turn abort against the real disposable backend. Evidence base:
+  // D1/D2 probe on OpenCode 1.18.34 (v1 prompt_async admits while busy and
+  // serializes natively; v1 abort marks the assistant MessageAbortedError;
+  // queued follow-ups survive the abort; idle abort is a non-destructive
+  // no-op). Pending-permission and transport-uncertainty cases stay at the
+  // unit level by design (fake-backend separation).
+  // -------------------------------------------------------------------
+  {
+    const w1Session = structured(
+      await mcpClient.callTool({
+        name: "create_session",
+        arguments: { title: "W1 control" },
+      }),
+    ).session_id;
+
+    // D.4: abort without an active turn is a clear non-destructive result.
+    const idleAbort = structured(
+      await mcpClient.callTool({
+        name: "abort_session_turn",
+        arguments: { session_id: w1Session },
+      }),
+    );
+    assert.equal(idleAbort.state, "no_active_turn");
+    assert.equal(idleAbort.aborted_message_id, undefined);
+    assert.equal(idleAbort.activity_after, "idle");
+    assert.deepEqual(idleAbort.pending_input_after, {
+      permissions: 0,
+      questions: 0,
+    });
+
+    // An idle session refuses follow-ups and points at send_message.
+    const idleFollowup = await mcpClient.callTool({
+      name: "send_session_followup",
+      arguments: { session_id: w1Session, message: "too early" },
+    });
+    assert.equal(idleFollowup.isError, true);
+    assert.equal(
+      idleFollowup._meta["opencode-vm/error"].code,
+      "SESSION_NOT_BUSY",
+    );
+
+    // Start a real busy turn (held provider stream).
+    const w1Main = structured(
+      await mcpClient.callTool({
+        name: "send_message",
+        arguments: { session_id: w1Session, message: "w1-main" },
+      }),
+    );
+    for (let i = 0; i < 100 && !heldPrompts.has("w1-main"); i++)
+      await delay(100);
+    assert.ok(heldPrompts.has("w1-main"), "the W1 main turn must be running");
+
+    // D.7: send_message keeps its exact SESSION_BUSY semantics while busy.
+    const busySend = await mcpClient.callTool({
+      name: "send_message",
+      arguments: { session_id: w1Session, message: "w1-blocked" },
+    });
+    assert.equal(busySend._meta["opencode-vm/error"].code, "SESSION_BUSY");
+
+    // D.2: the native follow-up is admitted while busy with a stable receipt.
+    const w1Followup = structured(
+      await mcpClient.callTool({
+        name: "send_session_followup",
+        arguments: { session_id: w1Session, message: "w1-followup-text" },
+      }),
+    );
+    assert.equal(w1Followup.state, "submitted");
+    assert.equal(w1Followup.session_id, w1Session);
+    assert.match(w1Followup.message_id, /^msg_[0-9a-f]{32}$/u);
+    assert.notEqual(w1Followup.message_id, w1Main.message_id);
+
+    // D.3: abort the running turn; acceptance is verified through reads and
+    // never reported as completed or passed.
+    const abortResult = structured(
+      await mcpClient.callTool({
+        name: "abort_session_turn",
+        arguments: { session_id: w1Session },
+      }),
+    );
+    assert.equal(abortResult.state, "aborted");
+    assert.ok(abortResult.aborted_message_id);
+    assert.match(abortResult.guidance ?? "", /rolled back/u);
+
+    // The existing correlated read attributes the main task as aborted.
+    let mainStatus;
+    for (let i = 0; i < 100; i++) {
+      mainStatus = structured(
+        await mcpClient.callTool({
+          name: "get_session_status",
+          arguments: {
+            session_id: w1Session,
+            message_id: w1Main.message_id,
+          },
+        }),
+      );
+      if (mainStatus.state === "aborted") break;
+      await delay(100);
+    }
+    assert.equal(mainStatus.state, "aborted");
+
+    // The queued follow-up survives the abort: still stored, non-terminal,
+    // and OpenCode drains it with the NEXT admitted prompt (native batching;
+    // no spontaneous execution after abort on 1.18.34 — probe6 evidence).
+    heldPrompts.get("w1-main")?.();
+    heldPrompts.delete("w1-main");
+    let queuedStatus;
+    for (let i = 0; i < 50; i++) {
+      queuedStatus = structured(
+        await mcpClient.callTool({
+          name: "get_session_status",
+          arguments: {
+            session_id: w1Session,
+            message_id: w1Followup.message_id,
+          },
+        }),
+      );
+      if (["submitted", "unknown"].includes(queuedStatus.state)) break;
+      await delay(100);
+    }
+    assert.ok(
+      ["submitted", "unknown"].includes(queuedStatus.state),
+      JSON.stringify(queuedStatus),
+    );
+    assert.equal(queuedStatus.backend_activity, "idle");
+
+    // D.1: normal idle send_message still works unchanged on the same
+    // session — and its admission natively drains the queued follow-up text
+    // into the next turn (attribution stays with the newest message; the
+    // follow-up receipt never becomes a fabricated completion).
+    const providerBefore = providerRequests.length;
+    const w1Next = structured(
+      await mcpClient.callTool({
+        name: "send_message",
+        arguments: { session_id: w1Session, message: "w1-final report" },
+      }),
+    );
+    assert.equal(w1Next.state, "submitted");
+    await waitForTask(w1Session, w1Next.message_id);
+    assert.ok(
+      providerRequests
+        .slice(providerBefore)
+        .some((request) =>
+          JSON.stringify(request.messages ?? []).includes("w1-followup-text"),
+        ),
+      "the queued follow-up must reach the model with the next admitted prompt",
+    );
+    process.stderr.write(
+      "[integration] W1 session-control: idle no-op abort, SESSION_NOT_BUSY, busy follow-up admission, verified abort, queued follow-up drained by next admission, idle regression\n",
+    );
+  }
 
   await mcpClient.close();
   mcpClient = undefined;

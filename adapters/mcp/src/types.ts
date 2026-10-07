@@ -1,7 +1,7 @@
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { dirname, isAbsolute } from "node:path";
 
-export const ADAPTER_VERSION = "0.1.28";
+export const ADAPTER_VERSION = "0.1.29";
 export const MCP_TRANSPORT = "streamable-http-stateless";
 
 export type RuntimeDescriptor = {
@@ -312,6 +312,21 @@ export type SendMessageResult = {
   }>;
 };
 
+export type AbortSessionTurnState =
+  | "aborted"
+  | "no_active_turn"
+  | "abort_uncertain";
+
+export type AbortSessionTurnResult = {
+  session_id: string;
+  state: AbortSessionTurnState;
+  aborted_message_id?: string;
+  observed_at: string;
+  activity_after: SessionActivity;
+  pending_input_after: PendingInput;
+  guidance?: string;
+};
+
 export type SessionRuntime = {
   agent: string;
   provider_id: string;
@@ -529,6 +544,7 @@ export const ADAPTER_ERROR_CODES = [
   "INVALID_ARGUMENT",
   "SESSION_NOT_FOUND",
   "SESSION_BUSY",
+  "SESSION_NOT_BUSY",
   "INPUT_REQUIRED",
   "BACKEND_UNAVAILABLE",
   "BACKEND_INCOMPATIBLE",

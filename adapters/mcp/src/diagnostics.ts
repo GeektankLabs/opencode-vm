@@ -11,6 +11,8 @@ const tools = new Set([
   "get_session_status",
   "get_session_history",
   "send_message",
+  "send_session_followup",
+  "abort_session_turn",
   "supersede_unresolved_submission",
   "upload_attachment",
   "get_session_runtime_options",
