@@ -40,6 +40,51 @@ const tools = new Set([
 ]);
 
 /** Local operator diagnostics only. Never serialize a request/result body. */
+export type CorrelationBase = {
+  request: string;
+  time: string;
+  generation: string;
+  adapterVersion: string;
+};
+
+export type RejectionPhase = "transport" | "header" | "protocol" | "method" | "auth";
+
+export type RejectionCorrelation = CorrelationBase & {
+  phase: RejectionPhase;
+  code: string;
+  reason: string;
+};
+
+type RoundtripRecord = { time: string; request: string; tool: string; code?: string };
+
+let lastToolSuccess: RoundtripRecord | null = null;
+let lastToolError: RoundtripRecord | null = null;
+
+/**
+ * Metadata-only evidence of the last ACTUAL tool roundtrips for the health
+ * granularity read. Polling or connectivity alone never populates these.
+ */
+export function lastToolRoundtrips(): {
+  last_success: RoundtripRecord | null;
+  last_error: RoundtripRecord | null;
+} {
+  return { last_success: lastToolSuccess, last_error: lastToolError };
+}
+
+/** Bounded redacted correlation for pre-dispatch HTTP rejections (STARTREST P3). */
+export function traceRejection(
+  correlation: RejectionCorrelation,
+  write = (line: string) => {
+    process.stderr.write(line);
+  },
+): void {
+  try {
+    write(`[mcp] rejection=${JSON.stringify(correlation)}\n`);
+  } catch {
+    /* Logging must not change request semantics. */
+  }
+}
+
 export async function traceToolCall(
   name: string,
   input: Record<string, unknown>,
@@ -115,5 +160,13 @@ export async function traceToolCall(
       ...(blockingMessage ? { blocking_message_id: blockingMessage } : {}),
       ...(message ? { message_id: message } : {}),
     });
+    const record: RoundtripRecord = {
+      time: new Date().toISOString(),
+      request,
+      tool,
+      ...(error ? { code: error } : {}),
+    };
+    if (state === "completed") lastToolSuccess = record;
+    else lastToolError = record;
   }
 }

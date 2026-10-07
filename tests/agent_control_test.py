@@ -13,7 +13,7 @@ from urllib.request import Request, urlopen
 
 import hub.server as server
 from hub.catalog import read_catalog, mcp_connection, read_capabilities
-from hub.policy import PolicyStore, PolicyConflict, PolicyError, PolicyCapabilityError, PROFILES, check_selection, resolve_profile
+from hub.policy import PolicyStore, PolicyConflict, PolicyError, PolicyCapabilityError, PROFILES, check_selection, resolve_profile, validate_final_fallback, validate_policy
 
 
 CATALOG = {"providers": [{"provider_id": "p", "name": "Provider"}],
@@ -153,6 +153,48 @@ class PolicyTest(unittest.TestCase):
         self.store.path.unlink(); self.store.path.symlink_to(backup)
         with self.assertRaises(PolicyError): self.store.read()
 
+    def test_final_fallback_validation_is_strict(self):
+        self.assertIsNone(validate_final_fallback(None))
+        self.assertEqual(validate_final_fallback({"selection": SELECTION}), {"mode": "total", "selection": SELECTION})
+        self.assertEqual(validate_final_fallback({"mode": "degrading", "selection": SELECTION}),
+                         {"mode": "degrading", "selection": SELECTION})
+        for bad in [{"mode": "total"}, {"mode": "sideways", "selection": SELECTION},
+                    {"mode": "total", "selection": None}, {"mode": "total", "selection": SELECTION, "extra": 1},
+                    "total"]:
+            with self.assertRaises(PolicyError):
+                validate_final_fallback(bad)
+        with self.assertRaises(PolicyError):
+            validate_policy({"schemaVersion": 3, "revision": 1, "updatedAt": "2026-10-07T00:00:00Z",
+                             "profiles": {name: None for name in PROFILES}})
+        with self.assertRaises(PolicyError):
+            validate_policy({"schemaVersion": 2, "revision": 1, "updatedAt": "2026-10-07T00:00:00Z",
+                             "finalFallback": None, "profiles": {name: None for name in PROFILES}})
+
+    def test_update_fallback_preserves_slot_on_profile_writes_and_backs_up_exact_bytes(self):
+        self.store.update_fallback(None, 0)
+        self.assertEqual(self.store.read()["schemaVersion"], 1)
+        self.store.update("deep", SELECTION, 1)
+        self.store.update_fallback({"mode": "degrading", "selection": SELECTION}, 2, optional_capable=True)
+        saved = self.store.read()
+        self.assertEqual(saved["schemaVersion"], 3)
+        self.assertEqual(saved["finalFallback"], {"mode": "degrading", "selection": SELECTION})
+        backup = self.store.directory / "agent-control.schema1-rev2.backup.json"
+        self.assertTrue(backup.is_file())
+        self.assertEqual(json.loads(backup.read_text())["schemaVersion"], 1)
+        self.store.update("standard", SELECTION, 3)
+        preserved = self.store.read()
+        self.assertEqual(preserved["schemaVersion"], 3)
+        self.assertEqual(preserved["finalFallback"], {"mode": "degrading", "selection": SELECTION})
+        with self.assertRaises(PolicyConflict):
+            self.store.update_fallback(None, 3)
+        cleared = self.store.update_fallback(None, 4)
+        self.assertEqual(cleared["schemaVersion"], 3)
+        self.assertIsNone(cleared["finalFallback"])
+        with self.assertRaises(PolicyCapabilityError):
+            fresh = Path(self.temp.name) / "fresh-project"
+            fresh.mkdir(exist_ok=True)
+            PolicyStore(fresh).update_fallback({"mode": "total", "selection": SELECTION}, 0)
+
     def test_shared_resolution_vectors(self):
         vectors = json.loads((Path(__file__).parent / "fixtures/ach1-resolution.json").read_text())
         for vector in vectors:
@@ -254,6 +296,48 @@ class HubApiTest(PolicyTest):
         self.assertTrue(server.private_peer("100.90.1.2"))
         self.assertFalse(server.private_peer("8.8.8.8"))
         self.assertFalse(server.private_peer("192.0.2.1"))
+
+    def fallback_request(self, fallback, revision=0, origin=True):
+        body = json.dumps({"revision": revision, "fallback": fallback}).encode()
+        headers = {"Content-Type": "application/json"}
+        if origin: headers["Origin"] = self.base
+        request = Request(self.base + "/api/control/fallback", data=body, headers=headers, method="PUT")
+        try:
+            with urlopen(request, timeout=3) as response:
+                return response.status, json.load(response)
+        except HTTPError as error:
+            return error.code, None
+
+    def test_final_fallback_route_is_additive_gated_and_cas_protected(self):
+        self.assertEqual(self.fallback_request(None, revision=0, origin=False)[0], 403)
+        status, body = self.fallback_request(None, revision=0)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["policy"]["schemaVersion"], 1)
+        for bad in [{"mode": "sideways", "selection": SELECTION}, {"mode": "total", "selection": None}, SELECTION]:
+            self.assertEqual(self.fallback_request(bad, revision=1)[0], 400)
+        # Schema-1 upgrade requires the live capability confirmation (before catalog checks).
+        self.assertEqual(self.fallback_request({"mode": "total", "selection": SELECTION}, revision=1)[0], 409)
+        with patch.object(server, "read_capabilities", return_value=True):
+            status, body = self.fallback_request({"selection": SELECTION}, revision=1)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["policy"]["schemaVersion"], 3)
+        self.assertEqual(body["policy"]["finalFallback"], {"mode": "total", "selection": SELECTION})
+        self.assertTrue((self.store.directory / "agent-control.schema1-rev1.backup.json").is_file())
+        self.assertEqual(self.fallback_request({"mode": "degrading", "selection": SELECTION}, revision=1)[0], 409)
+        # Catalog availability still gates the selection once no upgrade is pending.
+        self.assertEqual(self.fallback_request({"mode": "total", "selection": {**SELECTION, "variant": "missing"}}, revision=1)[0], 422)
+        status, body = self.fallback_request({"mode": "degrading", "selection": SELECTION}, revision=2)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["policy"]["finalFallback"]["mode"], "degrading")
+        # Profile writes keep working on schema 3 and preserve the slot.
+        self.assertEqual(self.request(SELECTION, revision=3), 200)
+        self.assertEqual(self.store.read()["finalFallback"]["mode"], "degrading")
+        status, body = self.fallback_request(None, revision=4)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["policy"]["schemaVersion"], 3)
+        self.assertIsNone(body["policy"]["finalFallback"])
+        with urlopen(self.base + "/api/control", timeout=3) as response:
+            self.assertIn("finalFallback", json.load(response)["policy"])
 
 
 class CatalogTest(PolicyTest):

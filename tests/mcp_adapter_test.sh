@@ -309,4 +309,44 @@ pass "host readiness result is reaped and propagated without signaling its PID"
 assert_eq "$(grep -cF 'MCP_SHUTDOWN_FAILED=1' "$SCRIPT")" 4
 pass "guest cleanup records and propagates connector shutdown failures"
 
+# STARTREST P2: start/attach/watcher report exactly one honest named end state.
+assert_eq "$(grep -cF '[mcp] End state:' "$SCRIPT")" 8
+grep -qF 'End state: complete — guest listener, authenticated host mapping, and OpenAI tunnel verified.' "$SCRIPT" ||
+  fail "complete tunnel end state missing"
+grep -qF 'End state: INCOMPLETE — connector ready (guest listener + authenticated host mapping verified); OpenAI tunnel start failed.' "$SCRIPT" ||
+  fail "incomplete tunnel end state missing"
+grep -qF 'End state: INCOMPLETE — host readiness verification timed out' "$SCRIPT" ||
+  fail "readiness timeout end state missing"
+grep -qF 'End state: disabled — suppressed by --no-mcp for this invocation.' "$SCRIPT" ||
+  fail "disabled end state missing"
+grep -qF 'readiness: not ready — ready descriptor absent or bound to another generation/port' "$SCRIPT" ||
+  fail "doctor readiness granularity missing"
+grep -qF 'readiness: not ready — authenticated host healthz failed (listener/connectivity)' "$SCRIPT" ||
+  fail "doctor listener granularity missing"
+grep -qF 'oauth obs:' "$SCRIPT" || fail "OAuth warning observation missing"
+pass "start/attach/doctor name exactly one honest MCP end state with concrete causes"
+
+# STARTREST P1: provenance report classifies the invocation and names gaps.
+(
+  export HOME="$TMP/provenance-home"
+  export OCVM_INTERNAL_SOURCE_ONLY=1 OCVM_DISABLE_UPDATE_CHECK=1
+  mkdir -p "$HOME"
+  # shellcheck disable=SC1090
+  source "$SCRIPT"
+  SCRIPT_DIR="$ROOT"
+  out="$(script_provenance_report)"
+  grep -qF 'invocation: git checkout' <<<"$out" || exit 1
+  grep -qF 'mcp assets: source checkout, valid' <<<"$out" || exit 1
+  grep -qF 'hub assets: source checkout' <<<"$out" || exit 1
+  grep -qF 'integrity:  no gaps detected' <<<"$out" || exit 1
+  SCRIPT_DIR="$TMP/standalone"
+  mkdir -p "$SCRIPT_DIR"
+  out="$(script_provenance_report)"
+  grep -qF 'mcp assets: GAP' <<<"$out" || exit 1
+  grep -qF 'hub assets: GAP' <<<"$out" || exit 1
+  grep -qF 'openlive:   not installed' <<<"$out" || exit 1
+  grep -qF 'integrity:  named gaps above' <<<"$out" || exit 1
+) || fail "provenance report did not classify checkout vs standalone gaps"
+pass "provenance report classifies invocation and names concrete asset gaps read-only"
+
 printf 'All MCP adapter lifecycle tests passed.\n'

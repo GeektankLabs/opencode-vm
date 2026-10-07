@@ -34,7 +34,7 @@ OPENLIVE_PREVIOUS_COMMAND="$OPENLIVE_DIR/previous-command"
 OPENLIVE_AUTH_MARKER="__opencode_vm_openlive__"
 OPENLIVE_LOCK_PATH=""
 OPENLIVE_ADAPTER_VERSION="0.1.7"
-OPENLIVE_ADAPTER_TAG="v0.7.13"
+OPENLIVE_ADAPTER_TAG="v0.7.14"
 OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.7.tar"
 OPENLIVE_ADAPTER_SHA256="39a50c5127b0a577b54e4790b5c3c1f463b35a52b42c4343aa639dcea53bad47"
 OPENLIVE_ACP_SDK_VERSION="1.2.1"
@@ -44,17 +44,17 @@ OPENLIVE_MANAGER_DESCRIPTION="Read-only OpenLive voice session manager"
 OPENLIVE_MANAGER_PROMPT="You manage an OpenLive voice call. The voice_sessions tool is available and you must call it before listing, inspecting, summarizing, checking, attaching to, or creating project sessions. Never claim session details without a successful tool result. Ask for clarification if a requested session is ambiguous. Create a new work session only when the user explicitly asks for one. Apart from that explicit create action, you are read-only: do not edit files, run shell commands, create tasks, or mutate sessions. Keep responses brief and conversational: one or two plain sentences without Markdown, paths, URLs, code, or stray symbols. When attachment or creation succeeds, tell the user the next voice prompt will continue in that session."
 MCP_CONNECTOR_DIR="$SHARE_ROOT/mcp-connector"
 MCP_ADAPTER_CACHE_ROOT="$MCP_CONNECTOR_DIR/adapters"
-MCP_ADAPTER_VERSION="0.1.27"
-MCP_ADAPTER_TAG="v0.7.13"
-MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.27.tar"
-MCP_ADAPTER_SHA256="e0a9d7772813dae57c0fde7e42e3759f14a1eb2e6bcfb20d8a10dcb94d5d3bf5"
+MCP_ADAPTER_VERSION="0.1.28"
+MCP_ADAPTER_TAG="v0.7.14"
+MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.28.tar"
+MCP_ADAPTER_SHA256="ba3b77e3c8a43ea5904d350dee10ccb7109cdf64988875d4e80fc31f804ffa6f"
 MCP_SDK_VERSION="1.30.1"
 MCP_OPENCODE_SDK_VERSION="1.18.21"
 MCP_TESTED_PROTOCOL_VERSION="2025-11-25"
 MCP_TUNNEL_DIR="$SHARE_ROOT/mcp-tunnel/openai"
-HUB_ASSET_TAG="v0.7.13"
+HUB_ASSET_TAG="v0.7.14"
 HUB_ASSET_FILENAME="opencode-vm-hub-1.tar"
-HUB_ASSET_SHA256="0d2f328ffda9ee3a0c8d61cfe303f7e479863a3f3af032d07d8650dd3eb1c84a"
+HUB_ASSET_SHA256="a6a742d051492cb71b85dadfdea47f2a4e4d72116b08a8127733fd7b11331cb0"
 
 # BEGIN GENERATED MANAGED RUNTIME
 OCVM_MANAGED_RUNTIME_GZIP_BASE64='H4sIAAAAAAAC/+19a3PbRrJoPvtXwKjUBrBBUHYSbw51FJUiMYluZElHUl5X1tIQAYqwQYABQNmKxP9++zFPAKTkze5W3TpiJRYxM+jp6enu6enpac6iPLpK
@@ -286,7 +286,7 @@ TASKBOARD_ARM64_SHA256="3749fb985f544fdb6788ba1dff69761e599ff82b3fe86d39ca54307c
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.7.13"
+OCVM_VERSION="0.7.14"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -5204,6 +5204,10 @@ doctor_cmd() {
       done
       echo ""
 
+      echo "[doctor] Script provenance (installed vs checkout)"
+      script_provenance_report
+      echo ""
+
       echo "[doctor] Providers from /connect (auth.json)"
       if [[ -f "$auth_file" ]]; then
         if command -v jq >/dev/null 2>&1; then
@@ -5377,19 +5381,35 @@ doctor_cmd() {
         if validate_mcp_credential "$_connector_share"; then
           _connector_token="$(<"$_connector_share/mcp/credential")"
         fi
-        if [[ "$_connector_enabled" == "1" && -f "$_connector_share/mcp/ready.json" && -n "$_connector_token" ]] &&
-           jq -e --arg project "$(proj_hash "$_connector_proj")" --arg generation "${SESS_CONTROLLER:-}" \
+        # STARTREST P5 host granularity: name the first missing layer instead
+        # of a bare "not ready"; polling/connected alone is never tool proof.
+        if [[ "$_connector_enabled" != "1" ]]; then
+          echo "  readiness: disabled (session configuration)"
+        elif [[ ! -f "$_connector_share/mcp/adapter/.ocvm-managed" ]]; then
+          echo "  readiness: not ready — adapter stage missing"
+        elif [[ -z "$_connector_token" ]]; then
+          echo "  readiness: not ready — credential missing or unsafe"
+        elif [[ ! -f "$_connector_share/mcp/ready.json" ]] || ! jq -e --arg project "$(proj_hash "$_connector_proj")" --arg generation "${SESS_CONTROLLER:-}" \
              --argjson port "$_connector_port" '
                .schema == 1 and .projectHash == $project and .generation == $generation and .port == $port
-             ' "$_connector_share/mcp/ready.json" >/dev/null 2>&1 &&
-           _connector_health="$(printf 'header = "X-OCVM-MCP-Token: %s"\n' "$_connector_token" |
-             curl -fsS --config - --max-time 2 "http://127.0.0.1:$_connector_port/healthz" 2>/dev/null)" &&
-           jq -e --arg project "$(proj_hash "$_connector_proj")" --arg generation "${SESS_CONTROLLER:-}" '
+             ' "$_connector_share/mcp/ready.json" >/dev/null 2>&1; then
+          echo "  readiness: not ready — ready descriptor absent or bound to another generation/port"
+        else
+          _connector_health="$(printf 'header = "X-OCVM-MCP-Token: %s"\n' "$_connector_token" |
+             curl -fsS --config - --max-time 2 "http://127.0.0.1:$_connector_port/healthz" 2>/dev/null)" || _connector_health=""
+          if [[ -n "$_connector_health" ]] && jq -e --arg project "$(proj_hash "$_connector_proj")" --arg generation "${SESS_CONTROLLER:-}" '
              .healthy == true and .project.id == $project and .generation == $generation
            ' <<<"$_connector_health" >/dev/null 2>&1; then
-          echo "  readiness: authenticated; endpoint http://127.0.0.1:$_connector_port/mcp"
-        else
-          echo "  readiness: not ready"
+            echo "  readiness: authenticated; endpoint http://127.0.0.1:$_connector_port/mcp"
+          else
+            echo "  readiness: not ready — authenticated host healthz failed (listener/connectivity)"
+          fi
+        fi
+        # STARTREST P6: the OAuth warning is a separately checkable, reported
+        # observation — no proven causal claim to any rejection series.
+        if [[ -f "$_connector_share/mcp/tunnel.log" ]] &&
+           tail -c 65536 "$_connector_share/mcp/tunnel.log" 2>/dev/null | grep -qF 'protected resource metadata missing resource'; then
+          echo "  oauth obs:  warning 'protected resource metadata missing resource' present in tunnel log (reported separately; no causal claim)"
         fi
         echo "  recovery:  opencode-vm web --reconnect --mcp --mcp-port $_connector_port"
       else
@@ -8689,6 +8709,91 @@ mcp_sha256() {
   else
     echo "[mcp] No SHA-256 tool is available." >&2
     return 1
+  fi
+}
+
+# STARTREST P1: one bounded, read-only provenance/integrity surface comparing
+# the running invocation (installed ~/bin copy vs checkout vs standalone), the
+# asset-resolution mode (source staging vs content-addressed release caches),
+# and pin/SHA consistency. Reports concrete named gaps; never downloads,
+# repairs, or mutates state — compatible local assets are only accepted by the
+# existing verified version/integrity rules of the staging functions.
+script_provenance_report() {
+  local running installed inst_ver run_digest inst_digest gap=0
+  running="$(ocvm_resolve_script_path)"
+  installed="$HOME/bin/opencode-vm"
+  echo "  running:    $running (v$OCVM_VERSION)"
+  if [[ "$running" == "$installed" ]]; then
+    echo "  invocation: managed install"
+  elif git -C "$(dirname "$running")" rev-parse --git-dir >/dev/null 2>&1; then
+    echo "  invocation: git checkout"
+  else
+    echo "  invocation: standalone script"
+  fi
+  if [[ "$running" != "$installed" ]]; then
+    if [[ -f "$installed" && ! -L "$installed" ]]; then
+      inst_ver="$(awk -F'"' '/^OCVM_VERSION=/ {print $2; exit}' "$installed" 2>/dev/null || true)"
+      echo "  installed:  $installed (v${inst_ver:-unknown})"
+      if [[ "${inst_ver:-}" != "$OCVM_VERSION" ]]; then
+        echo "  gap:        installed version v${inst_ver:-unknown} differs from running v$OCVM_VERSION"
+        gap=1
+      fi
+      run_digest="$(mcp_sha256 "$running" 2>/dev/null || true)"
+      inst_digest="$(mcp_sha256 "$installed" 2>/dev/null || true)"
+      if [[ -n "$run_digest" && "$run_digest" == "$inst_digest" ]]; then
+        echo "  digest:     installed copy byte-identical"
+      else
+        echo "  digest:     installed copy differs from the running script"
+        [[ "${inst_ver:-}" == "$OCVM_VERSION" ]] && gap=1
+      fi
+    else
+      echo "  installed:  <absent — 'opencode-vm install' manages ~/bin/opencode-vm>"
+    fi
+  fi
+  if [[ -d "$SCRIPT_DIR/adapters/mcp" ]]; then
+    if mcp_adapter_dev_valid "$SCRIPT_DIR/adapters/mcp" 2>/dev/null; then
+      echo "  mcp assets: source checkout, valid (v$MCP_ADAPTER_VERSION)"
+    else
+      echo "  mcp assets: GAP — adjacent source incomplete or wrong version (expected v$MCP_ADAPTER_VERSION)"
+      gap=1
+    fi
+  elif mcp_adapter_release_valid "$(mcp_adapter_cache_dir)" 2>/dev/null; then
+    echo "  mcp assets: release cache, pin-verified (v$MCP_ADAPTER_VERSION)"
+  else
+    echo "  mcp assets: GAP — no valid source or release cache (expected $(mcp_adapter_cache_dir))"
+    gap=1
+  fi
+  if [[ -d "$SCRIPT_DIR/adapters/openlive-acp" ]]; then
+    if openlive_adapter_dev_valid "$SCRIPT_DIR/adapters/openlive-acp" 2>/dev/null; then
+      echo "  openlive:   source checkout, valid (v$OPENLIVE_ADAPTER_VERSION)"
+    else
+      echo "  openlive:   GAP — adjacent source incomplete or wrong version (expected v$OPENLIVE_ADAPTER_VERSION)"
+      gap=1
+    fi
+  elif openlive_adapter_release_valid "$(openlive_adapter_cache_dir)" 2>/dev/null; then
+    echo "  openlive:   release cache, pin-verified (v$OPENLIVE_ADAPTER_VERSION)"
+  elif openlive_bridge_installed; then
+    echo "  openlive:   GAP — managed bridge installed but no valid adapter source/cache"
+    gap=1
+  else
+    echo "  openlive:   not installed (bridge absent; adapter is fetched on demand)"
+  fi
+  local hub_cache="$SHARE_ROOT/hub-assets/$HUB_ASSET_SHA256"
+  if [[ -d "$SCRIPT_DIR/hub" && -f "$SCRIPT_DIR/hub/server.py" ]]; then
+    echo "  hub assets: source checkout ($SCRIPT_DIR/hub)"
+  elif [[ -f "$hub_cache/.sha256" && "$(<"$hub_cache/.sha256")" == "$HUB_ASSET_SHA256" ]] &&
+       _agent_hub_verify_manifest "$hub_cache/hub" 2>/dev/null; then
+    echo "  hub assets: release cache, pin-verified"
+  elif [[ -f "$SHARE_ROOT/hub/server.py" && "$(cat "$SHARE_ROOT/hub/.ocvm-version" 2>/dev/null || true)" == "$OCVM_VERSION" ]]; then
+    echo "  hub assets: installed copy ($SHARE_ROOT/hub, v$OCVM_VERSION)"
+  else
+    echo "  hub assets: GAP — no valid source, release cache, or installed copy"
+    gap=1
+  fi
+  if (( gap == 0 )); then
+    echo "  integrity:  no gaps detected"
+  else
+    echo "  integrity:  named gaps above (read-only report; no download/repair performed)"
   fi
 }
 
@@ -16213,6 +16318,13 @@ attach_session() {
       ;;
     disable) sess_mcp_enabled=0 ;;
   esac
+  if [[ "$sess_mcp_enabled" != 1 ]]; then
+    if [[ "${SESSION_MCP_MODE:-}" == disable ]]; then
+      echo "[mcp] End state: disabled — suppressed by --no-mcp for this invocation."
+    else
+      echo "[mcp] End state: disabled — no server-backed MCP mode or OpenAI assignment for this session."
+    fi
+  fi
   local sess_taskboard_enabled=0
   if [[ ( "$sess_mode" == web || "$sess_mode" == tui-mcp ) && "${SESSION_TASKBOARD_MODE:-}" != disable ]]; then
     sess_taskboard_enabled=1
@@ -17116,8 +17228,23 @@ mcp_watch_host_ready() {
         echo "[mcp] Ready:      http://127.0.0.1:$port/mcp"
         echo "[mcp] Credential: $credential"
         echo "[mcp] Authentication remains required even when web mode uses --no-auth."
-        mcp_tunnel_start "$vm" "$proj" "$share" "$generation" ||
+        # Name exactly one honest end state (STARTREST P2): complete, or
+        # incomplete with the concrete missing piece — never a silent
+        # "VM runs, tunnel missing" success.
+        assigned=1
+        tunnel_rc=0
+        mcp_tunnel_registry resolve "$proj" >/dev/null 2>&1 || tunnel_rc=$?
+        (( tunnel_rc == 3 )) && assigned=0
+        if ! mcp_tunnel_start "$vm" "$proj" "$share" "$generation"; then
           echo "[mcp-tunnel] WARNING: tunnel setup failed; local web/MCP remain available. Check: opencode-vm provider mcp status openai" >&2
+          if (( assigned == 1 )); then
+            echo "[mcp] End state: INCOMPLETE — connector ready (guest listener + authenticated host mapping verified); OpenAI tunnel start failed." >&2
+          fi
+        elif (( assigned == 1 )); then
+          echo "[mcp] End state: complete — guest listener, authenticated host mapping, and OpenAI tunnel verified."
+        else
+          echo "[mcp] End state: complete — connector ready; no OpenAI tunnel assignment for this project."
+        fi
         exit 0
       fi
       sleep 0.3
@@ -17125,6 +17252,7 @@ mcp_watch_host_ready() {
     done
     rm -f "$response"
     echo "[mcp] ERROR: host loopback readiness timed out for port $port." >&2
+    echo "[mcp] End state: INCOMPLETE — host readiness verification timed out; ready.json/authenticated healthz not confirmed for generation $generation." >&2
     current_controller="$(
       unset SESS_CONTROLLER
       # shellcheck disable=SC1090
@@ -17704,6 +17832,10 @@ start_session() {
     effective_mcp_enabled=1
     effective_mcp_port="$(mcp_reserve_host_port "$proj" "${SESSION_MCP_PORT:-}")" || return 1
     validate_mcp_port "$effective_mcp_port"
+  elif [[ "${SESSION_MCP_MODE:-}" == disable ]]; then
+    echo "[mcp] End state: disabled — suppressed by --no-mcp for this invocation."
+  else
+    echo "[mcp] End state: disabled — no server-backed MCP mode or OpenAI assignment for this session."
   fi
 
   if ! base_exists; then

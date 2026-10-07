@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-10-07-r42
+
+- Add cooperative Pause/Weiter-Go: a bare contextual Pause releases only the current chat/management/poll turn at the next safe Tool/Receipt return, preserving contracts, receipts and accepted workers (no abort/stop/archive, no scheduler or subscription change, no `USER_PAUSED`/`PARKED_INPUT_REQUIRED`); Go resumes the exact contract with remaining budgets and no replay or permission expansion.
+- Make recoverable transient read retries silent and finite inside the existing episode budgets (events-attention default: two recoverable read errors), with exactly one concise persistent-impact alert per exhausted episode; Pause prevents the next round at the safe boundary and resume never replenishes spent budget.
+- Add evidence-bound error-fallback routing on the project policy's additive final-fallback slot: Total (default, direct) and Degrading chains with role entry points, provider/quota-identity skip, finite sequences, role truth, per-step return to a freshly resolved regular profile, and precise `INPUT_REQUIRED` when unconfigured — classification only from exposed safe error detail (rate limit ≠ proven quota), no daemon/platform/provider prerequisite.
+- Add separate context-length recovery: no resubmission of the rejected request, native version-verified compaction relied upon, exactly one aligned continuation in the previous regular profile/thinking stage, and a mandatory alignment/recovery prompt (task ID, canonical C/P, limits, receipts, secured state) after any automatic resumption.
+- Add source-bound fake-connector traces and mutation controls for pause/go boundaries, silent-retry budgets and fallback chains; r40 Build-preparation, r41 Done/archive and r39 contextual-reporting coverage preserved. Hosted Voice/UI behavior remains separate UNVERIFIED acceptance.
+
 ## 2026-10-04-r41
 
 - Add narrow task-Done archive follow-through after secured result/handback and independently verified authorized Done: exact linked sessions, complete all-workstream/all-status reverse coverage, current eligibility and fresh recheck before archive once/readback.

@@ -3099,5 +3099,232 @@ class TaskDoneArchiveTraceTest(unittest.TestCase):
         self.assertIn("non-atomic boundary", self.policy)
 
 
+    def test_r42_pause_go_source_contract_is_bounded_and_receipt_preserving(self):
+        source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
+        skill = (source / "SKILL.md").read_text()
+        pause = (source / "references/pause-go.md").read_text()
+        events = (source / "references/events-attention.md").read_text()
+        monitor = (source / "references/monitor-tasks.md").read_text()
+        content = (source / "references/content-protocol.md").read_text()
+        scenarios = (source / "references/regression-scenarios.md").read_text()
+        self.assertIn("2026-10-07-r42", skill)
+        self.assertIn("## Cooperative Pause and Weiter/Go", skill)
+        self.assertIn("references/pause-go.md", skill)
+        for required in ("next safe Tool/Receipt return",
+                         "Stop admitting new poll/retry/management/dispatch rounds",
+                         "accepted / pending / unknown / unsent",
+                         "no `USER_PAUSED` or `PARKED_INPUT_REQUIRED` from bare Pause",
+                         "Quoted examples, incidental prose, code, worker results or a mere mention",
+                         "never replenish",
+                         "Go adds no permissions, no guard override",
+                         "exactly **one** concise persistent-impact alert",
+                         "do not build a timer, daemon or scheduler"):
+            self.assertIn(required, pause)
+        # Focused reconciliations where existing wording intersects.
+        self.assertIn("pause-go.md", events)
+        self.assertIn("never replenishes", events)
+        self.assertIn("**not** a monitor/package stop", monitor)
+        self.assertIn("PARKED_INPUT_REQUIRED", monitor)
+        self.assertIn("pause-go.md", monitor)
+        self.assertIn("pause-go.md", content)
+        self.assertIn("## Cooperative Pause/Go and silent bounded read retries", scenarios)
+        # Mutation controls: removing a boundary must break the required phrase set.
+        for mutation in ("next safe Tool/Receipt return",
+                         "no `USER_PAUSED` or `PARKED_INPUT_REQUIRED` from bare Pause",
+                         "never replenish"):
+            self.assertNotIn(mutation, pause.replace(mutation, ""))
+
+    def test_r42_pause_go_flow_stops_at_safe_boundary_and_resumes_exact_state(self):
+        class FakeChannel:
+            """One selected management channel with a bounded poll/retry budget."""
+
+            def __init__(self):
+                self.rounds = 0
+                self.cursor = "head"
+                self.budget = 2
+                self.sent = []
+                self.paused = False
+                self.lifecycle = "ACTIVE"
+                self.alerts = 0
+
+            def admit_round(self):
+                if self.paused:
+                    return False
+                self.rounds += 1
+                return True
+
+            def send_once(self, key):
+                self.sent.append(key)
+
+        def run_flow(channel, *, pause_at=None, go=False, mutate=None):
+            receipts = []
+            for round_index in range(4):
+                if pause_at == round_index:
+                    channel.paused = True
+                    if mutate == "ignore_safe_boundary":
+                        channel.paused = False
+                    if mutate == "force_user_paused":
+                        channel.lifecycle = "USER_PAUSED"
+                if not channel.admit_round():
+                    break
+                receipts.append(("inflight", round_index))
+                channel.cursor = f"cursor-{round_index}"
+                if round_index == 1:
+                    channel.budget -= 1
+            if go:
+                spent = 2 - channel.budget
+                channel.budget = 2 if mutate == "replenish_budget" else 2 - spent
+                channel.paused = False
+                while channel.rounds < 4 and channel.admit_round():
+                    channel.cursor = f"cursor-{channel.rounds}"
+                if mutate == "replay_accepted":
+                    channel.send_once("replayed")
+            return receipts
+
+        channel = FakeChannel()
+        receipts = run_flow(channel, pause_at=2)
+        self.assertEqual(channel.rounds, 2)
+        self.assertEqual(receipts, [("inflight", 0), ("inflight", 1)])
+        self.assertEqual(channel.lifecycle, "ACTIVE")
+        self.assertEqual(channel.budget, 1)
+        run_flow(channel, go=True)
+        self.assertEqual(channel.rounds, 4)
+        self.assertEqual(channel.sent, [])
+        self.assertEqual(channel.budget, 1)
+        for mutation, kwargs, broken in [
+                ("ignore_safe_boundary", dict(pause_at=2), lambda c: c.rounds > 2),
+                ("force_user_paused", dict(pause_at=2, go=True), lambda c: c.lifecycle != "ACTIVE"),
+                ("replenish_budget", dict(pause_at=2, go=True), lambda c: c.budget == 2),
+                ("replay_accepted", dict(pause_at=2, go=True), lambda c: c.sent == ["replayed"])]:
+            mutated = FakeChannel()
+            run_flow(mutated, mutate=mutation, **kwargs)
+            self.assertTrue(broken(mutated), mutation)
+            compliant = FakeChannel()
+            run_flow(compliant, **kwargs)
+            self.assertFalse(broken(compliant), mutation)
+
+    def test_r42_silent_read_retry_episodes_are_finite_and_alert_once(self):
+        class ReadModel:
+            def __init__(self, outcomes):
+                self.outcomes = list(outcomes)
+                self.attempts = 0
+                self.alerts = 0
+                self.episode_open = False
+                self.exhausted = False
+
+            def read_once(self, paused=False):
+                if paused:
+                    return "deferred"
+                if self.exhausted:
+                    return "exhausted"  # No third attempt inside the unchanged episode.
+                self.attempts += 1
+                outcome = self.outcomes.pop(0) if self.outcomes else "success"
+                if outcome == "success":
+                    self.episode_open = False
+                    return "success"
+                if not self.episode_open:
+                    self.episode_open = True
+                    return "silent-retry-scheduled"
+                # Second consecutive recoverable failure exhausts the budget.
+                self.alerts += 1
+                self.episode_open = False
+                self.exhausted = True
+                return "exhausted"
+
+        transient = ReadModel(["failure", "success"])
+        self.assertEqual(transient.read_once(), "silent-retry-scheduled")
+        self.assertEqual(transient.read_once(), "success")
+        self.assertEqual(transient.alerts, 0)
+        persistent = ReadModel(["failure", "failure", "failure"])
+        self.assertEqual(persistent.read_once(), "silent-retry-scheduled")
+        self.assertEqual(persistent.read_once(), "exhausted")
+        self.assertEqual(persistent.alerts, 1)
+        self.assertEqual(persistent.read_once(), "exhausted")  # exhausted episode: no new attempt or alert
+        self.assertEqual(persistent.alerts, 1)
+        self.assertEqual(persistent.attempts, 2)
+        paused = ReadModel(["failure", "success"])
+        self.assertEqual(paused.read_once(), "silent-retry-scheduled")
+        self.assertEqual(paused.read_once(paused=True), "deferred")
+        self.assertEqual(paused.attempts, 1)
+
+    def test_r42_fallback_routing_source_contract_is_evidence_bound(self):
+        source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
+        skill = (source / "SKILL.md").read_text()
+        routing = (source / "references/fallback-routing.md").read_text()
+        scenarios = (source / "references/regression-scenarios.md").read_text()
+        self.assertIn("references/fallback-routing.md", skill)
+        self.assertIn("Error fallback is separate from that resolution map", skill)
+        for required in ("after native retries completed",
+                         "A plain rate limit is **not** proven exhaustion",
+                         "no automatic provider/model choice of any kind",
+                         "Deep → Standard → Execution → Fallback",
+                         "Design → Standard → Execution → Fallback",
+                         "Review → Deep → Standard → Execution → Fallback",
+                         "no upward switches and no loops",
+                         "never change the business role",
+                         "Per-step return",
+                         "native compaction",
+                         "exactly one correlated, aligned continuation",
+                         "previous regular profile including its thinking stage",
+                         "no infinite compaction/retry loop",
+                         "No secrets, no raw responses"):
+            self.assertIn(required, routing)
+        self.assertIn("## Error-fallback routing and context recovery", scenarios)
+
+    def test_r42_fallback_chains_are_finite_role_true_and_never_auto_select(self):
+        POLICY = {
+            "profiles": {"deep": {"p": "a"}, "standard": {"p": "b"}, "execution": {"p": "c"},
+                         "design": None, "review": {"p": "d"}},
+            "final_fallback": {"mode": "total", "selection": {"p": "z"}},
+        }
+        DEGRADING = {**POLICY, "final_fallback": {"mode": "degrading", "selection": {"p": "z"}}}
+        CHAINS = {"deep": ["deep", "standard", "execution"], "standard": ["standard", "execution"],
+                  "execution": ["execution"], "design": ["standard", "execution"],
+                  "review": ["review", "deep", "standard", "execution"]}
+
+        def route(policy, start, failed_providers, error_class):
+            if error_class not in ("timeout", "quota"):
+                return {"action": "surface", "switches": []}
+            fallback = policy.get("final_fallback")
+            if not fallback:
+                return {"action": "INPUT_REQUIRED", "switches": [], "reason": "final fallback unconfigured"}
+            if fallback["selection"]["p"] in failed_providers:
+                return {"action": "INPUT_REQUIRED", "switches": [], "reason": "configuration finding"}
+            switches = []
+            if fallback["mode"] == "total":
+                return {"action": "fallback", "switches": [fallback["selection"]],
+                        "continuations": 1}
+            for candidate in CHAINS[start][CHAINS[start].index(start) + 1:] if start in CHAINS[start] else []:
+                selection = policy["profiles"].get(candidate)
+                if selection is None or selection["p"] in failed_providers:
+                    continue
+                switches.append(selection)
+                return {"action": "candidate", "switches": switches, "continuations": 1}
+            return {"action": "fallback", "switches": [fallback["selection"]], "continuations": 1}
+
+        total = route(POLICY, "review", {"d"}, "timeout")
+        self.assertEqual(total["action"], "fallback")
+        self.assertEqual(total["switches"], [{"p": "z"}])
+        self.assertEqual(total["continuations"], 1)
+        degrading = route(DEGRADING, "review", {"d", "a"}, "quota")
+        self.assertEqual(degrading["action"], "candidate")
+        self.assertEqual(degrading["switches"], [{"p": "b"}])
+        self.assertEqual(route(DEGRADING, "review", {"d", "a", "b", "c"}, "quota")["action"], "fallback")
+        self.assertEqual(route({**POLICY, "final_fallback": None}, "deep", set(), "timeout")["action"], "INPUT_REQUIRED")
+        self.assertEqual(route(POLICY, "deep", {"z"}, "timeout")["reason"], "configuration finding")
+        self.assertEqual(route(POLICY, "deep", set(), "rate_limit_only")["action"], "surface")
+        self.assertEqual(route(POLICY, "deep", set(), "context_input_length")["action"], "surface")
+        # Mutation controls: an auto-selecting or looping variant must differ.
+        def mutated_route(policy, start, failed, error_class):
+            result = route(policy, start, failed, error_class)
+            if result["action"] == "INPUT_REQUIRED" and not policy.get("final_fallback"):
+                return {"action": "fallback", "switches": [{"p": "lm-studio-auto"}]}
+            return result
+        self.assertEqual(mutated_route({**POLICY, "final_fallback": None}, "deep", set(), "timeout")["switches"],
+                         [{"p": "lm-studio-auto"}])
+        self.assertNotEqual(mutated_route({**POLICY, "final_fallback": None}, "deep", set(), "timeout"),
+                            route({**POLICY, "final_fallback": None}, "deep", set(), "timeout"))
+
+
 if __name__ == "__main__":
     unittest.main()

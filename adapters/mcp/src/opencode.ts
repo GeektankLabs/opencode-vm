@@ -186,6 +186,7 @@ export interface SessionGateway {
   getProjectAttention?(query?: AttentionQuery): Promise<AttentionResult>;
   acknowledgeProjectAttention?(input: AttentionReceipt): Promise<AttentionEntry>;
   handleMcpEventMethod?(method: string, params: unknown): Promise<unknown>;
+  backendConnectivity?(): Promise<"ok" | "unreachable" | "unverified">;
 }
 
 export class OpenCodeGateway implements SessionGateway {
@@ -203,6 +204,8 @@ export class OpenCodeGateway implements SessionGateway {
   private journal?: ActivityJournal;
   private eventBridge?: McpEventBridge;
   private attentionProcessing?: Promise<void>;
+  private readonly attentionEpisodes = new Map<string, { attempts: number; nextAllowedAt: number; alerted: boolean }>();
+  private backendHealthCache?: { at: number; state: "ok" | "unreachable" };
   private readonly collectorStop = new AbortController();
   private collector?: Promise<void>;
   private sweeper?: Promise<void>;
@@ -310,6 +313,26 @@ export class OpenCodeGateway implements SessionGateway {
     return this.eventBridge.handle(method, params);
   }
 
+  /**
+   * Cached, bounded backend connectivity evidence for the health granularity
+   * read (STARTREST P5). Never blocks the health endpoint for longer than the
+   * short probe timeout; connectivity alone is not tool-roundtrip proof.
+   */
+  async backendConnectivity(): Promise<"ok" | "unreachable" | "unverified"> {
+    const now = Date.now();
+    if (this.backendHealthCache && now - this.backendHealthCache.at < 5000)
+      return this.backendHealthCache.state;
+    try {
+      const health = await this.client.global.health({ signal: AbortSignal.timeout(500) });
+      const state = health.data?.healthy === true ? "ok" : "unreachable";
+      this.backendHealthCache = { at: now, state };
+      return state;
+    } catch {
+      this.backendHealthCache = { at: now, state: "unreachable" };
+      return "unreachable";
+    }
+  }
+
   private processPendingAttention(): Promise<void> {
     if (this.attentionProcessing) return this.attentionProcessing;
     const operation = this.drainPendingAttention();
@@ -322,6 +345,12 @@ export class OpenCodeGateway implements SessionGateway {
   private async drainPendingAttention(): Promise<void> {
     if (!this.journal || !this.eventBridge) return;
     for (const entry of await this.journal.pendingAttention()) {
+      // STARTREST P6: bounded backoff per failure episode. A repeatedly
+      // CONTENT_UNAVAILABLE entry is skipped silently until its next allowed
+      // attempt instead of re-running on every backend event; the episode
+      // budget is finite and never replenished by success of other entries.
+      const episode = this.attentionEpisodes.get(entry.event_id);
+      if (episode && (episode.attempts >= 3 || Date.now() < episode.nextAllowedAt)) continue;
       try {
         if (entry.event_type === "session.input_required") {
           const status = await this.getSessionStatus(entry.session_id, entry.submitted_message_id);
@@ -353,12 +382,27 @@ export class OpenCodeGateway implements SessionGateway {
             hierarchy_status: context.hierarchy_status,
             evidence: { source: "pending_input", source_revision: sourceRevision, assistant_message_ids: [], complete: true },
           });
+          this.attentionEpisodes.delete(entry.event_id);
           continue;
         }
         await this.prefetchTerminalAttention(entry);
+        this.attentionEpisodes.delete(entry.event_id);
       } catch (error) {
         this.tracking.partial = true;
-        process.stderr.write(`[mcp] attention prefetch pending event=${entry.event_id.slice(0, 72)} code=${error instanceof AdapterError ? error.code : "unavailable"}\n`);
+        const prior = this.attentionEpisodes.get(entry.event_id);
+        const attempts = (prior?.attempts ?? 0) + 1;
+        const delays = [5_000, 15_000, 45_000];
+        const exhausted = attempts >= 3;
+        this.attentionEpisodes.set(entry.event_id, {
+          attempts,
+          nextAllowedAt: Date.now() + delays[Math.min(attempts - 1, delays.length - 1)]!,
+          alerted: exhausted ? true : (prior?.alerted ?? false),
+        });
+        const code = error instanceof AdapterError ? error.code : "unavailable";
+        if (attempts === 1)
+          process.stderr.write(`[mcp] attention prefetch pending event=${entry.event_id.slice(0, 72)} code=${code} (bounded backoff active)\n`);
+        else if (exhausted && !prior?.alerted)
+          process.stderr.write(`[mcp] attention prefetch exhausted after ${attempts} bounded attempts event=${entry.event_id.slice(0, 72)} code=${code}; entry stays pending, no automatic re-attempt\n`);
       }
     }
     await this.eventBridge.deliverPending();

@@ -63,7 +63,7 @@ On reference expiry, reacquire with known session/message IDs. On `CONTENT_CHANG
 
 On `SEARCH_CHANGED`, **discard the old search-page accumulation and restart without the old cursor**. Dedupe only within the new attempt using message ID/revision. Old observations may be retained as explicitly historical context, never merged into the new complete result set. Bound repeated attempts and report instability rather than hiding it.
 
-Read only exposed user/assistant content. Do not reconstruct hidden reasoning or bypass omitted tool-output permissions. Explain genuine source gaps. A new expert analysis needs authorization as a distinct task; it is not a read retry.
+Read only exposed user/assistant content. Do not reconstruct hidden reasoning or bypass omitted tool-output permissions. Explain genuine source gaps. Recoverable transient read failures follow the silent bounded-retry contract in [Pause and Go](pause-go.md); a genuine persistent source gap is still named and explained. A new expert analysis needs authorization as a distinct task; it is not a read retry.
 
 ## Compact read receipt
 

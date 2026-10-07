@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -9,6 +9,8 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import type { SessionGateway } from "./opencode.js";
 import { createMcpServer, dispatchMcp2ToolMethod } from "./tools.js";
+import { lastToolRoundtrips, traceRejection } from "./diagnostics.js";
+import type { CorrelationBase, RejectionPhase } from "./diagnostics.js";
 import { ADAPTER_VERSION, MCP_TRANSPORT, isRecord } from "./types.js";
 import type { RuntimeDescriptor } from "./types.js";
 
@@ -98,9 +100,15 @@ export class McpHttpServer {
       return;
     }
     this.activeRequests += 1;
+    const correlationBase: CorrelationBase = {
+      request: randomUUID(),
+      time: new Date().toISOString(),
+      generation: this.runtime.generation,
+      adapterVersion: ADAPTER_VERSION,
+    };
     try {
       if (!this.validHost(request)) {
-        writeJson(response, 403, { error: "Invalid Host header." });
+        this.rejectWith(response, correlationBase, 403, { error: "Invalid Host header." }, "header", "invalid_host");
         return;
       }
       const location = requestLocation(request);
@@ -109,24 +117,29 @@ export class McpHttpServer {
         location.search !== "" ||
         (pathname !== "/mcp" && pathname !== "/healthz")
       ) {
-        writeJson(response, 404, { error: "Not found." });
+        this.rejectWith(response, correlationBase, 404, { error: "Not found." }, "method", "not_found");
         return;
       }
       if (!this.validOrigin(request)) {
-        writeJson(response, 403, { error: "Invalid Origin header." });
+        this.rejectWith(response, correlationBase, 403, { error: "Invalid Origin header." }, "header", "invalid_origin");
         return;
       }
       if (!this.validToken(request)) {
         response.setHeader("www-authenticate", 'Token realm="opencode-vm-mcp"');
-        writeJson(response, 401, { error: "Authentication required." });
+        this.rejectWith(response, correlationBase, 401, { error: "Authentication required." }, "auth", "authentication_required");
         return;
       }
 
       if (pathname === "/healthz") {
         if (request.method !== "GET") {
+          traceRejection({ ...correlationBase, phase: "method", code: "405", reason: "method_not_allowed" });
           methodNotAllowed(response, "GET");
           return;
         }
+        const roundtrips = lastToolRoundtrips();
+        const backend = this.gateway.backendConnectivity
+          ? await this.gateway.backendConnectivity()
+          : "unverified";
         writeJson(response, 200, {
           healthy: true,
           schema: 1,
@@ -138,11 +151,21 @@ export class McpHttpServer {
           adapterVersion: ADAPTER_VERSION,
           transport: MCP_TRANSPORT,
           preferredProtocolVersion: LATEST_PROTOCOL_VERSION,
+          granularity: {
+            configuration: "validated",
+            process: "up",
+            listener: "bound",
+            backend_connectivity: backend,
+            events_channel: this.gateway.handleMcpEventMethod ? "enabled" : "disabled",
+            last_tool_success: roundtrips.last_success,
+            last_tool_error: roundtrips.last_error,
+          },
         });
         return;
       }
 
       if (request.method !== "POST") {
+        traceRejection({ ...correlationBase, phase: "method", code: "405", reason: "method_not_allowed" });
         methodNotAllowed(response, "POST");
         return;
       }
@@ -152,9 +175,9 @@ export class McpHttpServer {
         contentType.split(";", 1)[0]?.trim().toLowerCase() !==
           "application/json"
       ) {
-        writeJson(response, 415, {
+        this.rejectWith(response, correlationBase, 415, {
           error: "Content-Type must be application/json.",
-        });
+        }, "transport", "invalid_content_type");
         return;
       }
 
@@ -163,23 +186,25 @@ export class McpHttpServer {
         body = await readJsonBody(request);
       } catch (error) {
         if (error instanceof BodyTooLargeError) {
-          writeJson(response, 413, { error: "Request body is too large." });
+          this.rejectWith(response, correlationBase, 413, { error: "Request body is too large." }, "transport", "body_too_large");
         } else {
-          writeJson(response, 400, { error: "Malformed JSON request." });
+          this.rejectWith(response, correlationBase, 400, { error: "Malformed JSON request." }, "transport", "malformed_json");
         }
         return;
       }
       const requestProtocol = request.headers["mcp-protocol-version"];
       if (typeof requestProtocol === "string" && requestProtocol !== "2026-07-28" &&
         !SUPPORTED_PROTOCOL_VERSIONS.includes(requestProtocol)) {
-        writeJson(response, 400, { jsonrpc: "2.0", id: isRecord(body) ? body.id ?? null : null,
-          error: { code: -32022, message: "Unsupported protocol version.", data: { requested: requestProtocol, supported: [...SUPPORTED_PROTOCOL_VERSIONS, "2026-07-28"] } } });
+        this.rejectWith(response, correlationBase, 400, { jsonrpc: "2.0", id: isRecord(body) ? body.id ?? null : null,
+          error: { code: -32022, message: "Unsupported protocol version.", data: { requested: requestProtocol, supported: [...SUPPORTED_PROTOCOL_VERSIONS, "2026-07-28"] } } },
+          "protocol", "unsupported_protocol_version");
         return;
       }
       if (requestProtocol === "2026-07-28" &&
         isRecord(body) && typeof body.method === "string" && !validModernRequestHeaders(request, body)) {
-        writeJson(response, 400, { jsonrpc: "2.0", id: body.id ?? null,
-          error: { code: -32020, message: "Header mismatch: standard MCP request headers must match the request metadata." } });
+        this.rejectWith(response, correlationBase, 400, { jsonrpc: "2.0", id: body.id ?? null,
+          error: { code: -32020, message: "Header mismatch: standard MCP request headers must match the request metadata." } },
+          "header", "header_mismatch");
         return;
       }
 
@@ -190,19 +215,19 @@ export class McpHttpServer {
         body.id !== undefined &&
         Buffer.byteLength(JSON.stringify(body.id)) > 1024
       ) {
-        writeJson(response, 400, {
+        this.rejectWith(response, correlationBase, 400, {
           jsonrpc: "2.0",
           id: null,
           error: {
             code: -32600,
             message: "Request ID exceeds 1024 serialized bytes.",
           },
-        });
+        }, "protocol", "request_id_too_large");
         return;
       }
       if (pathname === "/mcp" && isRecord(body) && typeof body.method === "string" &&
         (body.method === "server/discover" || body.method.startsWith("events/"))) {
-        await this.handleEventRequest(request, response, body);
+        await this.handleEventRequest(request, response, body, correlationBase);
         return;
       }
       if (pathname === "/mcp" && request.headers["mcp-protocol-version"] === "2026-07-28" &&
@@ -239,24 +264,51 @@ export class McpHttpServer {
       }
     } catch {
       if (!response.headersSent)
-        writeJson(response, 400, { error: "Invalid request." });
+        this.rejectWith(response, correlationBase, 400, { error: "Invalid request." }, "transport", "invalid_request");
       else if (!response.writableEnded) response.end();
     } finally {
       this.activeRequests -= 1;
     }
   }
 
+  /**
+   * Pre-dispatch rejection with a bounded redacted correlation set (STARTREST
+   * P3): phase, time, request/generation/adapter identifiers and a safe reason
+   * token — never headers, bodies, URLs, or tokens. The correlation is an
+   * additive field; existing error codes/messages stay byte-compatible.
+   */
+  private rejectWith(
+    response: ServerResponse,
+    base: CorrelationBase,
+    status: number,
+    payload: Record<string, unknown>,
+    phase: RejectionPhase,
+    reason: string,
+  ): void {
+    const error = isRecord(payload.error) ? payload.error : undefined;
+    const code =
+      error && (typeof error.code === "number" || typeof error.code === "string")
+        ? String(error.code)
+        : String(status);
+    const correlation = { ...base, phase, code, reason };
+    traceRejection(correlation);
+    if (error) error.data = { ...(isRecord(error.data) ? error.data : {}), correlation };
+    else payload.correlation = correlation;
+    writeJson(response, status, payload);
+  }
+
   private async handleEventRequest(
     request: IncomingMessage,
     response: ServerResponse,
     body: Record<string, unknown>,
+    base: CorrelationBase,
   ): Promise<void> {
     const method = body.method as string;
     const id = body.id;
     if (id === undefined || id === null || (typeof id !== "string" && typeof id !== "number") ||
       (typeof id === "number" && !Number.isFinite(id)) || body.jsonrpc !== "2.0" ||
       (body.params !== undefined && !isRecord(body.params))) {
-      writeJson(response, 200, { jsonrpc: "2.0", id: id ?? null, error: { code: -32600, message: "Invalid JSON-RPC request." } });
+      this.rejectWith(response, base, 200, { jsonrpc: "2.0", id: id ?? null, error: { code: -32600, message: "Invalid JSON-RPC request." } }, "protocol", "invalid_jsonrpc");
       return;
     }
     const methodHeader = request.headers["mcp-method"];
@@ -265,15 +317,15 @@ export class McpHttpServer {
     const bodyVersion = metadata?.["io.modelcontextprotocol/protocolVersion"];
     if (typeof methodHeader !== "string" || methodHeader !== method ||
       typeof protocolHeader !== "string" || bodyVersion !== protocolHeader) {
-      writeJson(response, 400, { jsonrpc: "2.0", id, error: { code: -32020, message: "Header mismatch: Mcp-Method and MCP-Protocol-Version must match the request metadata." } });
+      this.rejectWith(response, base, 400, { jsonrpc: "2.0", id, error: { code: -32020, message: "Header mismatch: Mcp-Method and MCP-Protocol-Version must match the request metadata." } }, "header", "header_mismatch");
       return;
     }
     if (protocolHeader !== "2026-07-28") {
-      writeJson(response, 400, { jsonrpc: "2.0", id, error: {
+      this.rejectWith(response, base, 400, { jsonrpc: "2.0", id, error: {
         code: -32022,
         message: "Unsupported protocol version.",
         data: { requested: protocolHeader, supported: ["2026-07-28"] },
-      } });
+      } }, "protocol", "unsupported_protocol_version");
       return;
     }
     if (method === "server/discover") {
@@ -285,7 +337,7 @@ export class McpHttpServer {
       return;
     }
     if (!this.gateway.handleMcpEventMethod) {
-      writeJson(response, 200, { jsonrpc: "2.0", id, error: { code: -32014, message: "MCP Events are unavailable." } });
+      this.rejectWith(response, base, 200, { jsonrpc: "2.0", id, error: { code: -32014, message: "MCP Events are unavailable." } }, "method", "events_unavailable");
       return;
     }
     try {

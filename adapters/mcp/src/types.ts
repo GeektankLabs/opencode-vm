@@ -1,7 +1,7 @@
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { dirname, isAbsolute } from "node:path";
 
-export const ADAPTER_VERSION = "0.1.27";
+export const ADAPTER_VERSION = "0.1.28";
 export const MCP_TRANSPORT = "streamable-http-stateless";
 
 export type RuntimeDescriptor = {
@@ -92,6 +92,9 @@ export type ErrorDetail = {
     | "provider_header_timeout"
     | "provider_response_stream_error"
     | "provider_error"
+    | "provider_timeout"
+    | "provider_quota"
+    | "context_input_length"
     | "provider_auth"
     | "context_overflow"
     | "output_length"

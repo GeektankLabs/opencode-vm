@@ -464,10 +464,13 @@ const profileStatus = z.enum(["available", "unconfigured", "provider_unavailable
   "variant_unavailable", "catalog_unavailable", "catalog_incomplete"]);
 const profileEntry = z.object({ selection: profileSelection.nullable(), status: profileStatus }).strict();
 const modelPolicyOutput = z.object({
-  project_id: z.string(), schema_version: z.union([z.literal(1), z.literal(2)]), revision: z.number().int().nonnegative(),
+  project_id: z.string(), schema_version: z.union([z.literal(1), z.literal(2), z.literal(3)]), revision: z.number().int().nonnegative(),
   updated_at: z.string().nullable(), catalog_status: z.enum(["complete", "incomplete", "unavailable"]),
   profiles: z.object({ deep: profileEntry, standard: profileEntry, execution: profileEntry, design: profileEntry, review: profileEntry }).strict(),
   fallbacks: z.object({ design: z.array(z.enum(PROFILE_NAMES)), review: z.array(z.enum(PROFILE_NAMES)) }).strict(),
+  final_fallback: z.object({
+    mode: z.enum(["total", "degrading"]), selection: profileSelection, status: profileStatus,
+  }).strict().nullable(),
 }).strict();
 const recommendedInput = z.object({ profile: z.enum(PROFILE_NAMES) }).strict();
 const recommendedOutput = z.object({
@@ -590,6 +593,9 @@ const errorDetailObjectSchema = z.object({
     "provider_header_timeout",
     "provider_response_stream_error",
     "provider_error",
+    "provider_timeout",
+    "provider_quota",
+    "context_input_length",
     "provider_auth",
     "context_overflow",
     "output_length",

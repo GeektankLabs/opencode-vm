@@ -594,3 +594,32 @@ Instruction/source-bound synthetic traces must use the shipped dispatch preceden
 | After a substantive agent result, both files are directly readable | Read Board and original result, then page through registered context and plan (plus relevant details); compare achieved/verified state, decisions, findings, open points and plan changes. Mark stale/missing/contradictory maintenance as QA findings to hand to the executing agent in the next authorized request; do not edit files or start a copying agent. |
 | User requests an Executive Summary or next step | With direct tools, read `compact_context` first for current state and blockers; fetch `concept_plan` only if concept/target/implementation/test depth is needed and relevant indexed details only when indicated. Verify actual work claims against original result/test evidence; no new agent task for a file copy. |
 | Connector lacks direct task-document reads | Preserve the agent-mediated exact-text fallback only in authorized work; truncated/missing text cannot pass full QA. For a pure management read use available Board/session evidence, disclose missing document coverage and do not invent an agent run. |
+
+## Cooperative Pause/Go and silent bounded read retries
+
+| Scenario | Required behavior |
+|---|---|
+| Direct pause during an active poll turn, empty wait or busy external integration | Current turn returns at the next safe Tool/Receipt boundary; no new poll/retry/dispatch round; no abort/stop/archive/scheduler/subscription call; accepted workers stay running. |
+| Pause while a read/write is in flight or a receipt is lost | Capture the exact returned receipt or record unknown evidence; no false cancel/non-delivery claim and no follow-up mutation; uncertain writes reconcile by exact reads only. |
+| Weiter/Go/case-insensitive synonym in Text or Voice after a pause | Same contract/task/channel/decision revision/receipts/cursors/filter keys/budgets resume; accrued facts are retrieved; no accepted-work replay, no budget replenishment, no second worker/management instance. |
+| Prepared but genuinely unsent step at resume | One actual supported admission after fresh scope/idle/receipt/base/runtime checks under the existing authorization; never from a stale ready label; Go adds no permission, guard override or release/host authority. |
+| Quoted/incidental "pause"/"go" text, worker output or a new substantive concern | No command transition; normal scope-aware steering continues. |
+| Explicitly named additional process stop or real permission refusal alongside pause | Handle only that distinct authority; bare Pause never auto-answers, expands or replaces it; no `USER_PAUSED`/`PARKED_INPUT_REQUIRED` from bare Pause. |
+| One transient recoverable read failure, then success | Silent bounded retry with increasing interval inside the remaining budget; normal continuation; zero transient-error reports or questions. |
+| Second consecutive recoverable failure exhausts the episode budget | Finite trace; exactly one concise persistent-impact alert for the unchanged episode; no third attempt, no tight loop, no per-attempt spam. |
+| Pause arrives at the first failed/in-flight read return | No next retry/poll round; spent attempts, cursor and receipt saved; resume continues within the remaining budget without replenishment. |
+| Missing tool, auth denial or fatal contract error during reads | Real prerequisite/security blocker: surfaced, never bypassed by silent retries, account or channel switching; retrieval failure stays unknown evidence, not worker failure/success. |
+| Checkpoint save unavailable/uncertain at pause | Readback/reconcile or disclose unverified persistence; no duplicate note and no claimed saved state. |
+
+## Error-fallback routing and context recovery
+
+| Scenario | Required behavior |
+|---|---|
+| Confirmed timeout or quota-exhaustion terminal failure, Total mode, final fallback configured | One verified runtime switch to the configured final fallback plus exactly one aligned continuation with the recovery prompt; no intermediate profile, no own retry counters, native retries untouched. |
+| Same failure in Degrading mode from Deep/Design/Review | Finite role-entry chain (Deep→Standard→Execution→Fallback; Design→Standard→Execution→Fallback; Review→Deep→Standard→Execution→Fallback); missing profiles and already-failed provider/quota identities skipped; no upward switch, no loop, no repeated failed candidate. |
+| Plain rate limit without exhaustion evidence, or any other invalid-request error | No class-2/class-3 routing; the redacted/actual error stays surfaced without invented quota or provider-wide claims. |
+| Final fallback unconfigured, unsuitable or failing again | Precise documented `INPUT_REQUIRED` with original error class, profile/runtime, evidence references, last secured state and the operator decision; never an automatic provider/model choice and no further automatic continuation. |
+| Final fallback identity equals an already failed identity | Configuration finding reported via `INPUT_REQUIRED`; no pretended attempt. |
+| Fallback step completed; next separately started order | Fresh regular profile from current policy with exact readback (model-switch evidence); no permanent profile change, no blanket reset, no switch-back during a running fallback step. |
+| Exact structured input-length rejection (reported range pattern) | No immediate resubmission; native version-verified compaction relied upon, then exactly one aligned continuation in the previous regular profile/thinking stage at the active runtime; repeated context failure or compaction error → documented `INPUT_REQUIRED`, no loop. |
+| Design/Review work routed through technical fallback profiles | Business role unchanged: design requirements persist; reviewer independence and no self-implementation/self-acceptance preserved. |
