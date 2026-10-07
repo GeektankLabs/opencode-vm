@@ -28,9 +28,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 try:
     from .policy import PolicyStore, PolicyError, PolicyConflict, PolicyCapabilityError, PROFILES, FALLBACKS, FALLBACK_MODES, check_selection, validate_selection, resolve_profile
     from .catalog import read_catalog, mcp_connection, read_capabilities
+    from . import monitor as monitor_store
 except ImportError:  # Executed directly as hub/server.py by the guest service.
     from policy import PolicyStore, PolicyError, PolicyConflict, PolicyCapabilityError, PROFILES, FALLBACKS, FALLBACK_MODES, check_selection, validate_selection, resolve_profile
     from catalog import read_catalog, mcp_connection, read_capabilities
+    import monitor as monitor_store
 
 
 ROOT = Path(__file__).resolve().parent
@@ -301,6 +303,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(200, control_snapshot())
             except PolicyError:
                 self.send_json(409, {"code": "POLICY_FORMAT_UNSUPPORTED", "error": "Unsupported or invalid project policy."})
+        elif path == "/api/monitor":
+            self.handle_monitor_list()
+        elif re.fullmatch(r"/api/monitor/[0-9a-f]{32}/history", path):
+            self.handle_monitor_history()
+        elif re.fullmatch(r"/api/monitor/[0-9a-f]{32}", path):
+            self.handle_monitor_get()
         elif path == "/favicon.ico":
             self.send_response(204)
             self.end_headers()
@@ -321,6 +329,32 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_PUT(self) -> None:  # noqa: N802
         if not self.allowed(write=True):
+            return
+        monitor_put = re.fullmatch(r"/api/monitor/([0-9a-f]{32})", self.path)
+        if monitor_put:
+            payload = self.read_json_body()
+            if payload is None:
+                return
+            generation = payload.pop("generation", None)
+            if not isinstance(generation, int) or isinstance(generation, bool) or generation < 0:
+                self.send_json(400, {"code": "MONITOR_REQUEST_INVALID", "error": "generation is required for updates."})
+                return
+            try:
+                result = monitor_store.mutate(
+                    PROJECT,
+                    lambda registry: self.mutate_update(registry, f"monitor_{monitor_put.group(1)}", payload),
+                    expected_generation=generation,
+                )
+                monitor = next(item for item in result["monitors"] if item["id"] == f"monitor_{monitor_put.group(1)}")
+                self.send_json(200, {"monitor": self.monitor_summary(monitor),
+                                     "generation": result["generation"], "observed_at": now()})
+            except monitor_store.MonitorConflict:
+                self.send_json(409, {"code": "MONITOR_REVISION_CONFLICT", "error": "Monitor changed; reload before saving."})
+            except monitor_store.MonitorError as error:
+                code = "MONITOR_NOT_FOUND" if "does not exist" in str(error) else "MONITOR_REQUEST_INVALID"
+                self.monitor_error(code, str(error))
+            except OSError:
+                self.send_json(503, {"code": "MONITOR_SAVE_UNCONFIRMED", "error": "Monitor publication not confirmed; read back before another write."})
             return
         match = re.fullmatch(r"/api/control/profiles/(deep|standard|execution|design|review)", self.path)
         fallback_match = None if match else re.fullmatch(r"/api/control/fallback", self.path)
@@ -404,6 +438,309 @@ class Handler(BaseHTTPRequestHandler):
             return  # A lost response is reconciled by a read, never another write.
         except OSError:
             self.send_json(503, {"code": "POLICY_SAVE_UNCONFIRMED", "error": "Policy publication not confirmed; read back before another write."})
+
+    # ---------------- Monitor section (one canonical registry) ----------------
+
+    def monitor_summary(self, monitor: dict[str, Any]) -> dict[str, Any]:
+        last = next((entry for entry in reversed(monitor.get("history", []))
+                     if entry.get("type") in {"dispatched", "recovery-continued", "compaction-continued"}), None)
+        summary = {
+            "monitor_id": monitor["id"],
+            "title": monitor["title"],
+            "anchor_task_id": monitor["anchor"]["task_id"],
+            "scheduler": dict(monitor["scheduler"]),
+            "autonomy_profile": monitor["autonomy_profile"],
+            "runtime_profile": monitor["runtime_profile"],
+            "session_id": monitor["session"].get("session_id"),
+            "work_state": monitor["state"]["work"],
+            "run_active": bool(monitor["run"].get("active")),
+            "abort_requested": monitor.get("abort_request") is not None,
+            "last_run_at": last["at"] if last else None,
+            "updated_at": monitor["updated_at"],
+        }
+        if monitor["state"].get("parked_reason"):
+            summary["parked_reason"] = monitor["state"]["parked_reason"]
+        return summary
+
+    def monitor_freshness(self, monitor: dict[str, Any]) -> str:
+        last = next((entry for entry in reversed(monitor.get("history", []))
+                     if entry.get("type") in {"dispatched", "recovery-continued", "compaction-continued"}), None)
+        if not last:
+            return "unknown"
+        try:
+            parsed = datetime.strptime(last["at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        except ValueError:
+            return "unknown"
+        age = (datetime.now(timezone.utc) - parsed).total_seconds() * 1000
+        return "fresh" if age <= monitor["scheduler"]["interval_seconds"] * 2 * 1000 else "stale"
+
+    def monitor_error(self, code: str, message: str) -> None:
+        status = 404 if code == "MONITOR_NOT_FOUND" else 409 if code in {"MONITOR_CONFLICT", "MONITOR_STATE_CONFLICT"} else 400
+        self.send_json(status, {"code": code, "error": message})
+
+    def find_monitor(self, monitor_id: str) -> dict[str, Any] | None:
+        try:
+            registry = monitor_store.snapshot(PROJECT)
+        except monitor_store.MonitorError as error:
+            raise monitor_store.MonitorError(str(error)) from error
+        return next((item for item in registry["monitors"] if item["id"] == monitor_id), None)
+
+    def handle_monitor_list(self) -> None:
+        query = self.path.split("?", 1)[1] if "?" in self.path else ""
+        params: dict[str, str] = {}
+        for part in query.split("&"):
+            if not part:
+                continue
+            key, _, value = part.partition("=")
+            params[key] = value
+        try:
+            registry = monitor_store.snapshot(PROJECT)
+        except monitor_store.MonitorError:
+            self.send_json(503, {"code": "MONITOR_UNAVAILABLE", "error": "Monitor registry is unavailable."})
+            return
+        monitors = sorted(registry["monitors"], key=lambda item: (item["created_at"], item["id"]))
+        work_state = params.get("work_state")
+        if work_state is not None:
+            if work_state not in monitor_store.WORK_STATES:
+                self.send_json(400, {"code": "MONITOR_REQUEST_INVALID", "error": "Invalid work_state filter."})
+                return
+            monitors = [item for item in monitors if item["state"]["work"] == work_state]
+        total = len(monitors)
+        cursor = params.get("cursor", "0")
+        limit_raw = params.get("limit", "20")
+        if not cursor.isdecimal() or not limit_raw.isdecimal():
+            self.send_json(400, {"code": "MONITOR_REQUEST_INVALID", "error": "Invalid pagination."})
+            return
+        start, limit = int(cursor), min(50, max(1, int(limit_raw)))
+        page = monitors[start:start + limit]
+        next_cursor = str(start + limit) if start + limit < total else None
+        payload = {
+            "schema": 1,
+            "generatedAt": now(),
+            "generation": registry["generation"],
+            "monitors": [self.monitor_summary(item) for item in page],
+            "total": total,
+            "completeness": "paged" if next_cursor else "complete",
+            "observed_at": now(),
+        }
+        if next_cursor is not None:
+            payload["next_cursor"] = next_cursor
+        self.send_json(200, payload)
+
+    def handle_monitor_get(self) -> None:
+        monitor_id = self.path.split("?", 1)[0].rsplit("/", 1)[1]
+        try:
+            monitor = self.find_monitor(f"monitor_{monitor_id}")
+        except monitor_store.MonitorError:
+            self.send_json(503, {"code": "MONITOR_UNAVAILABLE", "error": "Monitor registry is unavailable."})
+            return
+        if monitor is None:
+            self.monitor_error("MONITOR_NOT_FOUND", "Monitor does not exist in this project registry.")
+            return
+        last = next((entry for entry in reversed(monitor.get("history", []))
+                     if entry.get("type", "").startswith("dispatch") or entry.get("type") in
+                     {"recovery-continued", "run-aborted", "run-abort-uncertain"}), None)
+        self.send_json(200, {
+            "monitor": self.monitor_summary(monitor),
+            "anchor": dict(monitor["anchor"]),
+            "effective": {
+                "interval_seconds": monitor["scheduler"]["interval_seconds"],
+                "runtime_profile": monitor["runtime_profile"],
+                "autonomy_profile": monitor["autonomy_profile"],
+            },
+            "last_event": {"at": last["at"], "type": last["type"]} if last else None,
+            "next_run_at": monitor["scheduler"]["next_run_at"],
+            "freshness": self.monitor_freshness(monitor),
+            "observed_at": now(),
+        })
+
+    def handle_monitor_history(self) -> None:
+        monitor_id = self.path.split("?", 1)[0].split("/")[3]
+        query = self.path.split("?", 1)[1] if "?" in self.path else ""
+        include_logs = "include_logs=1" in query
+        limit = 50
+        for part in query.split("&"):
+            key, _, value = part.partition("=")
+            if key == "limit" and value.isdecimal():
+                limit = min(100, max(1, int(value)))
+        try:
+            monitor = self.find_monitor(f"monitor_{monitor_id}")
+        except monitor_store.MonitorError:
+            self.send_json(503, {"code": "MONITOR_UNAVAILABLE", "error": "Monitor registry is unavailable."})
+            return
+        if monitor is None:
+            self.monitor_error("MONITOR_NOT_FOUND", "Monitor does not exist in this project registry.")
+            return
+        history = monitor.get("history", [])[-limit:]
+        last = next((entry for entry in reversed(monitor.get("history", []))
+                     if entry.get("type", "").startswith("dispatch") or entry.get("type") == "recovery-continued"), None)
+        payload = {
+            "monitor_id": monitor["id"],
+            "history": history,
+            "last_run_at": last["at"] if last else None,
+            "next_run_at": monitor["scheduler"]["next_run_at"],
+            "freshness": self.monitor_freshness(monitor),
+            "coverage": "paged" if len(monitor.get("history", [])) > limit else "complete",
+            "observed_at": now(),
+        }
+        if include_logs:
+            payload["logs"] = monitor.get("logs", [])[-limit:]
+        self.send_json(200, payload)
+
+    def read_json_body(self, maximum: int = 8192) -> dict[str, Any] | None:
+        length = self.headers.get("Content-Length", "")
+        if not length.isdecimal() or not 0 < int(length) <= maximum:
+            self.send_error(413)
+            return None
+        try:
+            payload = json.loads(self.rfile.read(int(length)))
+        except (ValueError, UnicodeError):
+            self.send_json(400, {"code": "MONITOR_REQUEST_INVALID", "error": "Invalid JSON payload."})
+            return None
+        if not isinstance(payload, dict):
+            self.send_json(400, {"code": "MONITOR_REQUEST_INVALID", "error": "Invalid request."})
+            return None
+        return payload
+
+    def do_POST(self) -> None:  # noqa: N802
+        path = self.path.split("?", 1)[0]
+        if not path.startswith("/api/monitor"):
+            self.send_error(404)
+            return
+        if not self.allowed(write=True):
+            return
+        if self.headers.get("Content-Type", "").split(";", 1)[0].lower() != "application/json":
+            self.send_error(415)
+            return
+        payload = self.read_json_body()
+        if payload is None:
+            return
+        try:
+            if path == "/api/monitor":
+                result = monitor_store.mutate(PROJECT, lambda registry: self.mutate_create(registry, payload))
+                self.send_json(201, {"monitor": self.monitor_summary(result["monitors"][-1]),
+                                     "generation": result["generation"], "observed_at": now()})
+                return
+            match = re.fullmatch(r"/api/monitor/([0-9a-f]{32})/(enable|disable|trigger|cancel|abort|delete)", path)
+            if not match:
+                self.send_error(404)
+                return
+            monitor_id, action = match.groups()
+            generation = payload.get("generation")
+            if generation is not None and (not isinstance(generation, int) or isinstance(generation, bool) or generation < 0):
+                self.send_json(400, {"code": "MONITOR_REQUEST_INVALID", "error": "Invalid generation."})
+                return
+            result = monitor_store.mutate(
+                PROJECT,
+                lambda registry: self.mutate_action(registry, f"monitor_{monitor_id}", action, payload),
+                expected_generation=generation,
+            )
+            if action == "delete":
+                self.send_json(200, {"monitor_id": f"monitor_{monitor_id}", "deleted": True,
+                                     "generation": result["generation"]})
+                return
+            monitor = next(item for item in result["monitors"] if item["id"] == f"monitor_{monitor_id}")
+            body = {"monitor": self.monitor_summary(monitor), "generation": result["generation"], "observed_at": now()}
+            if action == "abort":
+                body["state"] = "requested"
+                body["guidance"] = "Abort requested; the engine verifies the native abort and records the stored outcome."
+            self.send_json(200, body)
+        except monitor_store.MonitorConflict:
+            self.send_json(409, {"code": "MONITOR_REVISION_CONFLICT", "error": "Monitor changed; reload before saving."})
+        except monitor_store.MonitorError as error:
+            message = str(error)
+            code = "MONITOR_NOT_FOUND" if "does not exist" in message else "MONITOR_STATE_CONFLICT" if "running" in message else "MONITOR_REQUEST_INVALID"
+            self.monitor_error(code, message)
+        except OSError:
+            self.send_json(503, {"code": "MONITOR_SAVE_UNCONFIRMED", "error": "Monitor publication not confirmed; read back before another write."})
+
+    def mutate_create(self, registry: dict[str, Any], payload: dict[str, Any]) -> None:
+        title = payload.get("title")
+        task_id = payload.get("task_id")
+        interval = payload.get("interval_seconds", monitor_store.DEFAULT_INTERVAL_SECONDS)
+        autonomy = payload.get("autonomy_profile", "mvp")
+        runtime = payload.get("runtime_profile", "deep")
+        expiry = payload.get("expiry_at")
+        if (not isinstance(title, str) or not 1 <= len(title.strip()) <= 160
+                or not isinstance(task_id, str) or not monitor_store.valid_task_id(task_id)
+                or not isinstance(interval, int) or isinstance(interval, bool) or not 5 <= interval <= 86400
+                or autonomy not in monitor_store.AUTONOMY_PROFILES
+                or runtime not in monitor_store.RUNTIME_PROFILES
+                or (expiry is not None and (not isinstance(expiry, int) or isinstance(expiry, bool) or expiry <= 0))):
+            raise monitor_store.MonitorError("Invalid monitor definition.")
+        if any(item["anchor"]["task_id"] == task_id for item in registry["monitors"]):
+            raise monitor_store.MonitorConflict("This canonical task already has a monitor (unique master-task binding).")
+        monitor = monitor_store.default_monitor(title.strip(), task_id, interval, autonomy, runtime, expiry)
+        monitor_store.history_entry(monitor, "created", {"interval_seconds": interval})
+        registry["monitors"].append(monitor)
+
+    def mutate_action(self, registry: dict[str, Any], monitor_id: str, action: str, payload: dict[str, Any]) -> None:
+        monitor = next((item for item in registry["monitors"] if item["id"] == monitor_id), None)
+        if monitor is None:
+            raise monitor_store.MonitorError("Monitor does not exist in this project registry.")
+        at = monitor_store.timestamp()
+        if action == "enable":
+            monitor["scheduler"]["enabled"] = True
+            monitor["scheduler"]["next_run_at"] = int(time.time() * 1000) + monitor["scheduler"]["interval_seconds"] * 1000
+            monitor_store.history_entry(monitor, "enabled")
+        elif action == "disable":
+            monitor["scheduler"]["enabled"] = False
+            monitor["scheduler"]["next_run_at"] = None
+            monitor_store.history_entry(monitor, "disabled")
+        elif action == "trigger":
+            monitor["wake_request"] = {"requested_at": at, "reason": "hub-ui"}
+            monitor_store.history_entry(monitor, "trigger-requested", {"reason": "hub-ui"})
+        elif action == "cancel":
+            monitor["wake_request"] = None
+            if monitor["scheduler"]["enabled"]:
+                monitor["scheduler"]["next_run_at"] = int(time.time() * 1000) + monitor["scheduler"]["interval_seconds"] * 1000
+            monitor_store.history_entry(monitor, "future-cancelled")
+        elif action == "abort":
+            monitor["abort_request"] = {"requested_at": at, "reason": "hub-ui"}
+            monitor_store.history_entry(monitor, "abort-requested")
+        elif action == "delete":
+            if monitor["run"].get("active"):
+                raise monitor_store.MonitorError("The monitor has a running action; abort or finish it before deletion.")
+            registry["monitors"] = [item for item in registry["monitors"] if item["id"] != monitor_id]
+            return
+        else:
+            raise monitor_store.MonitorError("Invalid monitor action.")
+        monitor["updated_at"] = at
+
+    def mutate_update(self, registry: dict[str, Any], monitor_id: str, payload: dict[str, Any]) -> None:
+        monitor = next((item for item in registry["monitors"] if item["id"] == monitor_id), None)
+        if monitor is None:
+            raise monitor_store.MonitorError("Monitor does not exist in this project registry.")
+        allowed = {"title", "interval_seconds", "autonomy_profile", "runtime_profile", "expiry_at"}
+        if set(payload) - allowed:
+            raise monitor_store.MonitorError("Invalid monitor update fields.")
+        if "title" in payload:
+            title = payload["title"]
+            if not isinstance(title, str) or not 1 <= len(title.strip()) <= 160:
+                raise monitor_store.MonitorError("Invalid monitor title.")
+            monitor["title"] = title.strip()
+        if "interval_seconds" in payload:
+            interval = payload["interval_seconds"]
+            if not isinstance(interval, int) or isinstance(interval, bool) or not 5 <= interval <= 86400:
+                raise monitor_store.MonitorError("Invalid monitor interval.")
+            monitor["scheduler"]["interval_seconds"] = interval
+            if monitor["scheduler"]["enabled"]:
+                monitor["scheduler"]["next_run_at"] = int(time.time() * 1000) + interval * 1000
+        if "autonomy_profile" in payload:
+            if payload["autonomy_profile"] not in monitor_store.AUTONOMY_PROFILES:
+                raise monitor_store.MonitorError("Invalid autonomy profile.")
+            monitor["autonomy_profile"] = payload["autonomy_profile"]
+        if "runtime_profile" in payload:
+            if payload["runtime_profile"] not in monitor_store.RUNTIME_PROFILES:
+                raise monitor_store.MonitorError("Invalid monitor runtime profile.")
+            monitor["runtime_profile"] = payload["runtime_profile"]
+        if "expiry_at" in payload:
+            expiry = payload["expiry_at"]
+            if expiry is not None and (not isinstance(expiry, int) or isinstance(expiry, bool) or expiry <= 0):
+                raise monitor_store.MonitorError("Invalid expiry.")
+            monitor["scheduler"]["expiry_at"] = expiry
+        monitor["updated_at"] = monitor_store.timestamp()
+        monitor_store.history_entry(monitor, "updated")
 
     def send_json(self, code: int, payload: Any) -> None:
         data = json.dumps(payload, ensure_ascii=True).encode("utf-8")

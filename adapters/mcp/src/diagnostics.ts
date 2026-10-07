@@ -39,6 +39,17 @@ const tools = new Set([
   "add_task_comment",
   "link_task_to_session",
   "transfer_project_task",
+  "list_monitors",
+  "get_monitor",
+  "create_monitor",
+  "update_monitor",
+  "enable_monitor",
+  "disable_monitor",
+  "trigger_monitor",
+  "cancel_monitor_future",
+  "abort_monitor_run",
+  "delete_monitor",
+  "get_monitor_history",
 ]);
 
 /** Local operator diagnostics only. Never serialize a request/result body. */

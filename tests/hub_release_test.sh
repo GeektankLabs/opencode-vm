@@ -23,7 +23,7 @@ curl() {
 agent_hub_prepare_cache
 candidate="$(agent_hub_source_dir)"
 [[ "$candidate" == "$SHARE_ROOT/hub-assets/$HUB_ASSET_SHA256/hub" ]]
-for asset in server.py policy.py catalog.py index.html styles.css app.js control.js; do
+for asset in server.py policy.py catalog.py index.html styles.css app.js monitor.py monitor.js control.js; do
   [[ -f "$candidate/$asset" ]]
 done
 [[ ! -e "$candidate/__pycache__" ]]
