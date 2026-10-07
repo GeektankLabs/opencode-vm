@@ -2382,6 +2382,11 @@ export class OpenCodeGateway implements SessionGateway {
    * paths combines both permission surfaces. Existing v2-only reads stay
    * untouched.
    */
+  async getCombinedPendingInput(sessionId: string): Promise<PendingInput> {
+    await this.requireExposedSession(sessionId);
+    return this.combinedPending(sessionId);
+  }
+
   private async combinedPending(sessionId: string): Promise<PendingInput> {
     const [pending, v1Permissions] = await Promise.all([
       this.pending(sessionId),

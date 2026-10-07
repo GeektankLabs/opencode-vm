@@ -20,7 +20,7 @@ import {
   fallbackChain,
 } from "./monitor-engine.js";
 import type { MonitorBoardLike, MonitorGatewayLike, MonitorPolicyView } from "./monitor-engine.js";
-import type { RuntimeOptions, SessionStatusResult } from "./types.js";
+import type { AbortSessionTurnResult, RuntimeOptions, SessionStatusResult } from "./types.js";
 
 const TASK = "task_11111111-1111-4111-8111-111111111111";
 
@@ -63,6 +63,11 @@ type FakeState = {
   status: SessionStatusResult;
   history: Array<{ id: string; role: string; text: string }>;
   runtime: { provider_id: string; model_id: string };
+  combinedPending: { permissions: number; questions: number } | null;
+  combinedQueue: Array<{ permissions: number; questions: number } | null>;
+  combinedThrows: boolean;
+  abortPendingAfter: { permissions: number; questions: number } | null;
+  abortActivityAfter: "idle" | "busy" | "retry";
 };
 
 function fakes(state: FakeState) {
@@ -86,6 +91,11 @@ function fakes(state: FakeState) {
     async getSessionStatus() {
       return state.status;
     },
+    async getCombinedPendingInput() {
+      if (state.combinedThrows) throw new Error("combined pending coverage unavailable");
+      if (state.combinedQueue.length > 0) return state.combinedQueue.shift()!;
+      return state.combinedPending ?? state.status.pending_input;
+    },
     async getSessionHistory() {
       return { messages: state.history };
     },
@@ -96,13 +106,17 @@ function fakes(state: FakeState) {
     },
     async abortSessionTurn() {
       state.abortResults.push(state.abortState);
-      return {
+      const result: AbortSessionTurnResult = {
         session_id: "ses_monitor",
         state: state.abortState,
         observed_at: new Date(0).toISOString(),
-        activity_after: "idle",
-        pending_input_after: { permissions: 0, questions: 0 },
+        activity_after: state.abortActivityAfter,
+        pending_input_after: state.abortPendingAfter ?? { permissions: 0, questions: 0 },
       };
+      if (state.abortPendingAfter === null) {
+        delete (result as { pending_input_after?: unknown }).pending_input_after;
+      }
+      return result;
     },
     async getSessionRuntimeOptions() {
       return runtimeOptions();
@@ -152,6 +166,11 @@ function baseState(): FakeState {
     status: okStatus(),
     history: [],
     runtime: { provider_id: "deep-provider", model_id: "deep-model" },
+    combinedPending: null,
+    combinedQueue: [],
+    combinedThrows: false,
+    abortPendingAfter: { permissions: 0, questions: 0 },
+    abortActivityAfter: "idle",
   };
 }
 
@@ -496,6 +515,137 @@ test("engine: operator abort request performs a verified native abort without a 
     assert.equal(snapshot.registry.monitors[0]!.abort_request, null);
     assert.ok(snapshot.registry.monitors[0]!.history.some((entry) => entry.type === "run-aborted"));
     assert.equal(snapshot.registry.monitors[0]!.scheduler.enabled, true);
+  } finally {
+    await cleanup();
+  }
+});
+test("engine: blind v2 zero with combined v1 permission holds the pre-dispatch gate", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    state.status = okStatus({ pending_input: { permissions: 0, questions: 0 } });
+    state.combinedPending = { permissions: 1, questions: 0 };
+    const { gateway, board } = fakes(state);
+    const engine = new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => 100_000 });
+    await withRegistry(project, (registry) => {
+      const monitor = defaultMonitorRecord("M", TASK, {}, 100_000);
+      monitor.scheduler.next_run_at = 0;
+      registry.monitors.push(monitor);
+      return registry;
+    });
+    assert.equal(await engine.tick(), "busy-held");
+    assert.equal(state.sends.length, 0, "a v1-runner permission suppresses the model dispatch");
+    const snapshot = await readRegistrySnapshot(project);
+    assert.ok(snapshot.registry.monitors[0]!.history.some(
+      (entry) => entry.type === "busy-held" && (entry.detail as { reason?: string } | undefined)?.reason === "pending-input"));
+  } finally {
+    await cleanup();
+  }
+});
+
+test("engine: combined coverage errors fail closed and never dispatch", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    state.combinedThrows = true;
+    const { gateway, board } = fakes(state);
+    const engine = new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => 100_000 });
+    await withRegistry(project, (registry) => {
+      const monitor = defaultMonitorRecord("M", TASK, {}, 100_000);
+      monitor.scheduler.next_run_at = 0;
+      registry.monitors.push(monitor);
+      return registry;
+    });
+    assert.equal(await engine.tick(), "busy-held");
+    assert.equal(state.sends.length, 0, "unavailable combined coverage must not be treated as clear");
+    const snapshot = await readRegistrySnapshot(project);
+    assert.ok(snapshot.registry.monitors[0]!.history.some(
+      (entry) => entry.type === "busy-held" && (entry.detail as { reason?: string } | undefined)?.reason === "pending-coverage-unavailable"));
+  } finally {
+    await cleanup();
+  }
+});
+
+test("engine: compaction gate consults combined pending and holds on a late v1 permission", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    state.status = okStatus({
+      state: "failed",
+      error_details: [{ category: "context_input_length", message: "too long", detail_availability: "safe_template", source: "assistant_message_error", assistant_message_id: "msg_x", attribution: "exact_parent" }],
+    });
+    state.combinedQueue = [{ permissions: 0, questions: 0 }, { permissions: 1, questions: 0 }];
+    const { gateway, board } = fakes(state);
+    const engine = new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => 100_000 });
+    await withRegistry(project, (registry) => {
+      const monitor = defaultMonitorRecord("M", TASK, {}, 100_000);
+      monitor.scheduler.next_run_at = 0;
+      registry.monitors.push(monitor);
+      return registry;
+    });
+    assert.equal(await engine.tick(), "busy-held");
+    assert.equal(state.sends.length, 0, "the compaction continue is suppressed while any permission surface is pending");
+    const snapshot = await readRegistrySnapshot(project);
+    assert.ok(snapshot.registry.monitors[0]!.history.some((entry) => entry.type === "compaction-held"));
+  } finally {
+    await cleanup();
+  }
+});
+
+test("engine: post-abort verification consumes truthful combined coverage and preserves the operator request", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    state.abortState = "no_active_turn";
+    state.abortPendingAfter = { permissions: 1, questions: 0 };
+    const { gateway, board } = fakes(state);
+    const engine = new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => 100_000 });
+    await withRegistry(project, (registry) => {
+      const monitor = defaultMonitorRecord("M", TASK, {}, 100_000);
+      monitor.abort_request = { requested_at: new Date(0).toISOString(), reason: "operator-request" };
+      monitor.scheduler.next_run_at = 0;
+      registry.monitors.push(monitor);
+      return registry;
+    });
+    assert.equal(await engine.tick(), "recovery-parked");
+    assert.equal(state.sends.length, 0);
+    const snapshot = await readRegistrySnapshot(project);
+    const record = snapshot.registry.monitors[0]!;
+    assert.notEqual(record.abort_request, null, "the operator request survives until the abort is truly verified");
+    assert.ok(record.history.some((entry) => entry.type === "run-abort-uncertain"));
+    assert.ok(!record.history.some((entry) => entry.type === "run-aborted"), "a pending v1 permission is never a false clear");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("engine: missing or non-idle post-abort coverage holds without clearing the request", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    state.abortState = "aborted";
+    state.abortPendingAfter = null;
+    const { gateway, board } = fakes(state);
+    const engine = new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => 100_000 });
+    await withRegistry(project, (registry) => {
+      const monitor = defaultMonitorRecord("M", TASK, {}, 100_000);
+      monitor.abort_request = { requested_at: new Date(0).toISOString(), reason: "operator-request" };
+      monitor.scheduler.next_run_at = 0;
+      registry.monitors.push(monitor);
+      return registry;
+    });
+    assert.equal(await engine.tick(), "recovery-parked");
+    let snapshot = await readRegistrySnapshot(project);
+    assert.notEqual(snapshot.registry.monitors[0]!.abort_request, null, "missing coverage must not clear the request");
+    assert.ok(!snapshot.registry.monitors[0]!.history.some((entry) => entry.type === "run-aborted"));
+    state.abortPendingAfter = { permissions: 0, questions: 0 };
+    state.abortActivityAfter = "busy";
+    snapshot = await readRegistrySnapshot(project);
+    assert.equal(snapshot.registry.monitors[0]!.run.active, false);
+    assert.equal(await engine.tick(), "recovery-parked");
+    snapshot = await readRegistrySnapshot(project);
+    assert.notEqual(snapshot.registry.monitors[0]!.abort_request, null, "non-idle activity after the abort keeps the request held");
+    assert.ok(!snapshot.registry.monitors[0]!.history.some((entry) => entry.type === "run-aborted"));
   } finally {
     await cleanup();
   }

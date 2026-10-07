@@ -16,6 +16,7 @@ import type {
 import type {
   AbortSessionTurnResult,
   CreateSessionResult,
+  PendingInput,
   RuntimeOptions,
   RuntimeUpdateResult,
   SendMessageResult,
@@ -63,6 +64,7 @@ export type MonitorGatewayLike = {
   createSession(title: string): Promise<CreateSessionResult>;
   getSessionDetails(sessionId: string, includeArchived?: boolean): Promise<SessionDetailsResult>;
   getSessionStatus(sessionId: string, messageId?: string): Promise<SessionStatusResult>;
+  getCombinedPendingInput(sessionId: string): Promise<PendingInput>;
   getSessionHistory?(sessionId: string, limit: number, before?: string): Promise<{ messages: Array<{ id: string; role: string; text: string }> }>;
   sendMessage(sessionId: string, message: string, attachments?: string[]): Promise<SendMessageResult>;
   abortSessionTurn(sessionId: string): Promise<AbortSessionTurnResult>;
@@ -264,7 +266,6 @@ export class MonitorEngine {
         return "recovery-parked";
       }
       await this.release(id, now, "run-abort-uncertain", (record) => {
-        record.abort_request = null;
         monitorHistory(record, "run-abort-uncertain", { abort: aborted.state, source: "operator-request" }, now);
       });
       return "recovery-parked";
@@ -328,7 +329,14 @@ export class MonitorEngine {
       return "error";
     }
     const status = await this.gateway.getSessionStatus(session.sessionId, monitor.dispatch_wal?.message_id ?? undefined);
-    if (status.pending_input.permissions + status.pending_input.questions > 0) {
+    const pending = await this.combinedPending(session.sessionId);
+    if (!pending) {
+      await this.release(id, now, null, (record) => {
+        monitorHistory(record, "busy-held", { reason: "pending-coverage-unavailable" }, now);
+      });
+      return "busy-held";
+    }
+    if (pending.permissions + pending.questions > 0) {
       await this.release(id, now, null, (record) => {
         monitorHistory(record, "busy-held", { reason: "pending-input" }, now);
       });
@@ -788,7 +796,14 @@ export class MonitorEngine {
     summary: CanonicalSummary,
   ): Promise<WakeOutcome> {
     const status = await this.gateway.getSessionStatus(sessionId);
-    if (status.backend_activity !== "idle" || status.pending_input.permissions + status.pending_input.questions > 0) {
+    const pending = await this.combinedPending(sessionId);
+    if (!pending) {
+      await this.release(id, now, null, (m) => {
+        monitorHistory(m, "compaction-held", { reason: "pending-coverage-unavailable" }, now);
+      });
+      return "busy-held";
+    }
+    if (status.backend_activity !== "idle" || pending.permissions + pending.questions > 0) {
       await this.release(id, now, null, (m) => {
         monitorHistory(m, "compaction-held", { activity: status.backend_activity }, now);
       });
@@ -831,6 +846,18 @@ export class MonitorEngine {
     }
   }
 
+  private async combinedPending(sessionId: string): Promise<PendingInput | null> {
+    try {
+      const pending = await this.gateway.getCombinedPendingInput(sessionId);
+      if (!pending || typeof pending.permissions !== "number" || typeof pending.questions !== "number") return null;
+      if (!Number.isFinite(pending.permissions) || !Number.isFinite(pending.questions)) return null;
+      if (pending.permissions < 0 || pending.questions < 0) return null;
+      return pending;
+    } catch {
+      return null;
+    }
+  }
+
   private async abortAndVerify(
     sessionId: string,
     id: string,
@@ -846,8 +873,20 @@ export class MonitorEngine {
       return { kind: "held", state: "abort-failed" };
     }
     if (abort.state === "aborted" || abort.state === "no_active_turn") {
-      const pending = await this.gateway.getSessionStatus(sessionId);
-      if (pending.pending_input.permissions + pending.pending_input.questions > 0) {
+      const pendingAfter = abort.pending_input_after;
+      if (!pendingAfter || typeof pendingAfter.permissions !== "number" || typeof pendingAfter.questions !== "number"
+          || !Number.isFinite(pendingAfter.permissions) || !Number.isFinite(pendingAfter.questions)
+          || pendingAfter.permissions < 0 || pendingAfter.questions < 0) {
+        return { kind: "held", state: "pending-coverage-unavailable" };
+      }
+      if (pendingAfter.permissions + pendingAfter.questions > 0) {
+        return { kind: "held", state: "pending-input" };
+      }
+      if (abort.activity_after !== "idle") {
+        return { kind: "held", state: "activity-not-idle" };
+      }
+      const fresh = await this.combinedPending(sessionId);
+      if (fresh && fresh.permissions + fresh.questions > 0) {
         return { kind: "held", state: "pending-input" };
       }
       return { kind: "cleared", state: abort.state };
