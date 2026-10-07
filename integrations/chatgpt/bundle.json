@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "name": "opencode-session-orchestrator",
-  "revision": "2026-10-04-r41",
+  "revision": "2026-10-07-r42",
   "files": [
     "SKILL.md",
     "CHANGELOG.md",
@@ -16,10 +16,12 @@
     "references/clarification-sessions.md",
     "references/decision-preparation.md",
     "references/events-attention.md",
+    "references/fallback-routing.md",
     "references/initialization-follow-through.md",
     "references/integration-test-monitor.md",
     "references/monitor-tasks.md",
     "references/optimistic-mvp.md",
+    "references/pause-go.md",
     "references/progress-activity.md",
     "references/release-gates.md",
     "references/regression-scenarios.md",

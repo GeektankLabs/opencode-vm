@@ -3019,3 +3019,106 @@ test("submissions to different sessions proceed independently", async () => {
   );
   assert.equal(state.promptCalls.length, 2);
 });
+
+test("backend connectivity is cached, bounded and honest without live services", async (t) => {
+  let calls = 0;
+  const okClient = { global: { async health() { calls += 1; return { data: { healthy: true } }; } } };
+  const gateway = new OpenCodeGateway(runtime(), okClient as never);
+  t.after(() => gateway.close());
+  assert.equal(await gateway.backendConnectivity(), "ok");
+  assert.equal(await gateway.backendConnectivity(), "ok");
+  assert.equal(calls, 1, "the short cache must prevent a backend probe per poll");
+  (gateway as unknown as { backendHealthCacheTtlMs: number }).backendHealthCacheTtlMs = 10;
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(await gateway.backendConnectivity(), "ok");
+  assert.equal(calls, 2, "an expired cache re-probes");
+  let aborted = false;
+  const hangClient = {
+    global: {
+      health: ({ signal }: { signal: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => { aborted = true; reject(new Error("aborted")); });
+        }),
+    },
+  };
+  const hangGateway = new OpenCodeGateway(runtime(), hangClient as never);
+  t.after(() => hangGateway.close());
+  (hangGateway as unknown as { backendHealthProbeTimeoutMs: number }).backendHealthProbeTimeoutMs = 30;
+  // AbortSignal.timeout does not keep the event loop alive; in production the
+  // server does. Hold the loop so the bounded probe can actually fire here.
+  const keepAlive = setInterval(() => undefined, 10);
+  const started = Date.now();
+  try {
+    assert.equal(await hangGateway.backendConnectivity(), "unreachable");
+  } finally {
+    clearInterval(keepAlive);
+  }
+  assert.ok(aborted, "a hanging backend must be cut by the probe timeout");
+  assert.ok(Date.now() - started < 2000, "the health path stays bounded");
+  const sickGateway = new OpenCodeGateway(runtime(),
+    { global: { async health() { return { data: { healthy: false } }; } } } as never);
+  t.after(() => sickGateway.close());
+  assert.equal(await sickGateway.backendConnectivity(), "unreachable");
+});
+
+test("attention prefetch episodes back off bounded, alert once, retain pending and clear on success", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "ocvm-attention-episode-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "activity.json");
+  const state = baseState();
+  const opaque = (id: string, parent: string) => ({
+    info: { id, sessionID: "ses_work", role: "assistant", time: { created: 1, completed: 2 }, parentID: parent, finish: "stop" },
+    parts: [{ id: `part_${id}`, type: "tool", state: { output: "PRIVATE_TOOL_OUTPUT" } }],
+  });
+  state.messages = [stored("user_x", "request"), opaque("assistant_x", "user_x") as never];
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  (gateway as unknown as { attentionRetryDelaysMs: number[] }).attentionRetryDelaysMs = [0, 0, 0];
+  t.after(() => gateway.close());
+  const stderrLines: string[] = [];
+  const originalWrite = process.stderr.write;
+  process.stderr.write = ((chunk: unknown) => {
+    if (typeof chunk === "string") stderrLines.push(chunk);
+    return true;
+  }) as typeof process.stderr.write;
+  t.after(() => { process.stderr.write = originalWrite; });
+  const pendingLines = () => stderrLines.filter((line) => line.includes("attention prefetch pending")).length;
+  const exhaustedLines = () => stderrLines.filter((line) => line.includes("exhausted after 3 bounded attempts")).length;
+
+  await gateway.enableActivity(path);
+  await gateway.captureActivity("ses_work");
+  assert.equal(pendingLines(), 1, "the first failed attempt is logged once");
+  for (const filler of ["user_f1", "user_f2", "user_f3", "user_f4"]) {
+    state.messages.push(stored(filler, "filler"));
+    await gateway.captureActivity("ses_work");
+  }
+  assert.equal(pendingLines(), 1, "attempts 2 and 3 stay silent; the cap blocks further attempts");
+  assert.equal(exhaustedLines(), 1, "exactly one persistent-impact alert per exhausted episode");
+  assert.ok(!stderrLines.join("").includes("PRIVATE_TOOL_OUTPUT"));
+  let pending = (await gateway.getProjectAttention({ lifecycle: ["new"] })).entries;
+  const stuckX = pending.filter((entry) => entry.submitted_message_id === "user_x");
+  assert.equal(stuckX.length, 1);
+  assert.equal(stuckX[0]?.lifecycle, "new", "exhaustion retains the pending entry; evidence is never dropped");
+
+  // A second entry gets its own fresh episode budget.
+  state.messages.push(stored("user_y", "request"), opaque("assistant_y", "user_y") as never);
+  await gateway.captureActivity("ses_work");
+  assert.equal(pendingLines(), 2);
+  // The correlated result becoming visible makes the next bounded attempt
+  // succeed: a normal return clears the episode without exhaustion.
+  (state.messages[state.messages.length - 1] as { parts: unknown[] }).parts =
+    [{ id: "part_y_text", type: "text", text: "visible final report" }];
+  state.messages.push(stored("user_f5", "filler"));
+  await gateway.captureActivity("ses_work");
+  const readyY = (await gateway.getProjectAttention()).entries;
+  assert.ok(readyY.some((entry) => entry.submitted_message_id === "user_y" && entry.lifecycle === "ready"),
+    "a successful prefetch clears the episode and prepares the entry");
+  assert.equal(pendingLines(), 2, "the cleared episode logged no further attempts");
+  assert.equal(exhaustedLines(), 1, "success is not an exhaustion");
+
+  // A fresh future episode remains possible after a cleared one.
+  state.messages.push(stored("user_z", "request"), opaque("assistant_z", "user_z") as never);
+  await gateway.captureActivity("ses_work");
+  assert.equal(pendingLines(), 3, "episodes are per entry, not a global budget");
+  pending = (await gateway.getProjectAttention({ lifecycle: ["new"] })).entries;
+  assert.equal(pending.filter((entry) => entry.submitted_message_id === "user_z" && entry.lifecycle === "new").length, 1);
+});

@@ -5,12 +5,15 @@ import { AdapterError, type RuntimeDescriptor, type RuntimeOptions } from "./typ
 export const PROFILE_NAMES = ["deep", "standard", "execution", "design", "review"] as const;
 export type ProfileName = (typeof PROFILE_NAMES)[number];
 export const FALLBACKS: Partial<Record<ProfileName, ProfileName[]>> = { design: ["standard"], review: ["deep", "standard"] };
+export const FINAL_FALLBACK_MODES = ["total", "degrading"] as const;
 type Selection = { provider_id: string; model_id: string; variant: string };
+type FinalFallback = { mode: (typeof FINAL_FALLBACK_MODES)[number]; selection: Selection } | null;
 type Policy = {
-  schemaVersion: 1 | 2;
+  schemaVersion: 1 | 2 | 3;
   revision: number;
   updatedAt: string | null;
   profiles: Record<ProfileName, Selection | null>;
+  finalFallback: FinalFallback;
 };
 
 const id = (value: unknown): value is string =>
@@ -29,13 +32,18 @@ export async function readPolicy(runtime: RuntimeDescriptor): Promise<Policy> {
     const policy: unknown = JSON.parse(await readFile(path, "utf8"));
     if (!policy || typeof policy !== "object" || Array.isArray(policy)) throw new Error("invalid policy");
     const value = policy as Record<string, unknown>;
-    if (Object.keys(value).sort().join() !== "profiles,revision,schemaVersion,updatedAt" ||
-      ![1, 2].includes(value.schemaVersion as number) || !Number.isSafeInteger(value.revision) || (value.revision as number) < 1 ||
+    const schema = value.schemaVersion as number;
+    const keys = Object.keys(value).sort().join();
+    const expectedKeys = schema === 3
+      ? "finalFallback,profiles,revision,schemaVersion,updatedAt"
+      : "profiles,revision,schemaVersion,updatedAt";
+    if (keys !== expectedKeys ||
+      ![1, 2, 3].includes(schema) || !Number.isSafeInteger(value.revision) || (value.revision as number) < 1 ||
       typeof value.updatedAt !== "string" || !value.updatedAt.endsWith("Z") ||
       !value.profiles || typeof value.profiles !== "object" || Array.isArray(value.profiles))
       throw new Error("unsupported policy");
     const profiles = value.profiles as Record<string, unknown>;
-    const names = value.schemaVersion === 1 ? PROFILE_NAMES.slice(0, 3) : PROFILE_NAMES;
+    const names = schema === 1 ? PROFILE_NAMES.slice(0, 3) : PROFILE_NAMES;
     if (Object.keys(profiles).sort().join() !== [...names].sort().join()) throw new Error("invalid profiles");
     for (const name of names) {
       const selection = profiles[name];
@@ -46,12 +54,30 @@ export async function readPolicy(runtime: RuntimeDescriptor): Promise<Policy> {
         !id(fields.provider_id) || !id(fields.model_id) || !id(fields.variant))
         throw new Error("invalid selection");
     }
-    return { ...policy, profiles: { design: null, review: null, ...profiles } } as Policy;
+    let finalFallback: FinalFallback = null;
+    if (schema === 3) {
+      const raw = value.finalFallback;
+      if (raw !== null) {
+        if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("invalid final fallback");
+        const fields = raw as Record<string, unknown>;
+        if (Object.keys(fields).sort().join() !== "mode,selection") throw new Error("invalid final fallback");
+        const selection = fields.selection;
+        if (!selection || typeof selection !== "object" || Array.isArray(selection)) throw new Error("invalid final fallback");
+        const parts = selection as Record<string, unknown>;
+        if (Object.keys(parts).sort().join() !== "model_id,provider_id,variant" ||
+          !id(parts.provider_id) || !id(parts.model_id) || !id(parts.variant))
+          throw new Error("invalid final fallback");
+        if (fields.mode !== "total" && fields.mode !== "degrading") throw new Error("invalid final fallback mode");
+        finalFallback = { mode: fields.mode, selection: { provider_id: parts.provider_id as string, model_id: parts.model_id as string, variant: parts.variant as string } };
+      }
+    }
+    return { ...policy, profiles: { design: null, review: null, ...profiles }, finalFallback } as Policy;
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") {
       // A missing directory or file is a virtual, entirely unconfigured policy.
       return { schemaVersion: 1, revision: 0, updatedAt: null,
-        profiles: { deep: null, standard: null, execution: null, design: null, review: null } };
+        profiles: { deep: null, standard: null, execution: null, design: null, review: null },
+        finalFallback: null };
     }
     throw new AdapterError("UNSUPPORTED_CONFIGURATION", "Project Agent Control policy is invalid or unsupported.");
   }
@@ -76,6 +102,10 @@ export function describePolicy(runtime: RuntimeDescriptor, policy: Policy, catal
     profiles: Object.fromEntries(PROFILE_NAMES.map((name) => [name, {
       selection: policy.profiles[name], status: profileState(policy.profiles[name], catalog),
     }])),
+    final_fallback: policy.finalFallback
+      ? { mode: policy.finalFallback.mode, selection: policy.finalFallback.selection,
+          status: profileState(policy.finalFallback.selection, catalog) }
+      : null,
   };
 }
 

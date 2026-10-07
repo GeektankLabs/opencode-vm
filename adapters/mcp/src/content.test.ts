@@ -108,3 +108,62 @@ test("safe assistant error detail preserves the established abort classification
     source: "assistant_message_error",
   });
 });
+
+test("derived timeout/quota/input-length classes are safe, round-trip the allowlist and never leak raw text", () => {
+  const cases: Array<[string, Record<string, unknown>, string, string]> = [
+    ["504 timeout", { statusCode: 504, message: "upstream gateway blew up" }, "provider_timeout", "The provider request timed out."],
+    ["408 timeout", { statusCode: 408, message: "request timeout" }, "provider_timeout", "The provider request timed out."],
+    ["quota exceeded", { statusCode: 429, message: "You have exceeded your current quota" }, "provider_quota", "The provider reported quota or budget exhaustion."],
+    ["insufficient_quota", { statusCode: 429, message: "insufficient_quota" }, "provider_quota", "The provider reported quota or budget exhaustion."],
+    ["budget exhausted", { statusCode: 402, message: "budget exceeded for this account" }, "provider_quota", "The provider reported quota or budget exhaustion."],
+    ["input range in message", { statusCode: 400, message: "invalid_request_error: Range of input length should be [1, 128000]" }, "context_input_length", "Provider rejected the input length; reported allowed range is [1, 128000]."],
+    ["input range in responseBody", { statusCode: 400, responseBody: { error: { message: "Range of input length should be [1, 65536]" } } }, "context_input_length", "Provider rejected the input length; reported allowed range is [1, 65536]."],
+  ];
+  for (const [label, data, category, message] of cases) {
+    const detail = safeAssistantErrorDetail({ name: "APIError", data });
+    assert.equal(detail?.category, category, label);
+    assert.equal(detail?.message, message, label);
+    assert.equal(detail?.detail_availability, "safe_template", label);
+    assert.ok(isSafeAssistantErrorDetail(detail), label);
+    assert.doesNotMatch(JSON.stringify(detail), /upstream gateway|blew up|exceeded your current quota|budget exceeded for this account/u, label);
+  }
+  const leaky = safeAssistantErrorDetail({ name: "APIError", data: { statusCode: 400, message: "Range of input length should be [1, 983616] SECRET-CONTEXT" } });
+  assert.equal(leaky?.category, "context_input_length");
+  assert.ok(!JSON.stringify(leaky).includes("SECRET-CONTEXT"));
+});
+
+test("rate limits and unrelated invalid requests stay redacted provider_error", () => {
+  for (const data of [
+    { statusCode: 429, message: "Rate limit reached for requests" },
+    { statusCode: 429, message: "slow down please" },
+    { statusCode: 400, message: "invalid_request_error: something else entirely" },
+    { statusCode: 500, message: "internal error" },
+    { message: "Range of input length should be [1, 100]" },
+    { statusCode: 500, message: "Range of input length should be [1, 100]" },
+  ]) {
+    const detail = safeAssistantErrorDetail({ name: "APIError", data });
+    assert.equal(detail?.category, "provider_error", JSON.stringify(data));
+    assert.equal(detail?.detail_availability, "redacted", JSON.stringify(data));
+    assert.ok(isSafeAssistantErrorDetail(detail), JSON.stringify(data));
+  }
+});
+
+test("derived classes preserve retryability, keep metadata precedence and reject tampered persisted details", () => {
+  const retryable = safeAssistantErrorDetail({ name: "APIError", data: { statusCode: 504, isRetryable: true } });
+  assert.equal(retryable?.source_is_retryable, true);
+  assert.ok(isSafeAssistantErrorDetail(retryable));
+  const nonRetryable = safeAssistantErrorDetail({ name: "APIError", data: { statusCode: 429, message: "insufficient_quota", isRetryable: false } });
+  assert.equal(nonRetryable?.source_is_retryable, false);
+  assert.ok(isSafeAssistantErrorDetail(nonRetryable));
+  const ranged = safeAssistantErrorDetail({ name: "APIError", data: { statusCode: 400, message: "Range of input length should be [1, 983616]" } });
+  for (const tampered of [
+    { ...(retryable as object), message: "The provider request timed out badly." },
+    { ...(retryable as object), category: "provider_quota" },
+    { ...(ranged as object), message: "Provider rejected the input length; reported allowed range is [1, 983616]. EXTRA" },
+    { ...(ranged as object), detail_availability: "redacted" },
+  ]) {
+    assert.equal(isSafeAssistantErrorDetail(tampered), false, JSON.stringify(tampered));
+  }
+  const headerTimeout = safeAssistantErrorDetail({ name: "APIError", data: { statusCode: 504, metadata: { code: "ProviderHeaderTimeoutError", timeoutMs: "30000" } } });
+  assert.equal(headerTimeout?.category, "provider_header_timeout", "explicit metadata codes keep precedence over status-derived classes");
+});

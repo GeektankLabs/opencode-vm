@@ -476,6 +476,27 @@ try {
     await delay(250);
   }
   assert.equal(finalStatus?.state, "completed");
+  // Runtime round-trip: the selected runtime is the persisted session setting
+  // AND the actually used worker runtime of the real assistant turn.
+  const roundTripTurns = ((
+    await backend.session.messages({ sessionID: sessionId, limit: 100 })
+  ).data ?? []).filter((message) => message.info.role === "assistant");
+  assert.ok(roundTripTurns.length >= 1, "assistant turn evidence exists");
+  const effectiveRuntime = roundTripTurns[roundTripTurns.length - 1].info;
+  assert.equal(effectiveRuntime.providerID, "integration");
+  assert.equal(effectiveRuntime.modelID, "other-model");
+  const persistedSetting = structured(
+    await mcpClient.callTool({
+      name: "get_session",
+      arguments: { session_id: sessionId },
+    }),
+  );
+  assert.equal(persistedSetting.provider_id, "integration");
+  assert.equal(persistedSetting.model_id, "other-model");
+  assert.equal(persistedSetting.variant, "high");
+  process.stderr.write(
+    "[integration] runtime round-trip: selection persisted and effective in the real assistant turn\n",
+  );
   let activity;
   for (let attempt = 0; attempt < 80; attempt++) {
     activity = structured(
@@ -1289,6 +1310,19 @@ try {
     }),
   );
   assert.equal(recovered.state, "completed");
+  // The runtime selection survives the adapter restart from backend storage.
+  const afterRestart = structured(
+    await mcpClient.callTool({
+      name: "get_session_runtime_options",
+      arguments: { session_id: sessionId },
+    }),
+  );
+  assert.equal(afterRestart.current.provider_id, "integration");
+  assert.equal(afterRestart.current.model_id, "other-model");
+  assert.equal(afterRestart.current.variant, "high");
+  process.stderr.write(
+    "[integration] runtime persistence verified across adapter restart\n",
+  );
   assert.equal(
     (
       await backend.session.messages({ sessionID: sessionId, limit: 100 })

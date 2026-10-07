@@ -181,6 +181,40 @@ export function isSafeAssistantErrorDetail(value: unknown): value is ErrorDetail
         data: retryable === undefined ? {} : { isRetryable: retryable },
       });
       break;
+    case "provider_timeout":
+      expected = safeAssistantErrorDetail({
+        name: "APIError",
+        data: {
+          statusCode: 504,
+          ...(retryable === undefined ? {} : { isRetryable: retryable }),
+        },
+      });
+      break;
+    case "provider_quota":
+      expected = safeAssistantErrorDetail({
+        name: "APIError",
+        data: {
+          statusCode: 429,
+          message: "insufficient_quota",
+          ...(retryable === undefined ? {} : { isRetryable: retryable }),
+        },
+      });
+      break;
+    case "context_input_length": {
+      const range = /^Provider rejected the input length; reported allowed range is \[1, (\d{1,12})\]\.$/u.exec(
+        typeof value.message === "string" ? value.message : "",
+      );
+      if (!range) return false;
+      expected = safeAssistantErrorDetail({
+        name: "APIError",
+        data: {
+          statusCode: 400,
+          message: `Range of input length should be [1, ${range[1]}]`,
+          ...(retryable === undefined ? {} : { isRetryable: retryable }),
+        },
+      });
+      break;
+    }
     case "provider_auth":
       expected = safeAssistantErrorDetail({ name: "ProviderAuthError" });
       break;
@@ -250,10 +284,62 @@ function providerErrorDetail(data: Record<string, unknown> | undefined): ErrorDe
       ...sourceRetryable,
     };
   }
+  // Fallback routing classes (Journal10/12 FINAL): derive bounded safe classes
+  // from the stored provider error without exposing raw text. A plain rate
+  // limit is NOT proven quota exhaustion and stays redacted; the input-length
+  // class requires the exact structured range pattern.
+  const status =
+    typeof data?.statusCode === "number" && Number.isInteger(data.statusCode)
+      ? data.statusCode
+      : undefined;
+  const raw = boundedProviderText(data?.message) + "\n" + boundedProviderText(data?.responseBody);
+  const range = /Range of input length should be \[1, (\d{1,12})\]/u.exec(raw);
+  if (range && (status === 400 || raw.includes("invalid_request_error"))) {
+    return {
+      ...safeErrorDetail(
+        "context_input_length",
+        "APIError",
+        `Provider rejected the input length; reported allowed range is [1, ${range[1]}].`,
+      ),
+      ...sourceRetryable,
+    };
+  }
+  if (status === 408 || status === 504) {
+    return {
+      ...safeErrorDetail(
+        "provider_timeout",
+        "APIError",
+        "The provider request timed out.",
+      ),
+      ...sourceRetryable,
+    };
+  }
+  if (/insufficient[_ ]quota|quota[ _-]?(exceeded|exhausted)|insufficient[ _](balance|credit|funds)|exceeded your current quota|budget[ _](exceeded|limit)/iu.test(raw)) {
+    return {
+      ...safeErrorDetail(
+        "provider_quota",
+        "APIError",
+        "The provider reported quota or budget exhaustion.",
+      ),
+      ...sourceRetryable,
+    };
+  }
   return {
     ...redactedError("provider_error", "APIError"),
     ...sourceRetryable,
   };
+}
+
+function boundedProviderText(value: unknown): string {
+  if (typeof value === "string") return value.slice(0, 4096);
+  if (isRecord(value)) {
+    try {
+      return JSON.stringify(value).slice(0, 4096);
+    } catch {
+      return "";
+    }
+  }
+  return "";
 }
 
 function parseTimeoutMs(value: unknown): number | undefined {

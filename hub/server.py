@@ -26,10 +26,10 @@ from urllib.parse import urlsplit
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 try:
-    from .policy import PolicyStore, PolicyError, PolicyConflict, PolicyCapabilityError, PROFILES, FALLBACKS, check_selection, validate_selection, resolve_profile
+    from .policy import PolicyStore, PolicyError, PolicyConflict, PolicyCapabilityError, PROFILES, FALLBACKS, FALLBACK_MODES, check_selection, validate_selection, resolve_profile
     from .catalog import read_catalog, mcp_connection, read_capabilities
 except ImportError:  # Executed directly as hub/server.py by the guest service.
-    from policy import PolicyStore, PolicyError, PolicyConflict, PolicyCapabilityError, PROFILES, FALLBACKS, check_selection, validate_selection, resolve_profile
+    from policy import PolicyStore, PolicyError, PolicyConflict, PolicyCapabilityError, PROFILES, FALLBACKS, FALLBACK_MODES, check_selection, validate_selection, resolve_profile
     from catalog import read_catalog, mcp_connection, read_capabilities
 
 
@@ -323,7 +323,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self.allowed(write=True):
             return
         match = re.fullmatch(r"/api/control/profiles/(deep|standard|execution|design|review)", self.path)
-        if not match:
+        fallback_match = None if match else re.fullmatch(r"/api/control/fallback", self.path)
+        if not match and not fallback_match:
             self.send_error(404)
             return
         if self.headers.get("Content-Type", "").split(";", 1)[0].lower() != "application/json":
@@ -335,9 +336,28 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             payload = json.loads(self.rfile.read(int(length)))
-            if not isinstance(payload, dict) or set(payload) != {"revision", "selection"}:
+            if not isinstance(payload, dict):
                 raise PolicyError("Invalid request.")
-            selection = validate_selection(payload["selection"])
+            mode = None
+            if match:
+                if set(payload) != {"revision", "selection"}:
+                    raise PolicyError("Invalid request.")
+                selection = validate_selection(payload["selection"])
+            else:
+                if set(payload) != {"revision", "fallback"}:
+                    raise PolicyError("Invalid request.")
+                requested = payload["fallback"]
+                if requested is None:
+                    selection = None
+                else:
+                    if not isinstance(requested, dict) or not {"selection"} <= set(requested) <= {"mode", "selection"}:
+                        raise PolicyError("Invalid request.")
+                    mode = requested.get("mode", "total")
+                    if mode not in FALLBACK_MODES:
+                        raise PolicyError("Invalid request.")
+                    selection = validate_selection(requested["selection"])
+                    if selection is None:
+                        raise PolicyError("Invalid request.")
             store = PolicyStore(PROJECT)
             try:
                 current = store.read()
@@ -346,7 +366,10 @@ class Handler(BaseHTTPRequestHandler):
                 return
             capable = False
             connection = None
-            if selection is not None and (match.group(1) in FALLBACKS or current["schemaVersion"] == 2):
+            needs_capability = selection is not None and (
+                (match is not None and (match.group(1) in FALLBACKS or current["schemaVersion"] == 2)) or
+                (fallback_match is not None and current["schemaVersion"] == 1))
+            if needs_capability:
                 if SESSION_ROOT is None:
                     raise PolicyError("Hub runtime is not configured")
                 connection = mcp_connection(RUNTIME["mcp"], SESSION_ROOT, project_hash())
@@ -364,7 +387,12 @@ class Handler(BaseHTTPRequestHandler):
                 if check_selection(selection, catalog) != "available":
                     self.send_json(422, {"code": "SELECTION_UNAVAILABLE", "reason": check_selection(selection, catalog), "error": "Selection is unavailable; policy unchanged."})
                     return
-            updated = store.update(match.group(1), selection, payload["revision"], optional_capable=capable)
+            if match:
+                updated = store.update(match.group(1), selection, payload["revision"], optional_capable=capable)
+            else:
+                updated = store.update_fallback(
+                    {"mode": mode, "selection": selection} if selection is not None else None,
+                    payload["revision"], optional_capable=capable)
             self.send_json(200, {"policy": updated})
         except PolicyConflict:
             self.send_json(409, {"code": "POLICY_REVISION_CONFLICT", "error": "Policy changed; reload before saving."})
