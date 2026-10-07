@@ -16,7 +16,7 @@ Before schedule configuration, establish a fixed primer with these fields (clien
 | objective | goal, unchanged PASS criteria, stop/escalation boundaries, finite monitoring horizon |
 | monitored work | task/member IDs, session ownership or explicit not-yet-assigned, exact recovery rules, wave order/integration target |
 | actions | approved diagnosis/repair/test/resume/fresh surfaces; prohibited product/schema/security/acceptance changes, production and remote publishing |
-| limits | same-fingerprint repair cap (default two), progress/reset rules, transient retry cap, bounded active-run budget |
+| limits | same-fingerprint **production-code** repair cap (default two; excluded work never counts/parks), progress rules (evidenced progress ends the series; no reset), transient retry cap, bounded read-episode backoff, bounded active-run budget |
 | runtime | operator-confirmed Work supervisor model separate from OpenCode worker profile/runtime policy; no silent substitution |
 | setup | requested recurrence/time zone/start/end, required apps/MCP connection, single-flight owner, setup receipt reference |
 | persistence | note size and remaining description/output budget, checkpoint and operator handoff rules |
@@ -57,7 +57,7 @@ OpenCode worker profile policy: <separate current project preferences>.
 Required connections/tools in scheduled context: <verified capabilities>.
 Single-flight: <one owner/master, verified overlap/manual-trigger behavior>.
 Allowed actions/surfaces: <bounded actions>; forbidden decisions: <scope boundaries>.
-Repair limit: <default two same-fingerprint no-progress cycles>; transient resume
+Repair limit: <default two same-fingerprint production-code no-progress cycles; excluded work never counts>; transient resume
 limit: <default one per unchanged failure episode>; note/run budget: <bounds>.
 Read master + latest checkpoint + newer decisions before the no-op gate. Use the
 Monitor Tasks and selected policy references; at most one management action,

@@ -216,7 +216,7 @@ class SkillPackageTest(unittest.TestCase):
             "not MCP idempotency", "SUBMISSION_UNCERTAIN", "never blindly send again",
             "a new event ID for the same result", "not replay dispatch",
             "two recoverable errors total per active run", "does not reset it",
-            "at most two repairs for the same error without evidenced progress",
+            "at most two PRODUCTION-CODE repairs for the same error without evidenced progress",
             "New message, model, clock or Resume alone never resets",
             "resume checkpoint unverified", "remaining budgets", "Verify entry readback",
             "transport PASS / steering FAIL", "one-action-per-wake/cadence rules remain unchanged",
@@ -248,7 +248,7 @@ class SkillPackageTest(unittest.TestCase):
             "question", "alternatives", "choice/rationale", "uncertainty",
             "reversibility/rework", "implementation_commits", "components",
             "tests/acceptance", "change_path", "cumulative_drift",
-            "combined effect of all OIDs", "at most two repairs",
+            "combined effect of all OIDs", "at most two **production-code** repairs",
             "not progress or a budget reset", "No automatic hard reset/rebase",
             "OID_COUNT=0 / OID_UNTESTED (policy-only)", "not fabricated OIDs",
         ):
@@ -1767,7 +1767,7 @@ class SkillPackageTest(unittest.TestCase):
                     "Monitor PASS with complete evidence", "Monitor FAIL has unknown cause",
                     "Monitor diagnosis proves allowed harness fault",
                     "Monitor product/schema/security/architecture blocker",
-                    "Monitor same fingerprint after two no-progress repairs",
+                    "Monitor same fingerprint after two production-code no-progress repairs",
                     "Monitor parked with no new authority",
                     "Monitor parked with later free-form Operator Resume note",
                     "Monitor current interactive operator resume",
@@ -2504,7 +2504,7 @@ class SynthesizedContractTest(unittest.TestCase):
                          "INPUT_REQUIRED")
         self.assertEqual(next_contract["correction_loop"], before)
         self.assertEqual(before, {"A": 2, "B": 1})
-        self.assertIn("at most two no-progress autonomous repair cycles", self.packages)
+        self.assertIn("at most two no-progress autonomous **production-code** repair cycles", self.packages)
         self.assertIn("Reserve attempts at admission including uncertainty", self.packages)
 
     def test_synthesis_pilot_imports_completed_work_but_requires_new_full_candidate_qc(self):
@@ -3107,7 +3107,7 @@ class TaskDoneArchiveTraceTest(unittest.TestCase):
         monitor = (source / "references/monitor-tasks.md").read_text()
         content = (source / "references/content-protocol.md").read_text()
         scenarios = (source / "references/regression-scenarios.md").read_text()
-        self.assertIn("2026-10-07-r42", skill)
+        self.assertIn("2026-10-07-r43", skill)
         self.assertIn("## Cooperative Pause and Weiter/Go", skill)
         self.assertIn("references/pause-go.md", skill)
         for required in ("next safe Tool/Receipt return",
@@ -3324,6 +3324,136 @@ class TaskDoneArchiveTraceTest(unittest.TestCase):
                          [{"p": "lm-studio-auto"}])
         self.assertNotEqual(mutated_route({**POLICY, "final_fallback": None}, "deep", set(), "timeout"),
                             route({**POLICY, "final_fallback": None}, "deep", set(), "timeout"))
+
+    def test_w2_production_code_only_budget_and_read_episode_source_traces(self):
+        source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
+        skill = (source / "SKILL.md").read_text()
+        timeline = (source / "references/integration-test-monitor.md").read_text()
+        events = (source / "references/events-attention.md").read_text()
+        monitor = (source / "references/monitor-tasks.md").read_text()
+        packages = (source / "references/work-packages.md").read_text()
+        mvp = (source / "references/optimistic-mvp.md").read_text()
+        self.assertIn("2026-10-07-r43", skill)
+        self.assertIn("## 2026-10-07-r43", (source / "CHANGELOG.md").read_text())
+        # Production-Code-Only cap with excluded classes, progress and no-reset.
+        for required in ("at most two autonomous PRODUCTION-CODE repair cycles",
+                         "they never count and never park",
+                         "evidenced progress ends the no-progress series",
+                         "no third fix",
+                         "no message/clock/Resume/rename resets or extends the counter"):
+            self.assertIn(required, timeline)
+        for required in ("at most two PRODUCTION-CODE repairs for the same error without evidenced progress",
+                         "infrastructure work never counts",
+                         "later healthy Go/wakeups are never parked by historical read errors"):
+            self.assertIn(required, events)
+        self.assertIn("same-fingerprint **production-code** repair cap", monitor)
+        self.assertIn("production-code no-progress cycles; excluded work never counts", monitor)
+        self.assertIn("no-progress autonomous **production-code** repair cycles", packages)
+        self.assertIn("at most two **production-code** repairs", mvp)
+        self.assertIn("exhausted bounded **production-code** repair budget", skill)
+        # Finite read episode separated from the repair counter.
+        for required in ("bounded causal backoff, success ends the episode",
+                         "only persistently current unavailability holds dependent steps back",
+                         "never fabricate worker FAIL/PASS"):
+            self.assertIn(required, timeline)
+        # Uncertain non-idempotent writes remain receipt-reconciled, distinct.
+        self.assertIn("No retry of `SUBMISSION_UNCERTAIN`", timeline)
+        # Scheduler clock stays independent of the work lifecycle.
+        self.assertIn("Work park/PASS/STOPPED never stop the scheduler", timeline)
+
+    def test_w2_six_override_cases_are_planned_and_labels_are_honest(self):
+        source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
+        scenarios = (source / "references/regression-scenarios.md").read_text()
+        self.assertIn("## Production-code-only repair budget and finite read episodes (W2 override)", scenarios)
+        for required in ("Transient read errors followed by success",
+                         "no repair-counter consumption",
+                         "Historical read errors plus a later healthy Go/turn/wakeup",
+                         "No `2/2` park",
+                         "Persistent read unavailability",
+                         "exactly one concise persistent-impact alert",
+                         "worker status is never fabricated as FAIL/PASS from a read gap",
+                         "Two production-code repairs of the same fingerprint without evidenced progress",
+                         "an infrastructure/test/doc/management fix of the same fingerprint must not count",
+                         "Mixed read errors, repair attempts, Pause/Resume and an uncertain non-idempotent receipt",
+                         "never blindly retried or duplicated",
+                         "Repo/skill structural check versus host/scheduler E2E",
+                         "no synthetic E2E PASS"):
+            self.assertIn(required, scenarios)
+
+    def test_w2_mutation_controls_and_reference_model_stay_scoped(self):
+        """Instruction-level checks only: a spec reference model and mutation
+        controls over the scoped budget wording. This is a repository/spec
+        simulation — not the production engine (W3) and not hosted behavior."""
+        source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
+        timeline = (source / "references/integration-test-monitor.md").read_text()
+
+        def scoped_checks(text):
+            return [
+                "at most two autonomous PRODUCTION-CODE repair cycles" in text,
+                "they never count and never park" in text,
+                "evidenced progress ends the no-progress series" in text,
+                "bounded causal backoff, success ends the episode" in text,
+                "only persistently current unavailability holds dependent steps back" in text,
+            ]
+
+        self.assertTrue(all(scoped_checks(timeline)))
+        for mutation in ("PRODUCTION-CODE repair cycles",
+                         "they never count and never park",
+                         "evidenced progress ends the no-progress series",
+                         "bounded causal backoff, success ends the episode",
+                         "only persistently current unavailability holds dependent steps back"):
+            mutated = timeline.replace(mutation, "REMOVED-CONTROL")
+            self.assertFalse(all(scoped_checks(mutated)), f"mutation not detected: {mutation}")
+
+        class BudgetModel:
+            """Reference model for the six W2 cases (spec simulation only)."""
+
+            def __init__(self):
+                self.repairs = {}
+                self.episode = {}
+
+            def read(self, fingerprint, ok, persistent=False):
+                if ok:
+                    self.episode[fingerprint] = 0
+                    return "continue"
+                if persistent:
+                    return "dependent-blocked-until-recovery"
+                return "bounded-backoff-continue"
+
+            def repair(self, fingerprint, kind, evidenced_progress=False):
+                if kind != "production-code":
+                    return "not-counted"
+                if evidenced_progress:
+                    self.repairs[fingerprint] = 0
+                    return "progress-recorded-not-a-no-progress-failure"
+                attempts = self.repairs.get(fingerprint, 0)
+                if attempts >= 2:
+                    return "parked-no-third-fix"
+                self.repairs[fingerprint] = attempts + 1
+                return "repair-attempt"
+
+            def uncertain_write(self, reconciled):
+                return "send" if reconciled else "reconcile-exact-receipt-first"
+
+            def scheduler(self, work_state):
+                return "enabled"
+
+        model = BudgetModel()
+        self.assertEqual(model.read("r1", ok=False), "bounded-backoff-continue")
+        self.assertEqual(model.read("r1", ok=True), "continue")
+        self.assertEqual(model.read("history", ok=True), "continue")
+        self.assertEqual(model.read("down", ok=False, persistent=True), "dependent-blocked-until-recovery")
+        self.assertEqual(model.repair("f", "production-code"), "repair-attempt")
+        self.assertEqual(model.repair("f", "production-code"), "repair-attempt")
+        self.assertEqual(model.repair("f", "production-code"), "parked-no-third-fix")
+        self.assertEqual(model.repair("f", "infrastructure"), "not-counted")
+        self.assertEqual(model.repair("f", "tests"), "not-counted")
+        self.assertEqual(model.repair("p", "production-code", evidenced_progress=True),
+                         "progress-recorded-not-a-no-progress-failure")
+        self.assertEqual(model.uncertain_write(reconciled=False), "reconcile-exact-receipt-first")
+        self.assertEqual(model.uncertain_write(reconciled=True), "send")
+        for state in ("ACTIVE", "PARKED_INPUT_REQUIRED", "COMPLETE_PASS", "STOPPED"):
+            self.assertEqual(model.scheduler(state), "enabled")
 
 
 if __name__ == "__main__":
