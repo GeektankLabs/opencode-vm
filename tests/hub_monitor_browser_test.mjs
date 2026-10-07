@@ -54,6 +54,10 @@ async function refresh() {
   await page.waitForTimeout(150);
 }
 
+async function openCreate() {
+  await page.locator("#monitor-create").evaluate(element => { element.open = true; });
+}
+
 async function openEditor(title) {
   await card(title).locator("details").first().evaluate(element => { element.open = true; });
 }
@@ -179,20 +183,22 @@ test("a stale write is rejected (409) and changes nothing", async () => {
   assert.equal((await response).status(), 409);
   await page.waitForTimeout(200);
   assert.equal(registryMonitors()[id].scheduler.interval_seconds, 900, "the rejected write changed nothing");
+  await clickAction("Alpha Monitor", "Aktuellen Stand vergleichen");
+  await card("Alpha Monitor").locator(".monitor-feedback", { hasText: "Registry anderweitig geändert" }).waitFor({ state: "detached" });
 });
 
-test("FINDING: conflict feedback and draft preservation after a rejected write", async () => {
+test("conflict notice and draft survive a rejected write", async () => {
   await refresh();
   await openEditor("Alpha Monitor");
-  await card("Alpha Monitor").locator("input[type=number]").fill("444");
+  await card("Alpha Monitor").locator('input[name="interval_seconds"]').fill("444");
   storeCli("bump");
   const done = page.waitForResponse(r => r.url().includes("/api/monitor/") && r.request().method() === "PUT");
   await card("Alpha Monitor").locator('button[type=submit]').click();
-  await done.catch(() => {});
-  await page.waitForTimeout(300);
-  const feedback = await card("Alpha Monitor").locator(".monitor-feedback").textContent();
-  const field = await card("Alpha Monitor").locator("input[type=number]").inputValue();
-  assert.fail(`problemFingerprint=hub-monitor-ui-conflict-state-lost: after a 409 neither the conflict notice nor the draft survive (renderList() clears the per-card state map, so state.conflict and state.draft are discarded before buildCard reads them). feedback=${JSON.stringify(feedback)} field=${JSON.stringify(field)}`);
+  assert.equal((await done).status(), 409);
+  await card("Alpha Monitor").locator(".monitor-feedback", { hasText: "Registry anderweitig geändert" }).waitFor();
+  assert.equal(await card("Alpha Monitor").locator('input[name="interval_seconds"]').inputValue(), "444", "the draft survives");
+  await clickAction("Alpha Monitor", "Aktuellen Stand vergleichen");
+  await card("Alpha Monitor").locator(".monitor-feedback", { hasText: "Registry anderweitig geändert" }).waitFor({ state: "detached" });
 });
 
 test("scheduler enable/disable, trigger and cancel act on the canonical registry", async () => {
@@ -240,41 +246,116 @@ test("delete removes the monitor from the canonical registry", async () => {
 });
 
 // ---------------------------------------------------------------------------
-// FINDINGS: binding acceptance items the production UI does not satisfy yet.
+// Positive regressions for the W5 UI findings (fixed in this correction).
 // ---------------------------------------------------------------------------
 
-test("FINDING: UI re-reads its own successful write (effective readback)", async () => {
+test("post-write readback keeps UI and store generation identical and shows the new value", async () => {
   await refresh();
   const id = idByTitle("Alpha Monitor");
-  await submitDraft("Alpha Monitor", 333);
-  const stored = registryMonitors()[id].scheduler.interval_seconds;
-  assert.equal(stored, 333, "precondition: the write reached the canonical registry");
+  await saveEditor("Alpha Monitor", 333);
+  assert.ok(await waitStore(items => items[id].scheduler.interval_seconds === 333));
+  await page.locator(".monitor-card", { hasText: "Takt 333 s" }).first().waitFor();
   const statusGeneration = Number((await page.locator("#monitor-status").textContent()).match(/Generation (\d+)/)[1]);
-  assert.equal(
-    statusGeneration,
-    registryGeneration(),
-    "problemFingerprint=hub-monitor-ui-postwrite-reload-blocked: after a successful save the UI never reloads (load(true) is a no-op while the `writing` guard is still set), so the list and generation stay stale and the operator sees no confirmed effective readback",
-  );
+  assert.equal(statusGeneration, registryGeneration());
 });
 
-test("FINDING: a follow-up UI action after a UI write does not conflict spuriously", async () => {
+test("a follow-up UI action after a UI write succeeds without conflict", async () => {
   const id = idByTitle("Alpha Monitor");
-  const enabled = registryMonitors()[id].scheduler.enabled;
+  const before = registryMonitors()[id].scheduler.enabled;
   await clickAction("Alpha Monitor", /Takt (de)?aktivieren/);
-  assert.ok(
-    await waitStore(items => items[id].scheduler.enabled === !enabled),
-    "problemFingerprint=hub-monitor-ui-stale-generation-conflict: the stale UI generation makes the next action fail with MONITOR_REVISION_CONFLICT although nothing external changed; the UI must refresh after its own write",
-  );
+  assert.ok(await waitStore(items => items[id].scheduler.enabled === !before));
 });
 
-test("FINDING: UI exposes monitor create (A-F row E CRUD)", async () => {
-  const control = page.locator("button, a, input[type=submit]", { hasText: /anlegen|neu(er|en)? monitor|monitor anlegen|^create$/i });
-  const actions = await page.locator("form").evaluateAll(forms => forms.map(form => form.getAttribute("action") || ""));
-  assert.fail(`problemFingerprint=hub-monitor-ui-create-missing: no create control and no form posts to /api/monitor; A-F row E requires full UI<->MCP parity incl. create (concept plan section 3 CRUD). createControls=${await control.count()} formActions=${JSON.stringify(actions)}`);
+test("create form creates a monitor with defaults and a confirmed readback", async () => {
+  await refresh();
+  await openCreate();
+  await page.locator("#monitor-create-title").fill("UI Created Monitor");
+  await page.locator("#monitor-create-task").fill("task_0000ffff-0000-4000-8000-00000000ffff");
+  const done = page.waitForResponse(r => r.url().endsWith("/api/monitor") && r.request().method() === "POST");
+  await page.locator("#monitor-create-form button[type=submit]").click();
+  assert.equal((await done).status(), 201);
+  await page.locator("#monitor-create-feedback", { hasText: /Erstellt und zurückgelesen/ }).waitFor();
+  await openAll();
+  await page.locator(".monitor-card", { hasText: "UI Created Monitor" }).first().waitFor();
+  const text = await card("UI Created Monitor").textContent();
+  assert.match(text, /Takt 60 s/);
+  assert.match(text, /MVP \(Standard\)/);
+  assert.match(text, /Runtime Deep/);
+  const stored = Object.values(registryMonitors()).find(item => item.title === "UI Created Monitor");
+  assert.equal(stored.scheduler.interval_seconds, 60);
+  assert.equal(stored.autonomy_profile, "mvp");
+  assert.equal(stored.runtime_profile, "deep");
+  assert.equal(stored.anchor.task_id, "task_0000ffff-0000-4000-8000-00000000ffff");
 });
 
-test("FINDING: editor exposes the planned expiry setting", async () => {
+test("duplicate master-task binding is rejected honestly", async () => {
+  await refresh();
+  await openCreate();
+  const task = "task_0000fffe-0000-4000-8000-00000000fffe";
+  const submit = async title => {
+    await page.locator("#monitor-create-title").fill(title);
+    await page.locator("#monitor-create-task").fill(task);
+    const done = page.waitForResponse(r => r.url().endsWith("/api/monitor") && r.request().method() === "POST");
+    await page.locator("#monitor-create-form button[type=submit]").click();
+    return (await done).status();
+  };
+  assert.equal(await submit("Duplicate A"), 201);
+  assert.equal(await submit("Duplicate B"), 409);
+  assert.match(await page.locator("#monitor-create-feedback").textContent(), /MONITOR_REVISION_CONFLICT/);
+  const bound = Object.values(registryMonitors()).filter(item => item.anchor.task_id === task);
+  assert.equal(bound.length, 1);
+  assert.equal(bound[0].title, "Duplicate A");
+});
+
+test("expiry is editable and clears back to null", async () => {
+  await refresh();
+  const id = idByTitle("Alpha Monitor");
+  const value = "2030-01-02T03:04";
   await openEditor("Alpha Monitor");
-  const inputs = await card("Alpha Monitor").locator("input, select").evaluateAll(items => items.map(item => `${item.tagName}:${item.type}:${item.name || item.id || ""}`));
-  assert.fail(`problemFingerprint=hub-monitor-ui-expiry-missing: editor exposes no expiry field although PUT /api/monitor/{id} supports expiry_at and the W5 acceptance lists planned settings incl. expiry. fields=${JSON.stringify(inputs)}`);
+  await card("Alpha Monitor").locator('input[name="expiry_at"]').fill(value);
+  const done = page.waitForResponse(r => r.url().includes("/api/monitor/") && r.request().method() === "PUT");
+  await card("Alpha Monitor").locator('button[type=submit]').click();
+  assert.equal((await done).status(), 200);
+  assert.ok(await waitStore(items => items[id].scheduler.expiry_at === new Date(value).getTime()));
+  assert.match(await card("Alpha Monitor").textContent(), /Expiry /);
+  await openEditor("Alpha Monitor");
+  await card("Alpha Monitor").locator('input[name="expiry_at"]').fill("");
+  const done2 = page.waitForResponse(r => r.url().includes("/api/monitor/") && r.request().method() === "PUT");
+  await card("Alpha Monitor").locator('button[type=submit]').click();
+  assert.equal((await done2).status(), 200);
+  assert.ok(await waitStore(items => items[id].scheduler.expiry_at === null));
+});
+
+test("focus and draft survive a save", async () => {
+  await refresh();
+  await openEditor("Alpha Monitor");
+  const input = card("Alpha Monitor").locator('input[name="interval_seconds"]');
+  await input.focus();
+  await input.fill("654");
+  const done = page.waitForResponse(r => r.url().includes("/api/monitor/") && r.request().method() === "PUT");
+  await card("Alpha Monitor").locator("form").evaluate(form => form.requestSubmit());
+  assert.equal((await done).status(), 200);
+  await page.waitForTimeout(200);
+  const active = await page.evaluate(() => ({ name: document.activeElement?.name || "", value: document.activeElement?.value || "" }));
+  assert.equal(active.name, "interval_seconds");
+  assert.equal(active.value, "654");
+});
+
+test("pending writes are single-flight", async () => {
+  await refresh();
+  const id = idByTitle("Alpha Monitor");
+  let puts = 0;
+  await page.route("**/api/monitor/*", async route => {
+    if (route.request().method() === "PUT") { puts += 1; await new Promise(resolve => setTimeout(resolve, 700)); }
+    await route.continue();
+  });
+  await openEditor("Alpha Monitor");
+  await card("Alpha Monitor").locator('input[name="interval_seconds"]').fill("765");
+  const submit = card("Alpha Monitor").locator('button[type=submit]');
+  await submit.click();
+  await submit.click().catch(() => {});
+  await page.waitForTimeout(1600);
+  await page.unroute("**/api/monitor/*");
+  assert.equal(puts, 1);
+  assert.equal(registryMonitors()[id].scheduler.interval_seconds, 765);
 });

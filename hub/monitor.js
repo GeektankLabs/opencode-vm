@@ -9,6 +9,34 @@
   const cards = new Map();
   const node = (tag, text, className) => { const element = document.createElement(tag); if (text) element.textContent = text; if (className) element.className = className; return element; };
   const msToLocal = value => value ? new Date(Number(value)).toLocaleString("de-DE") : "—";
+  const pad = value => String(value).padStart(2, "0");
+  const epochToLocalInput = value => {
+    if (!value) return "";
+    const date = new Date(Number(value));
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  };
+  const localInputToEpoch = value => value ? new Date(value).getTime() : null;
+
+  function focusTarget() {
+    const active = document.activeElement;
+    if (!active || !active.name || !active.closest(".monitor-card")) return null;
+    return { id: active.closest(".monitor-card").id, name: active.name };
+  }
+
+  function restoreFocus(target) {
+    if (!target || document.activeElement !== document.body) return;
+    const element = document.querySelector(`#${CSS.escape(target.id)} [name="${CSS.escape(target.name)}"]`);
+    if (element) element.focus();
+  }
+
+  function fillOptions(select, labels, selected) {
+    select.replaceChildren();
+    for (const [value, text] of Object.entries(labels)) {
+      const option = new Option(text, value);
+      option.selected = value === selected;
+      select.add(option);
+    }
+  }
 
   function freshness(monitor) {
     if (!monitor.last_run_at) return "unknown";
@@ -31,8 +59,9 @@
   function renderList() {
     const container = $("monitor-cards");
     container.replaceChildren();
-    cards.clear();
-    for (const monitor of snapshot.monitors) container.append(buildCard(monitor));
+    const alive = new Set();
+    for (const monitor of snapshot.monitors) { alive.add(monitor.monitor_id); container.append(buildCard(monitor)); }
+    for (const id of [...cards.keys()]) if (!alive.has(id)) cards.delete(id);
     const summary = `${snapshot.monitors.length} von ${snapshot.total} Monitor(en) · Registry-Generation ${snapshot.generation}`;
     $("monitor-status").textContent = expired
       ? `${summary} · Abruf abgelaufen; MCP als Wahrheit lesen.`
@@ -54,6 +83,7 @@
         interval_seconds: monitor.scheduler.interval_seconds,
         autonomy_profile: monitor.autonomy_profile,
         runtime_profile: monitor.runtime_profile,
+        expiry_at: monitor.scheduler.expiry_at ?? null,
       };
     }
     const title = node("h3", monitor.title);
@@ -71,6 +101,8 @@
     card.append(node("p", `Session: ${monitor.session_id || "noch nicht primed"}`, "muted"));
 
     const editor = node("details", "monitor-editor");
+    editor.open = Boolean(state.editorOpen);
+    editor.addEventListener("toggle", () => { state.editorOpen = editor.open; });
     editor.append(node("summary", "Bearbeiten"));
     const form = node("form"); form.noValidate = true;
     const fields = [
@@ -78,6 +110,7 @@
       ["interval_seconds", "Intervall (Sekunden)", "number"],
       ["autonomy_profile", "Autonomieprofil", "select"],
       ["runtime_profile", "Monitor-Runtime", "select"],
+      ["expiry_at", "Expiry (optional)", "datetime-local"],
     ];
     const inputs = {};
     for (const [field, caption, kind] of fields) {
@@ -91,9 +124,12 @@
         input = node("input"); input.type = kind;
         if (kind === "number") { input.min = "5"; input.max = "86400"; }
       }
-      input.value = String(state.draft[field]);
+      input.name = field;
+      input.value = kind === "datetime-local" ? epochToLocalInput(state.draft[field]) : String(state.draft[field] ?? "");
       input.addEventListener("input", () => {
-        state.draft[field] = kind === "number" ? Number(input.value) : input.value;
+        state.draft[field] = kind === "number" ? Number(input.value)
+          : kind === "datetime-local" ? localInputToEpoch(input.value)
+          : input.value;
         state.dirty = true;
         feedback.textContent = "Ungespeicherte Änderung.";
       });
@@ -130,8 +166,8 @@
     return card;
   }
 
-  async function load(force) {
-    if (loading || writing) return false;
+  async function load(force, internal) {
+    if (loading || (writing && !internal)) return false;
     if (force) { expired = false; }
     loading = true;
     try {
@@ -165,7 +201,7 @@
 
   async function saveDraft(state) {
     if (writing || loading || state.conflict) return;
-    const previousFocus = document.activeElement;
+    const target = focusTarget();
     writing = true; state.saving = true;
     try {
       const { ok, body } = await api(`/api/monitor/${state.monitor_id.slice(8)}`, {
@@ -173,19 +209,18 @@
         body: JSON.stringify({ generation: snapshot.generation, ...state.draft }),
       });
       if (ok && body?.monitor) {
-        state.dirty = false; state.draft = null; expired = false;
-        await load(true);
+        state.dirty = false; state.draft = null; state.conflict = false; expired = false;
+        await load(true, true);
       } else if (body?.code === "MONITOR_REVISION_CONFLICT") {
         state.conflict = true;
-        await load(true);
+        await load(true, true);
         state.conflict = true; renderList();
       } else {
         uncertain = state.monitor_id;
         $("monitor-status").textContent = `Speichern nicht bestätigt (${esc(body?.code || "Netzwerk")}); zurücklesen und vergleichen, kein automatischer Wiederholungswrite.`;
       }
     } finally {
-      writing = false; state.saving = false; renderList();
-      if (document.activeElement === document.body && previousFocus?.isConnected) previousFocus.focus();
+      writing = false; state.saving = false; renderList(); restoreFocus(target);
     }
   }
 
@@ -201,14 +236,48 @@
         $("monitor-status").textContent = action === "abort"
           ? "Abort angefordert; der Engine verifiziert den nativen Abbruch und schreibt das Ergebnis in den Verlauf."
           : `Aktion ${action} bestätigt (Generation ${body?.generation}).`;
-        await load(true);
+        await load(true, true);
       } else if (body?.code === "MONITOR_REVISION_CONFLICT") {
-        await load(true);
+        await load(true, true);
         $("monitor-status").textContent = "Registry anderweitig geändert; aktueller Stand geladen. Aktion bewusst wiederholen.";
       } else {
         $("monitor-status").textContent = `Aktion nicht bestätigt: ${esc(body?.code || body?.error || "unbekannt")}.`;
       }
-    } finally { writing = false; }
+    } finally { writing = false; renderList(); }
+  }
+
+  async function createMonitor(event) {
+    event.preventDefault();
+    if (writing || loading) return;
+    const feedback = $("monitor-create-feedback");
+    const form = $("monitor-create-form");
+    const title = $("monitor-create-title").value.trim();
+    const taskId = $("monitor-create-task").value.trim();
+    const interval = Number($("monitor-create-interval").value || 60);
+    const autonomy = $("monitor-create-autonomy").value;
+    const runtime = $("monitor-create-runtime").value;
+    const expiry = localInputToEpoch($("monitor-create-expiry").value);
+    writing = true;
+    try {
+      const { ok, status, body } = await api("/api/monitor", {
+        method: "POST",
+        body: JSON.stringify({ title, task_id: taskId, interval_seconds: interval, autonomy_profile: autonomy, runtime_profile: runtime, expiry_at: expiry }),
+      });
+      if (ok && body?.monitor) {
+        const monitorId = body.monitor.monitor_id;
+        const detail = await api(`/api/monitor/${monitorId.slice(8)}`);
+        const created = detail.ok ? detail.body?.monitor : null;
+        await load(true, true);
+        feedback.textContent = created
+          ? `Erstellt und zurückgelesen: ${created.monitor_id} · Takt ${created.scheduler.interval_seconds} s · ${autonomyLabels[created.autonomy_profile]} · Runtime ${runtimeLabels[created.runtime_profile]}${created.scheduler.expiry_at ? ` · Expiry ${msToLocal(created.scheduler.expiry_at)}` : ""} · Generation ${snapshot.generation}.`
+          : `Erstellt (${monitorId}); Rücklesen ausstehend.`;
+        form.reset();
+        fillOptions($("monitor-create-autonomy"), autonomyLabels, "mvp");
+        fillOptions($("monitor-create-runtime"), runtimeLabels, "deep");
+      } else {
+        feedback.textContent = `Erstellen nicht bestätigt (${esc(body?.code || status || "Netzwerk")}); Eingaben bleiben stehen.`;
+      }
+    } finally { writing = false; renderList(); }
   }
 
   async function loadHistory(monitorId) {
@@ -234,6 +303,9 @@
 
   $("monitor-refresh").addEventListener("click", () => void load(true));
   $("monitor-more").addEventListener("click", () => void loadMore());
+  fillOptions($("monitor-create-autonomy"), autonomyLabels, "mvp");
+  fillOptions($("monitor-create-runtime"), runtimeLabels, "deep");
+  $("monitor-create-form").addEventListener("submit", event => { void createMonitor(event); });
   window.addEventListener("beforeunload", event => {
     if (uncertain || [...cards.values()].some(state => state.dirty)) { event.preventDefault(); event.returnValue = ""; }
   });
