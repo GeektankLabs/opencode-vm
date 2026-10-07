@@ -55,6 +55,7 @@ import type {
   ProjectIdentity,
   RuntimeDescriptor,
   SendMessageResult,
+  AbortSessionTurnResult,
   SessionActivity,
   SessionDetailsResult,
   SessionHistoryResult,
@@ -180,6 +181,12 @@ export interface SessionGateway {
     message: string,
     attachmentIds?: string[],
   ): Promise<SendMessageResult>;
+  sendFollowup?(
+    sessionId: string,
+    message: string,
+    attachmentIds?: string[],
+  ): Promise<SendMessageResult>;
+  abortSessionTurn?(sessionId: string): Promise<AbortSessionTurnResult>;
   supersedeUnresolvedSubmission(
     input: SubmissionGuardOverrideInput,
   ): Promise<SubmissionGuardOverrideResult>;
@@ -210,6 +217,10 @@ export class OpenCodeGateway implements SessionGateway {
   private backendHealthCache?: { at: number; state: "ok" | "unreachable" };
   private backendHealthCacheTtlMs = 5000;
   private backendHealthProbeTimeoutMs = 500;
+  // Test seam: abort verification cadence defaults; behavior with defaults is
+  // the shipped contract.
+  private abortVerifyBudgetMs = 8_000;
+  private abortVerifyPollMs = 500;
   private readonly collectorStop = new AbortController();
   private collector?: Promise<void>;
   private sweeper?: Promise<void>;
@@ -2092,6 +2103,313 @@ export class OpenCodeGateway implements SessionGateway {
     } finally {
       this.submissionLocks.delete(sessionId);
     }
+  }
+
+  /**
+   * Native follow-up admission into a session that is actively working.
+   * OpenCode's v1 runner admits prompts while busy and serializes them as the
+   * next turn of the same runner/projection (D1 probe evidence, 1.18.34); this
+   * adds no adapter-side queue, retry or priority. send_message stays the sole
+   * idle path and is untouched; pending input is never bypassed (v1 AND v2
+   * permission/question reads, because v1-runner permissions only surface on
+   * the v1 endpoint). The unresolved supersede guard deliberately stays bound
+   * to the running turn's receipt.
+   */
+  async sendFollowup(
+    sessionId: string,
+    message: string,
+    attachmentIds: string[] = [],
+  ): Promise<SendMessageResult> {
+    if (message.length < 1 || message.length > 32_000) {
+      throw new AdapterError(
+        "INVALID_ARGUMENT",
+        "message must contain between 1 and 32000 characters.",
+      );
+    }
+    if (this.submissionLocks.has(sessionId)) {
+      throw new AdapterError(
+        "SESSION_BUSY",
+        "The session is already receiving a message.",
+        undefined,
+        "write_in_progress",
+      );
+    }
+    const uncertain = this.uncertainSubmissions.get(sessionId);
+    if (
+      uncertain &&
+      uncertain.message === message &&
+      JSON.stringify(uncertain.attachmentIds) === JSON.stringify(attachmentIds)
+    ) {
+      throw new AdapterError(
+        "SUBMISSION_UNCERTAIN",
+        "This exact follow-up may already have been admitted; inspect its message_id before retrying.",
+        uncertain.messageId,
+      );
+    }
+    this.submissionLocks.add(sessionId);
+    this.collecting.delete(sessionId);
+    try {
+      const session = await this.requireExposedSession(sessionId);
+      await this.followupPreflight(sessionId);
+      const settings = await this.promptSettings(session);
+      const initialAttachments = this.attachments.resolve(
+        sessionId,
+        attachmentIds,
+      );
+      if (
+        initialAttachments.some((attachment) =>
+          attachment.mime_type.startsWith("image/"),
+        )
+      ) {
+        await this.requireImageInput(
+          settings.model.providerID,
+          settings.model.modelID,
+        );
+      }
+      // Runtime lookup can race another frontend. Recheck before admission;
+      // this is still not a cross-client backend transaction.
+      await this.followupPreflight(sessionId);
+      const attachments = this.attachments.resolve(sessionId, attachmentIds);
+      // No managed-policy adoption here: adoption is the idle work-admission
+      // boundary (the policy daemon refuses a busy session with
+      // MANAGED_SESSION_BUSY), while a follow-up targets a session that is
+      // actively working by definition. The follow-up inherits the session's
+      // current policy state; create_session/send_message remain the adoption
+      // points.
+      // Same parts mapping as send_message, kept separate so the send_message
+      // path stays byte-identical (W1 invariant).
+      const parts: Array<TextPartInput | FilePartInput> = [
+        { type: "text", text: message },
+      ];
+      for (const attachment of attachments) {
+        if (attachment.mime_type.startsWith("image/")) {
+          parts.push({
+            type: "file",
+            mime: attachment.mime_type,
+            filename: attachment.filename,
+            url: `data:${attachment.mime_type};base64,${attachment.data.toString("base64")}`,
+          });
+        } else {
+          parts.push({
+            type: "text",
+            text: `\n\n[Attachment: ${attachment.filename} (${attachment.mime_type})]\n${attachment.data.toString("utf8")}`,
+          });
+        }
+      }
+      const messageId = `msg_${randomUUID().replaceAll("-", "")}`;
+      const activityCursor = await this.journal?.track(sessionId, messageId);
+      const submittedAt = new Date().toISOString();
+      const submittedAttachments = attachments.map(submittedAttachment);
+      this.attachments.consume(sessionId, attachments);
+      // A different prompt is an explicit continuation; it ends the narrow
+      // immediate-retry window for an older uncertain transport call.
+      this.uncertainSubmissions.delete(sessionId);
+      try {
+        await this.client.session.promptAsync(
+          {
+            sessionID: sessionId,
+            directory: this.runtime.project,
+            messageID: messageId,
+            agent: settings.agent,
+            model: settings.model,
+            ...(settings.variant ? { variant: settings.variant } : {}),
+            parts,
+          },
+          { signal: AbortSignal.timeout(this.admissionDeadlineMs) },
+        );
+      } catch {
+        this.uncertainSubmissions.set(sessionId, {
+          message,
+          attachmentIds: [...attachmentIds],
+          messageId,
+        });
+        throw new AdapterError(
+          "SUBMISSION_UNCERTAIN",
+          "OpenCode did not confirm whether the follow-up was admitted; do not retry automatically.",
+          messageId,
+        );
+      }
+      if (this.journal) {
+        // Admission already happened; a journal fault must not turn the receipt
+        // into a retryable send error. Durable tracking permits reconciliation.
+        await this.journal
+          .submitted(sessionId, session.title, messageId)
+          .catch(() => {
+            this.tracking.partial = true;
+            process.stderr.write(
+              "[mcp] activity persistence failed after follow-up admission\n",
+            );
+          });
+      }
+      return {
+        session_id: sessionId,
+        message_id: messageId,
+        state: "submitted",
+        submitted_at: submittedAt,
+        ...(activityCursor ? { activity_cursor: activityCursor } : {}),
+        ...(submittedAttachments.length
+          ? { attachments: submittedAttachments }
+          : {}),
+      };
+    } finally {
+      this.submissionLocks.delete(sessionId);
+    }
+  }
+
+  /**
+   * Abort the active turn through OpenCode's native v1 abort, then verify the
+   * outcome through existing stored reads. Acceptance is never treated as
+   * confirmation: only a stored aborted assistant message proves the abort.
+   * No rollback is performed or promised; already-executed changes remain.
+   * Queued follow-ups survive a native abort and may still execute (D1/D2
+   * probe evidence). Idle sessions short-circuit to a non-destructive
+   * no_active_turn without a backend write.
+   */
+  async abortSessionTurn(sessionId: string): Promise<AbortSessionTurnResult> {
+    await this.requireExposedSession(sessionId);
+    const preflightActivity = await this.activity(sessionId);
+    if (preflightActivity === "idle") {
+      const pendingNow = await this.combinedPending(sessionId);
+      const observed = new Date().toISOString();
+      return {
+        session_id: sessionId,
+        state: "no_active_turn",
+        observed_at: observed,
+        activity_after: await this.activity(sessionId),
+        pending_input_after: pendingNow,
+        guidance:
+          "No active turn was observed, so nothing was aborted. This is a non-destructive result and not a task failure; no changes were rolled back.",
+      };
+    }
+    const before = await this.messages(sessionId, 12);
+    const sawAbortedMarker = [...before.items]
+      .reverse()
+      .find((item) => item.info.role === "assistant")
+      ?.info;
+    const preexistingAbort =
+      sawAbortedMarker && isAborted(sawAbortedMarker)
+        ? sawAbortedMarker.id
+        : undefined;
+    await this.backendCall(
+      () =>
+        this.client.session.abort(
+          { sessionID: sessionId, directory: this.runtime.project },
+          { signal: this.deadline() },
+        ),
+      "Could not request the OpenCode turn abort.",
+    );
+    const deadline = Date.now() + this.abortVerifyBudgetMs;
+    let lastActivity: SessionActivity = preflightActivity;
+    let lastPending = await this.combinedPending(sessionId);
+    let abortedId: string | undefined;
+    let racedTerminal = false;
+    while (Date.now() < deadline) {
+      const [page, activityNow, pendingNow] = await Promise.all([
+        this.messages(sessionId, 12),
+        this.activity(sessionId),
+        this.combinedPending(sessionId),
+      ]);
+      lastActivity = activityNow;
+      lastPending = pendingNow;
+      const newest = [...page.items]
+        .reverse()
+        .find((item) => item.info.role === "assistant")?.info;
+      if (newest && isAborted(newest) && newest.id !== preexistingAbort) {
+        abortedId = newest.id;
+        break;
+      }
+      if (
+        newest &&
+        newest.role === "assistant" &&
+        !isAborted(newest) &&
+        activityNow === "idle" &&
+        (isCompletedFinish(newest.finish) || hasError(newest))
+      ) {
+        // The running turn reached its own terminal state before abort
+        // evidence appeared. Never claim it was aborted or that it passed.
+        racedTerminal = true;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, this.abortVerifyPollMs));
+    }
+    const observed = new Date().toISOString();
+    if (abortedId) {
+      return {
+        session_id: sessionId,
+        state: "aborted",
+        aborted_message_id: abortedId,
+        observed_at: observed,
+        activity_after: lastActivity,
+        pending_input_after: lastPending,
+        guidance:
+          "Turn abort verified through the stored aborted assistant message. Already-executed changes remain; nothing was rolled back. Already admitted follow-ups are not discarded; OpenCode drains them with the next admitted prompt.",
+      };
+    }
+    return {
+      session_id: sessionId,
+      state: "abort_uncertain",
+      observed_at: observed,
+      activity_after: lastActivity,
+      pending_input_after: lastPending,
+      guidance: racedTerminal
+        ? "The newest assistant turn reached its own terminal state before abort evidence appeared; the abort request may have arrived after completion. Inspect get_session_status or get_task_result for the exact message state; do not treat this as an aborted or completed task."
+        : "The abort request was accepted but its effect could not be verified within the bounded window. Do not treat the turn as aborted or completed; re-check get_session_status before any follow-up submission.",
+    };
+  }
+
+  private async followupPreflight(sessionId: string): Promise<void> {
+    const [activity, pending] = await Promise.all([
+      this.activity(sessionId),
+      this.combinedPending(sessionId),
+    ]);
+    if (pending.permissions + pending.questions > 0)
+      throw new AdapterError(
+        "INPUT_REQUIRED",
+        "The session has pending input. Resolve it in OpenCode Web UI/TUI; the follow-up was not admitted.",
+        undefined,
+        "pending_input",
+      );
+    if (activity !== "busy" && activity !== "retry")
+      throw new AdapterError(
+        "SESSION_NOT_BUSY",
+        "The backend session is idle; use send_message to start a new task. A follow-up requires a session that is actively working.",
+      );
+  }
+
+  /**
+   * v1-runner permission requests only surface on the v1 endpoint (D1/D2
+   * probe evidence, 1.18.34), so pending detection for the session-control
+   * paths combines both permission surfaces. Existing v2-only reads stay
+   * untouched.
+   */
+  private async combinedPending(sessionId: string): Promise<PendingInput> {
+    const [pending, v1Permissions] = await Promise.all([
+      this.pending(sessionId),
+      this.pendingV1PermissionCount(sessionId),
+    ]);
+    return {
+      permissions: pending.permissions + v1Permissions,
+      questions: pending.questions,
+    };
+  }
+
+  private async pendingV1PermissionCount(sessionId: string): Promise<number> {
+    const response = await this.backendCall(
+      () =>
+        this.client.permission.list(
+          { directory: this.runtime.project },
+          { signal: this.deadline() },
+        ),
+      "Could not read pending OpenCode permissions.",
+    );
+    if (!Array.isArray(response.data)) {
+      throw incompatible("OpenCode returned unsupported permission data.");
+    }
+    return response.data.filter(
+      (entry) =>
+        isRecord(entry) &&
+        (entry.sessionID === undefined || entry.sessionID === sessionId),
+    ).length;
   }
 
   async supersedeUnresolvedSubmission(

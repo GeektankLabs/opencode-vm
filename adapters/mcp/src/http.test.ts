@@ -25,6 +25,7 @@ import type {
   RenameSessionResult,
   RuntimeDescriptor,
   SendMessageResult,
+  AbortSessionTurnResult,
   SessionDetailsResult,
   SessionHistoryResult,
   SessionStatusResult,
@@ -339,6 +340,43 @@ class FakeGateway implements SessionGateway {
     };
   }
 
+  followupCalls: Array<{
+    session_id: string;
+    message: string;
+    attachments?: string[];
+  }> = [];
+  followupError?: AdapterError;
+  async sendFollowup(
+    sessionId: string,
+    message: string,
+    attachments?: string[],
+  ): Promise<SendMessageResult> {
+    this.followupCalls.push({
+      session_id: sessionId,
+      message,
+      ...(attachments ? { attachments } : {}),
+    });
+    if (this.followupError) throw this.followupError;
+    return {
+      session_id: sessionId,
+      message_id: "msg_followup",
+      state: "submitted",
+    };
+  }
+
+  abortCalls: string[] = [];
+  async abortSessionTurn(sessionId: string): Promise<AbortSessionTurnResult> {
+    this.abortCalls.push(sessionId);
+    return {
+      session_id: sessionId,
+      state: "no_active_turn",
+      observed_at: new Date().toISOString(),
+      activity_after: "idle",
+      pending_input_after: { permissions: 0, questions: 0 },
+      guidance: "fixture",
+    };
+  }
+
   async supersedeUnresolvedSubmission(
     input: SubmissionGuardOverrideInput,
   ): Promise<SubmissionGuardOverrideResult> {
@@ -419,7 +457,7 @@ test("MCP 2.0 discovery and Events methods stay on the authenticated loopback en
   assert.equal((await post("events/list", "events/list", false)).status, 401);
 });
 
-test("official MCP client discovers twenty-two stateless HTTP tools and invokes session tools by ID", async () => {
+test("official MCP client discovers twenty-four stateless HTTP tools and invokes session tools by ID", async () => {
   const gateway = new FakeGateway();
   const server = new McpHttpServer(runtime(), token, gateway);
   const port = await server.start();
@@ -432,6 +470,7 @@ test("official MCP client discovers twenty-two stateless HTTP tools and invokes 
     await client.connect(transport);
     const listed = await client.listTools();
     assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), [
+      "abort_session_turn",
       "acknowledge_project_attention",
       "archive_session",
       "create_session",
@@ -450,6 +489,7 @@ test("official MCP client discovers twenty-two stateless HTTP tools and invokes 
       "read_message_content",
       "rename_session",
       "send_message",
+      "send_session_followup",
       "supersede_unresolved_submission",
       "update_session_runtime",
       "upload_attachment",
@@ -658,6 +698,72 @@ test("official MCP client discovers twenty-two stateless HTTP tools and invokes 
       message: "Use this as a visual reference.",
       attachments: ["att_0123456789abcdef0123456789abcdef"],
     });
+
+    // W1 session-control surface: discovery annotations + wire dispatch
+    const followupTool = listed.tools.find(
+      (tool) => tool.name === "send_session_followup",
+    );
+    assert.equal(followupTool?.annotations?.readOnlyHint, false);
+    assert.equal(followupTool?.annotations?.idempotentHint, false);
+    const abortTool = listed.tools.find(
+      (tool) => tool.name === "abort_session_turn",
+    );
+    assert.equal(abortTool?.annotations?.destructiveHint, true);
+    assert.equal(abortTool?.annotations?.idempotentHint, true);
+
+    const followed = await client.callTool({
+      name: "send_session_followup",
+      arguments: { session_id: "ses", message: "correction while busy" },
+    });
+    assert.equal(followed.isError, undefined);
+    assert.equal(
+      (followed.structuredContent as Record<string, unknown>)?.message_id,
+      "msg_followup",
+    );
+    assert.deepEqual(gateway.followupCalls.at(-1), {
+      session_id: "ses",
+      message: "correction while busy",
+    });
+
+    gateway.followupError = new AdapterError(
+      "SESSION_NOT_BUSY",
+      "The backend session is idle; use send_message to start a new task.",
+    );
+    const idleRejected = await client.callTool({
+      name: "send_session_followup",
+      arguments: { session_id: "ses", message: "idle attempt" },
+    });
+    assert.equal(idleRejected.isError, true);
+    assert.equal(
+      (idleRejected._meta as Record<string, any>)["opencode-vm/error"].code,
+      "SESSION_NOT_BUSY",
+    );
+    gateway.followupError = undefined;
+
+    const aborted = await client.callTool({
+      name: "abort_session_turn",
+      arguments: { session_id: "ses" },
+    });
+    assert.equal(aborted.isError, undefined);
+    assert.equal(
+      (aborted.structuredContent as Record<string, unknown>)?.state,
+      "no_active_turn",
+    );
+    assert.deepEqual(gateway.abortCalls.at(-1), "ses");
+
+    for (const [name, args] of [
+      ["send_session_followup", { session_id: "ses" }],
+      ["send_session_followup", { session_id: "ses", message: "" }],
+      ["abort_session_turn", {}],
+      ["abort_session_turn", { session_id: "ses", extra: true }],
+    ] as const) {
+      const invalid = await client.callTool({ name, arguments: args });
+      assert.equal(invalid.isError, true);
+      assert.equal(
+        (invalid._meta as Record<string, any>)["opencode-vm/error"].code,
+        "INVALID_ARGUMENT",
+      );
+    }
 
     for (const request of [
       {

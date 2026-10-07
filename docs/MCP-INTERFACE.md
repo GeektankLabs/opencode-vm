@@ -550,6 +550,39 @@ Since 0.1.2, receipts also include `submitted_at` (ISO timestamp of the submissi
 
 `SESSION_BUSY`, `SUBMISSION_UNRESOLVED` and `SUBMISSION_UNCERTAIN` retain their existing admission behavior. References are consumed once an OpenCode prompt may have been admitted, including an uncertain response; do not retry that prompt automatically. A model-capability rejection occurs before admission and leaves the staged references available until expiry.
 
+### `send_session_followup`
+
+Added in adapter 0.1.29 (W1 session control). Write-capable, destructive, non-idempotent, open-world tool.
+
+Submits one follow-up message into a session that is **actively working**, like typing another message into a running session in the OpenCode Web UI. The admission is native: OpenCode's v1 runner accepts prompts while busy. The adapter adds no queue, scheduler, priority or mid-turn injection, and it does not promise that the text reaches the model during the currently streaming turn. After the current work ends normally, OpenCode runs admitted follow-ups as their own next turn; after an **abort**, they stay queued until the next prompt is admitted and then drain batched with it (verified on OpenCode 1.18.34).
+
+Input and output shapes match `send_message` (`session_id`, `message`, optional `attachments`; receipt with `message_id`, `state:"submitted"`, `submitted_at`, `activity_cursor`). Attachment mapping, image-capability checks, one-use references, WAL tracking and the `SUBMISSION_UNCERTAIN` no-blind-resend semantics are identical to `send_message`.
+
+Differences from `send_message`:
+
+- Requires `busy` or `retry` backend activity. An idle session is rejected with `SESSION_NOT_BUSY`; use `send_message` there, whose admission behavior stays unchanged.
+- Pending permissions/questions are checked on **both** OpenCode surfaces (the v1 `/permission` endpoint and the v2 session permission/question lists), because v1-runner permission requests are visible only on the v1 endpoint. Any pending input rejects the follow-up with `INPUT_REQUIRED`; it is never bypassed.
+- Managed-policy adoption does not apply: adoption is the idle work-admission boundary (the policy daemon refuses a busy session), so a follow-up inherits the session's current policy state. `create_session`/`send_message` remain the adoption points.
+- The receipt does not replace the unresolved-supersede guard: the running turn's `message_id` remains the guarded receipt, and the follow-up only adds its own tracked message.
+
+The returned `message_id` correlates through `get_session_status`/`get_task_result` exactly like a `send_message` receipt. Aborting a turn does not discard an already admitted follow-up. When a follow-up drains batched with a later prompt (the post-abort case), OpenCode attributes the resulting assistant reply to the newest user message only; the follow-up receipt then resolves through the existing nonterminal/superseded semantics and never becomes a fabricated completion.
+
+### `abort_session_turn`
+
+Added in adapter 0.1.29 (W1 session control). Write-capable, destructive, idempotent-hinted tool.
+
+Requests OpenCode's native turn abort (v1 `POST /session/{id}/abort`) for the session's active turn and verifies the outcome through existing stored reads. Acceptance is not confirmation; the tool reports exactly what verification observed:
+
+```json
+{"session_id":"ses_...","state":"aborted","aborted_message_id":"msg_...","observed_at":"...","activity_after":"idle","pending_input_after":{"permissions":0,"questions":0},"guidance":"..."}
+```
+
+- `aborted` — the newest stored assistant message shows the native abort marker (`MessageAbortedError`/`finish:"abort"`) that was not already present before the call. This is the only state that proves the turn stopped by abort.
+- `no_active_turn` — the session was idle at preflight; no backend write is performed. This is a non-destructive result, not a task failure.
+- `abort_uncertain` — the abort was accepted but its effect could not be verified within the bounded window (~8 s), or the newest turn reached its own terminal state before abort evidence appeared. Inspect `get_session_status`/`get_task_result`; do not assume the turn was aborted or completed.
+
+The tool never reports an aborted turn as completed or passed, and it never performs or promises a rollback: changes the turn already made remain. A pending permission request is cleared by the abort (a resolution path, not a bypass). Already admitted follow-ups are not discarded by the abort: they stay queued and drain with the next admitted prompt (batched into that turn). A session that turns idle between preflight and submission, or work running in OpenCode's separate v2 "SessionNext" runner (invisible to `/session/status`), can still yield `no_active_turn`/`abort_uncertain`; the stored-read evidence is what the result reports.
+
 ### `supersede_unresolved_submission`
 
 Added in adapter 0.1.11. This is an explicit write-capable operator escape hatch, not a `force` switch on ordinary submission. It combines superseding the exact unresolved guard and submitting the user's intended new message in one audited operation:
@@ -797,6 +830,7 @@ Tool failures return `isError: true` and sanitized text. Machine-readable error 
 | `INVALID_ARGUMENT` | A limit, cursor, message, or other argument is invalid. |
 | `SESSION_NOT_FOUND` | The session is absent or excluded by the endpoint's confinement rules. |
 | `SESSION_BUSY` | Backend work is active/retrying or an MCP write is in progress; inspect `reason`. |
+| `SESSION_NOT_BUSY` | `send_session_followup` was requested while the backend session is idle; use `send_message` for a new task. |
 | `SUBMISSION_UNRESOLVED` | An old receipt cannot be confirmed terminal or superseded by the verified latest later turn despite observed idle. The requested operation was not admitted. Inspect the original correlation ID and `reason`. |
 | `SUBMISSION_GUARD_CONFLICT` | The exact guarded receipt changed, is no longer current, or `request_id` was reused with different operation fields. Re-read the current guard and require fresh approval before creating another override request. |
 | `INPUT_REQUIRED` | A permission or question must be handled in Web UI or TUI. |

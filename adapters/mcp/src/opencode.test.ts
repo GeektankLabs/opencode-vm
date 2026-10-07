@@ -69,8 +69,11 @@ type FakeState = {
   }>;
   permissions: Array<Record<string, unknown>>;
   questions: Array<Record<string, unknown>>;
+  v1Permissions: Array<Record<string, unknown>>;
   promptCalls: Array<Record<string, unknown>>;
   promptAsync?: (parameters: Record<string, unknown>) => Promise<unknown>;
+  abortCalls: Array<Record<string, unknown>>;
+  abort?: (parameters: Record<string, unknown>) => Promise<unknown>;
   config: { default_agent?: string; model?: string };
   agents: Array<{
     name: string;
@@ -121,6 +124,11 @@ function fakeClient(state: FakeState) {
     project: {
       async current() {
         return { data: { id: "project-id", worktree: project } };
+      },
+    },
+    permission: {
+      async list() {
+        return { data: state.v1Permissions };
       },
     },
     v2: {
@@ -292,6 +300,11 @@ function fakeClient(state: FakeState) {
         state.promptCalls.push(parameters);
         return state.promptAsync?.(parameters);
       },
+      async abort(parameters: Record<string, unknown>) {
+        state.abortCalls.push(parameters);
+        if (state.abort) return state.abort(parameters);
+        return { data: true };
+      },
     },
   };
 }
@@ -357,7 +370,9 @@ function baseState(sessions = [session("ses_work")]): FakeState {
     messages: [],
     permissions: [],
     questions: [],
+    v1Permissions: [],
     promptCalls: [],
+    abortCalls: [],
     config: { default_agent: "plan", model: "provider/model" },
     agents: [
       { name: "build", mode: "primary" },
@@ -3121,4 +3136,473 @@ test("attention prefetch episodes back off bounded, alert once, retain pending a
   assert.equal(pendingLines(), 3, "episodes are per entry, not a global budget");
   pending = (await gateway.getProjectAttention({ lifecycle: ["new"] })).entries;
   assert.equal(pending.filter((entry) => entry.submitted_message_id === "user_z" && entry.lifecycle === "new").length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// W1 Session-Control: send_session_followup + abort_session_turn
+// Evidence base: D1/D2 JIT probe against disposable real OpenCode 1.18.34
+// (v1 prompt_async admits while busy and serializes natively; v1 abort marks
+// the assistant MessageAbortedError; v1-runner permissions only surface on
+// the v1 endpoint; idle abort is a non-destructive no-op).
+// ---------------------------------------------------------------------------
+
+function activeAssistant(
+  id: string,
+  parent: string,
+): FakeState["messages"][number] {
+  return {
+    info: {
+      id,
+      sessionID: "ses_work",
+      role: "assistant",
+      parentID: parent,
+      time: { created: 1 },
+    },
+    parts: [{ id: `part_${id}`, type: "step-start" }],
+  };
+}
+
+function abortedAssistant(
+  id: string,
+  parent: string,
+): FakeState["messages"][number] {
+  return {
+    info: {
+      id,
+      sessionID: "ses_work",
+      role: "assistant",
+      parentID: parent,
+      time: { created: 1, completed: 2 },
+      error: { name: "MessageAbortedError" },
+    },
+    parts: [{ id: `part_${id}`, type: "step-start" }],
+  };
+}
+
+function setAbortSeams(
+  gateway: OpenCodeGateway,
+  budgetMs: number,
+  pollMs: number,
+): void {
+  const seams = gateway as unknown as {
+    abortVerifyBudgetMs: number;
+    abortVerifyPollMs: number;
+  };
+  seams.abortVerifyBudgetMs = budgetMs;
+  seams.abortVerifyPollMs = pollMs;
+}
+
+test("W1: follow-up admits natively while busy and keeps the supersede guard bound to the running turn", async (t) => {
+  const state = baseState();
+  state.promptAsync = async (parameters) => {
+    state.messages.push(stored(parameters.messageID as string, "task"));
+  };
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  t.after(() => gateway.close());
+
+  const first = await gateway.sendMessage("ses_work", "original task");
+  assert.equal(state.promptCalls.length, 1);
+  const adoptionsAfterSend = managedCalls.length;
+  assert.ok(adoptionsAfterSend >= 1, "send_message adopts managed policy");
+
+  state.statuses["ses_work"] = { type: "busy" };
+  const followup = await gateway.sendFollowup("ses_work", "correction while busy");
+  assert.equal(followup.state, "submitted");
+  assert.equal(
+    managedCalls.length,
+    adoptionsAfterSend,
+    "a busy follow-up never re-triggers the idle adoption boundary",
+  );
+  assert.equal(followup.session_id, "ses_work");
+  assert.match(followup.message_id, /^msg_[0-9a-f]{32}$/u);
+  assert.notEqual(followup.message_id, first.message_id);
+  assert.ok(followup.submitted_at);
+
+  const call = state.promptCalls[1];
+  assert.ok(call);
+  assert.equal(call.sessionID, "ses_work");
+  assert.equal(call.messageID, followup.message_id);
+  assert.equal(call.agent, "build");
+  assert.deepEqual(call.model, { providerID: "provider", modelID: "model" });
+  assert.equal(call.variant, "high");
+  assert.deepEqual(call.parts, [{ type: "text", text: "correction while busy" }]);
+
+  // The follow-up adds a tracked message but never replaces the guard of the
+  // still-running original turn.
+  const details = await gateway.getSessionDetails("ses_work");
+  assert.equal(details.admission?.guarded_message_id, first.message_id);
+  assert.equal(state.promptCalls.length, 2);
+});
+
+test("W1: follow-up refuses an idle session with SESSION_NOT_BUSY and no backend write", async (t) => {
+  const state = baseState();
+  state.promptAsync = async (parameters) => {
+    state.messages.push(stored(parameters.messageID as string, "task"));
+  };
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  t.after(() => gateway.close());
+  await assert.rejects(
+    gateway.sendFollowup("ses_work", "idle follow-up"),
+    (error: AdapterError) => {
+      assert.equal(error.code, "SESSION_NOT_BUSY");
+      assert.match(error.message, /send_message/u);
+      return true;
+    },
+  );
+  assert.equal(state.promptCalls.length, 0);
+});
+
+test("W1: follow-up treats retry activity as actively working", async (t) => {
+  const state = baseState();
+  state.statuses["ses_work"] = { type: "retry" };
+  state.promptAsync = async (parameters) => {
+    state.messages.push(stored(parameters.messageID as string, "task"));
+  };
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  t.after(() => gateway.close());
+  const result = await gateway.sendFollowup("ses_work", "follow-up during retry");
+  assert.equal(result.state, "submitted");
+  assert.equal(state.promptCalls.length, 1);
+});
+
+test("W1: follow-up never bypasses pending input on the v1 or v2 surface", async (t) => {
+  // v1-runner permission (invisible on the v2 endpoint — probe evidence)
+  const s1 = baseState();
+  s1.statuses["ses_work"] = { type: "busy" };
+  s1.v1Permissions = [{ id: "per_1", sessionID: "ses_work", permission: "bash" }];
+  const g1 = new OpenCodeGateway(runtime(), fakeClient(s1) as never);
+  t.after(() => g1.close());
+  await assert.rejects(g1.sendFollowup("ses_work", "x"), {
+    code: "INPUT_REQUIRED",
+    reason: "pending_input",
+  });
+  assert.equal(s1.promptCalls.length, 0);
+
+  // v2 permission
+  const s2 = baseState();
+  s2.statuses["ses_work"] = { type: "busy" };
+  s2.permissions = [{ id: "per_2", sessionID: "ses_work" }];
+  const g2 = new OpenCodeGateway(runtime(), fakeClient(s2) as never);
+  t.after(() => g2.close());
+  await assert.rejects(g2.sendFollowup("ses_work", "x"), {
+    code: "INPUT_REQUIRED",
+    reason: "pending_input",
+  });
+  assert.equal(s2.promptCalls.length, 0);
+
+  // v2 question
+  const s3 = baseState();
+  s3.statuses["ses_work"] = { type: "busy" };
+  s3.questions = [{ id: "q_1", sessionID: "ses_work" }];
+  const g3 = new OpenCodeGateway(runtime(), fakeClient(s3) as never);
+  t.after(() => g3.close());
+  await assert.rejects(g3.sendFollowup("ses_work", "x"), {
+    code: "INPUT_REQUIRED",
+    reason: "pending_input",
+  });
+  assert.equal(s3.promptCalls.length, 0);
+
+  // A different session's v1 permission does not block this session.
+  const s4 = baseState();
+  s4.statuses["ses_work"] = { type: "busy" };
+  s4.v1Permissions = [{ id: "per_3", sessionID: "ses_other" }];
+  s4.promptAsync = async (parameters) => {
+    s4.messages.push(stored(parameters.messageID as string, "task"));
+  };
+  const g4 = new OpenCodeGateway(runtime(), fakeClient(s4) as never);
+  t.after(() => g4.close());
+  const admitted = await g4.sendFollowup("ses_work", "unblocked");
+  assert.equal(admitted.state, "submitted");
+  assert.equal(s4.promptCalls.length, 1);
+});
+
+test("W1: follow-up transport uncertainty never blind-resends; a different follow-up continues", async (t) => {
+  const state = baseState();
+  state.statuses["ses_work"] = { type: "busy" };
+  let fail = true;
+  state.promptAsync = async (parameters) => {
+    if (fail) throw new Error("transport lost");
+    state.messages.push(stored(parameters.messageID as string, "task"));
+    return {};
+  };
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  t.after(() => gateway.close());
+
+  await assert.rejects(
+    gateway.sendFollowup("ses_work", "uncertain follow-up"),
+    (error: AdapterError) => {
+      assert.equal(error.code, "SUBMISSION_UNCERTAIN");
+      assert.match(error.correlationId ?? "", /^msg_[0-9a-f]{32}$/u);
+      return true;
+    },
+  );
+  assert.equal(state.promptCalls.length, 1);
+
+  // The exact same immediate retry stays protected: no second backend call.
+  await assert.rejects(gateway.sendFollowup("ses_work", "uncertain follow-up"), {
+    code: "SUBMISSION_UNCERTAIN",
+  });
+  assert.equal(state.promptCalls.length, 1);
+
+  // A different authorized follow-up is an explicit continuation.
+  fail = false;
+  const next = await gateway.sendFollowup("ses_work", "different follow-up");
+  assert.equal(next.state, "submitted");
+  assert.equal(state.promptCalls.length, 2);
+});
+
+test("W1: the MCP write lock serializes follow-ups against concurrent writes", async (t) => {
+  const state = baseState();
+  state.statuses["ses_work"] = { type: "busy" };
+  let release!: () => void;
+  state.promptAsync = () =>
+    new Promise<void>((resolve) => {
+      release = resolve;
+    });
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  t.after(() => gateway.close());
+
+  const first = gateway.sendFollowup("ses_work", "held follow-up");
+  while (state.promptCalls.length < 1)
+    await new Promise((resolve) => setImmediate(resolve));
+
+  await assert.rejects(gateway.sendMessage("ses_work", "concurrent send"), {
+    code: "SESSION_BUSY",
+    reason: "write_in_progress",
+  });
+  await assert.rejects(gateway.sendFollowup("ses_work", "concurrent follow-up"), {
+    code: "SESSION_BUSY",
+    reason: "write_in_progress",
+  });
+  release();
+  await first;
+  assert.equal(state.promptCalls.length, 1);
+});
+
+test("W1: follow-up attachment mapping equals send_message and image capability is enforced", async (t) => {
+  const state = baseState();
+  state.statuses["ses_work"] = { type: "busy" };
+  const submittedParts: Array<unknown> = [];
+  state.promptAsync = async (parameters) => {
+    submittedParts.push(parameters.parts);
+    state.messages.push(stored(parameters.messageID as string, "task"));
+    return {};
+  };
+  const client = fakeClient(state);
+  let imageInput = false;
+  client.v2.model.list = async () => ({
+    data: {
+      data: [
+        {
+          id: "model",
+          providerID: "provider",
+          name: "Model",
+          enabled: true,
+          variants: [],
+          capabilities: { input: imageInput ? ["text", "image"] : ["text"] },
+        },
+      ],
+    },
+  });
+  const gateway = new OpenCodeGateway(runtime(), client as never);
+  t.after(() => gateway.close());
+
+  const png = Buffer.from([
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x00,
+  ]);
+  const image = await gateway.uploadAttachment(
+    "ses_work",
+    "mockup.png",
+    "image/png",
+    png.toString("base64"),
+  );
+  await assert.rejects(
+    gateway.sendFollowup("ses_work", "look at this", [image.attachment_id]),
+    { code: "MODEL_DOES_NOT_SUPPORT_ATTACHMENT_TYPE" },
+  );
+  assert.equal(state.promptCalls.length, 0);
+
+  imageInput = true;
+  await gateway.sendFollowup("ses_work", "look at this", [image.attachment_id]);
+  state.statuses = {};
+  const image2 = await gateway.uploadAttachment(
+    "ses_work",
+    "mockup.png",
+    "image/png",
+    png.toString("base64"),
+  );
+  await gateway.sendMessage("ses_work", "look at this", [image2.attachment_id]);
+  assert.equal(submittedParts.length, 2);
+  assert.deepEqual(submittedParts[0], submittedParts[1]);
+
+  const textBytes = Buffer.from("# Follow-up note\nCheck the corner case.\n");
+  const note = await gateway.uploadAttachment(
+    "ses_work",
+    "note.md",
+    "text/markdown",
+    textBytes.toString("base64"),
+  );
+  state.statuses["ses_work"] = { type: "busy" };
+  await gateway.sendFollowup("ses_work", "with notes", [note.attachment_id]);
+  const parts = (submittedParts[2] ?? []) as Array<Record<string, unknown>>;
+  assert.equal(parts[0]?.text, "with notes");
+  assert.equal(parts[1]?.type, "text");
+  assert.ok(String(parts[1]?.text).includes("[Attachment: note.md (text/markdown)]"));
+  assert.ok(String(parts[1]?.text).includes("Check the corner case."));
+});
+
+test("W1: follow-up validates message bounds and session confinement", async (t) => {
+  const state = baseState();
+  state.statuses["ses_work"] = { type: "busy" };
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  t.after(() => gateway.close());
+  await assert.rejects(gateway.sendFollowup("ses_work", ""), {
+    code: "INVALID_ARGUMENT",
+  });
+  await assert.rejects(gateway.sendFollowup("ses_work", "x".repeat(32_001)), {
+    code: "INVALID_ARGUMENT",
+  });
+  await assert.rejects(gateway.sendFollowup("ses_ghost", "foreign"), {
+    code: "SESSION_NOT_FOUND",
+  });
+  assert.equal(state.promptCalls.length, 0);
+});
+
+test("W1: abort verifies the stored aborted assistant and never claims completion", async (t) => {
+  const state = baseState();
+  state.statuses["ses_work"] = { type: "busy" };
+  state.messages.push(stored("user_t", "long task"));
+  const active = activeAssistant("assist_t", "user_t");
+  state.messages.push(active);
+  state.abort = async () => {
+    active.info.error = { name: "MessageAbortedError" };
+    delete state.statuses["ses_work"];
+    return { data: true };
+  };
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  t.after(() => gateway.close());
+
+  const result = await gateway.abortSessionTurn("ses_work");
+  assert.equal(result.state, "aborted");
+  assert.equal(result.aborted_message_id, "assist_t");
+  assert.equal(result.activity_after, "idle");
+  assert.equal(state.abortCalls.length, 1);
+  assert.equal(state.abortCalls[0]?.sessionID, "ses_work");
+  assert.match(result.guidance ?? "", /nothing was rolled back/u);
+  assert.ok(!["completed", "passed", "failed"].includes(result.state));
+});
+
+test("W1: abort on an idle session is a non-destructive no_active_turn without a backend write", async (t) => {
+  const state = baseState();
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  t.after(() => gateway.close());
+  const result = await gateway.abortSessionTurn("ses_work");
+  assert.equal(result.state, "no_active_turn");
+  assert.equal(result.aborted_message_id, undefined);
+  assert.equal(result.activity_after, "idle");
+  assert.deepEqual(result.pending_input_after, { permissions: 0, questions: 0 });
+  assert.match(result.guidance ?? "", /non-destructive/u);
+  assert.equal(state.abortCalls.length, 0);
+});
+
+test("W1: abort is allowed while a v1 permission is pending and reports it cleared", async (t) => {
+  const state = baseState();
+  state.statuses["ses_work"] = { type: "busy" };
+  state.v1Permissions = [{ id: "per_1", sessionID: "ses_work", permission: "bash" }];
+  state.messages.push(stored("user_p", "tool task"));
+  const active = activeAssistant("assist_p", "user_p");
+  state.messages.push(active);
+  state.abort = async () => {
+    active.info.error = { name: "MessageAbortedError" };
+    state.v1Permissions = [];
+    delete state.statuses["ses_work"];
+    return { data: true };
+  };
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  t.after(() => gateway.close());
+  const result = await gateway.abortSessionTurn("ses_work");
+  assert.equal(result.state, "aborted");
+  assert.deepEqual(result.pending_input_after, { permissions: 0, questions: 0 });
+});
+
+test("W1: abort racing a self-completing turn stays abort_uncertain", async (t) => {
+  const state = baseState();
+  state.statuses["ses_work"] = { type: "busy" };
+  state.messages.push(stored("user_r", "fast task"));
+  const active = activeAssistant("assist_r", "user_r");
+  state.messages.push(active);
+  state.abort = async () => {
+    active.info.finish = "stop";
+    delete state.statuses["ses_work"];
+    return { data: true };
+  };
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  t.after(() => gateway.close());
+  const result = await gateway.abortSessionTurn("ses_work");
+  assert.equal(result.state, "abort_uncertain");
+  assert.equal(result.aborted_message_id, undefined);
+  assert.match(result.guidance ?? "", /terminal state/u);
+});
+
+test("W1: abort without verifiable evidence within the budget stays abort_uncertain", async (t) => {
+  const state = baseState();
+  state.statuses["ses_work"] = { type: "busy" };
+  state.messages.push(stored("user_u", "stuck task"));
+  state.messages.push(activeAssistant("assist_u", "user_u"));
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  t.after(() => gateway.close());
+  setAbortSeams(gateway, 200, 50);
+  const result = await gateway.abortSessionTurn("ses_work");
+  assert.equal(result.state, "abort_uncertain");
+  assert.equal(result.activity_after, "busy");
+  assert.equal(state.abortCalls.length, 1);
+  assert.match(result.guidance ?? "", /could not be verified/u);
+});
+
+test("W1: abort does not misattribute a pre-existing aborted turn", async () => {
+  // (a) a NEW aborted marker on the running turn is attributed correctly even
+  // though an older aborted turn exists in history.
+  const s1 = baseState();
+  s1.statuses["ses_work"] = { type: "busy" };
+  s1.messages.push(stored("user_old", "old task"));
+  s1.messages.push(abortedAssistant("assist_old", "user_old"));
+  s1.messages.push(stored("user_new", "new task"));
+  const activeNew = activeAssistant("assist_new", "user_new");
+  s1.messages.push(activeNew);
+  s1.abort = async () => {
+    activeNew.info.error = { name: "MessageAbortedError" };
+    delete s1.statuses["ses_work"];
+    return { data: true };
+  };
+  const g1 = new OpenCodeGateway(runtime(), fakeClient(s1) as never);
+  const r1 = await g1.abortSessionTurn("ses_work");
+  assert.equal(r1.state, "aborted");
+  assert.equal(r1.aborted_message_id, "assist_new");
+  await g1.close();
+
+  // (b) when the newest assistant was ALREADY aborted before the call and the
+  // backend changes nothing, the stale marker is never re-reported as this
+  // call's abort.
+  const s2 = baseState();
+  s2.statuses["ses_work"] = { type: "busy" };
+  s2.messages.push(stored("user_x", "task"));
+  s2.messages.push(abortedAssistant("assist_x", "user_x"));
+  const g2 = new OpenCodeGateway(runtime(), fakeClient(s2) as never);
+  setAbortSeams(g2, 200, 50);
+  const r2 = await g2.abortSessionTurn("ses_work");
+  assert.equal(r2.state, "abort_uncertain");
+  assert.equal(r2.aborted_message_id, undefined);
+  await g2.close();
+});
+
+test("W1: send_message keeps its exact SESSION_BUSY semantics on a busy session", async (t) => {
+  const state = baseState();
+  state.statuses["ses_work"] = { type: "busy" };
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  t.after(() => gateway.close());
+  await assert.rejects(gateway.sendMessage("ses_work", "normal task"), {
+    code: "SESSION_BUSY",
+    reason: "backend_active",
+  });
+  assert.equal(state.promptCalls.length, 0);
 });

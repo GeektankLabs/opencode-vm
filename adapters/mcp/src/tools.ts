@@ -913,6 +913,29 @@ const supersedeSubmissionOutputSchema = z
       .optional(),
   })
   .strict();
+const sendFollowupInputSchema = z
+  .object({
+    session_id: sessionId,
+    message: z.string().min(1).max(32_000),
+    attachments: z.array(z.string().min(1).max(256)).max(32).optional(),
+  })
+  .strict();
+const abortSessionTurnInputSchema = z
+  .object({
+    session_id: sessionId,
+  })
+  .strict();
+const abortSessionTurnOutputSchema = z
+  .object({
+    session_id: z.string(),
+    state: z.enum(["aborted", "no_active_turn", "abort_uncertain"]),
+    aborted_message_id: z.string().optional(),
+    observed_at: z.string(),
+    activity_after: activitySchema,
+    pending_input_after: pendingSchema,
+    guidance: z.string().optional(),
+  })
+  .strict();
 const createSessionOutputSchema = z
   .object({
     project: projectSchema,
@@ -1408,6 +1431,47 @@ export function createMcpServer(
     },
   );
 
+  const sendFollowupHandler = safeHandler(
+    async ({
+      session_id,
+      message,
+      attachments,
+    }: z.output<typeof sendFollowupInputSchema>) => {
+      if (!gateway.sendFollowup)
+        throw new AdapterError(
+          "UNSUPPORTED_CONFIGURATION",
+          "Session follow-up admission is not available on this connector.",
+        );
+      const result = await gateway.sendFollowup(
+        session_id,
+        message,
+        attachments,
+      );
+      return success(
+        result,
+        `Admitted follow-up ${result.message_id} into session ${result.session_id}${result.attachments?.length ? ` with ${result.attachments.length} attachment${result.attachments.length === 1 ? "" : "s"}` : ""}. OpenCode runs it natively as the next turn; correlate it with get_session_status before sending anything else.`,
+      );
+    },
+  );
+  const abortSessionTurnHandler = safeHandler(
+    async ({ session_id }: z.output<typeof abortSessionTurnInputSchema>) => {
+      if (!gateway.abortSessionTurn)
+        throw new AdapterError(
+          "UNSUPPORTED_CONFIGURATION",
+          "Turn abort is not available on this connector.",
+        );
+      const result = await gateway.abortSessionTurn(session_id);
+      return success(
+        result,
+        result.state === "aborted"
+          ? `Turn abort verified for session ${result.session_id} via stored message ${result.aborted_message_id}. Executed changes remain; nothing was rolled back.`
+          : result.state === "no_active_turn"
+            ? `Session ${result.session_id} had no active turn; nothing was aborted (non-destructive result, not a task failure).`
+            : `Abort of session ${result.session_id} was requested but not verified; inspect get_session_status before any follow-up submission.`,
+      );
+    },
+  );
+
   const uploadAttachmentHandler = safeHandler(
     async ({
       session_id,
@@ -1728,6 +1792,32 @@ export function createMcpServer(
     supersedeSubmissionHandler,
   );
 
+  server.registerTool(
+    "send_session_followup",
+    {
+      title: "Send OpenCode Session Follow-up",
+      description:
+        "Admit one follow-up message into a session that is actively working (busy or retrying), like sending another message into a running session in the OpenCode Web UI. OpenCode admits it natively while busy and runs it after the current work ends; if the current work is aborted, admitted follow-ups drain batched with the next admitted prompt. No adapter-side queue, retry, priority or mid-turn injection. For an idle session use send_message instead (SESSION_NOT_BUSY). Pending permissions/questions are never bypassed (INPUT_REQUIRED). Non-idempotent: do not blindly retry an uncertain request; SUBMISSION_UNCERTAIN means admission may already have occurred. Returns the stable message_id; correlate it with get_session_status or get_task_result.",
+      inputSchema: sendFollowupInputSchema,
+      outputSchema: sendMessageOutputSchema,
+      annotations: writeAnnotations,
+    },
+    sendFollowupHandler,
+  );
+
+  server.registerTool(
+    "abort_session_turn",
+    {
+      title: "Abort OpenCode Session Turn",
+      description:
+        "Request a native abort of the session's active turn and verify the outcome through stored reads. Acceptance is not confirmation: state=aborted is only reported with a stored aborted assistant message; otherwise no_active_turn (idle; non-destructive, nothing aborted) or abort_uncertain (inspect get_session_status before proceeding). Never reports a task as completed or passed. No rollback: already-executed changes remain. Queued follow-ups survive the abort; OpenCode drains them with the next admitted prompt. A pending permission request is cleared by the abort, not bypassed.",
+      inputSchema: abortSessionTurnInputSchema,
+      outputSchema: abortSessionTurnOutputSchema,
+      annotations: { ...writeAnnotations, idempotentHint: true },
+    },
+    abortSessionTurnHandler,
+  );
+
   server.server.setRequestHandler(
     CallToolRequestSchema,
     async (request, extra) => {
@@ -1871,6 +1961,20 @@ export function createMcpServer(
               supersedeSubmissionOutputSchema,
               input,
               supersedeSubmissionHandler,
+            );
+          case "send_session_followup":
+            return validatedToolCall(
+              sendFollowupInputSchema,
+              sendMessageOutputSchema,
+              input,
+              sendFollowupHandler,
+            );
+          case "abort_session_turn":
+            return validatedToolCall(
+              abortSessionTurnInputSchema,
+              abortSessionTurnOutputSchema,
+              input,
+              abortSessionTurnHandler,
             );
           case "upload_attachment":
             return validatedToolCall(
