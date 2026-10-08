@@ -2487,6 +2487,8 @@ export function createMcpServer(
             return validatedToolCall(z.object({}).strict(), modelPolicyOutput, input, modelPolicyHandler);
           case "get_recommended_runtime":
             return validatedToolCall(recommendedInput, recommendedOutput, input, recommendedHandler);
+          case "set_project_model_policy_fallback":
+            return validatedToolCall(policyFallbackInput, modelPolicyOutput, input, setFallbackHandler);
           case "get_project_activity":
             return validatedToolCall(
               activityInput,

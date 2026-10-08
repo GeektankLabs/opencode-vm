@@ -37,3 +37,13 @@ source_file="$HOME/bin/opencode-vm"
 install_cmd > "$TMP/install.log"
 [[ -f "$HOME/bin/opencode-vm" && -x "$HOME/bin/opencode-vm" ]]
 printf '%s\n' 'ok - install replaces an existing symlink and executable; Hub caches are ignored'
+
+# The documented direct and symlink start depend on the executable bit: a lost
+# mode exits 126 before any command runs and is invisible to bash/source tests.
+[[ -x "$ROOT/opencode-vm.sh" ]]
+direct="$(OCVM_DISABLE_UPDATE_CHECK=1 "$ROOT/opencode-vm.sh" version)"
+symlink="$TMP/opencode-vm-link"
+ln -s "$ROOT/opencode-vm.sh" "$symlink"
+linked="$(OCVM_DISABLE_UPDATE_CHECK=1 "$symlink" version)"
+[[ "$direct" == opencode-vm\ v* && "$linked" == "$direct" ]]
+printf '%s\n' 'ok - documented direct and symlink start stay executable and agree'

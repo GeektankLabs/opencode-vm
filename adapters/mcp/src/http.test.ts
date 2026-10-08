@@ -457,6 +457,84 @@ test("MCP 2.0 discovery and Events methods stay on the authenticated loopback en
   assert.equal((await post("events/list", "events/list", false)).status, 401);
 });
 
+test("final fallback write is callable on both protocol paths with commit, CAS and catalog refusal", async (t) => {
+  const project = await mkdtemp(join(tmpdir(), "policy-wire-"));
+  t.after(() => rm(project, { recursive: true, force: true }));
+  const selection = { provider_id: "provider", model_id: "model", variant: "high" };
+  const directory = join(project, ".opencode-vm");
+  const policyPath = join(directory, "agent-control.json");
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const original = `${JSON.stringify({ schemaVersion: 1, revision: 1, updatedAt: "2026-10-01T00:00:00Z",
+    profiles: { deep: selection, standard: null, execution: null } })}\n`;
+  await writeFile(policyPath, original);
+
+  const descriptor = { ...runtime(), project };
+  const adapter = new McpHttpServer(descriptor, token, new FakeGateway());
+  const port = await adapter.start();
+  t.after(() => adapter.close());
+
+  // SDK wire path (pinned 2025-11-25 baseline): the new tool must actually execute.
+  const transport = new StreamableHTTPClientTransport(
+    new URL(`http://127.0.0.1:${port}/mcp`),
+    { requestInit: { headers: { "X-OCVM-MCP-Token": token } } },
+  );
+  const client = new Client({ name: "ocvm-mcp-fallback-test", version: "1.0.0" });
+  try {
+    await client.connect(transport);
+    const written = await client.callTool({ name: "set_project_model_policy_fallback",
+      arguments: { revision: 1, fallback: { mode: "degrading", selection } } });
+    assert.notEqual(written.isError, true, JSON.stringify(written.content));
+    const policy = written.structuredContent as { schema_version: number; revision: number;
+      final_fallback: { mode: string; selection: unknown; status: string } | null; profiles: { deep: { selection: unknown } } };
+    assert.equal(policy.schema_version, 3);
+    assert.equal(policy.revision, 2);
+    assert.equal(policy.final_fallback?.mode, "degrading");
+    assert.equal(policy.final_fallback?.status, "available");
+    assert.deepEqual(policy.profiles.deep.selection, selection, "regular profile mappings survive the partial fallback write");
+  } finally {
+    await client.close().catch(() => undefined);
+  }
+  const stored = JSON.parse(await readFile(policyPath, "utf8"));
+  assert.deepEqual(stored.finalFallback, { mode: "degrading", selection });
+  assert.equal(JSON.parse(await readFile(join(directory, "agent-control.schema1-rev1.backup.json"), "utf8")).schemaVersion, 1,
+    "the schema 1 original was backed up before the schema 3 upgrade");
+
+  // Modern 2026-07-28 wire path uses the same dispatch.
+  const post = async (name: string, args: Record<string, unknown>) => fetch(`http://127.0.0.1:${port}/mcp`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      "X-OCVM-MCP-Token": token,
+      "Mcp-Method": "tools/call",
+      "MCP-Protocol-Version": "2026-07-28",
+      "Mcp-Name": name,
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call",
+      params: { name, arguments: args, _meta: { "io.modelcontextprotocol/protocolVersion": "2026-07-28" } } }),
+  });
+  const cleared = await post("set_project_model_policy_fallback", { revision: 2, fallback: null });
+  const clearedBody = await cleared.json() as { result?: { structuredContent?: { schema_version?: number; revision?: number; final_fallback?: unknown } } };
+  assert.equal(clearedBody.result?.structuredContent?.schema_version, 3, "clear never downgrades the schema");
+  assert.equal(clearedBody.result?.structuredContent?.revision, 3);
+  assert.equal(clearedBody.result?.structuredContent?.final_fallback, null);
+  assert.equal(JSON.parse(await readFile(policyPath, "utf8")).finalFallback, null);
+
+  const beforeStale = await readFile(policyPath);
+  const stale = await post("set_project_model_policy_fallback", { revision: 1, fallback: { mode: "total", selection } });
+  const staleBody = await stale.json() as { result?: { isError?: boolean; _meta?: Record<string, { code?: string }> } };
+  assert.equal(staleBody.result?.isError, true);
+  assert.equal(staleBody.result?._meta?.["opencode-vm/error"]?.code, "POLICY_REVISION_CONFLICT");
+  assert.deepEqual(await readFile(policyPath), beforeStale, "a stale revision never writes");
+
+  const invalid = await post("set_project_model_policy_fallback",
+    { revision: 3, fallback: { selection: { provider_id: "provider", model_id: "model", variant: "gone" } } });
+  const invalidBody = await invalid.json() as { result?: { isError?: boolean; _meta?: Record<string, { code?: string }> } };
+  assert.equal(invalidBody.result?.isError, true);
+  assert.equal(invalidBody.result?._meta?.["opencode-vm/error"]?.code, "SELECTION_UNAVAILABLE");
+  assert.deepEqual(await readFile(policyPath), beforeStale, "an unavailable catalog selection never writes");
+});
+
 test("official MCP client discovers thirty-six stateless HTTP tools and invokes session tools by ID", async () => {
   const gateway = new FakeGateway();
   const server = new McpHttpServer(runtime(), token, gateway);
