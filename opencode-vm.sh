@@ -34,7 +34,7 @@ OPENLIVE_PREVIOUS_COMMAND="$OPENLIVE_DIR/previous-command"
 OPENLIVE_AUTH_MARKER="__opencode_vm_openlive__"
 OPENLIVE_LOCK_PATH=""
 OPENLIVE_ADAPTER_VERSION="0.1.7"
-OPENLIVE_ADAPTER_TAG="v0.7.22"
+OPENLIVE_ADAPTER_TAG="v0.7.23"
 OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.7.tar"
 OPENLIVE_ADAPTER_SHA256="39a50c5127b0a577b54e4790b5c3c1f463b35a52b42c4343aa639dcea53bad47"
 OPENLIVE_ACP_SDK_VERSION="1.2.1"
@@ -45,14 +45,14 @@ OPENLIVE_MANAGER_PROMPT="You manage an OpenLive voice call. The voice_sessions t
 MCP_CONNECTOR_DIR="$SHARE_ROOT/mcp-connector"
 MCP_ADAPTER_CACHE_ROOT="$MCP_CONNECTOR_DIR/adapters"
 MCP_ADAPTER_VERSION="0.1.34"
-MCP_ADAPTER_TAG="v0.7.22"
+MCP_ADAPTER_TAG="v0.7.23"
 MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.34.tar"
 MCP_ADAPTER_SHA256="2e09e5d8564b73d96fbfd810b54ab30d9e83851961bc816bcaaa94a139a66a05"
 MCP_SDK_VERSION="1.30.1"
 MCP_OPENCODE_SDK_VERSION="1.18.21"
 MCP_TESTED_PROTOCOL_VERSION="2025-11-25"
 MCP_TUNNEL_DIR="$SHARE_ROOT/mcp-tunnel/openai"
-HUB_ASSET_TAG="v0.7.22"
+HUB_ASSET_TAG="v0.7.23"
 HUB_ASSET_FILENAME="opencode-vm-hub-1.tar"
 HUB_ASSET_SHA256="7842dc3167c22eac33ed8c2f1d2a96d60938f5694e079690ca822304ebd45be0"
 
@@ -200,6 +200,7 @@ DEFAULT_ECC_REF="main"
 # Skills subsystem (registry-driven since v0.4.5 — skills/registry.json is the source of truth)
 SKILLS_ENV="$SHARE_ROOT/skills.env"
 SKILLS_REGISTRY_CACHE="$SHARE_ROOT/skills-registry"   # fallback if script is not co-located with bundled skills/
+ORCHESTRATOR_SKILL_CACHE="$SHARE_ROOT/orchestrator-skill"
 SKILLS_DEFAULTS_VERSION_CURRENT=1
 
 # MCPs subsystem (separate from skills: MCPs are servers + credentials; skills are knowledge)
@@ -286,7 +287,7 @@ TASKBOARD_ARM64_SHA256="3749fb985f544fdb6788ba1dff69761e599ff82b3fe86d39ca54307c
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.7.22"
+OCVM_VERSION="0.7.23"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -2813,6 +2814,13 @@ skills_mount_for_session() {
 
     local src_root
     src_root="$(skills_source_root_for "$pkg" 2>/dev/null)" || continue
+    # An enabled management skill must not silently disappear in standalone mode.
+    if [[ "$pkg" == "orchestrator" &&
+          ( ! -r "$src_root/opencode-session-orchestrator/SKILL.md" ||
+            ! -s "$src_root/opencode-session-orchestrator/SKILL.md" ) ]]; then
+      echo "[skills] Enabled orchestrator skill source unavailable. Use the source checkout with integrations/chatgpt/opencode-session-orchestrator/SKILL.md present; session preparation stopped." >&2
+      return 1
+    fi
     # For bundled skill packs: refresh the cache if the bundled dir isn't available.
     if [[ "$rtype" == "single_bundled" ]]; then
       local _dir_name
