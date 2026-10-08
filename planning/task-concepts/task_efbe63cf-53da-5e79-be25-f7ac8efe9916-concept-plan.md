@@ -144,3 +144,21 @@ Host-persistent gesichert: Session-Share `…/sessions/66370db6a9e3f88af333b4d90
 
 Wiederaufnahme nur mit neuem Operatorauftrag: Git-/Journal-/Runtime-Frischprüfung zuerst, keine Annahme aus diesem Checkpoint, keine automatische Fortsetzung. **PAUSED.**
 
+## 22 Wiederaufnahme 2026-10-09 (nach VM-Neustart) — HP-Folgeticket Management-MCP-Bindung + P1
+
+**Operator-Rückmeldung (bestätigt, keine unabhängige Testaussage):** Der Nutzer bestätigt, dass die installierte/live Version läuft, das Fallback funktioniert und in Main ist. Das wird als **Operator-Rückmeldung** festgehalten — **nicht** als unabhängiger vollständiger Timeout/Quota-/Langzeit-Test. Die externen Abnahme-/Kalibrierungslücken (echte Providerfehlertexte, Langlauf, Native/macOS/Lima) bleiben **UNVERIFIED**. Kein erneuter Installations-/Fallback-Einstieg aus diesem Anlass.
+
+**Hoch priorisiertes Folgeticket (HP):** Management-Journal #37 (`1555228e…`) und #38 (`79b7ba61…`, 2026-10-08T18:51Z) beauftragen das Korrekturkonzept **„Management-MCP-Bindung, Orchestrator-Skill-Bereitstellung und native Subtask-Delegation der Monitor-Manager"** (Priorität High; #38 wörtlich „Priorität High bleibt"). Das vollständige CONCEPT_ONLY-Dokument ist erhalten und **hiermit kanonisch gebunden**:
+- Pfad (task-eigener Worktree): `.opencode-vm/worktrees/task_efbe63cf-monitor-mcp-konzept/planning/task-concepts/task_efbe63cf-53da-5e79-be25-f7ac8efe9916-monitor-mcp-konzept.md`
+- Rolle: `monitor_mcp_concept` · Status CONCEPT_ONLY · SHA-256 `fad92f3efbde6eef6e2f4dd64984921785fc0b706c1484b3aa13e36b36ec7993` (37050 B) · Branch `task/efbe63cf-monitor-mcp-konzept`, Base `259454d3`.
+- Belegter Kern (U1): `orchestrator`-Paket inaktiv ⇒ Skill nicht gemountet ⇒ `mcp_self_register`-Gate false ⇒ kein `ocvm-self` in der Session-Config ⇒ Manager ohne Board-/Dispatch-Tools (`MANAGER_CONNECTOR_NOT_BOUND`). Ursachen U2–U7, Alternativen A–D (Empfehlung D) und Phasen P1–P6: Konzept §3/§4/§7.
+
+**P1 (Skill-Provisioning-Fix) — UMGESETZT als Kandidat (nicht integriert):**
+- Fix: `ORCHESTRATOR_SKILL_CACHE` in der Konstanten-Region definiert; `skills_mount_for_session` bricht für ein aktiviertes `orchestrator`-Paket ohne lesbare/nichtleere Quell-`SKILL.md` mit klarer Meldung ab (`return 1`) statt still zu überspringen. Keine Produktentscheidung (D1–D8) vorweggenommen; Checkout-/Offline-Cache-/Opt-out-Pfad unverändert.
+- Kandidat `5ebd0d66c1c79756d605ba32e161f471cd9d733f` (Branch `task/efbe63cf-skill-source-resume`, Worktree `.opencode-vm/worktrees/task_efbe63cf-skill-source-resume`, Parent/Base Main `f28898a783ded7f2c02cda5d340b9b43150bff9e`), 2 Dateien, Script 0.7.22→0.7.23, drei Tags `v0.7.23`.
+- Belege grün: neuer Test `tests/orchestrator_skill_source_test.sh` 5/5, `besprechung_test.sh` grün, `bash -n`/`shellcheck --severity=error`, `release_metadata` 5/5, `release_state` 5/5.
+- Vorbestehender Fremdbefund (nicht diesem Patch zuzurechnen): `tests/skills_orchestrator_test.sh` erwartet r43, Bundle-Stand ist r45 ⇒ scheitert identisch am Base; separater Bestandsdefekt.
+- **Nicht getan:** keine Main-Integration, kein Push/Tag/Release/Install/Deploy/Restart, keine Produkt-/Board-/Policy-/Live-/Monitor-Änderung, fremde Dirty-Dateien unangetastet.
+
+**Reihenfolge:** P1-QC (exakt `5ebd0d6`) → lokale Main-Integration durch bestehenden Owner → danach P2–P6 **nur mit Operatorauftrag** und nach D1–D8-Entscheid. F2 bleibt separat (D6). Keine automatische Fortsetzung.
+
