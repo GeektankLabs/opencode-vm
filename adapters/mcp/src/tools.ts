@@ -17,7 +17,7 @@ import type { DocumentRole } from "./taskboard.js";
 import { traceToolCall } from "./diagnostics.js";
 import { SUPPORTED_ATTACHMENT_TYPES } from "./attachments.js";
 import { PROFILE_NAMES, describePolicy, profileState, readPolicy, resolveProfile, type PolicySelection } from "./agent-control.js";
-import { commitFinalFallback } from "./policy-commit.js";
+import { commitFinalFallback, commitProfileFallback, commitStrategies } from "./policy-commit.js";
 import {
   defaultMonitorRecord,
   monitorHistory,
@@ -476,14 +476,26 @@ const profileSelection = z.object({ provider_id: sessionId, model_id: sessionId,
 const profileStatus = z.enum(["available", "unconfigured", "provider_unavailable", "model_unavailable",
   "variant_unavailable", "catalog_unavailable", "catalog_incomplete"]);
 const profileEntry = z.object({ selection: profileSelection.nullable(), status: profileStatus }).strict();
+const strategySwitch = z.boolean().nullable();
+const strategySwitches = z.object({ degrading: strategySwitch, provider_skip: strategySwitch }).strict();
+const candidateOrderEntry = z.array(z.string()).nullable();
 const modelPolicyOutput = z.object({
-  project_id: z.string(), schema_version: z.union([z.literal(1), z.literal(2), z.literal(3)]), revision: z.number().int().nonnegative(),
+  project_id: z.string(), schema_version: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]), revision: z.number().int().nonnegative(),
   updated_at: z.string().nullable(), catalog_status: z.enum(["complete", "incomplete", "unavailable"]),
   profiles: z.object({ deep: profileEntry, standard: profileEntry, execution: profileEntry, design: profileEntry, review: profileEntry }).strict(),
   fallbacks: z.object({ design: z.array(z.enum(PROFILE_NAMES)), review: z.array(z.enum(PROFILE_NAMES)) }).strict(),
   final_fallback: z.object({
     mode: z.enum(["total", "degrading"]), selection: profileSelection, status: profileStatus,
   }).strict().nullable(),
+  profile_fallbacks: z.object({ deep: profileEntry, standard: profileEntry, execution: profileEntry, design: profileEntry, review: profileEntry }).strict(),
+  strategies: strategySwitches,
+  routing: z.object({
+    regime: z.enum(["legacy_final_fallback", "per_profile"]),
+    legacy_final_stage_applies: z.boolean(),
+    strategies_effective: z.object({ degrading: z.boolean(), provider_skip: z.boolean() }).strict(),
+    candidate_order: z.object({ deep: candidateOrderEntry, standard: candidateOrderEntry, execution: candidateOrderEntry,
+      design: candidateOrderEntry, review: candidateOrderEntry }).strict().nullable(),
+  }).strict(),
 }).strict();
 const recommendedInput = z.object({ profile: z.enum(PROFILE_NAMES) }).strict();
 const recommendedOutput = z.object({
@@ -494,6 +506,15 @@ const recommendedOutput = z.object({
 const policyFallbackInput = z.object({
   revision: z.number().int().nonnegative(),
   fallback: z.object({ mode: z.enum(["total", "degrading"]).optional(), selection: profileSelection }).strict().nullable(),
+}).strict();
+const policyProfileFallbackInput = z.object({
+  revision: z.number().int().nonnegative(),
+  profile: z.enum(PROFILE_NAMES),
+  fallback: profileSelection.nullable(),
+}).strict();
+const policyStrategiesInput = z.object({
+  revision: z.number().int().nonnegative(),
+  strategies: strategySwitches,
 }).strict();
 const runtimeUpdateOutput = z
   .object({
@@ -2083,7 +2104,7 @@ export function createMcpServer(
   });
   server.registerTool(
     "get_project_model_policy",
-    { title: "Get Project Model Policy", description: "Read schema 1/2 preferences for deep, standard, execution, design and review with catalog validation and fixed absence fallbacks.",
+    { title: "Get Project Model Policy", description: "Read schema 1/2/3/4 preferences for deep, standard, execution, design and review with catalog validation and fixed absence fallbacks. Additive schema-4 fields: profile_fallbacks (each profile's optional own fallback), strategies (degrading/provider_skip, null means not explicitly set) and routing (regime, legacy_final_stage_applies, strategies_effective, candidate_order).",
       inputSchema: z.object({}).strict(), outputSchema: modelPolicyOutput, annotations: readOnlyAnnotations },
     modelPolicyHandler,
   );
@@ -2111,6 +2132,39 @@ export function createMcpServer(
       description: "Set, change, or clear (fallback:null) the configured final error-fallback runtime in the project policy. Mode total is the default, degrading is optional; both are separate from the design/review resolution fallbacks. An exact provider/model/variant from the current catalog is required when setting. Uses revision CAS with an exact-bytes backup on the first schema 3 upgrade; clearing never downgrades the schema, and regular profile mappings are preserved. The response is the committed policy readback.",
       inputSchema: policyFallbackInput, outputSchema: modelPolicyOutput, annotations: { ...writeAnnotations, openWorldHint: false } },
     setFallbackHandler,
+  );
+  const setProfileFallbackHandler = safeHandler(async ({ revision, profile, fallback }: z.output<typeof policyProfileFallbackInput>) => {
+    if (!runtime) throw new AdapterError("UNSUPPORTED_CONFIGURATION", "Project runtime is unavailable.");
+    const catalog = await gateway.getSessionRuntimeOptions().catch(() => undefined);
+    const selection = fallback === null ? null : (fallback as PolicySelection);
+    if (selection !== null) {
+      if (!catalog || catalog.truncated) throw new AdapterError("CATALOG_UNAVAILABLE", "A complete runtime catalog is required to validate a profile fallback; the policy was not changed.");
+      const status = profileState(selection, catalog);
+      if (status !== "available") throw new AdapterError("SELECTION_UNAVAILABLE", `Profile fallback selection is ${status}; the policy was not changed.`);
+    }
+    const updated = await commitProfileFallback(runtime, revision, profile, selection);
+    return success(describePolicy(runtime, updated, catalog), "Profile fallback committed; this response is the policy readback. It is separate from the legacy global final fallback and from the design/review resolution fallbacks.");
+  });
+  server.registerTool(
+    "set_project_model_policy_profile_fallback",
+    { title: "Set Project Model Policy Profile Fallback",
+      description: "Set, change, or clear (fallback:null) one profile's OPTIONAL own error-fallback runtime (deep, standard, execution, design or review). Additive schema 4: uses revision CAS with an exact-bytes backup on the first schema 4 upgrade; clearing never downgrades the schema. The main profile mapping, the legacy global final fallback and both strategy switches are preserved. An exact catalog-listed provider/model/variant is required when setting. The response is the committed policy readback including routing.regime and routing.candidate_order.",
+      inputSchema: policyProfileFallbackInput, outputSchema: modelPolicyOutput, annotations: { ...writeAnnotations, openWorldHint: false } },
+    setProfileFallbackHandler,
+  );
+  const setStrategiesHandler = safeHandler(async ({ revision, strategies }: z.output<typeof policyStrategiesInput>) => {
+    if (!runtime) throw new AdapterError("UNSUPPORTED_CONFIGURATION", "Project runtime is unavailable.");
+    const catalog = await gateway.getSessionRuntimeOptions().catch(() => undefined);
+    const updated = await commitStrategies(runtime, revision,
+      { degrading: strategies.degrading, providerSkip: strategies.provider_skip });
+    return success(describePolicy(runtime, updated, catalog), "Fallback strategies committed; this response is the policy readback. Both switches are written explicitly; null means not explicitly set and is never a silently chosen default.");
+  });
+  server.registerTool(
+    "set_project_model_policy_strategies",
+    { title: "Set Project Model Policy Fallback Strategies",
+      description: "Set the two independent additive schema-4 fallback-strategy switches: degrading (continue with the next regular profile after an own fallback) and provider_skip (skip remaining candidates of an already failed provider identity, including profile fallbacks). Both must be sent explicitly as true, false or null (null = not explicitly set, surfaced as strategies_effective). Uses revision CAS with an exact-bytes backup on the first schema 4 upgrade; clearing both never downgrades the schema, and all profile mappings plus the legacy global final fallback are preserved. The response is the committed policy readback.",
+      inputSchema: policyStrategiesInput, outputSchema: modelPolicyOutput, annotations: { ...writeAnnotations, openWorldHint: false } },
+    setStrategiesHandler,
   );
   server.registerTool(
     "get_project_activity",
@@ -2555,6 +2609,10 @@ export function createMcpServer(
             return validatedToolCall(recommendedInput, recommendedOutput, input, recommendedHandler);
           case "set_project_model_policy_fallback":
             return validatedToolCall(policyFallbackInput, modelPolicyOutput, input, setFallbackHandler);
+          case "set_project_model_policy_profile_fallback":
+            return validatedToolCall(policyProfileFallbackInput, modelPolicyOutput, input, setProfileFallbackHandler);
+          case "set_project_model_policy_strategies":
+            return validatedToolCall(policyStrategiesInput, modelPolicyOutput, input, setStrategiesHandler);
           case "get_project_activity":
             return validatedToolCall(
               activityInput,

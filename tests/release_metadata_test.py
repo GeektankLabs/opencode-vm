@@ -18,6 +18,7 @@ STEP = textwrap.dedent(
 )
 SCRIPT = (ROOT / "opencode-vm.sh").read_text()
 VERSION = re.search(r'^OCVM_VERSION="([^"]+)"', SCRIPT, re.M)[1]
+MCP_VERSION = re.search(r'^MCP_ADAPTER_VERSION="([^"]+)"', SCRIPT, re.M)[1]
 
 
 class ReleaseMetadataTest(unittest.TestCase):
@@ -97,7 +98,7 @@ class ReleaseMetadataTest(unittest.TestCase):
 
         result, output = self.run_metadata({
             "adapters/mcp/src/types.ts": [
-                 ('export const ADAPTER_VERSION = "0.1.33";',
+                 (f'export const ADAPTER_VERSION = "{MCP_VERSION}";',
                  'export const ADAPTER_VERSION = "0.0.0";')
             ],
         })

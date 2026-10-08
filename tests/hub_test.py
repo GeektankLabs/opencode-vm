@@ -112,7 +112,9 @@ class HubReadModelTest(unittest.TestCase):
         connection = {"state": "ready", "reason": "verified", "base": "http://127.0.0.1:4568", "token": "PRIVATE-PROBE-TOKEN"}
         with patch.object(server, "mcp_connection", return_value=connection) as probe, \
              patch.object(server, "read_catalog", return_value=None), \
-             patch.object(server, "read_capabilities", return_value=False):
+             patch.object(server, "read_capabilities", return_value=False), \
+             patch.object(server, "read_policy_capabilities",
+                          return_value={"optionalProfiles": False, "profileFallbacks": False}):
             snapshot = server.control_snapshot()
         self.assertEqual(probe.call_count, 1)
         self.assertEqual(next(item for item in snapshot["readModel"]["integrations"] if item["id"] == "incoming-mcp")["state"], "ready")

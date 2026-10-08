@@ -3,21 +3,22 @@ import { constants } from "node:fs";
 import { lstat, link, mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { readPolicy, PROFILE_NAMES, type AgentControlPolicy, type PolicyFinalFallback, type PolicySelection } from "./agent-control.js";
+import { readPolicy, PROFILE_NAMES, type AgentControlPolicy, type PolicyFinalFallback, type PolicySelection, type PolicyStrategies } from "./agent-control.js";
 import { AdapterError, type AdapterErrorCode, type RuntimeDescriptor } from "./types.js";
 
 /**
- * Canonical final-fallback commit for the adapter-side policy write tool.
+ * Canonical policy commits for the adapter-side policy write tools.
  *
  * The Hub (Python) and this adapter write the same project file
  * `.opencode-vm/agent-control.json`. Both serialize on the same OS flock at
  * `.opencode-vm/agent-control.lock`; Node has no flock syscall binding, so the
  * lock is acquired by running `flock -x <fd>` on an inherited descriptor of the
  * lock file — the lock stays held by this process's open descriptor until it is
- * closed. Commit semantics mirror hub/policy.py update_fallback: revision CAS,
- * exact-bytes backup on the first schema 1/2 -> 3 upgrade, clearing never
- * downgrades, atomic publication with a private temp file. A missing lock tool
- * fails closed; an unlocked write is never performed.
+ * closed. Commit semantics mirror hub/policy.py: revision CAS, exact-bytes
+ * backup on the first upgrade to a newer schema, clearing never downgrades,
+ * atomic publication with a private temp file, and every other key is preserved
+ * verbatim. A missing lock tool fails closed; an unlocked write is never
+ * performed.
  */
 
 const VALUE = /^[^\s\u0000-\u001f\u007f]{1,256}$/u;
@@ -49,6 +50,25 @@ export function validateFinalFallbackValue(fallback: unknown): PolicyFinalFallba
   const mode = value.mode ?? "total";
   if (mode !== "total" && mode !== "degrading") fail("INVALID_ARGUMENT", "Fallback mode must be total or degrading.");
   return { mode, selection: validateSelectionValue(value.selection) };
+}
+
+export function validateStrategiesValue(strategies: unknown): PolicyStrategies {
+  if (!strategies || typeof strategies !== "object" || Array.isArray(strategies)) {
+    fail("INVALID_ARGUMENT", "Both fallback strategy switches must be sent explicitly.");
+  }
+  const value = strategies as Record<string, unknown>;
+  if (Object.keys(value).sort().join() !== "degrading,providerSkip") {
+    fail("INVALID_ARGUMENT", "Both fallback strategy switches must be sent explicitly.");
+  }
+  const result = { degrading: null, providerSkip: null } as PolicyStrategies;
+  for (const key of ["degrading", "providerSkip"] as const) {
+    const item = value[key];
+    if (item !== null && typeof item !== "boolean") {
+      fail("INVALID_ARGUMENT", "A fallback strategy switch must be true, false or null (not set).");
+    }
+    result[key] = item as boolean | null;
+  }
+  return result;
 }
 
 function timestamp(): string {
@@ -192,18 +212,31 @@ async function publish(directory: string, path: string, persisted: Record<string
   }
 }
 
-export type FinalFallbackCommitOptions = { lockTimeoutSeconds?: number };
+export type PolicyCommitOptions = { lockTimeoutSeconds?: number };
+export type FinalFallbackCommitOptions = PolicyCommitOptions;
 
-export async function commitFinalFallback(
+type PolicyPlan = {
+  version: 1 | 2 | 3 | 4;
+  profiles: Record<string, PolicySelection | null>;
+  finalFallback: PolicyFinalFallback;
+  profileFallbacks: Record<string, PolicySelection | null>;
+  strategies: PolicyStrategies;
+  /** Exact-bytes backup label, or null when this write is not a schema upgrade. */
+  backupLabel: string | null;
+};
+
+const NO_SELECTIONS = { deep: null, standard: null, execution: null, design: null, review: null };
+const NO_STRATEGIES: PolicyStrategies = { degrading: null, providerSkip: null };
+
+async function commitPolicyMutation(
   runtime: RuntimeDescriptor,
   expectedRevision: number,
-  fallback: PolicyFinalFallback,
-  options: FinalFallbackCommitOptions = {},
+  options: PolicyCommitOptions,
+  plan: (current: AgentControlPolicy) => PolicyPlan,
 ): Promise<AgentControlPolicy> {
   if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
     fail("INVALID_ARGUMENT", "A nonnegative expected policy revision is required.");
   }
-  const normalizedFallback = validateFinalFallbackValue(fallback);
   const directory = join(runtime.project, ".opencode-vm");
   const path = join(directory, "agent-control.json");
   const lock = await acquirePolicyLock(runtime.project, options.lockTimeoutSeconds ?? DEFAULT_LOCK_TIMEOUT_SECONDS);
@@ -212,38 +245,122 @@ export async function commitFinalFallback(
     if (current.revision !== expectedRevision) {
       fail("POLICY_REVISION_CONFLICT", "Policy changed since the revision you read; reload before saving.");
     }
+    const mutation = plan(current);
     let exists = true;
     try {
       await lstat(path);
     } catch {
       exists = false;
     }
-    if (normalizedFallback !== null && current.schemaVersion !== 3 && exists) {
+    if (mutation.backupLabel !== null && exists) {
       const bytes = await readFile(path);
       if (bytes.byteLength > MAX_POLICY_BYTES) fail("POLICY_COMMIT_UNAVAILABLE", "Policy file exceeds its bounded size; no write was performed.");
-      await backupExactBytes(directory, `schema${current.schemaVersion}`, current.revision, bytes);
+      await backupExactBytes(directory, mutation.backupLabel, current.revision, bytes);
     }
-    const version = normalizedFallback !== null && current.schemaVersion !== 3 ? 3 : current.schemaVersion;
-    const names = version === 1 ? PROFILE_NAMES.slice(0, 3) : PROFILE_NAMES;
-    const profiles = Object.fromEntries(names.map((name) => [name, current.profiles[name]]));
+    const names = mutation.version === 1 ? PROFILE_NAMES.slice(0, 3) : PROFILE_NAMES;
     const updatedAt = timestamp();
     const persisted: Record<string, unknown> = {
-      schemaVersion: version,
+      schemaVersion: mutation.version,
       revision: current.revision + 1,
       updatedAt,
-      profiles,
+      profiles: Object.fromEntries(names.map((name) => [name, mutation.profiles[name] ?? null])),
     };
-    if (version === 3) persisted.finalFallback = normalizedFallback;
+    if (mutation.version >= 3) persisted.finalFallback = mutation.finalFallback;
+    if (mutation.version === 4) {
+      persisted.profileFallbacks = Object.fromEntries(PROFILE_NAMES.map((name) => [name, mutation.profileFallbacks[name] ?? null]));
+      persisted.strategies = { degrading: mutation.strategies.degrading, providerSkip: mutation.strategies.providerSkip };
+    }
     await ensureIgnore(runtime.project);
     await publish(directory, path, persisted);
     return {
-      schemaVersion: version,
+      schemaVersion: mutation.version,
       revision: current.revision + 1,
       updatedAt,
-      profiles: current.profiles,
-      finalFallback: version === 3 ? normalizedFallback : null,
+      profiles: mutation.profiles as AgentControlPolicy["profiles"],
+      finalFallback: mutation.version >= 3 ? mutation.finalFallback : null,
+      profileFallbacks: (mutation.version === 4 ? mutation.profileFallbacks : NO_SELECTIONS) as AgentControlPolicy["profileFallbacks"],
+      strategies: mutation.version === 4 ? mutation.strategies : NO_STRATEGIES,
     };
   } finally {
     await lock.release();
   }
+}
+
+export async function commitFinalFallback(
+  runtime: RuntimeDescriptor,
+  expectedRevision: number,
+  fallback: PolicyFinalFallback,
+  options: FinalFallbackCommitOptions = {},
+): Promise<AgentControlPolicy> {
+  const normalizedFallback = validateFinalFallbackValue(fallback);
+  return commitPolicyMutation(runtime, expectedRevision, options, (current) => {
+    const upgrade = normalizedFallback !== null && current.schemaVersion < 3;
+    return {
+      version: upgrade ? 3 : current.schemaVersion,
+      profiles: current.profiles,
+      finalFallback: normalizedFallback,
+      profileFallbacks: current.profileFallbacks,
+      strategies: current.strategies,
+      backupLabel: upgrade ? `schema${current.schemaVersion}` : null,
+    };
+  });
+}
+
+/**
+ * Additive schema-4 commit of one profile's own fallback selection.
+ *
+ * Setting a selection upgrades schema 1/2/3 to schema 4 after backing up the
+ * exact original bytes; clearing never downgrades. The legacy `finalFallback`
+ * slot, every profile mapping and both strategy switches are preserved verbatim.
+ */
+export async function commitProfileFallback(
+  runtime: RuntimeDescriptor,
+  expectedRevision: number,
+  profile: string,
+  fallback: PolicySelection | null,
+  options: PolicyCommitOptions = {},
+): Promise<AgentControlPolicy> {
+  if (!(PROFILE_NAMES as readonly string[]).includes(profile)) {
+    fail("INVALID_ARGUMENT", "profile must be one of deep, standard, execution, design or review.");
+  }
+  const selection = fallback === null || fallback === undefined ? null : validateSelectionValue(fallback);
+  return commitPolicyMutation(runtime, expectedRevision, options, (current) => {
+    const upgrade = selection !== null && current.schemaVersion !== 4;
+    return {
+      version: upgrade ? 4 : current.schemaVersion,
+      profiles: current.profiles,
+      finalFallback: current.finalFallback,
+      profileFallbacks: { ...current.profileFallbacks, [profile]: selection },
+      strategies: current.strategies,
+      backupLabel: upgrade ? `schema${current.schemaVersion}` : null,
+    };
+  });
+}
+
+/**
+ * Additive schema-4 commit of the two independent fallback-strategy switches.
+ *
+ * Both switches are always written explicitly (`true`, `false`, or `null` for
+ * "not set"); an explicit value upgrades schema 1/2/3 to schema 4 after an
+ * exact-bytes backup, and clearing both never downgrades an existing schema 4.
+ */
+export async function commitStrategies(
+  runtime: RuntimeDescriptor,
+  expectedRevision: number,
+  strategies: PolicyStrategies,
+  options: PolicyCommitOptions = {},
+): Promise<AgentControlPolicy> {
+  const normalized = validateStrategiesValue(strategies);
+  return commitPolicyMutation(runtime, expectedRevision, options, (current) => {
+    const explicit = normalized.degrading !== null || normalized.providerSkip !== null;
+    const upgrade = explicit && current.schemaVersion !== 4;
+    return {
+      version: upgrade ? 4 : current.schemaVersion,
+      profiles: current.profiles,
+      finalFallback: current.finalFallback,
+      profileFallbacks: current.profileFallbacks,
+      strategies: normalized,
+      backupLabel: upgrade ? `schema${current.schemaVersion}` : null,
+    };
+  });
 }

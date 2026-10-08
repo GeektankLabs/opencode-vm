@@ -26,12 +26,12 @@ from urllib.parse import urlsplit
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 try:
-    from .policy import PolicyStore, PolicyError, PolicyConflict, PolicyCapabilityError, PROFILES, FALLBACKS, FALLBACK_MODES, check_selection, validate_selection, resolve_profile
-    from .catalog import read_catalog, mcp_connection, read_capabilities, read_board_tasks
+    from .policy import PolicyStore, PolicyError, PolicyConflict, PolicyCapabilityError, PROFILES, FALLBACKS, FALLBACK_MODES, STRATEGY_KEYS, check_selection, validate_selection, validate_strategies, profile_fallbacks_view, strategies_view, routing_regime, resolve_profile
+    from .catalog import read_catalog, mcp_connection, read_capabilities, read_schema4_capabilities, read_policy_capabilities, read_board_tasks
     from . import monitor as monitor_store
 except ImportError:  # Executed directly as hub/server.py by the guest service.
-    from policy import PolicyStore, PolicyError, PolicyConflict, PolicyCapabilityError, PROFILES, FALLBACKS, FALLBACK_MODES, check_selection, validate_selection, resolve_profile
-    from catalog import read_catalog, mcp_connection, read_capabilities, read_board_tasks
+    from policy import PolicyStore, PolicyError, PolicyConflict, PolicyCapabilityError, PROFILES, FALLBACKS, FALLBACK_MODES, STRATEGY_KEYS, check_selection, validate_selection, validate_strategies, profile_fallbacks_view, strategies_view, routing_regime, resolve_profile
+    from catalog import read_catalog, mcp_connection, read_capabilities, read_schema4_capabilities, read_policy_capabilities, read_board_tasks
     import monitor as monitor_store
 
 
@@ -247,13 +247,19 @@ def control_snapshot():
     policy = PolicyStore(PROJECT).read()
     connection = mcp_connection(RUNTIME["mcp"], SESSION_ROOT, project_hash())
     catalog = read_catalog(RUNTIME["mcp"], SESSION_ROOT, project_hash(), connection=connection)
+    own_fallbacks = profile_fallbacks_view(policy)
+    capabilities = read_policy_capabilities(connection)
     return {"policy": policy, "catalog": catalog, "validation": {
         name: check_selection(policy["profiles"][name], catalog) for name in PROFILES
     }, "finalFallbackStatus": check_selection(
         (policy.get("finalFallback") or {}).get("selection") if policy.get("finalFallback") else None, catalog),
+        "profileFallbackValidation": {name: check_selection(own_fallbacks[name], catalog) for name in PROFILES},
+        "strategies": strategies_view(policy),
+        "routing": routing_regime(policy),
         "resolutions": {name: resolve_profile(policy, name, catalog) for name in PROFILES},
         "fallbacks": FALLBACKS,
-        "capabilities": {"mcp": "supported", "optionalProfiles": read_capabilities(connection),
+        "capabilities": {"mcp": "supported", "optionalProfiles": capabilities["optionalProfiles"],
+                         "profileFallbacks": capabilities["profileFallbacks"],
                          "a2a": "unsupported", "openlive": "unsupported"},
         "catalogStatus": "unavailable" if catalog is None else "incomplete" if catalog["truncated"] else "complete",
         "readModel": build_model(connection=connection)}
@@ -370,7 +376,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         match = re.fullmatch(r"/api/control/profiles/(deep|standard|execution|design|review)", self.path)
         fallback_match = None if match else re.fullmatch(r"/api/control/fallback", self.path)
-        if not match and not fallback_match:
+        own_fallback_match = None if (match or fallback_match) else re.fullmatch(
+            r"/api/control/profiles/(deep|standard|execution|design|review)/fallback", self.path)
+        strategies_match = None if (match or fallback_match or own_fallback_match) else re.fullmatch(
+            r"/api/control/fallback-strategies", self.path)
+        if not (match or fallback_match or own_fallback_match or strategies_match):
             self.send_error(404)
             return
         if self.headers.get("Content-Type", "").split(";", 1)[0].lower() != "application/json":
@@ -385,10 +395,20 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(payload, dict):
                 raise PolicyError("Invalid request.")
             mode = None
+            strategies = None
             if match:
                 if set(payload) != {"revision", "selection"}:
                     raise PolicyError("Invalid request.")
                 selection = validate_selection(payload["selection"])
+            elif own_fallback_match:
+                if set(payload) != {"revision", "fallback"}:
+                    raise PolicyError("Invalid request.")
+                selection = validate_selection(payload["fallback"])
+            elif strategies_match:
+                if set(payload) != {"revision", "strategies"}:
+                    raise PolicyError("Invalid request.")
+                strategies = validate_strategies(payload["strategies"])
+                selection = None
             else:
                 if set(payload) != {"revision", "fallback"}:
                     raise PolicyError("Invalid request.")
@@ -411,18 +431,30 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(409, {"code": "POLICY_FORMAT_UNSUPPORTED", "error": "Unsupported or invalid project policy."})
                 return
             capable = False
+            schema4_capable = False
             connection = None
-            needs_capability = selection is not None and (
+            wants_schema4 = current["schemaVersion"] != 4 and (
+                (own_fallback_match is not None and selection is not None)
+                or (strategies_match is not None
+                    and any(strategies[key] is not None for key in STRATEGY_KEYS)))
+            needs_capability = (selection is not None and (
                 (match is not None and (match.group(1) in FALLBACKS or current["schemaVersion"] == 2)) or
-                (fallback_match is not None and current["schemaVersion"] == 1))
-            if needs_capability:
+                (fallback_match is not None and current["schemaVersion"] == 1))) or (
+                wants_schema4 and current["schemaVersion"] == 1)
+            if needs_capability or wants_schema4:
                 if SESSION_ROOT is None:
                     raise PolicyError("Hub runtime is not configured")
                 connection = mcp_connection(RUNTIME["mcp"], SESSION_ROOT, project_hash())
-                capable = read_capabilities(connection)
-                if not capable:
-                    self.send_json(409, {"code": "POLICY_CAPABILITY_UNAVAILABLE", "error": "Active MCP adapter does not confirm optional profiles and schema 2."})
-                    return
+                if needs_capability:
+                    capable = read_capabilities(connection)
+                    if not capable:
+                        self.send_json(409, {"code": "POLICY_CAPABILITY_UNAVAILABLE", "error": "Active MCP adapter does not confirm optional profiles and schema 2."})
+                        return
+                if wants_schema4:
+                    schema4_capable = read_schema4_capabilities(connection)
+                    if not schema4_capable:
+                        self.send_json(409, {"code": "POLICY_CAPABILITY_UNAVAILABLE", "error": "Active MCP adapter does not confirm schema 4 profile fallbacks and strategies."})
+                        return
             if selection is not None:
                 if SESSION_ROOT is None:
                     raise PolicyError("Hub runtime is not configured")
@@ -435,11 +467,23 @@ class Handler(BaseHTTPRequestHandler):
                     return
             if match:
                 updated = store.update(match.group(1), selection, payload["revision"], optional_capable=capable)
-            else:
+                self.send_json(200, {"policy": updated})
+            elif fallback_match:
                 updated = store.update_fallback(
                     {"mode": mode, "selection": selection} if selection is not None else None,
                     payload["revision"], optional_capable=capable)
-            self.send_json(200, {"policy": updated})
+                self.send_json(200, {"policy": updated})
+            else:
+                # Schema-4 writes can change the routing regime, so the derived
+                # readback is part of the commit response instead of a second GET.
+                updated = (store.update_profile_fallback(
+                    own_fallback_match.group(1), selection, payload["revision"],
+                    optional_capable=capable, schema4_capable=schema4_capable)
+                    if own_fallback_match else
+                    store.update_strategies(strategies, payload["revision"],
+                                            optional_capable=capable, schema4_capable=schema4_capable))
+                self.send_json(200, {"policy": updated, "routing": routing_regime(updated),
+                                     "strategies": strategies_view(updated)})
         except PolicyConflict:
             self.send_json(409, {"code": "POLICY_REVISION_CONFLICT", "error": "Policy changed; reload before saving."})
         except PolicyCapabilityError:

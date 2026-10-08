@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, open, readFile, readdir, rm, writeFile } from "node:fs/
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { commitFinalFallback, validateFinalFallbackValue } from "./policy-commit.js";
+import { commitFinalFallback, commitProfileFallback, commitStrategies, validateFinalFallbackValue, validateStrategiesValue } from "./policy-commit.js";
 import type { RuntimeDescriptor } from "./types.js";
 
 const selection = { provider_id: "p", model_id: "m", variant: "high" };
@@ -143,6 +143,116 @@ test("commit blocks on the shared canonical flock and fails closed on timeout", 
     await lock.close();
     const updated = await commitFinalFallback(runtime, 4, fallback);
     assert.equal(updated.revision, 5);
+  } finally {
+    await cleanup();
+  }
+});
+
+const schema3 = {
+  schemaVersion: 3, revision: 2, updatedAt: "2026-10-08T00:00:00Z",
+  profiles: { deep: selection, standard: selection, execution: null, design: null, review: null },
+  finalFallback: { mode: "degrading", selection },
+};
+
+test("strategy validation accepts exactly both switches as true, false or unset", () => {
+  assert.deepEqual(validateStrategiesValue({ degrading: true, providerSkip: false }), { degrading: true, providerSkip: false });
+  assert.deepEqual(validateStrategiesValue({ degrading: null, providerSkip: null }), { degrading: null, providerSkip: null });
+  for (const bad of [{ degrading: true }, { degrading: true, providerSkip: false, extra: true },
+    { degrading: 1, providerSkip: null }, { degrading: "true", providerSkip: null },
+    { degrading: true, providerSkip: "no" }, null, "degrading", [true, false]]) {
+    assert.throws(() => validateStrategiesValue(bad), { code: "INVALID_ARGUMENT" });
+  }
+});
+
+test("a profile fallback upgrades schema 3 to schema 4 with an exact-bytes backup and canonical key order", async () => {
+  const { project, runtime, cleanup } = await setup();
+  try {
+    await writePolicy(project, schema3);
+    const before = await readFile(policyPath(project));
+    const updated = await commitProfileFallback(runtime, 2, "deep", { ...selection, variant: "default" });
+    assert.equal(updated.schemaVersion, 4);
+    assert.equal(updated.revision, 3);
+    assert.deepEqual(updated.profileFallbacks.deep, { ...selection, variant: "default" });
+    assert.deepEqual(updated.finalFallback, schema3.finalFallback, "the legacy global slot is preserved verbatim");
+    assert.deepEqual(updated.strategies, { degrading: null, providerSkip: null });
+    const persisted = JSON.parse(await readFile(policyPath(project), "utf8"));
+    assert.deepEqual(Object.keys(persisted),
+      ["schemaVersion", "revision", "updatedAt", "profiles", "finalFallback", "profileFallbacks", "strategies"],
+      "persisted key order matches the Python writer byte for byte");
+    assert.deepEqual(persisted.profileFallbacks.deep, { ...selection, variant: "default" });
+    assert.deepEqual(persisted.strategies, { degrading: null, providerSkip: null });
+    assert.deepEqual(await readFile(join(project, ".opencode-vm", "agent-control.schema3-rev2.backup.json")), before);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("clearing never downgrades schema 4 and other keys survive every writer", async () => {
+  const { project, runtime, cleanup } = await setup();
+  try {
+    await writePolicy(project, schema3);
+    await commitProfileFallback(runtime, 2, "standard", selection);
+    await commitStrategies(runtime, 3, { degrading: true, providerSkip: false });
+    const clearedFallback = await commitProfileFallback(runtime, 4, "standard", null);
+    assert.equal(clearedFallback.schemaVersion, 4);
+    assert.equal(clearedFallback.profileFallbacks.standard, null);
+    assert.deepEqual(clearedFallback.strategies, { degrading: true, providerSkip: false });
+    const clearedStrategies = await commitStrategies(runtime, 5, { degrading: null, providerSkip: null });
+    assert.equal(clearedStrategies.schemaVersion, 4, "clearing both switches keeps schema 4");
+    assert.deepEqual(clearedStrategies.strategies, { degrading: null, providerSkip: null });
+    const persisted = JSON.parse(await readFile(policyPath(project), "utf8"));
+    assert.deepEqual(persisted.finalFallback, schema3.finalFallback);
+    assert.deepEqual(persisted.profiles.deep, selection);
+    assert.deepEqual(Object.keys(persisted.profileFallbacks).sort(), ["deep", "design", "execution", "review", "standard"]);
+    // The legacy writer keeps schema 4 and both new slots instead of downgrading.
+    const legacyWrite = await commitFinalFallback(runtime, 6, { mode: "total", selection });
+    assert.equal(legacyWrite.schemaVersion, 4);
+    assert.deepEqual(legacyWrite.finalFallback, { mode: "total", selection });
+    assert.deepEqual(legacyWrite.strategies, { degrading: null, providerSkip: null });
+    const backups = (await readdir(join(project, ".opencode-vm"))).filter((name) => name.includes("backup")).sort();
+    assert.deepEqual(backups, ["agent-control.schema3-rev2.backup.json"], "only the first upgrade backs up exact bytes");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("strategy commit upgrades schema 1 to five profile keys and refuses unknown profiles or stale revisions", async () => {
+  const { project, runtime, cleanup } = await setup();
+  try {
+    await writePolicy(project, {
+      schemaVersion: 1, revision: 1, updatedAt: "2026-10-01T00:00:00Z",
+      profiles: { deep: selection, standard: null, execution: null },
+    });
+    const before = await readFile(policyPath(project));
+    await assert.rejects(commitProfileFallback(runtime, 1, "manager", selection), { code: "INVALID_ARGUMENT" });
+    await assert.rejects(commitProfileFallback(runtime, 0, "deep", selection), { code: "POLICY_REVISION_CONFLICT" });
+    assert.deepEqual(await readFile(policyPath(project)), before, "a rejected write changes nothing");
+    const upgraded = await commitStrategies(runtime, 1, { degrading: false, providerSkip: true });
+    assert.equal(upgraded.schemaVersion, 4);
+    const persisted = JSON.parse(await readFile(policyPath(project), "utf8"));
+    assert.deepEqual(Object.keys(persisted.profiles).sort(), ["deep", "design", "execution", "review", "standard"]);
+    assert.deepEqual(persisted.strategies, { degrading: false, providerSkip: true });
+    assert.equal(persisted.finalFallback, null, "schema 4 always carries the legacy slot explicitly");
+    assert.deepEqual(await readFile(join(project, ".opencode-vm", "agent-control.schema1-rev1.backup.json")), before);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("the new schema-4 commits fail closed on a held canonical lock", async () => {
+  const { project, runtime, cleanup } = await setup();
+  try {
+    await writePolicy(project, schema3);
+    const directory = join(project, ".opencode-vm");
+    const lock = await open(join(directory, "agent-control.lock"), "a", 0o600);
+    const acquired = spawnSync("flock", ["-x", "3"], { stdio: ["ignore", "ignore", "pipe", lock.fd] });
+    assert.equal(acquired.status, 0, "test must hold the canonical lock");
+    const before = await readFile(policyPath(project));
+    await assert.rejects(commitProfileFallback(runtime, 2, "deep", selection, { lockTimeoutSeconds: 1 }), { code: "POLICY_COMMIT_UNAVAILABLE" });
+    await assert.rejects(commitStrategies(runtime, 2, { degrading: true, providerSkip: true }, { lockTimeoutSeconds: 1 }), { code: "POLICY_COMMIT_UNAVAILABLE" });
+    assert.deepEqual(await readFile(policyPath(project)), before, "a held lock means no write");
+    await lock.close();
+    assert.equal((await commitStrategies(runtime, 2, { degrading: true, providerSkip: true })).revision, 3);
   } finally {
     await cleanup();
   }

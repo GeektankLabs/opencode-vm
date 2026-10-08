@@ -535,7 +535,7 @@ test("final fallback write is callable on both protocol paths with commit, CAS a
   assert.deepEqual(await readFile(policyPath), beforeStale, "an unavailable catalog selection never writes");
 });
 
-test("official MCP client discovers thirty-nine stateless HTTP tools and invokes session tools by ID", async () => {
+test("official MCP client discovers forty-one stateless HTTP tools and invokes session tools by ID", async () => {
   const gateway = new FakeGateway();
   const server = new McpHttpServer(runtime(), token, gateway);
   const port = await server.start();
@@ -581,6 +581,8 @@ test("official MCP client discovers thirty-nine stateless HTTP tools and invokes
       "send_message",
       "send_session_followup",
       "set_project_model_policy_fallback",
+      "set_project_model_policy_profile_fallback",
+      "set_project_model_policy_strategies",
       "supersede_unresolved_submission",
       "trigger_monitor",
       "update_monitor",
@@ -593,6 +595,8 @@ test("official MCP client discovers thirty-nine stateless HTTP tools and invokes
     assert.equal(listed.tools.find((tool) => tool.name === "get_project_model_policy")?.annotations?.readOnlyHint, true);
     assert.equal(listed.tools.find((tool) => tool.name === "get_recommended_runtime")?.annotations?.readOnlyHint, true);
     assert.equal(listed.tools.find((tool) => tool.name === "set_project_model_policy_fallback")?.annotations?.readOnlyHint, false);
+    for (const name of ["set_project_model_policy_profile_fallback", "set_project_model_policy_strategies"])
+      assert.equal(listed.tools.find((tool) => tool.name === name)?.annotations?.readOnlyHint, false, name);
     for (const name of ["open_repo_live", "refresh_repo_live", "get_repo_live_session"])
       assert.equal(listed.tools.find((tool) => tool.name === name)?.annotations?.readOnlyHint, true, name);
     const policy = await client.callTool({ name: "get_project_model_policy", arguments: {} });

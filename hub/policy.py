@@ -1,4 +1,4 @@
-"""Project-local, credential-free Agent Control policy (schema 1/2/3)."""
+"""Project-local, credential-free Agent Control policy (schema 1/2/3/4)."""
 
 import fcntl
 import json
@@ -14,10 +14,21 @@ BASE_PROFILES = ("deep", "standard", "execution")
 PROFILES = (*BASE_PROFILES, "design", "review")
 FALLBACKS = {"design": ["standard"], "review": ["deep", "standard"]}
 FALLBACK_MODES = ("total", "degrading")
+# Additive schema-4 strategy switches. `None` means "not explicitly set", which
+# routing treats as not activated; it is never a silently chosen default.
+STRATEGY_KEYS = ("degrading", "providerSkip")
+# Regular degrading order; special-role entry points keep their existing chains.
+STAGE_ORDER = {"deep": ("deep", "standard", "execution"), "standard": ("standard", "execution"),
+               "execution": ("execution",), "design": ("design", "standard", "execution"),
+               "review": ("review", "deep", "standard", "execution")}
 FIELDS = ("provider_id", "model_id", "variant")
 MAX_BYTES = 16 * 1024
 VALUE = re.compile(r"^[^\s\x00-\x1f\x7f]{1,256}$")
 PRIVATE_VALUE = re.compile(r"(?i)^(?:/|\\|file:|bearer|sk-[a-z0-9_-]{16,}|gh[pousr]_[a-z0-9_]{20,})|://")
+KEY_SETS = ({"schemaVersion", "revision", "updatedAt", "profiles"},
+            {"schemaVersion", "revision", "updatedAt", "profiles", "finalFallback"},
+            {"schemaVersion", "revision", "updatedAt", "profiles", "finalFallback",
+             "profileFallbacks", "strategies"})
 
 
 class PolicyError(ValueError):
@@ -35,6 +46,27 @@ class PolicyCapabilityError(PolicyError):
 def empty_policy():
     return {"schemaVersion": 1, "revision": 0, "updatedAt": None,
             "profiles": {name: None for name in PROFILES}}
+
+
+def _timestamp():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _document(version, revision, profiles, final=None, profile_fallbacks=None, strategies=None):
+    """Next policy document in the canonical persisted key order (Python/TS parity)."""
+    updated = {"schemaVersion": version, "revision": revision, "updatedAt": _timestamp(),
+               "profiles": dict(profiles)}
+    if version >= 3:
+        updated["finalFallback"] = final
+    if version == 4:
+        updated["profileFallbacks"] = dict(profile_fallbacks)
+        updated["strategies"] = dict(strategies)
+    return updated
+
+
+def _persisted(updated, version):
+    names = BASE_PROFILES if version == 1 else PROFILES
+    return {**updated, "profiles": {name: updated["profiles"][name] for name in names}}
 
 
 def validate_selection(selection):
@@ -68,14 +100,98 @@ def validate_final_fallback(value):
     return {"mode": mode, "selection": selection}
 
 
+def validate_profile_fallbacks(value):
+    """Additive schema-4 slot: the optional own fallback of each profile card.
+
+    Strictly separate from `FALLBACKS` (design/review *resolution*) and from the
+    schema-3 `finalFallback` (the legacy global final stage). `None` per profile
+    means "no own fallback", which never stops a chain by itself.
+    """
+    if not isinstance(value, dict) or set(value) != set(PROFILES):
+        raise PolicyError("Profile fallbacks need an entry for every profile.")
+    return {name: validate_selection(value[name]) for name in PROFILES}
+
+
+def validate_strategies(value):
+    """Additive schema-4 slot: the two independent fallback-strategy switches.
+
+    Each switch is `True`, `False` or `None` (not explicitly set). No default is
+    invented here; routing surfaces the effective values instead.
+    """
+    if not isinstance(value, dict) or set(value) != set(STRATEGY_KEYS):
+        raise PolicyError("Fallback strategies need both switches explicitly.")
+    result = {}
+    for key in STRATEGY_KEYS:
+        item = value[key]
+        if item is not None and type(item) is not bool:
+            raise PolicyError("A fallback strategy switch must be true, false or unset.")
+        result[key] = item
+    return result
+
+
+def profile_fallbacks_view(policy):
+    """Normalized five-key view; schema 1/2/3 policies have no own fallbacks."""
+    stored = policy.get("profileFallbacks")
+    return dict(stored) if isinstance(stored, dict) else {name: None for name in PROFILES}
+
+
+def strategies_view(policy):
+    """Normalized switch view; absent means both switches are unset."""
+    stored = policy.get("strategies")
+    stored = stored if isinstance(stored, dict) else {}
+    return {key: stored.get(key) for key in STRATEGY_KEYS}
+
+
+def routing_regime(policy):
+    """Explicit routing regime; the legacy global final stage is never reinterpreted.
+
+    `per_profile` requires schema 4 *and* an actually configured own fallback or
+    an explicitly set switch. Otherwise the legacy `finalFallback` behaviour
+    applies unchanged. In the per-profile regime the legacy global final stage is
+    deliberately not part of the chain; that relationship is surfaced, not hidden.
+    """
+    strategies = strategies_view(policy)
+    per_profile = policy["schemaVersion"] == 4 and (
+        any(value is not None for value in profile_fallbacks_view(policy).values())
+        or any(strategies[key] is not None for key in STRATEGY_KEYS))
+    return {"regime": "per_profile" if per_profile else "legacy_final_fallback",
+            "legacyFinalStageApplies": not per_profile,
+            "strategiesEffective": {"degrading": strategies["degrading"] is True,
+                                    "providerSkip": strategies["providerSkip"] is True}}
+
+
+def candidate_order(policy, profile):
+    """Deterministic configured-candidate order for one entry profile.
+
+    Pure configuration projection: within each stage the main model comes before
+    that stage's own fallback, unconfigured entries are skipped, and degrading
+    must be explicitly activated to continue with the next regular stage. Runtime
+    filtering (already failed runtimes/provider identities, availability) stays a
+    documented management-layer responsibility. Returns None in the legacy regime.
+    """
+    if routing_regime(policy)["regime"] != "per_profile" or profile not in PROFILES:
+        return None
+    fallbacks = profile_fallbacks_view(policy)
+    degrading = strategies_view(policy)["degrading"] is True
+    stages = STAGE_ORDER[profile] if degrading else (profile,)
+    order = []
+    for stage in stages:
+        if policy["profiles"].get(stage) is not None:
+            order.append(f"{stage}.main")
+        if fallbacks.get(stage) is not None:
+            order.append(f"{stage}.fallback")
+    return order
+
+
 def validate_policy(value):
-    if not isinstance(value, dict) or set(value) not in (
-            {"schemaVersion", "revision", "updatedAt", "profiles"},
-            {"schemaVersion", "revision", "updatedAt", "profiles", "finalFallback"}):
+    if not isinstance(value, dict) or set(value) not in KEY_SETS:
         raise PolicyError("Unsupported Agent Control policy format.")
-    if type(value["schemaVersion"]) is not int or value["schemaVersion"] not in (1, 2, 3):
+    if type(value["schemaVersion"]) is not int or value["schemaVersion"] not in (1, 2, 3, 4):
         raise PolicyError("Unsupported Agent Control policy version.")
-    if (value["schemaVersion"] == 3) != ("finalFallback" in value):
+    if (value["schemaVersion"] >= 3) != ("finalFallback" in value):
+        raise PolicyError("Unsupported Agent Control policy format.")
+    if (value["schemaVersion"] == 4) != ("profileFallbacks" in value) \
+            or (value["schemaVersion"] == 4) != ("strategies" in value):
         raise PolicyError("Unsupported Agent Control policy format.")
     if type(value["revision"]) is not int or value["revision"] < 1:
         raise PolicyError("Invalid policy revision.")
@@ -87,8 +203,11 @@ def validate_policy(value):
     for selection in value["profiles"].values():
         validate_selection(selection)
     result = {**value, "profiles": {**{name: None for name in PROFILES}, **value["profiles"]}}
-    if value["schemaVersion"] == 3:
+    if value["schemaVersion"] >= 3:
         result["finalFallback"] = validate_final_fallback(value["finalFallback"])
+    if value["schemaVersion"] == 4:
+        result["profileFallbacks"] = validate_profile_fallbacks(value["profileFallbacks"])
+        result["strategies"] = validate_strategies(value["strategies"])
     return result
 
 
@@ -111,42 +230,23 @@ class PolicyStore:
             raise PolicyError("Invalid or unsupported Agent Control policy.") from error
 
     def update(self, profile, selection, expected_revision, *, optional_capable=False):
-        if profile not in PROFILES or type(expected_revision) is not int or expected_revision < 0:
+        if profile not in PROFILES:
             raise PolicyError("Invalid profile or revision.")
         validate_selection(selection)
-        if self.directory.is_symlink() or (self.directory.exists() and not self.directory.is_dir()):
-            raise PolicyError("Unsafe policy directory.")
-        self.directory.mkdir(mode=0o700, exist_ok=True)
-        lock = self.directory / "agent-control.lock"
-        if lock.is_symlink():
-            raise PolicyError("Unsafe policy lock.")
-        fd = os.open(lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-        try:
-            info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
-                raise PolicyError("Unsafe policy lock.")
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            current = self.read()
-            if current["revision"] != expected_revision:
-                raise PolicyConflict("Policy changed; reload before saving.")
+
+        def mutate(current):
             upgrade = current["schemaVersion"] == 1 and profile in FALLBACKS and selection is not None
             if upgrade and not optional_capable:
                 raise PolicyCapabilityError("Active MCP adapter does not confirm schema 2 and optional profiles.")
-            if upgrade and self.path.exists():
-                self._backup(current["revision"], self.path.read_bytes())
-            self._ensure_ignore()
             version = 2 if upgrade else current["schemaVersion"]
-            updated = {"schemaVersion": version, "revision": expected_revision + 1,
-                       "updatedAt": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
-                       "profiles": {**current["profiles"], profile: selection}}
-            if version == 3:
-                updated["finalFallback"] = current.get("finalFallback")
-            persisted = {**updated, "profiles": {name: updated["profiles"][name]
-                         for name in (BASE_PROFILES if version == 1 else PROFILES)}}
-            self._publish(persisted)
-            return updated
-        finally:
-            os.close(fd)
+            updated = _document(version, expected_revision + 1,
+                                {**current["profiles"], profile: selection},
+                                final=current.get("finalFallback"),
+                                profile_fallbacks=profile_fallbacks_view(current),
+                                strategies=strategies_view(current))
+            return updated, _persisted(updated, version), "schema1" if upgrade else None
+
+        return self._write(expected_revision, mutate)
 
     def update_fallback(self, fallback, expected_revision, *, optional_capable=False):
         """CAS update of the additive schema-3 finalFallback slot.
@@ -154,9 +254,84 @@ class PolicyStore:
         Setting a fallback upgrades schema 1/2 to schema 3 after backing up the
         exact original bytes; clearing on schema 1/2 leaves the schema untouched.
         A schema-1 upgrade requires the same MCP capability confirmation as the
-        first optional-profile mapping.
+        first optional-profile mapping. Schema-4 keys are preserved verbatim.
         """
         fallback = validate_final_fallback(fallback)
+
+        def mutate(current):
+            upgrade = current["schemaVersion"] in (1, 2) and fallback is not None
+            if upgrade and current["schemaVersion"] == 1 and not optional_capable:
+                raise PolicyCapabilityError("Active MCP adapter does not confirm schema 2 and optional profiles.")
+            version = 3 if upgrade or current["schemaVersion"] == 3 else current["schemaVersion"]
+            updated = _document(version, expected_revision + 1, current["profiles"], final=fallback,
+                                profile_fallbacks=profile_fallbacks_view(current),
+                                strategies=strategies_view(current))
+            label = f"schema{current['schemaVersion']}" if upgrade else None
+            return updated, _persisted(updated, version), label
+
+        return self._write(expected_revision, mutate)
+
+    def update_profile_fallback(self, profile, selection, expected_revision, *,
+                                optional_capable=False, schema4_capable=False):
+        """CAS update of one additive schema-4 per-profile own fallback.
+
+        Setting a selection upgrades schema 1/2/3 to schema 4 after backing up the
+        exact original bytes; clearing never downgrades. The legacy `finalFallback`
+        slot and every other key are preserved verbatim, and a schema-1 upgrade
+        still requires the existing optional-profile capability confirmation.
+        """
+        if profile not in PROFILES:
+            raise PolicyError("Invalid profile or revision.")
+        validate_selection(selection)
+
+        def mutate(current):
+            upgrade = current["schemaVersion"] != 4 and selection is not None
+            if upgrade:
+                if not schema4_capable:
+                    raise PolicyCapabilityError(
+                        "Active MCP adapter does not confirm schema 4 profile fallbacks and strategies.")
+                if current["schemaVersion"] == 1 and not optional_capable:
+                    raise PolicyCapabilityError("Active MCP adapter does not confirm schema 2 and optional profiles.")
+            version = 4 if upgrade or current["schemaVersion"] == 4 else current["schemaVersion"]
+            fallbacks = {**profile_fallbacks_view(current), profile: selection}
+            updated = _document(version, expected_revision + 1, current["profiles"],
+                                final=current.get("finalFallback"), profile_fallbacks=fallbacks,
+                                strategies=strategies_view(current))
+            label = f"schema{current['schemaVersion']}" if upgrade else None
+            return updated, _persisted(updated, version), label
+
+        return self._write(expected_revision, mutate)
+
+    def update_strategies(self, strategies, expected_revision, *,
+                          optional_capable=False, schema4_capable=False):
+        """CAS update of the two additive schema-4 fallback-strategy switches.
+
+        Both switches are always written explicitly (`true`, `false` or `null` for
+        "not set"); an explicit value upgrades schema 1/2/3 to schema 4 after an
+        exact-bytes backup, and clearing both never downgrades an existing schema 4.
+        """
+        strategies = validate_strategies(strategies)
+
+        def mutate(current):
+            explicit = any(strategies[key] is not None for key in STRATEGY_KEYS)
+            upgrade = current["schemaVersion"] != 4 and explicit
+            if upgrade:
+                if not schema4_capable:
+                    raise PolicyCapabilityError(
+                        "Active MCP adapter does not confirm schema 4 profile fallbacks and strategies.")
+                if current["schemaVersion"] == 1 and not optional_capable:
+                    raise PolicyCapabilityError("Active MCP adapter does not confirm schema 2 and optional profiles.")
+            version = 4 if upgrade or current["schemaVersion"] == 4 else current["schemaVersion"]
+            updated = _document(version, expected_revision + 1, current["profiles"],
+                                final=current.get("finalFallback"),
+                                profile_fallbacks=profile_fallbacks_view(current), strategies=strategies)
+            label = f"schema{current['schemaVersion']}" if upgrade else None
+            return updated, _persisted(updated, version), label
+
+        return self._write(expected_revision, mutate)
+
+    def _write(self, expected_revision, mutate):
+        """Canonical CAS write: lock, revision check, exact-bytes backup, publish."""
         if type(expected_revision) is not int or expected_revision < 0:
             raise PolicyError("Invalid revision.")
         if self.directory.is_symlink() or (self.directory.exists() and not self.directory.is_dir()):
@@ -174,21 +349,10 @@ class PolicyStore:
             current = self.read()
             if current["revision"] != expected_revision:
                 raise PolicyConflict("Policy changed; reload before saving.")
-            upgrade = current["schemaVersion"] in (1, 2) and fallback is not None
-            if upgrade and current["schemaVersion"] == 1 and not optional_capable:
-                raise PolicyCapabilityError("Active MCP adapter does not confirm schema 2 and optional profiles.")
-            if upgrade and self.path.exists():
-                self._backup(current["revision"], self.path.read_bytes(),
-                             label=f"schema{current['schemaVersion']}")
+            updated, persisted, backup_label = mutate(current)
+            if backup_label is not None and self.path.exists():
+                self._backup(current["revision"], self.path.read_bytes(), label=backup_label)
             self._ensure_ignore()
-            version = 3 if upgrade or current["schemaVersion"] == 3 else current["schemaVersion"]
-            updated = {"schemaVersion": version, "revision": expected_revision + 1,
-                       "updatedAt": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
-                       "profiles": dict(current["profiles"])}
-            if version == 3:
-                updated["finalFallback"] = fallback
-            persisted = {**updated, "profiles": {name: updated["profiles"][name]
-                         for name in (BASE_PROFILES if version == 1 else PROFILES)}}
             self._publish(persisted)
             return updated
         finally:

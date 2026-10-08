@@ -183,6 +183,111 @@ try {
     assert.equal(storedPolicy.schemaVersion, 3);
     assert.equal(storedPolicy.finalFallback, null);
     assert.match(await page.locator("#profile-final-fallback .profile-summary").innerText(), /Nicht konfiguriert/);
+    // Journal#5: every model picker sorts alphabetically by displayed model name,
+    // case-insensitively and deterministically, while IDs/variants stay untouched.
+    const openDetails = async selector => {
+      const details = page.locator(selector);
+      if (!await details.evaluate(element => element.open)) await details.locator("summary").click();
+    };
+    const longId = "family/long-" + "model-name-".repeat(15);
+    const expectedOrder = ["family/alpha", "family/beta", "family/dup-a", "family/dup-b", longId, "family/model"];
+    const optionValues = async id => page.locator(`#${id}`).evaluate(el => [...el.options].slice(1).map(o => o.value));
+    const optionLabels = async id => page.locator(`#${id}`).evaluate(el => [...el.options].slice(1).map(o => o.textContent));
+    await openDetails("#profile-deep .profile-editor");
+    await page.locator("#deep-provider_id").selectOption("fixture");
+    assert.deepEqual(await optionValues("deep-model_id"), expectedOrder);
+    assert.deepEqual((await optionLabels("deep-model_id")).slice(0, 3),
+      ["Alpha reasoning model", "beta reasoning model", "duplicate display name"],
+      "case-insensitive alphabetical order; equal display names tie-break on model_id (family/dup-a before family/dup-b)");
+    await page.locator("#deep-provider_id").selectOption("other");
+    assert.deepEqual(await optionValues("deep-model_id"), ["other/alpha", "other/zeta"], "sorted inside each provider list");
+    await page.locator("#deep-provider_id").selectOption("fixture");
+    await page.locator("#deep-model_id").selectOption("family/model");
+    assert.deepEqual(await optionValues("deep-variant"), ["default", "high"], "variant order stays as delivered");
+    await page.locator("#deep-variant").selectOption("high");
+    await openDetails("#profile-deep .profile-fallback-editor");
+    await page.locator("#deep-fallback-provider_id").selectOption("fixture");
+    assert.deepEqual(await optionValues("deep-fallback-model_id"), expectedOrder, "own-fallback picker is sorted too");
+    await openDetails("#profile-final-fallback .profile-editor");
+    await page.locator("#fallback-provider_id").selectOption("fixture");
+    assert.deepEqual(await optionValues("fallback-model_id"), expectedOrder, "final-fallback picker is sorted too");
+
+    // Optional own fallback: additive schema-4 upgrade with an exact-bytes backup.
+    const revisionBeforeOwn = (await (await page.request.get(`${base}/api/control`)).json()).policy.revision;
+    await page.locator("#deep-fallback-model_id").selectOption("family/model");
+    await page.locator("#deep-fallback-variant").selectOption("high");
+    await page.locator("#profile-deep .profile-fallback-form").getByRole("button", { name: "Eigenes Fallback speichern und Policy erweitern" }).click();
+    await page.waitForFunction(() => document.querySelector("#profile-deep .profile-fallback-feedback").textContent.includes("Eigenes Fallback gespeichert · Revision"));
+    storedPolicy = JSON.parse(await readFile(`${project}/.opencode-vm/agent-control.json`));
+    assert.equal(storedPolicy.schemaVersion, 4);
+    assert.deepEqual(storedPolicy.profileFallbacks.deep, tuple);
+    assert.deepEqual(storedPolicy.strategies, { degrading: null, providerSkip: null }, "no switch is silently defaulted");
+    assert.deepEqual(Object.keys(storedPolicy).sort(),
+      ["finalFallback", "profileFallbacks", "profiles", "revision", "schemaVersion", "strategies", "updatedAt"]);
+    assert.ok((await readdir(`${project}/.opencode-vm`)).some(name =>
+      new RegExp(`^agent-control\\.schema3-rev${revisionBeforeOwn}\\.backup\\.json$`).test(name)),
+      "the schema-3 original must be backed up before the schema-4 upgrade");
+    assert.match(await page.locator("#profile-deep .profile-fallback-summary").innerText(), /Eigenes Fallback:.*Im aktuellen Katalog verfügbar/);
+    assert.match(await page.locator("#fallback-strategies .strategies-summary").innerText(), /Profilbezogener Modus aktiv/);
+    assert.match(await page.locator("#fallback-strategies .strategies-summary").innerText(),
+      /Degrading nicht gesetzt · Provider-Skip nicht gesetzt · wirksam: Degrading aus, Provider-Skip aus/,
+      "unset switches are shown as not activated instead of a hidden default");
+    assert.match(await page.locator("#profile-final-fallback .profile-editor").innerText(), /nicht Teil der neuen Kette/,
+      "the legacy global final stage relationship stays explicit");
+
+    // Two independent switches: saving writes both explicitly, reset writes null.
+    await openDetails("#fallback-strategies .strategies-editor");
+    await page.locator("#strategies-degrading").check();
+    await page.locator("#fallback-strategies button[type=submit]").click();
+    await page.waitForFunction(() => document.querySelector("#fallback-strategies .profile-feedback").textContent.includes("Strategien gespeichert · Revision"));
+    storedPolicy = JSON.parse(await readFile(`${project}/.opencode-vm/agent-control.json`));
+    assert.deepEqual(storedPolicy.strategies, { degrading: true, providerSkip: false });
+    assert.deepEqual(storedPolicy.profileFallbacks.deep, tuple, "a strategy write preserves own fallbacks");
+    await page.locator("#strategies-providerSkip").check();
+    await page.locator("#fallback-strategies button[type=submit]").click();
+    await page.waitForFunction(() => document.querySelector("#fallback-strategies .strategies-summary").textContent.includes("Provider-Skip an"));
+    assert.deepEqual(JSON.parse(await readFile(`${project}/.opencode-vm/agent-control.json`)).strategies,
+      { degrading: true, providerSkip: true });
+    await page.locator("#fallback-strategies .profile-actions button.secondary").click();
+    await page.waitForFunction(() => document.querySelector("#fallback-strategies .profile-feedback").textContent.includes("zurückgesetzt · Revision"));
+    storedPolicy = JSON.parse(await readFile(`${project}/.opencode-vm/agent-control.json`));
+    assert.deepEqual(storedPolicy.strategies, { degrading: null, providerSkip: null });
+    assert.equal(storedPolicy.schemaVersion, 4, "resetting the switches never downgrades the schema");
+
+    // Lost response on an own-fallback write: no blind retry, explicit readback.
+    await page.route("**/api/control/profiles/standard/fallback", route => route.abort());
+    await openDetails("#profile-standard .profile-fallback-editor");
+    await page.locator("#standard-fallback-provider_id").selectOption("fixture");
+    await page.locator("#standard-fallback-model_id").selectOption("family/beta");
+    await page.locator("#standard-fallback-variant").selectOption("high");
+    await page.locator("#profile-standard .profile-fallback-form").getByRole("button", { name: "Eigenes Fallback speichern" }).click();
+    await page.waitForFunction(() => document.querySelector("#profile-standard .profile-fallback-feedback").textContent.includes("nicht bestätigt"));
+    assert.match(await page.locator("#profile-standard .profile-fallback-feedback").innerText(), /kein automatischer Wiederholungswrite/);
+    await page.unroute("**/api/control/profiles/standard/fallback");
+    await page.locator("#profile-standard .profile-fallback-form").getByRole("button", { name: "Speicherstand zurücklesen" }).click();
+    await page.waitForFunction(() => document.querySelector("#profile-standard .profile-fallback-feedback").textContent.includes("Aktuell gespeichert"));
+    await page.locator("#profile-standard .profile-fallback-form").getByRole("button", { name: "Entwurf nach Abgleich freigeben" }).click();
+    await page.waitForFunction(() => document.querySelector("#profile-standard .profile-fallback-feedback").textContent.includes("Abgleich bestätigt"));
+    // Concurrent change: the draft survives and needs a deliberate comparison.
+    const currentOwn = await (await page.request.get(`${base}/api/control`)).json();
+    await page.request.put(`${base}/api/control/profiles/standard/fallback`, { headers: { Origin: base },
+      data: { revision: currentOwn.policy.revision, fallback: { ...tuple, model_id: "family/alpha" } } });
+    await page.locator("#profile-standard .profile-fallback-form").getByRole("button", { name: "Eigenes Fallback speichern" }).click();
+    await page.waitForFunction(() => document.querySelector("#profile-standard .profile-fallback-feedback").textContent.includes("anderweitig"));
+    assert.equal(await page.locator("#standard-fallback-model_id").inputValue(), "family/beta", "the draft is preserved");
+    await page.locator("#profile-standard .profile-fallback-form").getByRole("button", { name: "Aktuellen Stand vergleichen" }).click();
+    await page.waitForFunction(() => document.querySelector("#profile-standard .profile-fallback-feedback").textContent.includes("Aktuell gespeichert"));
+    await page.locator("#profile-standard .profile-fallback-form").getByRole("button", { name: "Entwurf nach Abgleich freigeben" }).click();
+    await page.locator("#profile-standard .profile-fallback-form").getByRole("button", { name: "Eigenes Fallback speichern" }).click();
+    await page.waitForFunction(() => document.querySelector("#profile-standard .profile-fallback-feedback").textContent.includes("Eigenes Fallback gespeichert · Revision"));
+    assert.deepEqual(JSON.parse(await readFile(`${project}/.opencode-vm/agent-control.json`)).profileFallbacks.standard,
+      { ...tuple, model_id: "family/beta" });
+    await page.locator("#profile-standard .profile-fallback-form").getByRole("button", { name: "Eigenes Fallback entfernen" }).click();
+    await page.waitForFunction(() => document.querySelector("#profile-standard .profile-fallback-feedback").textContent.includes("Eigenes Fallback entfernt"));
+    storedPolicy = JSON.parse(await readFile(`${project}/.opencode-vm/agent-control.json`));
+    assert.equal(storedPolicy.profileFallbacks.standard, null);
+    assert.equal(storedPolicy.schemaVersion, 4, "clearing an own fallback never downgrades the schema");
+    assert.deepEqual(storedPolicy.profileFallbacks.deep, tuple, "other own fallbacks survive");
     const long = "family/long-" + "model-name-".repeat(15); await select("design", "high", long);
     // Four state labels/local help, source filter and disclosure/focus survive status refresh.
     await page.route("**/api/control", async route => {

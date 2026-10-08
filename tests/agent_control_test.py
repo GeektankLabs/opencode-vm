@@ -12,8 +12,8 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 import hub.server as server
-from hub.catalog import read_catalog, mcp_connection, read_capabilities
-from hub.policy import PolicyStore, PolicyConflict, PolicyError, PolicyCapabilityError, PROFILES, check_selection, resolve_profile, validate_final_fallback, validate_policy
+from hub.catalog import read_catalog, mcp_connection, read_capabilities, read_schema4_capabilities, read_policy_capabilities
+from hub.policy import PolicyStore, PolicyConflict, PolicyError, PolicyCapabilityError, PROFILES, BASE_PROFILES, STRATEGY_KEYS, check_selection, resolve_profile, routing_regime, candidate_order, profile_fallbacks_view, strategies_view, validate_final_fallback, validate_policy, validate_profile_fallbacks, validate_strategies
 
 
 CATALOG = {"providers": [{"provider_id": "p", "name": "Provider"}],
@@ -203,13 +203,117 @@ class PolicyTest(unittest.TestCase):
                 selection = dict(SELECTION)
                 if state.endswith("_unavailable"):
                     selection[{"provider_unavailable": "provider_id", "model_unavailable": "model_id",
-                               "variant_unavailable": "variant"}[state]] = "gone"
+                                "variant_unavailable": "variant"}[state]] = "gone"
                 policy["profiles"][role] = selection
             catalog = None if vector["catalog"] == "unavailable" else {**CATALOG, "truncated": vector["catalog"] == "incomplete"}
             result = resolve_profile(policy, vector["profile"], catalog)
             for key in ("status", "resolved_profile", "resolution_path"):
                 self.assertEqual(result.get(key), vector.get(key), vector)
             self.assertEqual("runtime" in result, vector["status"] == "available")
+
+    def test_schema4_validation_is_strict(self):
+        self.assertEqual(validate_profile_fallbacks(dict.fromkeys(PROFILES)), dict.fromkeys(PROFILES))
+        self.assertEqual(validate_profile_fallbacks({**dict.fromkeys(PROFILES), "deep": SELECTION})["deep"], SELECTION)
+        self.assertEqual(validate_strategies({"degrading": True, "providerSkip": None}),
+                         {"degrading": True, "providerSkip": None})
+        for bad in [{"degrading": True}, {"degrading": True, "providerSkip": False, "extra": True},
+                    {"degrading": 1, "providerSkip": None}, {"degrading": "true", "providerSkip": None},
+                    {"degrading": True, "providerSkip": "no"}, "degrading"]:
+            with self.assertRaises(PolicyError):
+                validate_strategies(bad)
+        for bad in [dict.fromkeys(BASE_PROFILES), {**dict.fromkeys(PROFILES), "manager": None},
+                    {**dict.fromkeys(PROFILES), "deep": {**SELECTION, "extra": "x"}},
+                    {**dict.fromkeys(PROFILES), "deep": {**SELECTION, "provider_id": "/etc/passwd"}}]:
+            with self.assertRaises(PolicyError):
+                validate_profile_fallbacks(bad)
+        complete = {"schemaVersion": 4, "revision": 1, "updatedAt": "2026-10-08T00:00:00Z",
+                    "profiles": dict.fromkeys(PROFILES), "finalFallback": None,
+                    "profileFallbacks": dict.fromkeys(PROFILES),
+                    "strategies": {"degrading": None, "providerSkip": None}}
+        self.assertEqual(validate_policy(complete)["schemaVersion"], 4)
+        for bad in [{**complete, "strategies": None}, {**complete, "profileFallbacks": None},
+                    {**complete, "extra": 1}, {**complete, "schemaVersion": 5},
+                    {"schemaVersion": 4, "revision": 1, "updatedAt": "2026-10-08T00:00:00Z",
+                     "profiles": dict.fromkeys(PROFILES), "finalFallback": None,
+                     "profileFallbacks": dict.fromkeys(PROFILES)},
+                    {"schemaVersion": 3, "revision": 1, "updatedAt": "2026-10-08T00:00:00Z",
+                     "profiles": dict.fromkeys(PROFILES), "finalFallback": None,
+                     "profileFallbacks": dict.fromkeys(PROFILES),
+                     "strategies": {"degrading": None, "providerSkip": None}}]:
+            with self.assertRaises(PolicyError):
+                validate_policy(bad)
+
+    def test_shared_fallback_regime_vectors_match_the_adapter(self):
+        """Same vectors the TypeScript reader asserts; one shared fixture file."""
+        vectors = json.loads((Path(__file__).parent.parent / "adapters/mcp/tests/fallback-vectors.json").read_text())
+        self.assertGreaterEqual(len(vectors), 8)
+        for vector in vectors:
+            policy = validate_policy(vector["policy"])
+            routing = routing_regime(policy)
+            self.assertEqual(routing["regime"], vector["regime"], vector["name"])
+            self.assertEqual(routing["legacyFinalStageApplies"], vector["legacy_final_stage_applies"], vector["name"])
+            self.assertEqual(routing["strategiesEffective"],
+                             {"degrading": vector["strategies_effective"]["degrading"],
+                              "providerSkip": vector["strategies_effective"]["provider_skip"]}, vector["name"])
+            for profile in PROFILES:
+                self.assertEqual(candidate_order(policy, profile), vector["candidate_order"][profile],
+                                 f'{vector["name"]} / {profile}')
+
+    def test_profile_fallback_and_strategy_writes_upgrade_back_up_and_preserve(self):
+        self.store.update("deep", SELECTION, 0)
+        self.store.update_fallback({"mode": "degrading", "selection": SELECTION}, 1, optional_capable=True)
+        self.assertEqual(self.store.read()["schemaVersion"], 3)
+        with self.assertRaises(PolicyCapabilityError):
+            self.store.update_profile_fallback("deep", SELECTION, 2)
+        saved = self.store.update_profile_fallback("deep", SELECTION, 2, schema4_capable=True)
+        self.assertEqual(saved["schemaVersion"], 4)
+        self.assertEqual(saved["profileFallbacks"]["deep"], SELECTION)
+        self.assertEqual(saved["strategies"], {"degrading": None, "providerSkip": None})
+        self.assertEqual(saved["finalFallback"], {"mode": "degrading", "selection": SELECTION})
+        backup = self.store.directory / "agent-control.schema3-rev2.backup.json"
+        self.assertTrue(backup.is_file())
+        self.assertEqual(json.loads(backup.read_text())["schemaVersion"], 3)
+        self.assertEqual(list(json.loads(self.store.path.read_text())),
+                         ["schemaVersion", "revision", "updatedAt", "profiles", "finalFallback",
+                          "profileFallbacks", "strategies"], "canonical key order matches the adapter writer")
+        # Every other writer preserves the schema-4 slots and never downgrades.
+        self.assertEqual(self.store.update("standard", SELECTION, 3)["schemaVersion"], 4)
+        self.assertEqual(self.store.read()["profileFallbacks"]["deep"], SELECTION)
+        self.assertEqual(self.store.update_fallback(None, 4)["schemaVersion"], 4)
+        self.assertEqual(self.store.read()["finalFallback"], None)
+        self.assertEqual(self.store.read()["profileFallbacks"]["deep"], SELECTION)
+        with self.assertRaises(PolicyConflict):
+            self.store.update_strategies({"degrading": True, "providerSkip": False}, 4)
+        switched = self.store.update_strategies({"degrading": True, "providerSkip": False}, 5, schema4_capable=True)
+        self.assertEqual(switched["strategies"], {"degrading": True, "providerSkip": False})
+        self.assertEqual(switched["profileFallbacks"]["deep"], SELECTION)
+        cleared = self.store.update_strategies({"degrading": None, "providerSkip": None}, 6, schema4_capable=True)
+        self.assertEqual(cleared["schemaVersion"], 4, "clearing never downgrades")
+        self.assertEqual(cleared["strategies"], {"degrading": None, "providerSkip": None})
+        removed = self.store.update_profile_fallback("deep", None, 7, schema4_capable=True)
+        self.assertEqual(removed["schemaVersion"], 4)
+        self.assertIsNone(removed["profileFallbacks"]["deep"])
+        self.assertEqual(sorted(path.name for path in self.store.directory.glob("agent-control.*.backup.json")),
+                         ["agent-control.schema1-rev1.backup.json", "agent-control.schema3-rev2.backup.json"],
+                         "each first upgrade to a new schema backs up exact bytes once; later writes add none")
+        # Clearing on schema 1/2 neither upgrades nor invents the new keys.
+        fresh = Path(self.temp.name) / "fresh-project"
+        fresh.mkdir(exist_ok=True)
+        store = PolicyStore(fresh)
+        untouched = store.update_profile_fallback("deep", None, 0, schema4_capable=True)
+        self.assertEqual(untouched["schemaVersion"], 1)
+        self.assertFalse(store.path.exists() and "profileFallbacks" in store.path.read_text())
+        self.assertEqual(store.update_strategies({"degrading": None, "providerSkip": None}, 1,
+                                                 schema4_capable=True)["schemaVersion"], 1)
+        with self.assertRaises(PolicyCapabilityError):
+            store.update_strategies({"degrading": True, "providerSkip": True}, 2)
+        with self.assertRaises(PolicyCapabilityError):
+            store.update_profile_fallback("deep", SELECTION, 2)
+        upgraded = store.update_strategies({"degrading": False, "providerSkip": True}, 2,
+                                           optional_capable=True, schema4_capable=True)
+        self.assertEqual(upgraded["schemaVersion"], 4)
+        self.assertEqual(sorted(json.loads(store.path.read_text())["profiles"]), sorted(PROFILES))
+        self.assertEqual(upgraded["finalFallback"], None)
 
 
 class HubApiTest(PolicyTest):
@@ -338,6 +442,130 @@ class HubApiTest(PolicyTest):
         self.assertIsNone(body["policy"]["finalFallback"])
         with urlopen(self.base + "/api/control", timeout=3) as response:
             self.assertIn("finalFallback", json.load(response)["policy"])
+
+
+    def own_fallback_request(self, fallback, revision=0, origin=True, profile="deep"):
+        body = json.dumps({"revision": revision, "fallback": fallback}).encode()
+        headers = {"Content-Type": "application/json"}
+        if origin: headers["Origin"] = self.base
+        request = Request(self.base + f"/api/control/profiles/{profile}/fallback", data=body, headers=headers, method="PUT")
+        try:
+            with urlopen(request, timeout=3) as response:
+                return response.status, json.load(response)
+        except HTTPError as error:
+            return error.code, None
+
+    def strategies_request(self, strategies, revision=0, origin=True):
+        body = json.dumps({"revision": revision, "strategies": strategies}).encode()
+        headers = {"Content-Type": "application/json"}
+        if origin: headers["Origin"] = self.base
+        request = Request(self.base + "/api/control/fallback-strategies", data=body, headers=headers, method="PUT")
+        try:
+            with urlopen(request, timeout=3) as response:
+                return response.status, json.load(response)
+        except HTTPError as error:
+            return error.code, None
+
+    def raw_put(self, path, payload, origin=True):
+        headers = {"Content-Type": "application/json"}
+        if origin: headers["Origin"] = self.base
+        request = Request(self.base + path, data=json.dumps(payload).encode(), headers=headers, method="PUT")
+        try:
+            with urlopen(request, timeout=3) as response:
+                return response.status
+        except HTTPError as error:
+            return error.code
+
+    def test_profile_fallback_route_is_additive_gated_and_cas_protected(self):
+        own_path = "/api/control/profiles/deep/fallback"
+        self.assertEqual(self.own_fallback_request(None, revision=0, origin=False)[0], 403)
+        for bad in [{"revision": 0}, {"revision": 0, "fallback": SELECTION, "extra": 1},
+                    {"revision": 0, "fallback": {**SELECTION, "extra": "x"}},
+                    {"revision": 0, "fallback": {**SELECTION, "provider_id": "sk-abcdefghijklmnopqrstuv"}},
+                    {"revision": 0, "fallback": {**SELECTION, "model_id": "/etc/passwd"}}]:
+            self.assertEqual(self.raw_put(own_path, bad), 400, bad)
+        self.assertEqual(self.raw_put(own_path, {"revision": -1, "fallback": None}), 400)
+        self.assertEqual(self.request(SELECTION), 200, "a schema-1 policy exists before the upgrade")
+        # A schema-4 upgrade needs the live capability confirmation before any catalog check.
+        self.assertEqual(self.own_fallback_request(SELECTION, revision=1)[0], 409)
+        self.assertNotIn("profileFallbacks", self.store.path.read_text())
+        with patch.object(server, "read_capabilities", return_value=True), \
+             patch.object(server, "read_schema4_capabilities", return_value=True):
+            status, body = self.own_fallback_request(SELECTION, revision=1)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["policy"]["schemaVersion"], 4)
+        self.assertEqual(body["policy"]["profileFallbacks"]["deep"], SELECTION)
+        self.assertEqual(body["policy"]["profiles"]["deep"], SELECTION, "the main mapping is preserved")
+        self.assertEqual(body["routing"]["regime"], "per_profile")
+        self.assertFalse(body["routing"]["legacyFinalStageApplies"])
+        self.assertEqual(body["strategies"], {"degrading": None, "providerSkip": None})
+        self.assertTrue((self.store.directory / "agent-control.schema1-rev1.backup.json").is_file())
+        self.assertEqual(json.loads((self.store.directory / "agent-control.schema1-rev1.backup.json")
+                                    .read_text())["schemaVersion"], 1)
+        self.assertEqual(self.own_fallback_request(SELECTION, revision=1)[0], 409)
+        self.assertEqual(self.own_fallback_request({**SELECTION, "variant": "missing"}, revision=2)[0], 422)
+        server.read_catalog = lambda *args, **kwargs: {**CATALOG, "truncated": True}
+        self.assertEqual(self.own_fallback_request({**SELECTION, "variant": "default"}, revision=2)[0], 503)
+        server.read_catalog = lambda *args, **kwargs: None
+        self.assertEqual(self.own_fallback_request({**SELECTION, "variant": "default"}, revision=2)[0], 503)
+        server.read_catalog = lambda *args, **kwargs: CATALOG
+        # Clearing needs no catalog and never downgrades the schema.
+        status, body = self.own_fallback_request(None, revision=2)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["policy"]["schemaVersion"], 4)
+        self.assertIsNone(body["policy"]["profileFallbacks"]["deep"])
+        self.assertEqual(body["routing"]["regime"], "legacy_final_fallback",
+                         "with everything unset the legacy behaviour is preserved")
+        with patch("hub.policy.os.replace", side_effect=OSError("publication failed")):
+            self.assertEqual(self.own_fallback_request(SELECTION, revision=3)[0], 503)
+        self.assertEqual(self.store.read()["revision"], 3, "a failed publication changes nothing")
+        with urlopen(self.base + "/api/control", timeout=3) as response:
+            snapshot = json.load(response)
+        for key in ("profileFallbackValidation", "strategies", "routing"):
+            self.assertIn(key, snapshot)
+        self.assertEqual(snapshot["profileFallbackValidation"]["deep"], "unconfigured")
+        self.assertIn("profileFallbacks", snapshot["capabilities"])
+        self.assertEqual(snapshot["routing"]["regime"], "legacy_final_fallback")
+
+    def test_strategies_route_writes_both_switches_explicitly_and_reports_the_regime(self):
+        self.assertEqual(self.strategies_request(None, revision=0, origin=False)[0], 403)
+        for bad in [{"degrading": True}, {"degrading": True, "providerSkip": False, "extra": True},
+                    {"degrading": 1, "providerSkip": None}, {"degrading": "true", "providerSkip": None},
+                    {"degrading": True, "providerSkip": "no"}, "degrading", None]:
+            self.assertEqual(self.strategies_request(bad, revision=0)[0], 400, bad)
+        self.assertEqual(self.raw_put("/api/control/fallback-strategies", {"revision": 0}), 400)
+        self.assertEqual(self.strategies_request({"degrading": True, "providerSkip": False}, revision=0)[0], 409)
+        with patch.object(server, "read_capabilities", return_value=True), \
+             patch.object(server, "read_schema4_capabilities", return_value=True):
+            status, body = self.strategies_request({"degrading": True, "providerSkip": False}, revision=0)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["policy"]["schemaVersion"], 4)
+        self.assertEqual(body["policy"]["strategies"], {"degrading": True, "providerSkip": False})
+        self.assertEqual(body["routing"]["regime"], "per_profile")
+        self.assertEqual(body["routing"]["strategiesEffective"], {"degrading": True, "providerSkip": False})
+        self.assertEqual(sorted(json.loads(self.store.path.read_text())["profiles"]), sorted(PROFILES))
+        self.assertEqual(list(self.store.directory.glob("agent-control.*.backup.json")), [],
+                         "a missing original has no bytes to back up")
+        self.assertEqual(self.strategies_request({"degrading": False, "providerSkip": True}, revision=0)[0], 409,
+                         "a stale expected revision never writes")
+        # No selection means no catalog dependency: an unavailable catalog still writes.
+        server.read_catalog = lambda *args, **kwargs: None
+        status, body = self.strategies_request({"degrading": False, "providerSkip": True}, revision=1)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["policy"]["strategies"], {"degrading": False, "providerSkip": True})
+        # Resetting to "not set" keeps schema 4 and returns to the legacy regime.
+        status, body = self.strategies_request({"degrading": None, "providerSkip": None}, revision=2)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["policy"]["schemaVersion"], 4)
+        self.assertEqual(body["policy"]["strategies"], {"degrading": None, "providerSkip": None})
+        self.assertEqual(body["routing"]["regime"], "legacy_final_fallback")
+        with patch("hub.policy.os.replace", side_effect=OSError("publication failed")):
+            self.assertEqual(self.strategies_request({"degrading": True, "providerSkip": True}, revision=3)[0], 503)
+        self.assertEqual(self.store.read()["revision"], 3, "a failed publication changes nothing")
+        with urlopen(self.base + "/api/control", timeout=3) as response:
+            snapshot = json.load(response)
+        self.assertEqual(snapshot["strategies"], {"degrading": None, "providerSkip": None})
+        self.assertEqual(snapshot["routing"]["strategiesEffective"], {"degrading": False, "providerSkip": False})
 
 
 class CatalogTest(PolicyTest):

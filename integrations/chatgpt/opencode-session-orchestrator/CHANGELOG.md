@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-10-08-r45
+
+- Add the additive per-profile fallback mode (policy schema 4) to error-fallback routing: each profile card may carry its own optional fallback runtime, and two independent switches (Degrading, Provider-Skip) govern the chain. `routing.regime` distinguishes `per_profile` from the unchanged `legacy_final_fallback`; the legacy global final stage stays stored and readable but is not part of the per-profile chain and is never silently appended. Unset switches mean "not activated" (published as `routing.strategies_effective`), never a hidden default.
+- Keep the routing evidence-bound and finite: the failed identical runtime is never retried, provider skip applies to profile fallbacks too, unconfigured candidates are skipped, unavailable candidates are reported with their reason, and an exhausted chain ends in a controlled readable `INPUT_REQUIRED` (terminal end of the processing run, not a process crash, no double admission, no repeated uncertain side effects). Context/input-length errors stay on their separate compaction path.
+- Document the two discovered write tools (`set_project_model_policy_profile_fallback`, `set_project_model_policy_strategies`) with revision CAS, exact catalog-validated selections, explicit both-switch writes and committed readback; no invented provider/model, no silent configuration.
+- Hub model pickers now list models alphabetically by displayed name (locale-aware, case-insensitive, deterministic tie-breaker) across main mappings, own fallbacks and the final fallback, with provider separation, IDs, variants, availability and routing unchanged.
+
 ## 2026-10-08-r44
 
 - Document operator-directed configuration of the final error-fallback slot through the discovered write capability (adapter 0.1.31 adds `set_project_model_policy_fallback`): read the current revision, use an exact catalog-validated selection and mode decided by the operator, write with revision CAS, and confirm the committed readback. No invented provider/model, no silent auto-configuration; an unconfigured slot still yields a precise `INPUT_REQUIRED`.

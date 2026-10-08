@@ -484,6 +484,78 @@ class SkillPackageTest(unittest.TestCase):
             with self.subTest(marker=marker):
                 self.assertIn(marker, notice)
 
+    def test_r45_per_profile_fallback_mode_is_additive_explicit_and_finite(self):
+        source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
+        skill = (source / "SKILL.md").read_text()
+        routing = (source / "references/fallback-routing.md").read_text()
+        changelog = (source / "CHANGELOG.md").read_text()
+        manifest, _ = BUILDER.package_content(ROOT)
+        self.assertEqual(manifest["revision"], "2026-10-08-r45")
+        self.assertIn("## 2026-10-08-r45\n", changelog)
+        self.assertIn("**2026-10-08-r45**", skill)
+        self.assertIn("references/fallback-routing.md", skill)
+        self.assertIn("routing.regime: per_profile", skill)
+        section = routing.split("## Per-profile fallback mode (additive schema 4)\n", 1)[1] \
+            .split("## Context-error recovery", 1)[0]
+        for marker in (
+            # explicit regime, additive schema, legacy slot neither removed nor reinterpreted
+            "Read `routing.regime` from the discovered policy read", "never inferred",
+            "`legacy_final_fallback` — today's behaviour, unchanged",
+            "at least one configured own fallback", "at least one explicitly set switch",
+            "is **not** part of the chain", "never silently appended as an extra last step",
+            "`routing.legacy_final_stage_applies` states this relationship explicitly",
+            # chain order: own fallback before degrading, existing role entry points
+            "The failed main model is never retried", "identical runtime (provider/model/variant) is never attempted twice",
+            "own fallback** is the next candidate when configured and permitted",
+            "Only when `routing.strategies_effective.degrading` is true",
+            "Deep → Standard → Execution", "Design → Standard → Execution and Review → Deep → Standard → Execution",
+            "main model first and then its own fallback",
+            "a missing own fallback alone does not stop the chain",
+            "Configured-but-unavailable candidates are not attempted and are reported with their status reason",
+            "`routing.candidate_order[profile]` is the deterministic configured order",
+            "`<stage>.main` then `<stage>.fallback`", "it is `null` in the legacy regime",
+            # four switch combinations, null is not a hidden default
+            "| off | off |", "| off | on |", "| on | off |", "| on | on |",
+            "own fallback of the same stage → terminal `INPUT_REQUIRED`",
+            "unless its provider identity already failed",
+            "other configured models of the same provider remain allowed",
+            "**including profile fallbacks**",
+            "`null` means *not explicitly activated*, never a hidden default",
+            "published as `routing.strategies_effective`",
+            # evidence-bound identity, finiteness, controlled terminal state
+            "skip only what the confirmed error and the configured IDs actually prove",
+            "construct no provider-wide causal or skip claim",
+            "the chain is finite, adds no retry/backoff/counter layer",
+            "keeps native backend retries and the repair history separate",
+            "never continues silently",
+            "**not** a VM/adapter process crash and not a swallowed failure",
+            "every attempted candidate with its outcome",
+            "every skipped candidate with its reason",
+            "identical runtime already failed, provider identity skipped, unconfigured, unavailable",
+            "the last secured state and the required operator decision",
+            "No double worker admission and no repetition of uncertain side effects",
+            # write contract
+            "`set_project_model_policy_profile_fallback`, `set_project_model_policy_strategies`",
+            "with revision CAS", "Both strategy switches are always written explicitly",
+            "Never invent a provider/model, never configure silently",
+            "leave the main profile mappings and the legacy final-fallback slot untouched",
+            # roles, per-step return and the separate context class
+            "a reviewer stays independent with no self-implementation or self-acceptance",
+            "resolves its regular profile fresh from the current policy with exact readback",
+            "Context/input-length errors stay on their separate compaction path",
+            "never a routing trigger",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, section)
+        # The legacy total/degrading contract stays worded as before (no reinterpretation).
+        legacy = routing.split("## Routing on timeout/quota (classes 1–2)\n", 1)[1] \
+            .split("## Per-profile fallback mode", 1)[0]
+        for marker in ("**Total (standard):**", "**Degrading (selectable option):**",
+                       "no automatic provider/model choice of any kind", "**Role truth:**",
+                       "**Per-step return:**"):
+            with self.subTest(legacy=marker):
+                self.assertIn(marker, legacy)
+
     def test_task_compact_context_convention(self):
         source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
         skill = (source / "SKILL.md").read_text()
@@ -3107,7 +3179,7 @@ class TaskDoneArchiveTraceTest(unittest.TestCase):
         monitor = (source / "references/monitor-tasks.md").read_text()
         content = (source / "references/content-protocol.md").read_text()
         scenarios = (source / "references/regression-scenarios.md").read_text()
-        self.assertIn("2026-10-08-r44", skill)
+        self.assertIn("2026-10-08-r45", skill)
         self.assertIn("## Cooperative Pause and Weiter/Go", skill)
         self.assertIn("references/pause-go.md", skill)
         for required in ("next safe Tool/Receipt return",
@@ -3333,7 +3405,7 @@ class TaskDoneArchiveTraceTest(unittest.TestCase):
         monitor = (source / "references/monitor-tasks.md").read_text()
         packages = (source / "references/work-packages.md").read_text()
         mvp = (source / "references/optimistic-mvp.md").read_text()
-        self.assertIn("2026-10-08-r44", skill)
+        self.assertIn("2026-10-08-r45", skill)
         self.assertIn("## 2026-10-08-r44", (source / "CHANGELOG.md").read_text())
         # Production-Code-Only cap with excluded classes, progress and no-reset.
         for required in ("at most two autonomous PRODUCTION-CODE repair cycles",

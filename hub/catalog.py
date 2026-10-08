@@ -109,25 +109,78 @@ def mcp_connection(runtime, session_root, project_hash):
         return {"state": "not_ready", "reason": "Authentifizierter MCP-Healthcheck fehlgeschlagen."}
 
 
-def read_capabilities(connection):
-    """Discover the *active* input/output contract, never infer it from a version."""
+def _tools_list(connection):
+    """One bounded tools/list read; None when the active contract is not discoverable."""
     if connection.get("state") != "ready":
-        return False
+        return None
     try:
         result = _request(connection["base"] + "/mcp", connection["token"],
                           {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
-        tools = {tool["name"]: tool for tool in result["result"]["tools"]}
+        return {tool["name"]: tool for tool in result["result"]["tools"]}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, CatalogUnavailable):
+        return None
+
+
+def _version_supported(schema_property, wanted):
+    return bool(wanted in schema_property.get("enum", []) or schema_property.get("const") == wanted or any(
+        part.get("const") == wanted or wanted in part.get("enum", [])
+        for part in schema_property.get("anyOf", [])))
+
+
+def _supports_optional_profiles(tools):
+    try:
         recommendation = tools["get_recommended_runtime"]
         roles = recommendation["inputSchema"]["properties"]["profile"]["enum"]
         output = tools["get_project_model_policy"]["outputSchema"]["properties"]
-        version = output["schema_version"]
-        supports_two = 2 in version.get("enum", []) or version.get("const") == 2 or any(
-            part.get("const") == 2 or 2 in part.get("enum", []) for part in version.get("anyOf", []))
-        return (supports_two and {"design", "review"}.issubset(roles)
-                and {"design", "review"}.issubset(output["profiles"]["properties"])
-                and {"resolution_path", "resolved_profile"}.issubset(recommendation["outputSchema"]["properties"]))
-    except (OSError, ValueError, KeyError, TypeError, AttributeError, CatalogUnavailable):
+        return bool(_version_supported(output["schema_version"], 2)
+                    and {"design", "review"}.issubset(roles)
+                    and {"design", "review"}.issubset(output["profiles"]["properties"])
+                    and {"resolution_path", "resolved_profile"}.issubset(recommendation["outputSchema"]["properties"]))
+    except (KeyError, TypeError, AttributeError):
         return False
+
+
+def _supports_profile_fallbacks(tools):
+    """Schema-4 contract: additive readback fields plus both per-profile write tools.
+
+    Confirmed only from the *active* discovered schemas, never from a version
+    string, so an older connector is never handed a document it would reject.
+    """
+    try:
+        output = tools["get_project_model_policy"]["outputSchema"]["properties"]
+        routing = output["routing"]["properties"]
+        profile_write = tools["set_project_model_policy_profile_fallback"]["inputSchema"]["properties"]
+        strategy_write = tools["set_project_model_policy_strategies"]["inputSchema"]["properties"]
+        return bool(_version_supported(output["schema_version"], 4)
+                    and {"profile_fallbacks", "strategies", "routing"} <= set(output)
+                    and {"regime", "legacy_final_stage_applies", "strategies_effective",
+                         "candidate_order"} <= set(routing)
+                    and {"revision", "profile", "fallback"} <= set(profile_write)
+                    and {"revision", "strategies"} <= set(strategy_write)
+                    and {"degrading", "provider_skip"} <= set(strategy_write["strategies"]["properties"]))
+    except (KeyError, TypeError, AttributeError):
+        return False
+
+
+def read_capabilities(connection):
+    """Discover the *active* input/output contract, never infer it from a version."""
+    tools = _tools_list(connection)
+    return _supports_optional_profiles(tools) if tools is not None else False
+
+
+def read_schema4_capabilities(connection):
+    """Discover the *active* schema-4 profile-fallback/strategy contract."""
+    tools = _tools_list(connection)
+    return _supports_profile_fallbacks(tools) if tools is not None else False
+
+
+def read_policy_capabilities(connection):
+    """Both policy capability flags from ONE bounded tools/list discovery."""
+    tools = _tools_list(connection)
+    if tools is None:
+        return {"optionalProfiles": False, "profileFallbacks": False}
+    return {"optionalProfiles": _supports_optional_profiles(tools),
+            "profileFallbacks": _supports_profile_fallbacks(tools)}
 
 
 def read_board_tasks(runtime, session_root, project_hash, *, connection=None, limit=MAX_CANDIDATE_TASKS):
