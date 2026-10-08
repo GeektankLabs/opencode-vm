@@ -89,6 +89,26 @@
     $("monitor-more").hidden = !nextCursor;
   }
 
+  function sessionLine(monitor) {
+    const line = node("p", "", "muted");
+    if (!monitor.session_id) { line.textContent = "Session noch nicht gestartet"; return line; }
+    const navigation = snapshot?.navigation;
+    if (!navigation || !Number.isInteger(navigation.web_port)) { line.textContent = `Session: ${monitor.session_id}`; return line; }
+    // Same route schema as the project dashboard: version-gated, never a guessed URL.
+    const base = `https://${location.hostname}:${navigation.web_port}`;
+    const link = node("a", navigation.opencode_version === "1.18.34" ? "Session öffnen" : `Session ${monitor.session_id} · OpenCode (Route unverifiziert)`);
+    if (navigation.opencode_version === "1.18.34") {
+      const key = btoa(base).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+      link.href = `${base}/server/${key}/session/${encodeURIComponent(monitor.session_id)}`;
+      line.append(node("span", `Session: ${monitor.session_id} · `));
+    } else {
+      link.href = base;
+    }
+    link.target = "_blank"; link.rel = "noopener noreferrer";
+    line.append(link);
+    return line;
+  }
+
   function renderHistory(state, list) {
     list.replaceChildren();
     for (const entry of state.historyEntries.slice(0, 80)) {
@@ -122,7 +142,7 @@
     if (monitor.parked_reason) card.append(node("p", `Parkgrund: ${monitor.parked_reason}`, "muted"));
     card.append(node("p", `Takt ${monitor.scheduler.interval_seconds} s · ${autonomyLabels[monitor.autonomy_profile]} · Runtime ${runtimeLabels[monitor.runtime_profile]}`, "muted"));
     card.append(node("p", `Nächster Lauf: ${msToLocal(monitor.scheduler.next_run_at)} · Letzter Lauf: ${monitor.last_run_at ? new Date(monitor.last_run_at).toLocaleString("de-DE") : "unbekannt"} · Frische: ${freshness(monitor)}${monitor.scheduler.expiry_at ? ` · Expiry ${msToLocal(monitor.scheduler.expiry_at)}` : ""}`, "muted"));
-    card.append(node("p", `Session: ${monitor.session_id || "noch nicht primed"}`, "muted"));
+    card.append(sessionLine(monitor));
 
     const actions = node("div", "", "monitor-actions");
     const toggle = node("button", monitor.scheduler.enabled ? "Takt deaktivieren" : "Takt aktivieren", "button secondary"); toggle.type = "button";
@@ -341,16 +361,25 @@
       candidates = body.candidates;
       candidatesStale = false;
       candidateTitles = new Map(candidates.map(item => [item.task_id, item.title]));
+      const partial = body.completeness === "partial";
       select.replaceChildren(...(candidates.length
         ? [new Option("— Bitte wählen —", ""), ...candidates.map(item => new Option(`${item.title} · ${item.task_id}`, item.task_id))]
-        : [new Option("Keine offenen deklarierten Mastertasks/Work Packages ohne Monitorbindung", "")]));
+        : [new Option(partial ? "Liste unvollständig — bitte aktualisieren" : "Keine offenen deklarierten Mastertasks/Work Packages ohne Monitorbindung", "")]));
       const previousValid = Boolean(previous) && candidates.some(item => item.task_id === previous);
       if (previousValid) select.value = previous;
+      // An allowed scan budget or a capped list is reported as incomplete —
+      // never presented as "no candidates".
+      const coverage = partial
+        ? `Liste unvollständig (${body.incomplete_reason || "Budget"}${Array.isArray(body.missing_statuses) && body.missing_statuses.length ? `, Status nicht gelesen: ${body.missing_statuses.join(", ")}` : ""}); gefiltert nach offenen Status, Einträge können fehlen.`
+        : "";
+      const capped = body.truncated ? `Liste gekürzt auf die ersten ${candidates.length} von ${body.scanned ?? "?"} deklarierten Tasks.` : "";
       if (previous && !previousValid) {
-        status.textContent = `Die bisherige Auswahl${previousTitle ? ` „${previousTitle}“` : ""} ist nicht mehr verfügbar (inzwischen abgeschlossen oder an einen Monitor gebunden). Bitte eine gültige Auswahl treffen.`;
+        status.textContent = `Die bisherige Auswahl${previousTitle ? ` „${previousTitle}“` : ""} ist nicht mehr verfügbar (inzwischen abgeschlossen oder an einen Monitor gebunden). Bitte eine gültige Auswahl treffen. ${coverage}${capped}`.trim();
+      } else if (candidates.length) {
+        status.textContent = `${candidates.length} offene deklarierte Mastertask(s) ohne Monitorbindung. ${coverage}${capped}`.trim();
       } else {
-        status.textContent = candidates.length
-          ? `${candidates.length} offene deklarierte Mastertask(s) ohne Monitorbindung.`
+        status.textContent = partial
+          ? `Keine deklarierten Mastertasks in der gelesenen Teilmenge gefunden. ${coverage}${capped}`.trim()
           : "Keine offenen deklarierten Mastertasks/Work Packages ohne Monitorbindung gefunden.";
       }
       updateCreateState();

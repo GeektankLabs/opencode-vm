@@ -120,6 +120,14 @@ def configure_runtime(runtime_path: Path, project: Path, expected_project_hash: 
         raise ValueError("Hub runtime input is invalid")
     if mcp["enabled"] and (not 1 <= mcp["port"] <= 65535 or mcp["generation"] != runtime["generation"]):
         raise ValueError("Hub MCP runtime input is invalid")
+    navigation = runtime.get("navigation")
+    if navigation is not None and (
+            not isinstance(navigation, dict)
+            or not isinstance(navigation.get("web_port"), int) or isinstance(navigation["web_port"], bool)
+            or not 1 <= navigation["web_port"] <= 65535
+            or not isinstance(navigation.get("opencode_version"), str)
+            or not navigation["opencode_version"] or len(navigation["opencode_version"]) > 64):
+        raise ValueError("Hub navigation runtime input is invalid")
     if runtime["authEnabled"]:
         if (not isinstance(auth, dict) or set(auth) != {"username", "password"}
                 or not isinstance(auth["username"], str) or not 1 <= len(auth["username"]) <= 255
@@ -529,6 +537,12 @@ class Handler(BaseHTTPRequestHandler):
         }
         if next_cursor is not None:
             payload["next_cursor"] = next_cursor
+        navigation = RUNTIME.get("navigation")
+        payload["navigation"] = (
+            {"web_port": navigation["web_port"], "opencode_version": navigation["opencode_version"]}
+            if isinstance(navigation, dict) and isinstance(navigation.get("web_port"), int)
+            and not isinstance(navigation.get("web_port"), bool)
+            and isinstance(navigation.get("opencode_version"), str) else None)
         self.send_json(200, payload)
 
     def handle_monitor_candidates(self) -> None:
@@ -538,16 +552,22 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(503, {"code": "MONITOR_UNAVAILABLE", "error": "Monitor registry is unavailable."})
             return
         connection = mcp_connection(RUNTIME["mcp"], SESSION_ROOT, project_hash())
-        tasks = read_board_tasks(RUNTIME["mcp"], SESSION_ROOT, project_hash(), connection=connection)
-        if tasks is None:
+        result = read_board_tasks(RUNTIME["mcp"], SESSION_ROOT, project_hash(), connection=connection)
+        if result is None:
             self.send_json(503, {"code": "MONITOR_CANDIDATES_UNAVAILABLE",
                                  "error": "The project board task list is not readable; no candidates were confirmed."})
             return
         bound = {item["anchor"]["task_id"] for item in registry["monitors"]}
         candidates = [{"task_id": task["task_id"], "title": task["title"]}
-                      for task in tasks if task["declared"] and task["task_id"] not in bound]
-        self.send_json(200, {"schema": 1, "candidates": candidates, "total": len(candidates),
-                             "generation": registry["generation"], "observed_at": now()})
+                      for task in result["tasks"] if task["task_id"] not in bound]
+        payload = {"schema": 1, "candidates": candidates, "total": len(candidates),
+                   "completeness": result["completeness"], "truncated": result["truncated"],
+                   "generation": registry["generation"], "observed_at": now()}
+        if result.get("reason"):
+            payload["incomplete_reason"] = result["reason"]
+        if result.get("missing_statuses"):
+            payload["missing_statuses"] = result["missing_statuses"]
+        self.send_json(200, payload)
 
     def handle_monitor_get(self) -> None:
         monitor_id = self.path.split("?", 1)[0].rsplit("/", 1)[1]

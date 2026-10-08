@@ -210,7 +210,7 @@ test("default interval 60 is surfaced for a new canonical monitor", async () => 
   assert.match(text, /Takt 60 s/);
   assert.match(text, /MVP \(Standard\)/);
   assert.match(text, /Runtime Deep/);
-  assert.equal(await card("New Monitor").locator(".muted", { hasText: "Session: noch nicht primed" }).count(), 1);
+  assert.equal(await card("New Monitor").locator(".muted", { hasText: "Session noch nicht gestartet" }).count(), 1);
 });
 
 test("a stale write is rejected (409), keeps the draft and a later change retries deliberately", async () => {
@@ -363,6 +363,42 @@ test("refresh re-reads the board list: vanished selections are explicit and erro
   await page.locator("#monitor-create-candidates-status", { hasText: "nicht aktuell" }).waitFor();
   assert.equal(await page.locator("#monitor-create-task").inputValue(), taskAB, "the previous selection survives a failed board read");
   await page.unroute("**/api/monitor/candidates");
+  await refresh();
+  await page.locator("#monitor-create-candidates-status", { hasText: "offene deklarierte Mastertask" }).waitFor();
+});
+
+test("session links follow the existing route schema and incomplete candidate lists stay honest", async () => {
+  await refresh();
+  await openAll();
+  await card("Session Monitor").locator("p.muted a[target='_blank']").waitFor();
+  const link = card("Session Monitor").locator("p.muted a[target='_blank']");
+  const expectedKey = Buffer.from("https://127.0.0.1:4096").toString("base64")
+    .replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+  assert.equal(await link.getAttribute("href"),
+    `https://127.0.0.1:4096/server/${expectedKey}/session/ses_fixture_session`,
+    "the bound session opens through the same route schema as the project dashboard");
+  assert.equal(await link.getAttribute("rel"), "noopener noreferrer");
+  assert.match(await card("Session Monitor").innerText(), /Session: ses_fixture_session/);
+  // Without a bound session there is no link, only the honest text.
+  assert.match(await card("Alpha Monitor").innerText(), /Session noch nicht gestartet/);
+  assert.equal(await card("Alpha Monitor").locator("p.muted a[target='_blank']").count(), 0);
+
+  // An allowed scan budget is reported as incomplete — never as an empty list.
+  await writeFixtureTasks({ tasks: [], completeness: "partial", reason: "task-scan-budget",
+    missing_statuses: ["in_progress"], truncated: false, scanned: 0 });
+  await refresh();
+  await openCreate();
+  await page.locator("#monitor-create-candidates-status", { hasText: "Liste unvollständig" }).waitFor();
+  assert.match(await page.locator("#monitor-create-candidates-status").innerText(), /in_progress/,
+    "the unread status is named instead of hiding the gap");
+  assert.match(await page.locator("#monitor-create-task option").first().innerText(), /Liste unvollständig/);
+  assert.equal(await page.locator("#monitor-create-form button[type=submit]").isDisabled(), true);
+  // A capped list says that it is capped (taskAB is still unbound here).
+  await writeFixtureTasks({ tasks: [{ task_id: taskAB, title: "Second Declared WP", status: "todo" }],
+    completeness: "complete", reason: null, missing_statuses: [], truncated: true, scanned: 80 });
+  await refresh();
+  await page.locator("#monitor-create-candidates-status", { hasText: "Liste gekürzt" }).waitFor();
+  await writeFixtureTasks(defaultTasks);
   await refresh();
   await page.locator("#monitor-create-candidates-status", { hasText: "offene deklarierte Mastertask" }).waitFor();
 });

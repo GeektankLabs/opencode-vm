@@ -200,14 +200,15 @@ jobs:
           python3 -B tests/web_service_flags_test.py
           node --test tests/web_editor_extension_test.cjs
           node --test tests/web_launcher_dom_test.cjs
-          bash -n opencode-vm.sh tests/install_test.sh tests/hub_release_test.sh tests/mcp_adapter_test.sh tests/openlive_test.sh tests/besprechung_test.sh tests/vm_doctor_test.sh scripts/build-agent-hub.sh scripts/build-mcp-adapter.sh scripts/build-openlive-adapter.sh
-          shellcheck --severity=error opencode-vm.sh tests/install_test.sh tests/hub_release_test.sh tests/mcp_adapter_test.sh tests/openlive_test.sh tests/besprechung_test.sh tests/vm_doctor_test.sh scripts/build-agent-hub.sh scripts/build-mcp-adapter.sh scripts/build-openlive-adapter.sh
+          bash -n opencode-vm.sh tests/install_test.sh tests/hub_release_test.sh tests/mcp_adapter_test.sh tests/monitor_service_test.sh tests/openlive_test.sh tests/besprechung_test.sh tests/vm_doctor_test.sh scripts/build-agent-hub.sh scripts/build-mcp-adapter.sh scripts/build-openlive-adapter.sh
+          shellcheck --severity=error opencode-vm.sh tests/install_test.sh tests/hub_release_test.sh tests/mcp_adapter_test.sh tests/monitor_service_test.sh tests/openlive_test.sh tests/besprechung_test.sh tests/vm_doctor_test.sh scripts/build-agent-hub.sh scripts/build-mcp-adapter.sh scripts/build-openlive-adapter.sh
           bash tests/install_test.sh
           bash tests/hub_release_test.sh
           bash tests/besprechung_test.sh
           bash tests/mcp_lock_test.sh
           bash tests/vm_doctor_test.sh
           bash tests/mcp_adapter_test.sh
+          bash tests/monitor_service_test.sh
           bash tests/openlive_test.sh
       - name: Build reproducible adapters
         if: steps.state.outputs.release_needed == 'true'

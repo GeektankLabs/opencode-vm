@@ -11,6 +11,54 @@ class CatalogUnavailable(Exception):
     pass
 
 
+# Declared master tasks/work packages are recognized by the existing canonical
+# document sidecar roles; the open native statuses are used only to narrow a
+# scan that exceeded the adapter budget. No new index or membership store.
+DECLARED_DOCUMENT_ROLES = {"compact_context", "concept_plan"}
+BOARD_SCAN_STATUSES = ("todo", "in_progress")
+MAX_CANDIDATE_TASKS = 50
+
+
+def _tool_error_code(result):
+    payload = result.get("result") if isinstance(result, dict) else None
+    meta = payload.get("_meta") if isinstance(payload, dict) else None
+    error = meta.get("opencode-vm/error") if isinstance(meta, dict) else None
+    return error.get("code") if isinstance(error, dict) and isinstance(error.get("code"), str) else None
+
+
+def _list_project_tasks(connection, arguments):
+    """One bounded list_project_tasks call. Returns (tasks, error_code)."""
+    result = _request(connection["base"] + "/mcp", connection["token"],
+                      {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                       "params": {"name": "list_project_tasks", "arguments": arguments}})
+    payload = result.get("result")
+    if not isinstance(payload, dict):
+        return None, "TASKBOARD_ERROR"
+    if payload.get("isError"):
+        return None, _tool_error_code(result) or "TASKBOARD_ERROR"
+    content = payload.get("structuredContent")
+    tasks = content.get("tasks") if isinstance(content, dict) else None
+    return (tasks, None) if isinstance(tasks, list) else (None, "TASKBOARD_ERROR")
+
+
+def _parse_declared_tasks(tasks):
+    """Project the declared tasks; None marks an unusable board response."""
+    declared, seen = [], set()
+    for item in tasks:
+        if (not isinstance(item, dict) or not isinstance(item.get("task_id"), str)
+                or not isinstance(item.get("title"), str) or not isinstance(item.get("status"), str)):
+            return None
+        if item["task_id"] in seen:
+            continue
+        documents = item.get("documents")
+        roles = {reference.get("role") for reference in documents if isinstance(reference, dict)} \
+            if isinstance(documents, list) else set()
+        if roles & DECLARED_DOCUMENT_ROLES:
+            seen.add(item["task_id"])
+            declared.append({"task_id": item["task_id"], "title": item["title"], "status": item["status"]})
+    return declared
+
+
 def _request(url, token, payload=None):
     headers = {"X-OCVM-MCP-Token": token, "Accept": "application/json, text/event-stream"}
     if payload is not None:
@@ -82,41 +130,44 @@ def read_capabilities(connection):
         return False
 
 
-def read_board_tasks(runtime, session_root, project_hash, *, connection=None):
-    """Bounded project-local task read for the monitor master-task candidates.
+def read_board_tasks(runtime, session_root, project_hash, *, connection=None, limit=MAX_CANDIDATE_TASKS):
+    """Bounded project-local read of declared master tasks/work packages.
 
-    A task counts as a declared master task/work package when the existing
-    canonical document sidecar binds a `compact_context` or `concept_plan`
-    role; the terminal native status `done` is excluded by the existing
-    include_terminal filter of list_project_tasks. Returns None when the
-    list is not confirmable — never an empty list disguised as success.
+    A task counts as declared when the existing canonical document sidecar binds
+    a `compact_context` or `concept_plan` role; the terminal native status `done`
+    is excluded by the existing include_terminal filter of list_project_tasks.
+
+    One bounded unfiltered scan first; when the adapter reports its scan budget
+    (`TASK_SEARCH_INCOMPLETE`), the existing backend `status` filter narrows the
+    read per open status instead of surfacing an empty list. Incomplete coverage
+    is reported explicitly (`completeness`/`reason`/`missing_statuses`) and a
+    capped list is marked `truncated` — an allowed limit is never presented as
+    "no candidates". Returns None only when the board is not readable at all.
     """
     connection = connection if connection is not None else mcp_connection(runtime, session_root, project_hash)
     if connection.get("state") != "ready":
         return None
     try:
-        base, token = connection["base"], connection["token"]
-        result = _request(base + "/mcp", token, {"jsonrpc": "2.0", "id": 3,
-                          "method": "tools/call", "params": {"name": "list_project_tasks",
-                                                             "arguments": {"include_terminal": False}}})
-        content = result.get("result", {}).get("structuredContent")
-        if not isinstance(content, dict) or result.get("result", {}).get("isError"):
-            return None
-        tasks = content.get("tasks")
-        if not isinstance(tasks, list):
-            return None
-        parsed = []
-        declared_roles = {"compact_context", "concept_plan"}
-        for item in tasks:
-            if (not isinstance(item, dict) or not isinstance(item.get("task_id"), str)
-                    or not isinstance(item.get("title"), str) or not isinstance(item.get("status"), str)):
+        tasks, error = _list_project_tasks(connection, {"include_terminal": False})
+        completeness, reason, missing = "complete", None, []
+        if tasks is None:
+            if error != "TASK_SEARCH_INCOMPLETE":
                 return None
-            documents = item.get("documents")
-            roles = {reference.get("role") for reference in documents if isinstance(reference, dict)} \
-                if isinstance(documents, list) else set()
-            parsed.append({"task_id": item["task_id"], "title": item["title"], "status": item["status"],
-                           "declared": bool(roles & declared_roles)})
-        return parsed
+            tasks = []
+            for status in BOARD_SCAN_STATUSES:
+                page, page_error = _list_project_tasks(connection, {"include_terminal": False, "status": status})
+                if page is None:
+                    missing.append(status)
+                    continue
+                tasks.extend(page)
+            if len(missing) == len(BOARD_SCAN_STATUSES):
+                return None
+            completeness, reason = "partial", "task-scan-budget"
+        declared = _parse_declared_tasks(tasks)
+        if declared is None:
+            return None
+        return {"tasks": declared[:limit], "completeness": completeness, "reason": reason,
+                "missing_statuses": missing, "truncated": len(declared) > limit, "scanned": len(declared)}
     except (OSError, ValueError, KeyError, TypeError, AttributeError, CatalogUnavailable):
         return None
 

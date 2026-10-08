@@ -22,6 +22,7 @@ TITLES = {
     5: "Stale Monitor",
     6: "Unknown Monitor",
     7: "Deletable Monitor",
+    8: "Session Monitor",
 }
 
 # Declared master tasks/work packages served through the candidates endpoint:
@@ -35,10 +36,22 @@ DECLARED_TASKS = [
 
 
 def fixture_tasks(*_args, **_kwargs):
+    """Mirror of hub.catalog.read_board_tasks' bounded result contract.
+
+    A list override behaves like a complete scan; a dict override is passed
+    through so a test can serve partial/truncated coverage explicitly.
+    """
     override = Path(server.PROJECT) / ".fixture-tasks.json"
+    tasks = DECLARED_TASKS
     if override.exists():
-        return json.loads(override.read_text(encoding="utf-8"))
-    return DECLARED_TASKS
+        value = json.loads(override.read_text(encoding="utf-8"))
+        if isinstance(value, dict):
+            return value
+        tasks = value
+    declared = [{"task_id": item["task_id"], "title": item["title"], "status": item["status"]}
+                for item in tasks if item.get("declared")]
+    return {"tasks": declared, "completeness": "complete", "reason": None,
+            "missing_statuses": [], "truncated": False, "scanned": len(declared)}
 
 
 def seed(project: Path, count: int = 52) -> None:
@@ -67,6 +80,9 @@ def seed(project: Path, count: int = 52) -> None:
             elif index == 5:
                 old = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - 3600))
                 monitor["history"] = [{"at": old, "type": "dispatched", "detail": {"action": "review"}}]
+            elif index == 8:
+                monitor["session"] = {"session_id": "ses_fixture_session", "title": "Session Monitor",
+                                      "primed_at": at_iso}
             registry["monitors"].append(monitor)
 
     store.mutate(project, build)
@@ -85,6 +101,7 @@ if __name__ == "__main__":
             "tunnelConfigured": False,
             "openliveConfigured": False,
             "a2aEnabled": False,
+            "navigation": {"web_port": 4096, "opencode_version": "1.18.34"},
         }
         server.AUTH_CREDENTIALS = None
         server.REQUEST_SCHEME = "http"

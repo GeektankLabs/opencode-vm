@@ -34,7 +34,7 @@ OPENLIVE_PREVIOUS_COMMAND="$OPENLIVE_DIR/previous-command"
 OPENLIVE_AUTH_MARKER="__opencode_vm_openlive__"
 OPENLIVE_LOCK_PATH=""
 OPENLIVE_ADAPTER_VERSION="0.1.7"
-OPENLIVE_ADAPTER_TAG="v0.7.19"
+OPENLIVE_ADAPTER_TAG="v0.7.20"
 OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.7.tar"
 OPENLIVE_ADAPTER_SHA256="39a50c5127b0a577b54e4790b5c3c1f463b35a52b42c4343aa639dcea53bad47"
 OPENLIVE_ACP_SDK_VERSION="1.2.1"
@@ -45,16 +45,16 @@ OPENLIVE_MANAGER_PROMPT="You manage an OpenLive voice call. The voice_sessions t
 MCP_CONNECTOR_DIR="$SHARE_ROOT/mcp-connector"
 MCP_ADAPTER_CACHE_ROOT="$MCP_CONNECTOR_DIR/adapters"
 MCP_ADAPTER_VERSION="0.1.32"
-MCP_ADAPTER_TAG="v0.7.19"
+MCP_ADAPTER_TAG="v0.7.20"
 MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.32.tar"
 MCP_ADAPTER_SHA256="ac6dee0c9660c879678f3b2260cc7b4b9a7c734f48b738aa7cd472b7ddc4d034"
 MCP_SDK_VERSION="1.30.1"
 MCP_OPENCODE_SDK_VERSION="1.18.21"
 MCP_TESTED_PROTOCOL_VERSION="2025-11-25"
 MCP_TUNNEL_DIR="$SHARE_ROOT/mcp-tunnel/openai"
-HUB_ASSET_TAG="v0.7.19"
+HUB_ASSET_TAG="v0.7.20"
 HUB_ASSET_FILENAME="opencode-vm-hub-1.tar"
-HUB_ASSET_SHA256="ba0defd687ef7837cf142e5908f30e004459d552314079fd336a863d31edafb4"
+HUB_ASSET_SHA256="506a9895f3431718a21e6f20a2b47f10a561c94d83c1e22160e308c74b54b96f"
 
 # BEGIN GENERATED MANAGED RUNTIME
 OCVM_MANAGED_RUNTIME_GZIP_BASE64='H4sIAAAAAAAC/+19a3PbRrJoPvtXwKjUBrBBUHYSbw51FJUiMYluZElHUl5X1tIQAYqwQYABQNmKxP9++zFPAKTkze5W3TpiJRYxM+jp6enu6enpac6iPLpK
@@ -286,7 +286,7 @@ TASKBOARD_ARM64_SHA256="3749fb985f544fdb6788ba1dff69761e599ff82b3fe86d39ca54307c
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.7.19"
+OCVM_VERSION="0.7.20"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -13744,7 +13744,7 @@ dashboard_failure() {
 
 start_monitor() {
   [[ "$OC_MODE" == web ]] || return 0
-  local dir="$SESS_SHARE/monitor" adapter="$SESS_SHARE/dashboard/adapter" tmp="" waited=0 node_bin=""
+  local dir="$SESS_SHARE/monitor" adapter="$SESS_SHARE/dashboard/adapter" tmp="" node_bin=""
   stop_monitor || return 1
   [[ -d "$adapter" && ! -L "$adapter" ]] || return 1
   [[ -f "$adapter/.ocvm-managed" ]] && grep -qFx 'opencode-vm-mcp-staging-v1' "$adapter/.ocvm-managed" || return 1
@@ -13775,17 +13775,49 @@ start_monitor() {
     --property=AppArmorProfile=opencode-sandbox --property="StandardOutput=append:$dir/server.log" --property="StandardError=append:$dir/server.log" \
     --setenv="OCVM_MANAGED_POLICY_SOCKET=${OCVM_MANAGED_POLICY_SOCKET:-}" \
     -- "$node_bin" "$adapter/dist/monitor-main.js" "$dir/runtime-input.json" || return 1
-  while [[ "$waited" -lt 20 ]]; do
-    [[ -f "$dir/heartbeat.json" ]] && break
-    sleep 1
-    waited=$((waited + 1))
-  done
-  [[ -f "$dir/heartbeat.json" ]] || { echo "[monitor] Engine heartbeat unavailable; OpenCode continues." >&2; return 1; }
+  if ! monitor_wait_heartbeat "$PROJ_DIR" "$OC_OPENLIVE_PROJECT_HASH" "$OC_HUB_GENERATION" 20; then
+    echo "[monitor] Engine heartbeat not confirmed at $(monitor_heartbeat_path "$PROJ_DIR") within 20 s (starting, stale, or owned by another runtime); OpenCode continues." >&2
+    return 1
+  fi
   echo "[monitor] Engine active (project registry; no listener, no port)."
 }
 
+# The engine writes its heartbeat next to the project-persistent monitor
+# registry (<project>/.opencode-vm/monitor/heartbeat.json, monitor-main.ts),
+# never into the session share. Readiness reads exactly that path and verifies
+# identity plus freshness, so a starting or foreign runtime is not reported as
+# this runtime's engine.
+monitor_heartbeat_path() {
+  printf '%s\n' "$1/.opencode-vm/monitor/heartbeat.json"
+}
+
+monitor_wait_heartbeat() {
+  local project="$1" hash="$2" generation="$3" limit="${4:-20}" max_age="${5:-90}"
+  local file waited=0 now at at_epoch age
+  file="$(monitor_heartbeat_path "$project")"
+  command -v jq >/dev/null 2>&1 || return 1
+  while [[ "$waited" -lt "$limit" ]]; do
+    if [[ -f "$file" && ! -L "$file" ]]; then
+      at="$(jq -r 'select(type == "object" and .schema == 1) | .at // empty' "$file" 2>/dev/null || true)"
+      if [[ -n "$at" ]] \
+        && [[ "$(jq -r '.projectHash // empty' "$file" 2>/dev/null || true)" == "$hash" ]] \
+        && [[ "$(jq -r '.generation // empty' "$file" 2>/dev/null || true)" == "$generation" ]]; then
+        now="$(date +%s)"
+        at_epoch="$(date -d "$at" +%s 2>/dev/null || true)"
+        if [[ -n "$at_epoch" ]]; then
+          age=$(( now - at_epoch ))
+          [[ "$age" -ge 0 && "$age" -le "$max_age" ]] && return 0
+        fi
+      fi
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  return 1
+}
+
 stop_monitor() {
-  local dir="$SESS_SHARE/monitor"
+  local dir="$SESS_SHARE/monitor" heartbeat=""
   if systemctl is-active --quiet ocvm-monitor.service 2>/dev/null; then
     local description=""
     description="$(systemctl show -p Description --value ocvm-monitor.service 2>/dev/null || true)"
@@ -13797,6 +13829,12 @@ stop_monitor() {
         ;;
     esac
     sudo -n systemctl stop ocvm-monitor.service 2>/dev/null || return 1
+  fi
+  # Only this runtime's own heartbeat is removed; a foreign generation stays.
+  heartbeat="$(monitor_heartbeat_path "${PROJ_DIR:-$PWD}")"
+  if [[ -f "$heartbeat" && ! -L "$heartbeat" ]] \
+    && [[ "$(jq -r '.generation // empty' "$heartbeat" 2>/dev/null || true)" == "${OC_HUB_GENERATION:-}" ]]; then
+    rm -f "$heartbeat"
   fi
   rm -f "$dir/runtime-input.json" "$dir/heartbeat.json"
   return 0
@@ -14061,7 +14099,8 @@ start_hub() {
       jq -n --arg hash "$OC_OPENLIVE_PROJECT_HASH" --arg generation "$OC_HUB_GENERATION" --argjson port "$port" \
       --argjson mcp_enabled "$mcp_enabled" --argjson mcp_port "${OC_MCP_PORT:-0}" --argjson auth_enabled "$auth_enabled" \
       --argjson a2a_enabled "$a2a_enabled" --argjson tunnel_configured "$tunnel_configured" --argjson openlive_configured "$openlive_configured" \
-      '{schema:1,projectHash:$hash,generation:$generation,hubPort:$port,authEnabled:$auth_enabled,auth:(if $auth_enabled then {username:env.HUB_AUTH_USERNAME,password:env.HUB_AUTH_PASSWORD} else null end),a2aEnabled:$a2a_enabled,tunnelConfigured:$tunnel_configured,openliveConfigured:$openlive_configured,mcp:{enabled:$mcp_enabled,port:$mcp_port,generation:$generation}}' > "$tmp" ||
+      --argjson web_port "$OC_PORT" --arg opencode_version "$(opencode --version 2>/dev/null || true)" \
+      '{schema:1,projectHash:$hash,generation:$generation,hubPort:$port,authEnabled:$auth_enabled,auth:(if $auth_enabled then {username:env.HUB_AUTH_USERNAME,password:env.HUB_AUTH_PASSWORD} else null end),a2aEnabled:$a2a_enabled,tunnelConfigured:$tunnel_configured,openliveConfigured:$openlive_configured,navigation:{web_port:$web_port,opencode_version:$opencode_version},mcp:{enabled:$mcp_enabled,port:$mcp_port,generation:$generation}}' > "$tmp" ||
       ! chmod 600 "$tmp" || ! mv -f "$tmp" "$dir/runtime-input.json"; then
     rm -f "$tmp"
     hub_failure "Could not publish Hub runtime input."
@@ -14666,10 +14705,28 @@ stop_mcp_adapter() (
   return 0
 )
 
+# web.sh is sourced host-side (with the script's own helpers) AND guest-side by
+# `vm_exec` blocks that only source this library. The host `jq_inplace` is not
+# available there, so this library keeps its own equivalent: same guarded,
+# atomic replace semantics, no dependency on the sourcing context.
+web_jq_inplace() {
+  local file="$1"; shift
+  command -v jq >/dev/null 2>&1 || return 1
+  [ -f "$file" ] || return 1
+  local tmp; tmp="$(mktemp)" || return 1
+  if jq "$@" "$file" > "$tmp" 2>/dev/null \
+     && [ -s "$tmp" ] && jq -e . "$tmp" >/dev/null 2>&1; then
+    mv "$tmp" "$file"
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
 mcp_self_unregister() {
   local cfg="$SESS_SHARE/config/opencode/opencode.json"
   [ -f "$cfg" ] && [ ! -L "$cfg" ] || return 0
-  jq_inplace "$cfg" 'del(.mcp["ocvm-self"])' || true
+  web_jq_inplace "$cfg" 'del(.mcp["ocvm-self"])' || true
 }
 
 mcp_self_connect() {
@@ -14702,7 +14759,7 @@ mcp_self_register() {
   { [ -f "$credential" ] && [ ! -L "$credential" ]; } || return 0
   token="$(cat "$credential" 2>/dev/null || true)"
   [ -n "$token" ] || return 0
-  jq_inplace "$cfg" --arg url "http://127.0.0.1:${OC_MCP_PORT:-40960}/mcp" --arg token "$token" '
+  web_jq_inplace "$cfg" --arg url "http://127.0.0.1:${OC_MCP_PORT:-40960}/mcp" --arg token "$token" '
     .mcp = ((.mcp // {}) + {"ocvm-self": {type:"remote", url:$url, headers:{"X-OCVM-MCP-Token":$token}, enabled:true}})
   ' || { echo "[mcp] WARNING: monitor self-connection could not be registered." >&2; return 0; }
   echo "[mcp] Monitor self-connection registered for the canonical orchestrator skill."

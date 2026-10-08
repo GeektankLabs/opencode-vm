@@ -391,5 +391,123 @@ class HubMonitorTest(HubReadModelTest):
             self.assertNotIn(removed, ui, "the contracted UI removal must stay effective")
         self.assertNotIn("localStorage", ui, "no second UI-side registry")
 
+    def test_navigation_runtime_input_is_validated_and_exposed_for_session_links(self):
+        import hub.monitor as monitor_store
+        monitor = monitor_store.default_monitor("Linked", "task_44444444-4444-4444-8444-444444444444", 60, "mvp", "deep", None)
+        monitor["session"] = {"session_id": "ses_link", "title": "Linked", "primed_at": "2026-10-08T00:00:00Z"}
+        monitor_store.mutate(self.project, lambda registry: registry["monitors"].append(monitor))
+        for invalid in ({"web_port": "4096", "opencode_version": "1.18.34"},
+                        {"web_port": 0, "opencode_version": "1.18.34"},
+                        {"web_port": 4096, "opencode_version": ""},
+                        {"web_port": True, "opencode_version": "1.18.34"}):
+            self.write_runtime(authEnabled=False, auth=None, navigation=invalid)
+            with self.assertRaisesRegex(ValueError, "navigation"):
+                server.configure_runtime(self.runtime_path, self.project, self.project_id)
+        self.write_runtime(authEnabled=False, auth=None,
+                           navigation={"web_port": 4096, "opencode_version": "1.18.34"})
+        server.configure_runtime(self.runtime_path, self.project, self.project_id)
+        http, thread = self.serve()
+        base = f"http://127.0.0.1:{http.server_port}"
+        try:
+            status, listed = self.request(base, "/api/monitor?limit=50")
+            self.assertEqual(status, 200)
+            self.assertEqual(listed["navigation"], {"web_port": 4096, "opencode_version": "1.18.34"})
+            self.assertEqual(listed["monitors"][0]["session_id"], "ses_link")
+        finally:
+            http.shutdown()
+            http.server_close()
+            thread.join()
+        # Without navigation the UI has no link target and must not invent one.
+        self.write_runtime(authEnabled=False, auth=None)
+        server.configure_runtime(self.runtime_path, self.project, self.project_id)
+        http, thread = self.serve()
+        base = f"http://127.0.0.1:{http.server_port}"
+        try:
+            status, listed = self.request(base, "/api/monitor?limit=50")
+            self.assertEqual(status, 200)
+            self.assertIsNone(listed["navigation"])
+        finally:
+            http.shutdown()
+            http.server_close()
+            thread.join()
+
+    def test_monitor_candidates_report_coverage_instead_of_an_empty_list(self):
+        import hub.monitor as monitor_store
+        bound = monitor_store.default_monitor("Bound", "task_55555555-5555-4555-8555-555555555555", 60, "mvp", "deep", None)
+        monitor_store.mutate(self.project, lambda registry: registry["monitors"].append(bound))
+        self.write_runtime(authEnabled=False, auth=None)
+        server.configure_runtime(self.runtime_path, self.project, self.project_id)
+        http, thread = self.serve()
+        base = f"http://127.0.0.1:{http.server_port}"
+        original = server.read_board_tasks
+        try:
+            server.read_board_tasks = lambda *args, **kwargs: {
+                "tasks": [{"task_id": "task_55555555-5555-4555-8555-555555555555", "title": "Bound", "status": "in_progress"},
+                          {"task_id": "task_66666666-6666-4666-8666-666666666666", "title": "Open WP", "status": "todo"}],
+                "completeness": "partial", "reason": "task-scan-budget", "missing_statuses": ["in_progress"],
+                "truncated": False, "scanned": 2}
+            status, body = self.request(base, "/api/monitor/candidates")
+            self.assertEqual(status, 200)
+            self.assertEqual([item["task_id"] for item in body["candidates"]],
+                             ["task_66666666-6666-4666-8666-666666666666"], "bound tasks stay excluded")
+            self.assertEqual(body["completeness"], "partial")
+            self.assertEqual(body["incomplete_reason"], "task-scan-budget")
+            self.assertEqual(body["missing_statuses"], ["in_progress"])
+            self.assertFalse(body["truncated"])
+            server.read_board_tasks = lambda *args, **kwargs: None
+            status, body = self.request(base, "/api/monitor/candidates")
+            self.assertEqual(status, 503)
+            self.assertEqual(body["code"], "MONITOR_CANDIDATES_UNAVAILABLE")
+        finally:
+            server.read_board_tasks = original
+            http.shutdown()
+            http.server_close()
+            thread.join()
+
+    def test_board_task_read_narrows_on_scan_budget_and_never_fakes_empty(self):
+        import hub.catalog as catalog
+        calls = []
+        declared = {"task_id": "task_77777777-7777-4777-8777-777777777777", "title": "WP", "status": "todo",
+                    "documents": [{"role": "concept_plan", "path": "planning/x.md"}]}
+        plain = {"task_id": "task_88888888-8888-4888-8888-888888888888", "title": "Ticket", "status": "todo",
+                 "documents": []}
+        connection = {"state": "ready", "base": "http://127.0.0.1:1", "token": "t"}
+
+        def budget_then_narrowed(url, token, payload=None):
+            arguments = payload["params"]["arguments"]
+            calls.append(arguments)
+            if "status" not in arguments:
+                return {"result": {"isError": True, "_meta": {"opencode-vm/error": {"code": "TASK_SEARCH_INCOMPLETE"}}}}
+            if arguments["status"] == "todo":
+                return {"result": {"structuredContent": {"tasks": [declared, plain]}}}
+            return {"result": {"isError": True, "_meta": {"opencode-vm/error": {"code": "TASK_SEARCH_INCOMPLETE"}}}}
+
+        original = catalog._request
+        try:
+            catalog._request = budget_then_narrowed
+            result = catalog.read_board_tasks({"enabled": True}, None, "hash", connection=connection)
+            self.assertEqual(calls[0], {"include_terminal": False})
+            self.assertEqual(result["completeness"], "partial")
+            self.assertEqual(result["reason"], "task-scan-budget")
+            self.assertEqual(result["missing_statuses"], ["in_progress"], "an unread status is named, not hidden")
+            self.assertEqual([item["task_id"] for item in result["tasks"]], [declared["task_id"]],
+                             "only declared tasks are candidates")
+
+            def unavailable(url, token, payload=None):
+                raise catalog.CatalogUnavailable("board down")
+            catalog._request = unavailable
+            self.assertIsNone(catalog.read_board_tasks({"enabled": True}, None, "hash", connection=connection),
+                              "an unreadable board is None, never an empty list")
+
+            many = [{**declared, "task_id": f"task_{index:08d}-0000-4000-8000-{index:012d}"} for index in range(60)]
+            catalog._request = lambda url, token, payload=None: {"result": {"structuredContent": {"tasks": many}}}
+            capped = catalog.read_board_tasks({"enabled": True}, None, "hash", limit=50, connection=connection)
+            self.assertTrue(capped["truncated"])
+            self.assertEqual(len(capped["tasks"]), 50)
+            self.assertEqual(capped["scanned"], 60)
+            self.assertEqual(capped["completeness"], "complete")
+        finally:
+            catalog._request = original
+
 if __name__ == "__main__":
     unittest.main()
