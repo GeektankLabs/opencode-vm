@@ -250,3 +250,26 @@ export function boundedUiProjection(snapshot: ReturnType<DashboardCollector["sna
     truncation: omittedTotal === 0 ? null : { sessions: operationalRows.omitted + idleRows.omitted, tasks: tasks.omitted,
       unknown_sessions: unknown.omitted, recent: events.omitted, reason: "READ_RESPONSE_BUDGET" as const } };
 }
+
+/** Shared read-only control wiring for the adapter: overview, refresh and one
+ * session detail all lazily collect once and then at most every 2s. A detail
+ * call before the first collection therefore still sees the admitted inventory
+ * instead of reporting an in-scope session as missing. */
+export function createDashboardControl(collector: DashboardCollector, service: UiService,
+  now: () => number = Date.now): DashboardControl {
+  let lastTick = 0;
+  const ensureCollected = async () => {
+    if (now() - lastTick > 2000) { lastTick = now(); await collector.tick(); }
+  };
+  return {
+    overview: () => boundedUiProjection(collector.snapshot(false), service),
+    refresh: async () => { await ensureCollected(); return boundedUiProjection(collector.snapshot(false), service); },
+    session: async (sessionId: string) => {
+      await ensureCollected();
+      const detail = await collector.readSessionDetail(sessionId);
+      return detail.found
+        ? { found: true, service, observed_at: detail.observed_at, session: detail.row, recent: detail.recent }
+        : { found: false, service };
+    },
+  };
+}

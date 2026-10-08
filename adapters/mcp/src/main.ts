@@ -5,7 +5,7 @@ import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
 import { McpHttpServer, supportedProtocolVersions } from "./http.js";
 import { OpenCodeGateway } from "./opencode.js";
 import { ActivityJournal } from "./activity.js";
-import { DashboardCollector, boundedUiProjection } from "./dashboard.js";
+import { DashboardCollector, createDashboardControl } from "./dashboard.js";
 import type { UiService } from "./dashboard.js";
 import { ProjectBoardService } from "./taskboard.js";
 import {
@@ -45,20 +45,7 @@ export async function main(): Promise<void> {
     activity: ids => ActivityJournal.readDashboard(activityPath, runtime.projectHash, ids),
   });
   const service: UiService = { kind: "mcp-app", generation: runtime.generation, adapterVersion: ADAPTER_VERSION };
-  let lastTick = 0;
-  gateway.dashboardControl = {
-    overview: () => boundedUiProjection(collector.snapshot(false), service),
-    refresh: async () => {
-      if (Date.now() - lastTick > 2000) { lastTick = Date.now(); await collector.tick(); }
-      return boundedUiProjection(collector.snapshot(false), service);
-    },
-    session: async sessionId => {
-      const detail = await collector.readSessionDetail(sessionId);
-      return detail.found
-        ? { found: true, service, observed_at: detail.observed_at, session: detail.row, recent: detail.recent }
-        : { found: false, service };
-    },
-  };
+  gateway.dashboardControl = createDashboardControl(collector, service);
 
   const server = new McpHttpServer(runtime, token, gateway);
   const readyPath = join(dirname(runtimePath), "ready.json");

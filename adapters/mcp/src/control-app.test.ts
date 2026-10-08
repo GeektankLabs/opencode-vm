@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DashboardCollector, boundedUiProjection } from "./dashboard.js";
+import { DashboardCollector, boundedUiProjection, createDashboardControl } from "./dashboard.js";
 import type { DashboardControl, DashboardReader, Inventory, Session, Tasks } from "./dashboard.js";
 import { READ_PAYLOAD_BYTES, jsonBytes } from "./content.js";
 import { createMcpServer, loadControlAppHtml, REPO_LIVE_UI_MIME, REPO_LIVE_UI_URI } from "./tools.js";
@@ -23,15 +23,17 @@ function fixture(count = 3) {
   const tasks: Tasks = [{ task_id: "task_A", title: "Task A", board_status: "in_progress", board_project_id: "workstream",
     links: [{ session_id: "ses_0", message_id: "msg_new" }] }];
   let sessionFail = false;
+  let inventories = 0, reads = 0;
   const reader: DashboardReader = {
-    inventory: async () => inventory,
-    session: async item => { if (sessionFail) throw new Error("unavailable"); return { ...row(item.id), observed_at: new Date(time).toISOString() }; },
+    inventory: async () => { inventories++; return inventory; },
+    session: async item => { reads++; if (sessionFail) throw new Error("unavailable"); return { ...row(item.id), observed_at: new Date(time).toISOString() }; },
     board: async () => tasks,
     activity: async ids => ({ epoch: "epoch", recent: [...ids].slice(0, 2).map((id, index) => ({ event_id: `e${index}`,
       session_id: id, message_id: null, type: "message.completed", timestamp: new Date(time).toISOString() })) }),
   };
   const collector = new DashboardCollector({ id: "project", name: "Test" }, "generation", reader, () => time);
-  return { collector, reader, inventory, tasks, advance: (delta: number) => { time += delta; }, failSession: () => { sessionFail = true; } };
+  return { collector, reader, inventory, tasks, advance: (delta: number) => { time += delta; },
+    now: () => time, inventories: () => inventories, reads: () => reads, failSession: () => { sessionFail = true; } };
 }
 
 test("Repo Live projection keeps evidence separate, injects the serving process and stays under the read budget", async () => {
@@ -80,6 +82,42 @@ test("fresh session detail is scope-bound, keeps runtime separation and reports 
   assert.deepEqual(missing, { found: false });
   probe.failSession();
   await assert.rejects(probe.collector.readSessionDetail("ses_0"));
+});
+
+test("first get_repo_live_session tool call succeeds before any refresh", async () => {
+  const probe = fixture();
+  const control = createDashboardControl(probe.collector, { kind: "mcp-app", generation: "generation" }, () => probe.now());
+  const gateway = { dashboardControl: control } as unknown as SessionGateway;
+  const server = createMcpServer(gateway, undefined);
+  const handlers = (server.server as unknown as { _requestHandlers?: Map<string, (request: unknown, extra: unknown) => Promise<unknown>> })._requestHandlers;
+  const call = async (name: string, args: Record<string, unknown>) => await handlers!.get("tools/call")!(
+    { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } },
+    { requestId: 1, signal: AbortSignal.timeout(5000) });
+  const first = await call("get_repo_live_session", { session_id: "ses_0" }) as
+    { isError?: boolean; structuredContent?: { found?: boolean; session?: { session_id?: string } } };
+  assert.notEqual(first.isError, true);
+  assert.equal(first.structuredContent?.found, true);
+  assert.equal(first.structuredContent?.session?.session_id, "ses_0");
+  const foreign = await call("get_repo_live_session", { session_id: "ses_foreign" }) as
+    { isError?: boolean; _meta?: Record<string, { code?: string }> };
+  assert.equal(foreign.isError, true);
+  assert.equal(foreign._meta?.["opencode-vm/error"]?.code, "SESSION_NOT_FOUND");
+});
+
+test("session detail lazily collects first so an in-scope id is found while foreign ids stay rejected", async () => {
+  const probe = fixture();
+  const control = createDashboardControl(probe.collector, { kind: "mcp-app", generation: "generation" }, () => probe.now());
+  const first = await control.session("ses_0") as { found?: boolean; session?: { session_id?: string } };
+  assert.equal(first.found, true, "a valid session is found before any explicit refresh");
+  assert.equal(first.session?.session_id, "ses_0");
+  assert.ok(probe.inventories() >= 1, "the detail call collected the admitted inventory");
+  const inventories = probe.inventories();
+  await control.session("ses_0");
+  assert.equal(probe.inventories(), inventories, "a second detail call inside the window does not re-collect");
+  const foreign = await control.session("ses_foreign") as { found?: boolean };
+  assert.equal(foreign.found, false, "foreign ids stay rejected by scope");
+  const overview = await control.refresh() as { counts?: unknown };
+  assert.ok(overview.counts, "the overview projection still works through the shared control");
 });
 
 test("Repo Live UI resource is assembled from the single repository source", async () => {
