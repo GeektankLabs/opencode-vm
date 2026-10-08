@@ -162,3 +162,23 @@ Wiederaufnahme nur mit neuem Operatorauftrag: Git-/Journal-/Runtime-Frischprüfu
 
 **Reihenfolge:** P1-QC (exakt `5ebd0d6`) → lokale Main-Integration durch bestehenden Owner → danach P2–P6 **nur mit Operatorauftrag** und nach D1–D8-Entscheid. F2 bleibt separat (D6). Keine automatische Fortsetzung.
 
+## 23 Operator-Präzisierung D1/D8 (2026-10-09, DOCS_ONLY, verbindlich)
+
+**D1 (Adressaten-/Aktivierungsmodell) — fachlich präzisiert (ersetzt die reine „default_active vs. Opt-in"-Frage):** Der Skill hat **zwei Adressaten**: (a) **externe Agentenumgebungen** (z. B. ChatGPT) für die beauftragte OpenCode-Orchestrierung; (b) **innerhalb OpenCode ausschließlich Monitor-/Manager-Sessions**, die ein Work Package oder Mastertask begleiten. **Einstieg lightweight, Details bedarfsgerecht.** MCP **möglichst selektiv** diesen internen Sessions bereitstellen. Ist selektive Bereitstellung technisch unmöglich, ist **gemeinsame Sichtbarkeit zulässig, aber das MCP MUSS serverseitig Rechte prüfen**. Externe Aufrufer nur **innerhalb bestehender Auftrags-/Auth-Berechtigung**; **kein pauschaler Vollzugriff** allein durch den Namen „OpenAI".
+
+**D8 (Guard) — verbindliche fachliche Anforderung (nicht mehr bloß Prompt-Pflicht/optional nachrangig):**
+- Bestimmte **Selbststeuerungs-/Managementaktionen sind für ALLE internen OpenCode-Aufrufer zu sperren — einschließlich Mastertasks.**
+- **Übrige** interne Managementaktionen **nur an autorisierte Monitor-/Mastertask-Rolle UND zugeordneten Task-/WP-Scope** gebunden.
+- Externe Aufrufer nur im Rahmen bestehender Auftrags-/Auth-Berechtigung.
+- **Behauptete Herkunft/Rolle des Agenten ist kein Vertrauensnachweis.**
+- **Konkrete Verbotsliste OFFEN** (nicht erfinden); **Implementierung offen**; Guard ist ab jetzt Pflichtbestandteil.
+
+**Belegte technische Klärung (Konzept U1–U7/A–D/§5 + Source `opencode-vm.sh:14726–14766`, `adapters/mcp/src/http.ts:401–424`):**
+- **Belegt:** `mcp_self_register` schreibt `ocvm-self` nur in die Session-Share-`opencode.json`, gated auf `OC_MCP_ENABLED=1` **und** gemountetes `orchestrator`-Skill ⇒ **Tool-Sichtbarkeit ist bereits per-Session/opt-in** steuerbar. **Sichtbarkeit ≠ Autorisierung.**
+- **Fehlt/unverified:** keine serverseitig vertrauenswürdige Caller-Identität — nur statisches geteiltes Bearer-Token, Loopback-Hostcheck, optionaler Origin-Check; **kein** `remoteAddress`/`X-Forwarded`/Caller-Feld/Per-Rolle-Token; identisches Token in Agent-Config und Tunnel, gleiche UID, Confinement default-allow ⇒ intern/extern/Scheduler **nicht unterscheidbar** (NOT_FEASIBLE, §5).
+- **Heutige Sperren:** Token + Host-/Origin-Check + AppArmor (default-allow); Scheduler-Pfad real getrennt (in-process, kein MCP). **Keine** Selbstreferenz-/Zielklassen-Prüfung.
+- **Minimaler nächster Entwurf (Empfehlung, nicht implementiert):** (a) R3+ deklarierter Caller + **serverseitige Zielauflösung**, fail-closed nur für Selbstziel/unbestimmten Caller bei geschützten Writes (+ Audit/Tests), plus (b) delegierender Tool-Wrapper als Prompt-Pflicht — Zielauflösung serverseitig, daher „behauptete Herkunft" nicht ausreichend.
+- **Exakt benötigte Operatorentscheidung:** (1) konkrete Verbotsliste (gesperrt für ALLE internen inkl. Mastertasks vs. rollen-/scope-gebunden) — offen; (2) Guard-Variante (a) vs. (b) zuerst; (3) Bestätigung selektiver interner MCP-Bereitstellung über die bestehende config-/skill-gated Registrierung.
+
+**Status:** D1 präzisiert, D8 verbindlich, Implementierung offen. Keine Skill-/Code-/Policy-/Live-Änderung.
+
