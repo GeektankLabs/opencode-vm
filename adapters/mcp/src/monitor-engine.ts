@@ -116,6 +116,8 @@ export type CanonicalSummary = {
 };
 
 const READ_FINGERPRINT = "canonical-read";
+/** Version of the MANAGEMENT role/context contract. Bumping it re-primes once. */
+const PRIMING_CONTRACT = "mgmt-v1";
 
 function iso(now: number): string {
   return new Date(now).toISOString();
@@ -353,7 +355,7 @@ export class MonitorEngine {
     const evidenced = classifyEvidence(status);
     if (evidenced.kind === "blocked") {
       if (evidenced.category === "context_input_length") return this.compactionContinue(id, now, monitor, session.sessionId, summary);
-      return this.recover(id, now, monitor, session.sessionId, evidenced);
+      return this.recover(id, now, monitor, session.sessionId, evidenced, summary);
     }
     if (status.backend_activity !== "idle" || status.state === "running") {
       // Retrying/waiting/active progress is not a blocked error; busy alone is
@@ -377,7 +379,12 @@ export class MonitorEngine {
     }
     if (runtime.kind === "switched" || runtime.kind === "already") {
       const actionId = `wake_${randomUUID().replaceAll("-", "")}`;
-      const prompt = this.buildWakePrompt(monitor, summary, decisionsSince, actionId, triggered);
+      // Priming is digest-gated: a new/rebound session, a changed anchor,
+      // autonomy/runtime profile or document revision re-primes once; an
+      // unchanged context keeps the wake short (no full priming per tick).
+      const priming = this.primingDigest(monitor, summary);
+      const prime = monitor.session.priming_digest !== priming;
+      const prompt = this.buildWakePrompt(monitor, summary, decisionsSince, actionId, triggered, prime);
       const wal = await withRegistry(
         this.project,
         (registry) => {
@@ -424,7 +431,8 @@ export class MonitorEngine {
         if (record.dispatch_wal && record.dispatch_wal.action_id === actionId) record.dispatch_wal.message_id = result.message_id;
         record.state.last_seen_digest = summary.digest;
         record.wake_request = null;
-        monitorHistory(record, triggered ? "noop-trigger" : "dispatched", { message_id: result.message_id, action_id: actionId }, now);
+        if (prime) this.recordPriming(record, priming, now);
+        monitorHistory(record, triggered ? "noop-trigger" : "dispatched", { message_id: result.message_id, action_id: actionId, primed: prime }, now);
         this.appendDecisionSummary(record, summary, decisionsSince, now);
       });
       return triggered ? "noop-trigger" : "dispatched";
@@ -669,6 +677,7 @@ export class MonitorEngine {
     monitor: MonitorRecord,
     sessionId: string,
     evidence: { fingerprint: string; category: string },
+    summary?: CanonicalSummary,
   ): Promise<WakeOutcome> {
     // Operational recovery is not a production-code repair; the W2 budget is
     // applied through the deterministic classifier below.
@@ -760,7 +769,9 @@ export class MonitorEngine {
       return "error";
     }
     const actionId = `recovery_${randomUUID().replaceAll("-", "")}`;
-    const prompt = this.buildRecoveryPrompt(monitor, evidence, actionId);
+    const priming = summary ? this.primingDigest(monitor, summary) : null;
+    const prime = priming !== null && monitor.session.priming_digest !== priming;
+    const prompt = this.buildRecoveryPrompt(monitor, evidence, actionId, summary, prime);
     await withRegistry(
       this.project,
       (registry) => {
@@ -792,10 +803,12 @@ export class MonitorEngine {
     await this.release(id, now, "recovery-continued", (m) => {
       if (m.dispatch_wal && m.dispatch_wal.action_id === actionId) m.dispatch_wal.message_id = result.message_id;
       m.recovery.active = false;
+      if (prime && priming) this.recordPriming(m, priming, now);
       monitorHistory(m, "recovery-continued", {
         message_id: result.message_id,
         fallback: `${selected.provider_id}/${selected.model_id}`,
         fingerprint: evidence.fingerprint,
+        primed: prime,
       }, now);
     });
     return "recovery-continued";
@@ -823,7 +836,10 @@ export class MonitorEngine {
       return "busy-held";
     }
     const actionId = `compact_${randomUUID().replaceAll("-", "")}`;
-    const prompt = this.buildRecoveryPrompt(monitor, { fingerprint: "context_input_length", category: "context_input_length" }, actionId, summary);
+    // Compaction is context loss: the MANAGEMENT role block is always repeated,
+    // bounded to this one admitted continuation.
+    const priming = this.primingDigest(monitor, summary);
+    const prompt = this.buildRecoveryPrompt(monitor, { fingerprint: "context_input_length", category: "context_input_length" }, actionId, summary, true);
     await withRegistry(
       this.project,
       (registry) => {
@@ -839,7 +855,8 @@ export class MonitorEngine {
       const result = await this.gateway.sendMessage(sessionId, prompt);
       await this.release(id, now, "compaction-continued", (m) => {
         if (m.dispatch_wal && m.dispatch_wal.action_id === actionId) m.dispatch_wal.message_id = result.message_id;
-        monitorHistory(m, "compaction-continued", { message_id: result.message_id }, now);
+        this.recordPriming(m, priming, now);
+        monitorHistory(m, "compaction-continued", { message_id: result.message_id, primed: true }, now);
         m.state.last_seen_digest = summary.digest;
         m.wake_request = null;
       });
@@ -931,22 +948,63 @@ export class MonitorEngine {
 
   // --------------------------------------------------------------- prompts
 
+  /** Stable identity of the priming context: role contract, anchor, autonomy and
+   * runtime profile plus the bound document revisions. A change re-primes once;
+   * an unchanged digest keeps the wake short (no full priming per tick). */
+  private primingDigest(monitor: MonitorRecord, summary: CanonicalSummary): string {
+    return digest({
+      contract: PRIMING_CONTRACT,
+      anchor: summary.task.id,
+      autonomy: monitor.autonomy_profile,
+      runtime: monitor.runtime_profile,
+      documents: summary.documents.map((doc) => `${doc.role}:${doc.path}:${doc.revision ?? ""}`),
+    });
+  }
+
+  /** One-time MANAGEMENT role/context block. It references canonical sources by
+   * path and revision instead of duplicating their content, and it is sent at
+   * most once per priming digest — never on every tick. */
+  private buildPrimingBlock(monitor: MonitorRecord, summary: CanonicalSummary): string {
+    const documents = summary.documents.length
+      ? summary.documents.map((doc) => `${doc.role}=${doc.path}${doc.revision ? `@${doc.revision}` : ""}`).join(", ")
+      : "none registered";
+    return [
+      `[MANAGEMENT-PRIMING ${PRIMING_CONTRACT}]`,
+      `Role: MANAGEMENT for monitor ${monitor.id} — coordinate, never implement. Delegate analysis, implementation and tests to separate worker sessions through the existing interfaces.`,
+      `Master anchor: ${summary.task.id} — "${summary.task.title}". Resolve Master/Work-Package → member tickets → their sessions with existing tools only (list_project_tasks, get_project_task links/documents, get_task_management_history, list_sessions, get_session_status); no second assignment store.`,
+      `Canonical context, read on demand and never duplicated here: ${documents}; the anchor task's management journal. Keep task state, journal checkpoints and the compact context current after every decided step.`,
+      `Autonomy profile ${monitor.autonomy_profile}: apply its operator-contract scope. Sandbox covers the explicitly assigned test estate (harness, test code and tests, test services/DB/containers/images, assigned cleanup and rebuild); product source and semantics are out of scope, production, foreign or unknown targets never.`,
+      `Worker failures: analyse from the exact receipt, safe error details and originals, then report visibly on management level — task/session/work, error class and evidenced cause, impact, recovery attempt and budget, blocker, next action. Separate a failed turn from busy and from an externally still-running job. Terminal timeout/quota follows the configured project fallback policy (read it; never substitute a model yourself), keeping idle / no-pending-input / catalog / update-readback / one-send / reconcile / no-duplicate discipline.`,
+      `Delegated authorization: within the documented grants you may concretize an existing authorization and re-task a worker without a new human loop, and answer a superfluous business question from that grant. Never bypass or auto-approve a real host/security permission or a denied connector action; escalate those and any unclear target or scope.`,
+      `Self-steering: never write to this management session or its own monitor binding (no self-target send, runtime switch, archive or rename). The technical guard is a separate pending decision; the rule binds regardless.`,
+      `Cadence: at most one bounded step per wake; when nothing relevant changed, end briefly without new orders (bounded no-op). Never infer task completion from a technical turn end.`,
+    ].join("\n");
+  }
+
+  /** Records the priming contract actually delivered with an admitted message.
+   * Called only inside the existing release mutation of that same wake, so a
+   * priming is never claimed for an unconfirmed send. */
+  private recordPriming(record: MonitorRecord, priming: string, now: number): void {
+    record.session.priming_digest = priming;
+    record.session.primed_at = iso(now);
+    monitorHistory(record, "manager-primed", { contract: PRIMING_CONTRACT, digest: priming.slice(0, 16) }, now);
+  }
+
   private buildWakePrompt(
     monitor: MonitorRecord,
     summary: CanonicalSummary,
     decisionsSince: number,
     actionId: string,
     triggered: boolean,
+    prime: boolean,
   ): string {
-    const parts = [
-      `[MONITOR-ACTION ${actionId}]`,
-      `Monitor ${monitor.id} (${monitor.title}) wake${triggered ? " (operator trigger)" : ""}.`,
-      `Canonical anchor task: ${summary.task.id} — "${summary.task.title}" (status ${summary.task.status}${summary.task.updated ? `, updated ${summary.task.updated}` : ""}).`,
-      `Latest checkpoint: ${summary.checkpoint ?? "unknown"}; newest journal decision: ${summary.newest_decision ?? "unknown"}; decisions since last wake: ${decisionsSince}.`,
-      `Bound documents: ${summary.documents.length ? summary.documents.map((doc) => `${doc.role}=${doc.path}${doc.revision ? `@${doc.revision}` : ""}`).join(", ") : "none registered"} (coverage ${summary.coverage}).`,
-      `Autonomy profile: ${monitor.autonomy_profile}. Continue the canonical task contract within its authorized scope. Take at most one bounded step; read the actual canonical C/P, checkpoint and newer operator decisions before acting. Missing input or a real decision must be reported as INPUT_REQUIRED; do not invent scope. Task-done status is never inferred from technical turn completion.`,
+    const mission = [
+      `[MONITOR-ACTION ${actionId}] MANAGEMENT wake${triggered ? " (operator trigger)" : ""} · monitor ${monitor.id} · master ${summary.task.id} "${summary.task.title}" (${summary.task.status}).`,
+      `Delta: checkpoint ${summary.checkpoint ?? "none"}; newest decision ${summary.newest_decision ?? "none"}; decisions since last wake ${decisionsSince}; documents ${summary.documents.length ? summary.documents.map((doc) => `${doc.role}@${doc.revision ?? "unversioned"}`).join(",") : "none"} (coverage ${summary.coverage}).`,
+      `Mission: 1) verify progress of this master/work package, 2) read the current worker and receipt results, 3) decide and execute exactly ONE next permitted step, delegating implementation/tests to a worker session, 4) analyse blockers and resolve or escalate them within the existing grants, 5) if nothing relevant changed, end briefly (bounded no-op) without duplicate orders.`,
+      `Reads: journal checkpoint/tail first; open canonical C/P only when a listed revision changed. Report INPUT_REQUIRED only for a real missing decision; keep state, journal and compact context updated.`,
     ];
-    return parts.join("\n");
+    return prime ? `${this.buildPrimingBlock(monitor, summary)}\n\n${mission.join("\n")}` : mission.join("\n");
   }
 
   private buildRecoveryPrompt(
@@ -954,17 +1012,19 @@ export class MonitorEngine {
     evidence: { fingerprint: string; category: string },
     actionId: string,
     summary?: CanonicalSummary,
+    prime = false,
   ): string {
     const parts = [
       `[MONITOR-${evidence.category === "context_input_length" ? "COMPACT" : "RECOVERY"} ${actionId}]`,
-      `Monitor ${monitor.id} (${monitor.title}) operational recovery.`,
+      `Monitor ${monitor.id} MANAGEMENT operational recovery.`,
       evidence.category === "context_input_length"
-        ? "The previous request was rejected for input length. Do not resubmit the rejected request; rely on the verified native compaction result and continue the same task context exactly once with the recovery summary."
-        : `The worker stopped with an evidenced blocked error (${evidence.fingerprint}; category ${evidence.category}). Continue the same task context in this session; do not duplicate already admitted work.`,
+        ? "The previous request was rejected for input length. Do not resubmit the rejected request; rely on the verified native compaction result and continue the same management context exactly once with the recovery summary."
+        : `A turn stopped with an evidenced blocked error (${evidence.fingerprint}; category ${evidence.category}). Continue the same management context in this session; delegate the actual work again instead of executing it here, and do not duplicate already admitted work.`,
       summary ? `Canonical anchor task: ${summary.task.id}; checkpoint: ${summary.checkpoint ?? "unknown"}.` : `Canonical anchor task: ${monitor.anchor.task_id}.`,
-      "Re-establish the task from the canonical C/P, checkpoint and receipts before the next bounded step; report a precise INPUT_REQUIRED if a real decision is needed. Already executed changes remain; no rollback is claimed.",
+      "Re-establish the state from the canonical C/P references, the journal checkpoint and the worker receipts before the next bounded step; report a precise INPUT_REQUIRED if a real decision is needed. Already executed changes remain; no rollback is claimed.",
     ];
-    return parts.join("\n");
+    const body = parts.join("\n");
+    return prime && summary ? `${this.buildPrimingBlock(monitor, summary)}\n\n${body}` : body;
   }
 }
 

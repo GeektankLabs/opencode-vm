@@ -61,7 +61,7 @@ export type MonitorRecord = {
   };
   autonomy_profile: MonitorAutonomyProfile;
   runtime_profile: MonitorRuntimeProfile;
-  session: { session_id: string | null; title: string | null; primed_at: string | null };
+  session: { session_id: string | null; title: string | null; primed_at: string | null; priming_digest?: string | null };
   state: { work: MonitorWorkState; parked_reason?: string; last_seen_digest: string | null; watermark: string | null };
   cursors: Record<string, string>;
   budget: Record<string, { no_progress: number; entries: MonitorRepairEntry[] }>;
@@ -140,7 +140,7 @@ export function defaultMonitorRecord(
     },
     autonomy_profile: overrides.autonomy_profile ?? "mvp",
     runtime_profile: overrides.runtime_profile ?? "deep",
-    session: { session_id: null, title: null, primed_at: null },
+    session: { session_id: null, title: null, primed_at: null, priming_digest: null },
     state: { work: "active", last_seen_digest: null, watermark: null },
     cursors: {},
     budget: {},

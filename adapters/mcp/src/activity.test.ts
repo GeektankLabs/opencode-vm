@@ -11,7 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { ActivityJournal } from "./activity.js";
+import { ActivityJournal, persistErrorClass } from "./activity.js";
 import { AdapterError } from "./types.js";
 import type { ActivitySnapshot } from "./types.js";
 
@@ -186,6 +186,61 @@ test("legacy migration rejects persisted error details that are not safe project
   );
   await assert.rejects(readFile(emptyDetailsTarget, "utf8"),
     (error) => (error as NodeJS.ErrnoException).code === "ENOENT");
+});
+
+test("a failed commit logs a bounded metadata class and keeps the fail-closed latch", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "ocvm-journal-commit-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = join(directory, "mcp");
+  await mkdir(store, { mode: 0o700 });
+  const journal = await ActivityJournal.open(join(store, "activity.json"), "project");
+  await journal.observe(snapshot("a", "idle"), "observed");
+
+  // Deterministic and root-safe: with the private directory gone, creating the
+  // temporary file fails with ENOENT for any uid — no chmod/permission trickery.
+  await rm(store, { recursive: true, force: true });
+
+  const lines: string[] = [];
+  const original = process.stderr.write.bind(process.stderr);
+  (process.stderr as unknown as { write: (chunk: unknown) => boolean }).write = (chunk: unknown) => {
+    lines.push(String(chunk));
+    return true;
+  };
+  try {
+    await assert.rejects(
+      journal.observe(snapshot("b", "busy"), "observed"),
+      (error) => error instanceof AdapterError && error.code === "ACTIVITY_UNAVAILABLE",
+    );
+    const logged = lines.filter((line) => line.startsWith("[mcp] activity-commit-failed"));
+    assert.equal(logged.length, 1, "exactly one bounded diagnostic line per failed commit");
+    assert.match(logged[0]!, /^\[mcp\] activity-commit-failed class=[A-Za-z0-9_]{1,40}\n$/u);
+    assert.equal(logged[0]!.trim(), "[mcp] activity-commit-failed class=ENOENT");
+    assert.ok(!logged[0]!.includes(directory), "no path reaches the log");
+
+    // The latch stays closed: further commits fail on the pre-check without a
+    // second write attempt, without a second log line and without a reset.
+    lines.length = 0;
+    await assert.rejects(
+      journal.observe(snapshot("c", "idle"), "observed"),
+      (error) => error instanceof AdapterError && error.code === "ACTIVITY_UNAVAILABLE",
+    );
+    await assert.rejects(
+      journal.signal("a", "Title", "idle"),
+      (error) => error instanceof AdapterError && error.code === "ACTIVITY_UNAVAILABLE",
+    );
+    assert.equal(lines.filter((line) => line.startsWith("[mcp] activity-commit-failed")).length, 0,
+      "a latched journal neither retries nor reopens");
+  } finally {
+    (process.stderr as unknown as { write: unknown }).write = original;
+    await journal.close().catch(() => undefined);
+  }
+
+  // The sanitizer itself never emits paths, payloads or secrets.
+  assert.equal(persistErrorClass(Object.assign(new Error("boom"), { code: "ENOSPC" })), "ENOSPC");
+  assert.equal(persistErrorClass(Object.assign(new Error("boom"), { code: "EACCES" })), "EACCES");
+  assert.equal(persistErrorClass(new Error("/tmp/secret/activity.json Bearer TOKEN")), "Error");
+  assert.equal(persistErrorClass(Object.assign(new Error("boom"), { code: "/etc/passwd" })), "Error");
+  assert.equal(persistErrorClass(undefined), "unknown");
 });
 
 test("filters advance over skipped events, recheck visibility and support bounded waits", async (t) => {

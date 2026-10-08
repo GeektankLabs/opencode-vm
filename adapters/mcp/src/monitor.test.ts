@@ -694,3 +694,125 @@ test("engine: missing or non-idle post-abort coverage holds without clearing the
     await cleanup();
   }
 });
+
+test("engine: MANAGEMENT priming is sent once, later wakes stay short and single-message", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    const { gateway, board } = fakes(state);
+    const engine = new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => 100_000 });
+    await withRegistry(project, (registry) => {
+      const created = defaultMonitorRecord("M", TASK, {}, 100_000);
+      created.scheduler.next_run_at = 0;
+      registry.monitors.push(created);
+      return registry;
+    });
+    assert.equal(await engine.tick(), "dispatched");
+    assert.equal(state.sends.length, 1, "priming plus mission is one admitted message, never two");
+    const first = state.sends[0]!;
+    assert.match(first, /\[MANAGEMENT-PRIMING mgmt-v1\]/);
+    assert.match(first, /Role: MANAGEMENT/);
+    assert.match(first, /coordinate, never implement/);
+    assert.match(first, /list_project_tasks, get_project_task links\/documents/);
+    assert.match(first, /Sandbox covers the explicitly assigned test estate/);
+    assert.match(first, /product source and semantics are out of scope/);
+    assert.match(first, /Never bypass or auto-approve a real host\/security permission/);
+    assert.match(first, /never write to this management session or its own monitor binding/);
+    assert.match(first, /\[MONITOR-ACTION wake_/);
+    assert.match(first, /bounded no-op/);
+    // The optimized mission no longer forces a full canonical re-read each wake.
+    assert.ok(!first.includes("read the actual canonical C/P"), "no per-tick full-document read instruction");
+    assert.match(first, /open canonical C\/P only when a listed revision changed/);
+
+    const primed = await readRegistrySnapshot(project);
+    const digestValue = primed.registry.monitors[0]!.session.priming_digest;
+    assert.equal(typeof digestValue, "string");
+    assert.ok(primed.registry.monitors[0]!.history.some((entry) => entry.type === "manager-primed"));
+
+    // Changed canonical state, unchanged priming context: short wake, no priming.
+    state.taskUpdated = "2026-10-08T00:00:00.000Z";
+    await withRegistry(project, (registry) => {
+      registry.monitors[0]!.scheduler.next_run_at = 0;
+      return registry;
+    });
+    assert.equal(await engine.tick(), "dispatched");
+    assert.equal(state.sends.length, 2);
+    const second = state.sends[1]!;
+    assert.ok(!second.includes("[MANAGEMENT-PRIMING"), "no full priming on every tick");
+    assert.match(second, /^\[MONITOR-ACTION wake_/u);
+    assert.ok(second.length < first.length, "the repeated wake stays materially shorter");
+    const after = await readRegistrySnapshot(project);
+    assert.equal(after.registry.monitors[0]!.session.priming_digest, digestValue, "digest unchanged without re-priming");
+    assert.equal(after.registry.monitors[0]!.history.filter((entry) => entry.type === "manager-primed").length, 1);
+
+    // A changed autonomy profile is a context change: re-prime exactly once.
+    await withRegistry(project, (registry) => {
+      registry.monitors[0]!.autonomy_profile = "sandbox";
+      registry.monitors[0]!.scheduler.next_run_at = 0;
+      return registry;
+    });
+    state.taskUpdated = "2026-10-09T00:00:00.000Z";
+    assert.equal(await engine.tick(), "dispatched");
+    assert.match(state.sends[2]!, /\[MANAGEMENT-PRIMING mgmt-v1\]/);
+    assert.match(state.sends[2]!, /Autonomy profile sandbox: apply its operator-contract scope/);
+    const reprime = await readRegistrySnapshot(project);
+    assert.notEqual(reprime.registry.monitors[0]!.session.priming_digest, digestValue);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("engine: compaction continuation repeats the MANAGEMENT role block once", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    state.status = okStatus({
+      state: "failed",
+      error_details: [{ category: "context_input_length", message: "Range of input length should be [1, 100]", detail_availability: "safe_template", source: "assistant_message_error", assistant_message_id: "msg_x", attribution: "exact_parent" }],
+    });
+    const { gateway, board } = fakes(state);
+    const engine = new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => 100_000 });
+    await withRegistry(project, (registry) => {
+      const created = defaultMonitorRecord("M", TASK, {}, 100_000);
+      created.scheduler.next_run_at = 0;
+      registry.monitors.push(created);
+      return registry;
+    });
+    assert.equal(await engine.tick(), "compaction-continued");
+    assert.equal(state.sends.length, 1, "exactly one admitted continuation");
+    assert.match(state.sends[0]!, /\[MANAGEMENT-PRIMING mgmt-v1\]/);
+    assert.match(state.sends[0]!, /\[MONITOR-COMPACT /);
+    const snapshot = await readRegistrySnapshot(project);
+    assert.equal(typeof snapshot.registry.monitors[0]!.session.priming_digest, "string");
+    assert.match(JSON.stringify(snapshot.registry.monitors[0]!.history.find((entry) => entry.type === "compaction-continued")!.detail), /"primed":true/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("engine: wake prompt stays inside its token budget and names the bounded mission", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    const { gateway, board } = fakes(state);
+    const engine = new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => 100_000 });
+    await withRegistry(project, (registry) => {
+      const created = defaultMonitorRecord("M", TASK, {}, 100_000);
+      created.scheduler.next_run_at = 0;
+      registry.monitors.push(created);
+      return registry;
+    });
+    await engine.tick();
+    const primedWake = state.sends[0]!;
+    const mission = primedWake.slice(primedWake.indexOf("[MONITOR-ACTION"));
+    // Budget guard: the recurring mission text stays small (~150 tokens), the
+    // one-time priming block is bounded as well (~330 tokens).
+    assert.ok(mission.length <= 1100, `mission text grew to ${mission.length} characters`);
+    assert.ok(primedWake.length - mission.length <= 2400, `priming block grew to ${primedWake.length - mission.length} characters`);
+    for (const marker of ["Mission: 1) verify progress", "exactly ONE next permitted step", "bounded no-op", "INPUT_REQUIRED only for a real missing decision"]) {
+      assert.ok(mission.includes(marker), `mission marker missing: ${marker}`);
+    }
+  } finally {
+    await cleanup();
+  }
+});

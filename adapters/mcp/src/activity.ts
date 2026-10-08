@@ -57,6 +57,17 @@ type Store = {
 type EventInput = Omit<ActivityEvent, "event_id" | "cursor" | "timestamp">;
 const terminal = new Set(["completed", "failed", "aborted"]);
 
+/** Bounded, metadata-only error class for diagnostics: an errno code or the
+ * error class name. Deliberately narrow so a path, payload or secret can never
+ * reach the adapter log through this field. */
+export function persistErrorClass(error: unknown): string {
+  const code = (error as NodeJS.ErrnoException | null | undefined)?.code;
+  if (typeof code === "string" && /^[A-Z][A-Z0-9_]{0,31}$/.test(code)) return code;
+  const name = (error as Error | null | undefined)?.name;
+  if (typeof name === "string" && /^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(name)) return name;
+  return "unknown";
+}
+
 /** One owned adapter is the writer. Commits serialize observation + event state
  * in one atomic file; reads never perform backend polling or copy history. */
 export class ActivityJournal {
@@ -1045,8 +1056,13 @@ export class ActivityJournal {
         await rename(temporary, this.path);
         this.store = draft;
         for (const wake of this.waiters) wake();
-      } catch {
+      } catch (error) {
         this.failed = true;
+        // Metadata only: a bounded error class for the adapter log, never a
+        // path, payload or secret. The latch stays fail-closed — no reset, no
+        // retry and no reopen from here; the ACTIVITY_UNAVAILABLE contract is
+        // unchanged and keeps pointing at this log line.
+        process.stderr.write(`[mcp] activity-commit-failed class=${persistErrorClass(error)}\n`);
         throw new AdapterError(
           "ACTIVITY_UNAVAILABLE",
           "Could not persist activity; the journal was not reset.",
