@@ -130,3 +130,35 @@ Angehalten (Auftrag erfüllt); seit 2026-10-08T21:57Z zusätzlich PAUSED_FOR_REB
 - **Exakt benötigte Operatorentscheidung:** (1) die **konkrete Verbotsliste** (welche Aktionen für ALLE internen Aufrufer inkl. Mastertasks gesperrt; welche nur rollen-/scope-gebunden) — offen, Operator-eigen; (2) Guard-Variante (a) vs. (b) zuerst; (3) Bestätigung der selektiven internen MCP-Bereitstellung über die bestehende config-/skill-gated Registrierung.
 
 **Status:** D1 fachlich präzisiert; D8 als verbindliche Anforderung dokumentiert, **Implementierung offen**. Keine Skill-/Code-/Policy-/Live-Änderung; fremde dirty Dateien unangetastet.
+
+## Operator-Korrektur D8 + Wirkungsmatrix (2026-10-09, DOCS_ONLY, verbindlich)
+
+**Korrektur der früheren absoluten Formulierung (supersediert oben):** **Keine pauschale Selbststeuerungssperre beschlossen.** Erst **tatsächliche Tools und Risiken bewerten**, **nützliche Steuerung erhalten**; die **konkrete Verbotsliste bleibt OFFEN**. Der Operator nennt besonders das **Ändern eigener Monitoreinstellungen** als Beispiel für potenziell nützliche, nicht pauschal zu sperrende Steuerung. Verbindliche Anforderung ist daher: **technische Kontrollierbarkeit + Diagnose** (nicht eine pauschale Sperre); genaue Sperren/Strenge sind **jetzt in Bewertung**. „Behauptete Herkunft/Rolle ist kein Vertrauensnachweis" bleibt gültig.
+
+**Neu verbindlich (unabhängig von der offenen Verbotsliste):** Jede **blockierte Aktion** liefert eine **klare, strukturierte Rückmeldung** und schreibt ein **secret-freies Auditlog** mit: **Tool, Ziel, vertrauenswürdiger Aufruferrolle, Session, Grund, Policyregel, Request-ID, Zeit**. **Keine stille leere Antwort.** (Ehrlichkeitshinweis: „vertrauenswürdige Aufruferrolle" ist heute **nicht** verfügbar — siehe technische Analyse; das Feld wäre bis zur R3+-Realisierung deklariert, nicht verifiziert.)
+
+**Technischer Befund (belegt, Source `adapters/mcp/src/tools.ts:1058–1068`, `:2400–2503`; `http.ts:401–424`):**
+- **Capability (belegt):** `update_monitor` ist exponiert und akzeptiert `title`, `interval_seconds` (5–86400), `autonomy_profile` (conservative/sandbox/mvp/yolo), `runtime_profile`, `expiry_at` (positiv/null), `expected_generation`. Ebenso exponiert: `enable/disable_monitor`, `trigger_monitor`, `cancel_monitor_future`, `abort_monitor_run`, `delete_monitor`. **Ein Aufrufer KANN heute seinen eigenen Monitor ändern** — es gibt **keine** Caller-/Selbstprüfung im Adapter (grep auf `SELF_CONTROL|CALLER_CONTEXT|caller|remoteAddress` ohne Produkttreffer).
+- **Fehlender Nachweis (kein Capability-Mangel):** serverseitig **keine vertrauenswürdige Aufruferidentität/Rolle** (nur geteiltes Bearer-Token + Loopback-Host + optionaler Origin). Daher ist eine **identitätsbasierte** Beschränkung heute **nicht durchsetzbar**; nur eine **behauptete** Caller-Angabe + **serverseitige Zielauflösung** wäre möglich (R3+), und selbst die Zielauflösung ist keine Identitäts-Authentisierung.
+
+**Empfehlung — minimale Beschränkung nach Wirkungsmatrix (Vorschlag, NICHT entschieden; Verbotsliste OFFEN):**
+
+| Aktion | Wirkung „selbst" (eigener Monitor/eigene Session) | Eigene Workers | Fremder Scope | Minimale Empfehlung (Vorschlag) |
+|---|---|---|---|---|
+| `update_monitor` (interval/autonomy/runtime/expiry/title) | ändert eigenen Takt/Autonomie/Runtime/Ablauf | indirekt (künftige Wakes) | fremder Monitor | **erlauben** (nützlich), aber Audit; ggf. Operator-Bestätigung nur bei Autonomie-Eskalation auf `yolo`, Takt-Verkürzung unter Default, oder Löschen von `expiry_at` |
+| `disable/cancel_future/trigger_monitor` | stoppt/verschiebt/erzwingt eigenen Takt | eigene Worker | fremder Monitor | **erlauben** + Audit; Selbst-`delete`/`cancel` mit Verlust des eigenen Audit-Trails höher prüfen |
+| `delete_monitor` | entfernt eigenen Monitor + Historie | — | fremder Monitor | erlauben nur mit Audit; ggf. höhere Hürde (Historie) |
+| `send_message` / `send_session_followup` | **Selbstsend = klassischer Unfall** | eigener Worker | fremder Scope | **nur beweisbar selbstreferentielle Ziele sperren**; eigene Worker/fremd im Auth-Rahmen erlauben |
+| `abort_session_turn` / `abort_monitor_run` | stoppt eigenen laufenden Turn | eigener Worker | fremd | erlauben mit verifiziertem Ergebnis + Audit; **Scheduler-Recovery nicht pauschal garantieren** |
+| `set_project_model_policy_*` (runtime/policy) | projektweite Wirkung (nicht „eigener Scope") | alle | alle | höhere Hürde + Audit (projektweite Tragweite) |
+| Board **Done** | fachlicher Statusabschluss | — | fremde Tasks | rollen-/auftragsgebunden halten (Business-Outcome) |
+| Journal-Append | eigener Task-Verlauf | — | fremde Tasks | eigenen Task erlauben; fremd gemäß Scope |
+| Attention-Read | lesend/Queue | — | — | unkritisch (read-only) |
+| `archive_session` | eigene idle Session | — | fremde Session | eigenen idle Fall erlauben + Audit |
+| `supersede_unresolved_submission` | Operator-gebunden | — | — | bestehende Guard-/Attestierungsanforderung beibehalten |
+
+**Offen (Operator):** konkrete Verbotsliste; Strenge je Zeile; Guard-Variante (R3+ declared-caller + serverseitige Zielauflösung vs. Tool-Wrapper). **Nicht entschieden, nicht implementiert.**
+
+**Beobachtung:** Ein Followup-Versuch wurde mit **`SESSION_NOT_BUSY`** abgelehnt (idle ⇒ vertraglich keine Admission) — **keine zweite Zustellung**; kein Retry/kein Bypass.
+
+**Status:** Frühere absolute Guard-Formulierung korrigiert; Guard-Anforderung = Kontrollierbarkeit + Diagnose + strukturierte Block-Antwort + secret-freies Auditlog; Verbotsliste/Strenge in Bewertung, offen. Keine Code-/Policy-/Live-Änderung; fremde dirty Dateien unangetastet.

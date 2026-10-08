@@ -182,3 +182,17 @@ Wiederaufnahme nur mit neuem Operatorauftrag: Git-/Journal-/Runtime-Frischprüfu
 
 **Status:** D1 präzisiert, D8 verbindlich, Implementierung offen. Keine Skill-/Code-/Policy-/Live-Änderung.
 
+## 24 Operator-Korrektur D8 + Wirkungsmatrix (2026-10-09, DOCS_ONLY, verbindlich)
+
+**Korrektur (supersediert die absolute Formulierung in §23):** **Keine pauschale Selbststeuerungssperre beschlossen.** Zuerst **tatsächliche Tools und Risiken bewerten**, **nützliche Steuerung erhalten**; die **konkrete Verbotsliste bleibt OFFEN**. Der Operator nennt besonders das **Ändern eigener Monitoreinstellungen** als potenziell nützliche Steuerung. Verbindlich ist **technische Kontrollierbarkeit + Diagnose**, nicht eine pauschale Sperre; Strenge/Sperren sind **in Bewertung**. „Behauptete Herkunft/Rolle ist kein Vertrauensnachweis" bleibt.
+
+**Neu verbindlich (unabhängig von der offenen Liste):** Jede **blockierte Aktion** ⇒ **strukturierte Rückmeldung** + **secret-freies Auditlog** mit **Tool, Ziel, vertrauenswürdiger Aufruferrolle, Session, Grund, Policyregel, Request-ID, Zeit**; **keine stille leere Antwort**. Ehrlichkeitshinweis: „vertrauenswürdige Aufruferrolle" ist heute **nicht** verfügbar (Feld bis R3+ deklariert, nicht verifiziert).
+
+**Technischer Befund (belegt):** `update_monitor` exponiert mit `title`, `interval_seconds` 5–86400, `autonomy_profile` conservative/sandbox/mvp/yolo, `runtime_profile`, `expiry_at` (positiv/null), `expected_generation` (`tools.ts:1058–1068`); ebenso enable/disable/trigger/cancel_future/abort_run/delete (`:2400–2503`). **Capability:** Ein Aufrufer **kann heute seinen eigenen Monitor ändern** — **keine** Caller-/Selbstprüfung im Adapter (grep ohne Produkttreffer). **Fehlender Nachweis:** keine vertrauenswürdige Caller-Identität/Rolle (nur geteiltes Bearer-Token + Loopback + optionaler Origin) ⇒ identitätsbasierte Beschränkung heute **nicht durchsetzbar**.
+
+**Minimale Beschränkungsempfehlung (Vorschlag, NICHT entschieden; Liste OFFEN):** `update_monitor`/`disable`/`cancel_future`/`trigger` **erlauben + Audit** (ggf. Operator-Bestätigung nur bei Autonomie-Eskalation auf `yolo`, Takt unter Default, Löschen `expiry_at`); `delete` erlauben mit Audit/höherer Hürde; `send_message`/`followup` **nur beweisbar selbstreferentielle Ziele sperren**, eigene Worker/fremd im Auth-Rahmen erlauben; `abort` erlauben mit verifiziertem Ergebnis + Audit, **Scheduler-Recovery nicht pauschal garantieren**; `set_project_model_policy_*` höhere Hürde (projektweite Tragweite) + Audit; Board **Done** rollen-/auftragsgebunden; Journal-Append eigenen Task erlauben; Attention-Read read-only/unkritisch; `archive_session` eigene idle erlauben + Audit; `supersede_unresolved_submission` bestehende Operator-Attestierung beibehalten. Volle Matrix: C (Operator-Korrektur D8 + Wirkungsmatrix).
+
+**Beobachtung:** Followup-Versuch mit **`SESSION_NOT_BUSY`** abgelehnt (idle ⇒ keine Admission) — **keine zweite Zustellung**, kein Retry/Bypass.
+
+**Status:** Frühere absolute Guard-Formulierung korrigiert; Anforderung = Kontrollierbarkeit + Diagnose + strukturierte Block-Antwort + secret-freies Auditlog; Verbotsliste/Strenge offen. Keine Code-/Policy-/Live-Änderung.
+
