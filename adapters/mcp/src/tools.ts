@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type {
   CallToolResult,
@@ -7,6 +10,7 @@ import type {
 import { CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod/v4";
 import type { SessionGateway } from "./opencode.js";
+import type { DashboardControl } from "./dashboard.js";
 import type { RuntimeDescriptor } from "./types.js";
 import { ProjectBoardService, MAX_TASK_DESCRIPTION_LENGTH } from "./taskboard.js";
 import type { DocumentRole } from "./taskboard.js";
@@ -1106,6 +1110,38 @@ const writeAnnotations: ToolAnnotations = {
   idempotentHint: false,
   openWorldHint: true,
 };
+
+export const REPO_LIVE_UI_URI = "ui://repo-live/v1.html";
+export const REPO_LIVE_UI_MIME = "text/html;profile=mcp-app";
+let controlAppHtml: string | undefined;
+
+/** Assemble the one Repo Live source (index.html + styles.css + app.js) into a
+ * self-contained MCP app resource; the same files serve the browser dashboard.
+ * Fails closed when the documented inline markers are no longer present. */
+export async function loadControlAppHtml(): Promise<string> {
+  if (controlAppHtml) return controlAppHtml;
+  const directory = resolve(dirname(fileURLToPath(import.meta.url)), "../dashboard");
+  const [html, css, script] = await Promise.all([
+    readFile(resolve(directory, "index.html"), "utf8"),
+    readFile(resolve(directory, "styles.css"), "utf8"),
+    readFile(resolve(directory, "app.js"), "utf8"),
+  ]);
+  const link = '<link rel="stylesheet" href="/styles.css">';
+  const source = '<script src="/app.js" defer></script>';
+  if (!html.includes(link) || !html.includes(source)) throw new Error("Repo Live UI asset markers are missing.");
+  controlAppHtml = html.replace(link, `<style>\n${css}\n</style>`).replace(source, `<script>\n${script}\n</script>`);
+  return controlAppHtml;
+}
+
+function requireDashboardControl(gateway: SessionGateway): DashboardControl {
+  const control = gateway.dashboardControl;
+  if (!control) throw new AdapterError("BACKEND_UNAVAILABLE", "The Repo Live read projection is unavailable in this runtime.");
+  return control;
+}
+
+const controlOverviewInput = z.object({}).strict();
+const controlSessionInput = z.object({ session_id: sessionId }).strict();
+const controlOutput = z.looseObject({});
 
 export function createMcpServer(
   gateway: SessionGateway,
@@ -2425,6 +2461,36 @@ export function createMcpServer(
     monitorHistoryHandler,
   );
 
+  // Repo Live MCP app: one UI resource rendered by `open_repo_live`; data flows
+  // through the same bounded projection the browser dashboard serves. Read-only.
+  const controlOverviewHandler = safeHandler(async () =>
+    readSuccess(await requireDashboardControl(gateway).refresh() as object, "Repo Live overview refreshed."));
+  const controlSessionHandler = safeHandler(async (value: z.output<typeof controlSessionInput>) => {
+    const detail = await requireDashboardControl(gateway).session(value.session_id) as { found?: boolean };
+    if (!isRecord(detail) || detail.found !== true)
+      throw new AdapterError("SESSION_NOT_FOUND", "The session is not part of the Repo Live projection.");
+    return readSuccess(detail as object, "Returned Repo Live session detail.");
+  });
+  server.registerResource("opencode-repo-live", REPO_LIVE_UI_URI,
+    { description: "Read-only Repo Live control view; browser and MCP app share one source.", mimeType: REPO_LIVE_UI_MIME },
+    async () => ({ contents: [{ uri: REPO_LIVE_UI_URI, mimeType: REPO_LIVE_UI_MIME, text: await loadControlAppHtml(),
+      _meta: { ui: { prefersBorder: false, csp: { connectDomains: [], resourceDomains: [] } } } }] }));
+  server.registerTool("open_repo_live", {
+    title: "Open Repo Live",
+    description: "Open the read-only Repo Live control view: current tasks, associated sessions, evidenced work state, last activity, freshness and bounded evidence. It starts, stops, merges or changes nothing.",
+    inputSchema: controlOverviewInput, annotations: readOnlyAnnotations,
+    _meta: { ui: { resourceUri: REPO_LIVE_UI_URI }, "openai/ui": { entrypoints: [{ type: "global" }, { type: "thread" }] } },
+  }, controlOverviewHandler);
+  server.registerTool("refresh_repo_live", {
+    title: "Refresh Repo Live",
+    description: "Read a fresh bounded Repo Live overview (tasks, sessions, activity, explicit freshness and coverage). A read is not execution, QC, integration or release evidence.",
+    inputSchema: controlOverviewInput, annotations: readOnlyAnnotations,
+  }, controlOverviewHandler);
+  server.registerTool("get_repo_live_session", {
+    title: "Read Repo Live session",
+    description: "Read one in-scope session with correlated turn evidence, pending input, separated setting/assistant runtime and the newest metadata events first. Bounded preview; no message text.",
+    inputSchema: controlSessionInput, annotations: readOnlyAnnotations,
+  }, controlSessionHandler);
 
   server.server.setRequestHandler(
     CallToolRequestSchema,
@@ -2877,6 +2943,11 @@ export function createMcpServer(
                 );
               },
             );
+          case "open_repo_live":
+          case "refresh_repo_live":
+            return validatedToolCall(controlOverviewInput, controlOutput, input, controlOverviewHandler);
+          case "get_repo_live_session":
+            return validatedToolCall(controlSessionInput, controlOutput, input, controlSessionHandler);
           default:
             return errorResult(
               new AdapterError("INVALID_ARGUMENT", "Tool name is invalid."),
@@ -2893,12 +2964,12 @@ export function createMcpServer(
   return server;
 }
 
-/** Dispatch MCP 2026 tool requests through the same registered handlers while
- * the pinned SDK transport remains on the legacy 2025 protocol baseline. */
-export async function dispatchMcp2ToolMethod(
+/** Dispatch MCP 2026 tool and resource requests through the same registered
+ * handlers while the pinned SDK transport remains on the legacy 2025 baseline. */
+export async function dispatchMcp2Method(
   gateway: SessionGateway,
   runtime: RuntimeDescriptor,
-  method: "tools/list" | "tools/call",
+  method: "tools/list" | "tools/call" | "resources/list" | "resources/read",
   id: string | number,
   params: Record<string, unknown>,
 ): Promise<unknown> {

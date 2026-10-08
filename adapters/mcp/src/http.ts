@@ -8,7 +8,7 @@ import {
   SUPPORTED_PROTOCOL_VERSIONS,
 } from "@modelcontextprotocol/sdk/types.js";
 import type { SessionGateway } from "./opencode.js";
-import { createMcpServer, dispatchMcp2ToolMethod } from "./tools.js";
+import { createMcpServer, dispatchMcp2Method } from "./tools.js";
 import { lastToolRoundtrips, traceRejection } from "./diagnostics.js";
 import type { CorrelationBase, RejectionPhase } from "./diagnostics.js";
 import { ADAPTER_VERSION, MCP_TRANSPORT, isRecord } from "./types.js";
@@ -240,8 +240,10 @@ export class McpHttpServer {
       }
       if (pathname === "/mcp" && request.headers["mcp-protocol-version"] === "2026-07-28" &&
         isRecord(body) && typeof body.method === "string") {
-        if ((body.method === "tools/list" || body.method === "tools/call") && isRecord(body.params))
-          await this.handleModernToolRequest(response, body);
+        const modernParams = isRecord(body.params) ? body.params
+          : body.method === "resources/list" ? {} : undefined;
+        if (["tools/list", "tools/call", "resources/list", "resources/read"].includes(body.method) && modernParams)
+          await this.handleModernToolRequest(response, { ...body, params: modernParams });
         else
           writeJson(response, 404, { jsonrpc: "2.0", id: body.id ?? null, error: { code: -32601, message: "Method not found." } });
         return;
@@ -340,7 +342,7 @@ export class McpHttpServer {
       writeJson(response, 200, { jsonrpc: "2.0", id, result: {
         resultType: "complete",
         supportedVersions: ["2026-07-28"],
-        capabilities: { tools: {}, events: {} },
+        capabilities: { tools: {}, resources: {}, events: {} },
       } });
       return;
     }
@@ -383,13 +385,16 @@ export class McpHttpServer {
 
   private async handleModernToolRequest(response: ServerResponse, body: Record<string, unknown>): Promise<void> {
     const id = body.id as string | number;
-    const method = body.method as "tools/list" | "tools/call";
+    const method = body.method as "tools/list" | "tools/call" | "resources/list" | "resources/read";
     try {
-      const result = await dispatchMcp2ToolMethod(this.gateway, this.runtime, method, id, body.params as Record<string, unknown>);
+      const result = await dispatchMcp2Method(this.gateway, this.runtime, method, id, body.params as Record<string, unknown>);
       if (!isRecord(result)) throw new Error("MCP tool handler returned an invalid result.");
       writeJson(response, 200, { jsonrpc: "2.0", id, result: { resultType: "complete", ...result } });
-    } catch {
-      writeJson(response, 200, { jsonrpc: "2.0", id, error: { code: -32603, message: "Internal server error." } });
+    } catch (error) {
+      // Map rejection codes without exposing internal or foreign error texts.
+      const code = isRecord(error) && typeof error.code === "number" ? error.code : -32603;
+      const message = code === -32602 ? "Invalid params." : code === -32601 ? "Method not found." : "Internal server error.";
+      writeJson(response, 200, { jsonrpc: "2.0", id, error: { code, message } });
     }
   }
 

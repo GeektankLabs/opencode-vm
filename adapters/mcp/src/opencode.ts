@@ -9,6 +9,7 @@ import { sanitizeSummary, summarizeAttention } from "./attention.js";
 import { ProjectBoardService } from "./taskboard.js";
 import { AttachmentStore, submittedAttachment } from "./attachments.js";
 import type { AttachmentDescriptor } from "./attachments.js";
+import type { DashboardControl } from "./dashboard.js";
 import type {
   Message,
   Part,
@@ -194,11 +195,14 @@ export interface SessionGateway {
   acknowledgeProjectAttention?(input: AttentionReceipt): Promise<AttentionEntry>;
   handleMcpEventMethod?(method: string, params: unknown): Promise<unknown>;
   backendConnectivity?(): Promise<"ok" | "unreachable" | "unverified">;
+  /** Read-only Repo Live projection wired by the adapter runtime; absent in fakes. */
+  dashboardControl?: DashboardControl;
 }
 
 export class OpenCodeGateway implements SessionGateway {
   private readonly client: OpenCodeClient;
   private projectId: string | undefined;
+  dashboardControl?: DashboardControl;
   private compatibilityPromise: Promise<void> | undefined;
   private readonly submissionLocks = new Set<string>();
   private readonly unresolved = new Map<string, string>();

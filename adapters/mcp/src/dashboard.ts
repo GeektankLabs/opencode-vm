@@ -1,5 +1,7 @@
 import type { OpenCodeGateway } from "./opencode.js";
 import type { ProjectBoardService } from "./taskboard.js";
+import { READ_PAYLOAD_BYTES, jsonBytes } from "./content.js";
+import { isRecord } from "./types.js";
 
 export type Inventory = Awaited<ReturnType<OpenCodeGateway["readDashboardInventory"]>>;
 export type Session = Awaited<ReturnType<OpenCodeGateway["readDashboardSession"]>>;
@@ -9,6 +11,20 @@ export type DashboardReader = {
   session(session: Inventory["sessions"][number]): Promise<Session>;
   board(): Promise<Tasks>;
   activity(ids: Set<string>): Promise<unknown>;
+};
+
+/** Read-only projection surface shared by the browser dashboard and the MCP app.
+ * The adapter wires one collector behind this contract; both transports stay thin. */
+export type DashboardControl = {
+  overview(): unknown;
+  refresh(): Promise<unknown>;
+  session(sessionId: string): Promise<unknown>;
+};
+
+export type UiService = {
+  kind: "dashboard" | "mcp-app";
+  generation: string;
+  adapterVersion?: string;
 };
 type Source = { observed_at: string | null; last_success_at: string | null; complete: boolean; error: string | null };
 const source = (): Source => ({ observed_at: null, last_success_at: null, complete: false, error: null });
@@ -128,6 +144,50 @@ export class DashboardCollector {
   }
   stop() { this.stopped = true; clearTimeout(this.timer); }
 
+  /** One row of evidence: Board, backend activity, correlated turns and runtime
+   * stay separate; missing freshness downgrades the row to unknown, never idle. */
+  private sessionRow(s: Session, freshBoard: boolean, rowFresh: boolean) {
+    const direct = this.tasks.flatMap(task => task.links.filter(link => link.session_id === s.session_id)
+      .map(link => ({ task_id: task.task_id, session_id: s.session_id, message_id: link.message_id,
+        scope: link.message_id ? "message" : "session", source: "board_link" })));
+    const inherited = s.parent_session_id ? this.tasks.filter(task => task.links.some(link => link.session_id === s.parent_session_id))
+      .filter(task => !direct.some(link => link.task_id === task.task_id))
+      .map(task => ({ task_id: task.task_id, session_id: s.session_id, message_id: null,
+        scope: "parent_indirect", source: "board_parent_link" })) : [];
+    const associations = [...direct, ...inherited];
+    const latest = s.turns.at(-1);
+    return { ...s, state: rowFresh ? s.pending_input.permissions + s.pending_input.questions > 0 ? "input_required" : s.backend_activity === "retry" ? "retry" : s.backend_activity === "busy" ? "running" : latest?.state === "submitted" ? "submitted" : s.turns.some(t => t.active || t.state === "submitted") ? "unknown" : "idle" : "unknown",
+      operational: operational(s), freshness: rowFresh ? "fresh" : "stale",
+      binding_state: !freshBoard ? "unknown" : associations.length ? "known" : "unbound",
+      current_turn_unbound: latest ? !direct.some(a => a.message_id === latest.user_message_id) : null,
+      associations,
+      anomaly: s.archived && operational(s) ? "ARCHIVED_ACTIVE" : null };
+  }
+
+  private sourceFresh(name: keyof DashboardCollector["sources"], time = this.now()) {
+    const value = this.sources[name];
+    const age = value.observed_at ? Math.max(0, time - Date.parse(value.observed_at)) : null;
+    const threshold = name === "board" || name === "discovery" ? 45000 : 15000;
+    return value.error === null && age !== null && age <= threshold && value.complete;
+  }
+
+  private recentFor(sessionId: string) {
+    return isRecord(this.recent) && Array.isArray(this.recent.recent)
+      ? this.recent.recent.filter((event): event is Record<string, unknown> =>
+          isRecord(event) && event.session_id === sessionId).slice(-10).reverse()
+      : [];
+  }
+
+  /** Fresh single-session read for the read-only MCP app; one admitted session,
+   * bounded to its correlated turns and up to ten metadata events. */
+  async readSessionDetail(sessionId: string) {
+    const item = this.inventory?.sessions.find(session => session.id === sessionId);
+    if (!item) return { found: false as const };
+    const session = await this.reader.session(item);
+    return { found: true as const, observed_at: new Date(this.now()).toISOString(),
+      row: this.sessionRow(session, this.sourceFresh("board"), true), recent: this.recentFor(sessionId) };
+  }
+
   snapshot(summary = false) {
     const time = this.now();
     const sources = Object.fromEntries(Object.entries(this.sources).map(([name, value]) => {
@@ -137,24 +197,8 @@ export class DashboardCollector {
         state: value.error ? "degraded" : age === null ? "unknown" : age > threshold ? "stale" : "fresh" }];
     }));
     const fresh = (name: string) => sources[name]?.state === "fresh" && sources[name]?.complete;
-    const sessions = this.sessions.map(s => {
-      const direct = this.tasks.flatMap(task => task.links.filter(link => link.session_id === s.session_id)
-        .map(link => ({ task_id: task.task_id, session_id: s.session_id, message_id: link.message_id,
-          scope: link.message_id ? "message" : "session", source: "board_link" })));
-      const inherited = s.parent_session_id ? this.tasks.filter(task => task.links.some(link => link.session_id === s.parent_session_id))
-        .filter(task => !direct.some(link => link.task_id === task.task_id))
-        .map(task => ({ task_id: task.task_id, session_id: s.session_id, message_id: null,
-          scope: "parent_indirect", source: "board_parent_link" })) : [];
-      const associations = [...direct, ...inherited];
-      const latest = s.turns.at(-1);
-      const rowFresh = fresh("sessions") && time - Date.parse(s.observed_at) <= 15000;
-      return { ...s, state: rowFresh ? s.pending_input.permissions + s.pending_input.questions > 0 ? "input_required" : s.backend_activity === "retry" ? "retry" : s.backend_activity === "busy" ? "running" : latest?.state === "submitted" ? "submitted" : s.turns.some(t => t.active || t.state === "submitted") ? "unknown" : "idle" : "unknown",
-        operational: operational(s), freshness: rowFresh ? "fresh" : "stale",
-        binding_state: !fresh("board") ? "unknown" : associations.length ? "known" : "unbound",
-        current_turn_unbound: latest ? !direct.some(a => a.message_id === latest.user_message_id) : null,
-        associations,
-        anomaly: s.archived && operational(s) ? "ARCHIVED_ACTIVE" : null };
-    });
+    const sessions = this.sessions.map(s => this.sessionRow(s,
+      fresh("board"), fresh("sessions") && time - Date.parse(s.observed_at) <= 15000));
     const active = sessions.filter(s => s.operational);
     const attention = active.filter(s => s.state === "input_required" || s.state === "unknown" || s.anomaly);
     const taskIds = new Set(active.flatMap(s => s.associations.map(a => a.task_id)));
@@ -169,4 +213,40 @@ export class DashboardCollector {
     if (summary) return base;
     return { ...base, sessions, unknown_sessions: this.unknown, tasks: this.tasks.filter(task => sessions.some(s => s.associations.some(a => a.task_id === task.task_id))), recent: this.recent };
   }
+}
+
+const UI_PROJECTION_BYTES = READ_PAYLOAD_BYTES - 4096;
+
+/** Bounded, deterministic projection for the shared Repo Live UI. Rows are kept
+ * by priority (operational sessions, tasks, idle sessions, unknown rows, recent
+ * events) under the structured read budget; anything omitted is counted in an
+ * explicit truncation object — never silently dropped or replaced by a verdict. */
+export function boundedUiProjection(snapshot: ReturnType<DashboardCollector["snapshot"]>, service: UiService) {
+  if (!("sessions" in snapshot)) throw new Error("Repo Live UI projection requires the detail snapshot.");
+  const activity = isRecord(snapshot.recent) && Array.isArray(snapshot.recent.recent)
+    ? { ...snapshot.recent, recent: [...snapshot.recent.recent] as unknown[] } : null;
+  const base = { ...snapshot, sessions: [] as unknown[], unknown_sessions: [] as unknown[], tasks: [] as unknown[],
+    recent: activity ? { ...activity, recent: [] as unknown[] } : null, service, truncation: null as unknown };
+  let remaining = UI_PROJECTION_BYTES - jsonBytes(base);
+  const take = <T>(items: T[]) => {
+    const kept: T[] = []; let omitted = 0;
+    for (const item of items) {
+      const cost = jsonBytes(item) + 1;
+      if (cost <= remaining) { kept.push(item); remaining -= cost; } else omitted++;
+    }
+    return { kept, omitted };
+  };
+  const operationalRows = take(snapshot.sessions.filter(session => session.operational));
+  const tasks = take(snapshot.tasks);
+  const idleRows = take(snapshot.sessions.filter(session => !session.operational));
+  const unknown = take(snapshot.unknown_sessions ?? []);
+  const events = take(activity?.recent ?? []);
+  const omittedTotal = operationalRows.omitted + idleRows.omitted + tasks.omitted + unknown.omitted + events.omitted;
+  return { ...base,
+    sessions: [...operationalRows.kept, ...idleRows.kept],
+    tasks: tasks.kept,
+    unknown_sessions: unknown.kept,
+    recent: activity ? { ...activity, recent: events.kept } : null,
+    truncation: omittedTotal === 0 ? null : { sessions: operationalRows.omitted + idleRows.omitted, tasks: tasks.omitted,
+      unknown_sessions: unknown.omitted, recent: events.omitted, reason: "READ_RESPONSE_BUDGET" as const } };
 }

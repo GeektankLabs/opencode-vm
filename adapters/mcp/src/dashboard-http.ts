@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { isIP } from "node:net";
+import { ADAPTER_VERSION } from "./types.js";
 import type { DashboardCollector } from "./dashboard.js";
 
 export type DashboardConfig = {
@@ -79,7 +80,8 @@ export function dashboardHandler(config: DashboardConfig, collector: DashboardCo
           (url.searchParams.has("view") && !["detail", "summary"].includes(url.searchParams.get("view")!))) return send(400, { error: "INVALID_VIEW" });
         const snapshot = collector.snapshot(url.searchParams.get("view") === "summary");
         if (!snapshot.sources.sessions?.last_success_at) return send(503, { error: "STATUS_UNAVAILABLE" });
-        const text = JSON.stringify({ ...snapshot, navigation: config.navigation ?? null });
+        const text = JSON.stringify({ ...snapshot, service: { kind: "dashboard", generation: snapshot.generation,
+          adapterVersion: ADAPTER_VERSION }, navigation: config.navigation ?? null });
         if (Buffer.byteLength(text) > 512 * 1024) return send(503, { error: "READ_BUDGET_EXCEEDED" });
         return send(200, text);
       }

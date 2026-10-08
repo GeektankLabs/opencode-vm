@@ -535,7 +535,7 @@ test("final fallback write is callable on both protocol paths with commit, CAS a
   assert.deepEqual(await readFile(policyPath), beforeStale, "an unavailable catalog selection never writes");
 });
 
-test("official MCP client discovers thirty-six stateless HTTP tools and invokes session tools by ID", async () => {
+test("official MCP client discovers thirty-nine stateless HTTP tools and invokes session tools by ID", async () => {
   const gateway = new FakeGateway();
   const server = new McpHttpServer(runtime(), token, gateway);
   const port = await server.start();
@@ -565,6 +565,7 @@ test("official MCP client discovers thirty-six stateless HTTP tools and invokes 
       "get_project_attention",
       "get_project_model_policy",
       "get_recommended_runtime",
+      "get_repo_live_session",
       "get_session",
       "get_session_history",
       "get_session_progress",
@@ -573,7 +574,9 @@ test("official MCP client discovers thirty-six stateless HTTP tools and invokes 
       "get_task_result",
       "list_monitors",
       "list_sessions",
+      "open_repo_live",
       "read_message_content",
+      "refresh_repo_live",
       "rename_session",
       "send_message",
       "send_session_followup",
@@ -590,6 +593,8 @@ test("official MCP client discovers thirty-six stateless HTTP tools and invokes 
     assert.equal(listed.tools.find((tool) => tool.name === "get_project_model_policy")?.annotations?.readOnlyHint, true);
     assert.equal(listed.tools.find((tool) => tool.name === "get_recommended_runtime")?.annotations?.readOnlyHint, true);
     assert.equal(listed.tools.find((tool) => tool.name === "set_project_model_policy_fallback")?.annotations?.readOnlyHint, false);
+    for (const name of ["open_repo_live", "refresh_repo_live", "get_repo_live_session"])
+      assert.equal(listed.tools.find((tool) => tool.name === name)?.annotations?.readOnlyHint, true, name);
     const policy = await client.callTool({ name: "get_project_model_policy", arguments: {} });
     assert.equal((policy.structuredContent as { revision: number }).revision, 0);
     const recommendation = await client.callTool({ name: "get_recommended_runtime", arguments: { profile: "deep" } });

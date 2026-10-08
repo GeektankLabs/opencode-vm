@@ -4,6 +4,10 @@ import { pathToFileURL } from "node:url";
 import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
 import { McpHttpServer, supportedProtocolVersions } from "./http.js";
 import { OpenCodeGateway } from "./opencode.js";
+import { ActivityJournal } from "./activity.js";
+import { DashboardCollector, boundedUiProjection } from "./dashboard.js";
+import type { UiService } from "./dashboard.js";
+import { ProjectBoardService } from "./taskboard.js";
 import {
   ADAPTER_VERSION,
   MCP_TRANSPORT,
@@ -25,7 +29,36 @@ export async function main(): Promise<void> {
   const gateway = new OpenCodeGateway(runtime);
   await gateway.compatibilityCheck();
   const legacyJournal = join(dirname(runtimePath), "activity.json");
-  await gateway.enableActivity(await projectActivityJournalPath(runtime.project), legacyJournal);
+  const activityPath = await projectActivityJournalPath(runtime.project);
+  await gateway.enableActivity(activityPath, legacyJournal);
+
+  // One lazy Repo Live collector behind the shared read-only projection; it
+  // collects on demand (first MCP app read, then at most every 2s) so unused
+  // sessions create no backend polling, and never writes.
+  const board = runtime.taskboardUrl && runtime.taskboardMetadataFile
+    ? new ProjectBoardService({ ...runtime, taskboardUrl: runtime.taskboardUrl, taskboardMetadataFile: runtime.taskboardMetadataFile })
+    : undefined;
+  const collector = new DashboardCollector({ id: runtime.projectHash, name: runtime.projectName }, runtime.generation, {
+    inventory: () => gateway.readDashboardInventory(),
+    session: session => gateway.readDashboardSession(session),
+    board: () => { if (!board) throw new Error("Board unavailable"); return board.readDashboardTasks(); },
+    activity: ids => ActivityJournal.readDashboard(activityPath, runtime.projectHash, ids),
+  });
+  const service: UiService = { kind: "mcp-app", generation: runtime.generation, adapterVersion: ADAPTER_VERSION };
+  let lastTick = 0;
+  gateway.dashboardControl = {
+    overview: () => boundedUiProjection(collector.snapshot(false), service),
+    refresh: async () => {
+      if (Date.now() - lastTick > 2000) { lastTick = Date.now(); await collector.tick(); }
+      return boundedUiProjection(collector.snapshot(false), service);
+    },
+    session: async sessionId => {
+      const detail = await collector.readSessionDetail(sessionId);
+      return detail.found
+        ? { found: true, service, observed_at: detail.observed_at, session: detail.row, recent: detail.recent }
+        : { found: false, service };
+    },
+  };
 
   const server = new McpHttpServer(runtime, token, gateway);
   const readyPath = join(dirname(runtimePath), "ready.json");

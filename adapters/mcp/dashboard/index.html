@@ -1,7 +1,18 @@
 <!doctype html>
 <html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Repo Live</title><link rel="stylesheet" href="/styles.css"><script src="/app.js" defer></script></head>
-<body><header><h1 id="project">Repo Live</h1><p id="counts">Status wird geladen …</p><p id="freshness">Noch keine Quellbeobachtung</p><details><summary>Quellen &amp; Zeitstempel</summary><p id="source-details" class="meta"></p></details></header>
-<main><p id="error" role="status"></p><nav aria-label="Live-Filter"><button id="all" aria-pressed="true">Alle</button><button id="attention" aria-pressed="false">Input / Attention</button><button id="running" aria-pressed="false">Läuft / Retry</button><a id="board">Taskboard (HTTP)</a></nav>
-<section aria-label="Aktive Arbeit" id="work"></section><details id="others"><summary>Weitere Sessions</summary><section id="idle"></section></details>
-<section><h2>Zuletzt beobachtet</h2><p id="recent">Keine belegte jüngste Aktivität</p></section>
-<p class="note">Boardstatus ≠ Laufstatus. Turn abgeschlossen ≠ Taskabnahme. Read-only · „Überblick“-UXreferenz unverifiziert.</p></main><p class="sr" id="announcement" aria-live="polite"></p></body></html>
+<body>
+<header class="top"><div class="brand"><div class="logo" aria-hidden="true">RL</div><div><h1 id="project">Repo Live</h1><p class="caption" id="counts">Status wird geladen …</p></div></div><div class="top-actions"><span class="freshness caption" id="freshness">Noch keine Quellbeobachtung</span><button id="refresh" type="button" disabled>Aktualisieren</button></div></header>
+<p class="statusline" id="status-line" role="status" aria-live="polite">Verbindung wird hergestellt …</p>
+<p id="error" role="status"></p>
+<main>
+  <section class="panel" aria-label="Arbeitslage (getrennte Fakten)"><h2>Arbeitslage</h2><div class="facts" id="facts"></div><p class="caption">Boardstatus, Sessionbetrieb, Turnabschluss, QC, Main-Integration und servierender Prozess sind getrennte Fakten; fehlende Nachweise bleiben unbekannt. Ein Turnabschluss ist keine Abnahme.</p></section>
+  <nav class="filters" aria-label="Live-Filter"><button id="all" type="button" aria-pressed="true">Alle</button><button id="attention" type="button" aria-pressed="false">Input / Attention</button><button id="running" type="button" aria-pressed="false">Läuft / Retry</button><a id="board" hidden>Taskboard</a></nav>
+  <p id="placeholder" class="empty">Aktuelle Daten werden beim Öffnen geladen.</p>
+  <section id="work" aria-label="Aktive Arbeit"></section>
+  <details id="others"><summary>Weitere Sessions</summary><section id="idle"></section></details>
+  <section class="panel" aria-label="Zuletzt beobachtet"><h2>Zuletzt beobachtet</h2><div id="recent"></div></section>
+  <details class="sources"><summary>Quellen, Datenalter &amp; Abdeckung</summary><div id="source-details"></div><p id="truncation" class="caption"></p></details>
+  <p class="note">Read-only · Boardstatus ≠ Laufstatus · Turn abgeschlossen ≠ QC/Abnahme/Integration · „Überblick"-UXreferenz bleibt unverifiziert.</p>
+</main>
+<p class="sr" id="announcement" aria-live="polite"></p>
+</body></html>

@@ -15,10 +15,35 @@ no-auth choice is preserved; missing auth or TLS material does not silently
 disable protection. Client trust remains an operator decision. Local responsive
 fixtures are not real Safari, Phone, Voice, Lima or host-forward acceptance.
 
+## One UI, two transports
+
+`adapters/mcp/dashboard/{index.html,styles.css,app.js}` is the single Control
+view source. The browser service serves it as static files; the MCP adapter
+assembles the byte-identical files into one inline `ui://repo-live/v1.html`
+resource (`text/html;profile=mcp-app`) and renders it with the `open_repo_live`
+tool (`_meta.ui.resourceUri`, declared `openai/ui` entrypoints `global` and
+`thread`; real ChatGPT sidebar/panel availability stays unverified). The page
+renders from one snapshot shape and only its host shim differs:
+
+- Browser: `fetch("/api/v1/status")`, producer-aligned polling, local session
+  and Board links.
+- MCP app: `tools/call` over the MCP Apps host bridge (`refresh_repo_live`,
+  `get_repo_live_session`), no local URL fetch and no anchor assumption. The
+  adapter keeps one lazy collector (first read, then at most every 2s) so an
+  unused session does not poll the backend.
+
+The **Arbeitslage** panel keeps facts separate: Board status, backend sessions,
+correlated turn completions, QC findings, main integration and the serving
+process. QC/integration/installed have no canonical live source here and are
+shown as unknown; turn completion is never promoted to a verdict. Detail panes
+load fresh when opened (newest metadata events first) and show explicit
+loading, error and retry states; a failed refresh keeps the last known stand.
+
 ## Read contract
 
 - `GET /healthz`: owned project/generation/readOnly/readiness, authenticated.
-- `GET /api/v1/status`: bounded detail view from one volatile collector.
+- `GET /api/v1/status`: bounded detail view from one volatile collector, plus an
+  additive `service {kind,generation,adapterVersion}` field.
 - `GET /api/v1/status?view=summary`: same snapshot/counts/freshness, no session
   histories. A later global page may consume this without global discovery now.
 - Unsupported methods: 405; invalid view/selectors: 400; missing/wrong existing
@@ -27,6 +52,12 @@ fixtures are not real Safari, Phone, Voice, Lima or host-forward acceptance.
 - No prompts, descriptions, raw workspace paths, provider errors or credentials
   in status responses. Unknown counts are null, not zero. Unknown session reads
   retain admitted identity rows separately. Responses are capped at 512 KiB.
+
+The MCP app path returns the same snapshot shape as a bounded projection under
+the structured read budget (`READ_PAYLOAD_BYTES - 4096` target, 48 KiB payload
+ceiling); omitted rows are counted in `truncation {sessions,tasks,
+unknown_sessions,recent,reason:"READ_RESPONSE_BUDGET"}`. Unknown session ids
+return `SESSION_NOT_FOUND`; all three Repo Live tools are `readOnlyHint:true`.
 
 Session/turn/Board states are independent. Unique session IDs determine counts,
 including manual sessions, children and managers. Explicit Board associations
@@ -57,16 +88,22 @@ The old operator “Überblick” reference remains UNVERIFIED and is not a bloc
 for this data MVP.
 
 Dashboard modules and static UI are distributed in the pinned MCP adapter
-archive, reusing its SDK/domain readers. `--no-mcp` still permits this internal
+archive, reusing its SDK/domain readers — including the MCP app resource and
+its tools, which read the same collector. `--no-mcp` still permits this internal
 read producer; it does not create an MCP listener/token or broaden public MCP
 child/manager/history exposure. Only an owned transient service is stopped,
 under a bounded cleanup lock and matching generation/description.
 
-Private checks: `node --test dist/dashboard*.test.js`,
-`python3 -B tests/dashboard_lifecycle_test.py`; browser fixture:
+Private checks (in `adapters/mcp`): `node --test dist/dashboard*.test.js
+dist/control-app*.test.js`, `python3 -B tests/dashboard_lifecycle_test.py`;
+browser fixtures:
 `PLAYWRIGHT_MODULE=/absolute/playwright/index.mjs node tests/dashboard-browser.mjs`
-in `adapters/mcp`. Artifacts default to `/tmp/opencode/wc-browser`, generated
-fixture certificates are test-only. Source mutation times are paired with actual
-production-UI status/runtime renders in the following painted frame (DOM
-observation plus double requestAnimationFrame), not producer polling constants.
-Independent QC, integration and all external acceptance remain separate gates.
+(browser transport, real collector over HTTPS) and
+`PLAYWRIGHT_MODULE=/absolute/playwright/index.mjs node tests/repo-live-app-browser.mjs`
+(assembled MCP app resource in an iframe with a simulated MCP Apps host bridge).
+Artifacts default to `/tmp/opencode/wc-browser` and `/tmp/opencode/repo-live-app`,
+generated fixture certificates are test-only. Source mutation times are paired
+with actual production-UI status/runtime renders in the following painted frame
+(DOM observation plus double requestAnimationFrame), not producer polling
+constants. Independent QC, integration and all external acceptance remain
+separate gates.
