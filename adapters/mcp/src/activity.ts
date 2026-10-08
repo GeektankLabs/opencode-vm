@@ -57,12 +57,12 @@ type Store = {
 type EventInput = Omit<ActivityEvent, "event_id" | "cursor" | "timestamp">;
 const terminal = new Set(["completed", "failed", "aborted"]);
 
-/** Bounded, metadata-only error class for diagnostics: an errno code or the
- * error class name. Deliberately narrow so a path, payload or secret can never
- * reach the adapter log through this field. */
+/** Bounded, metadata-only error class for diagnostics: an errno-shaped code or
+ * the error class name. Deliberately narrow so a path, payload or secret can
+ * never reach the adapter log through this field. */
 export function persistErrorClass(error: unknown): string {
   const code = (error as NodeJS.ErrnoException | null | undefined)?.code;
-  if (typeof code === "string" && /^[A-Z][A-Z0-9_]{0,31}$/.test(code)) return code;
+  if (typeof code === "string" && /^E[A-Z0-9_]{1,31}$/.test(code)) return code;
   const name = (error as Error | null | undefined)?.name;
   if (typeof name === "string" && /^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(name)) return name;
   return "unknown";

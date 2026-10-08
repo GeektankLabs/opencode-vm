@@ -240,6 +240,9 @@ test("a failed commit logs a bounded metadata class and keeps the fail-closed la
   assert.equal(persistErrorClass(Object.assign(new Error("boom"), { code: "EACCES" })), "EACCES");
   assert.equal(persistErrorClass(new Error("/tmp/secret/activity.json Bearer TOKEN")), "Error");
   assert.equal(persistErrorClass(Object.assign(new Error("boom"), { code: "/etc/passwd" })), "Error");
+  assert.equal(persistErrorClass(Object.assign(new Error("boom"), { code: "BEARER_TOKEN_VALUE" })), "Error",
+    "an uppercase non-errno code is not emitted verbatim");
+  assert.equal(persistErrorClass(Object.assign(new Error("boom"), { code: "ERR_FS_EISDIR" })), "ERR_FS_EISDIR");
   assert.equal(persistErrorClass(undefined), "unknown");
 });
 

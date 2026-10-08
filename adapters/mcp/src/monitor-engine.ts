@@ -336,6 +336,12 @@ export class MonitorEngine {
       });
       return "error";
     }
+    // A (re)bind inside this wake must not leave the in-flight view on the stale
+    // claim snapshot: later steps of the same wake (runtime resolution, priming
+    // decision) use the session the registry actually holds now.
+    if (monitor.session.session_id !== session.sessionId || (monitor.session.priming_digest ?? null) !== session.primingDigest) {
+      monitor.session = { ...monitor.session, session_id: session.sessionId, priming_digest: session.primingDigest };
+    }
     const status = await this.gateway.getSessionStatus(session.sessionId, monitor.dispatch_wal?.message_id ?? undefined);
     const pending = await this.combinedPending(session.sessionId);
     if (!pending) {
@@ -355,7 +361,7 @@ export class MonitorEngine {
     const evidenced = classifyEvidence(status);
     if (evidenced.kind === "blocked") {
       if (evidenced.category === "context_input_length") return this.compactionContinue(id, now, monitor, session.sessionId, summary);
-      return this.recover(id, now, monitor, session.sessionId, evidenced, summary);
+      return this.recover(id, now, monitor, session.sessionId, evidenced, summary, session.primingDigest);
     }
     if (status.backend_activity !== "idle" || status.state === "running") {
       // Retrying/waiting/active progress is not a blocked error; busy alone is
@@ -383,7 +389,9 @@ export class MonitorEngine {
       // autonomy/runtime profile or document revision re-primes once; an
       // unchanged context keeps the wake short (no full priming per tick).
       const priming = this.primingDigest(monitor, summary);
-      const prime = monitor.session.priming_digest !== priming;
+      // Fresh digest from ensureSession: a rebind inside this very wake resets it
+      // to null, so the brand-new session is primed in the same admitted message.
+      const prime = session.primingDigest !== priming;
       const prompt = this.buildWakePrompt(monitor, summary, decisionsSince, actionId, triggered, prime);
       const wal = await withRegistry(
         this.project,
@@ -589,11 +597,12 @@ export class MonitorEngine {
   private async ensureSession(
     monitor: MonitorRecord,
     now: number,
-  ): Promise<{ kind: "ok"; sessionId: string } | { kind: "session-error"; reason: string }> {
+  ): Promise<{ kind: "ok"; sessionId: string; primingDigest: string | null } | { kind: "session-error"; reason: string }> {
     if (monitor.session.session_id) {
       try {
         const details = await this.gateway.getSessionDetails(monitor.session.session_id);
-        if (details.id === monitor.session.session_id) return { kind: "ok", sessionId: details.id };
+        if (details.id === monitor.session.session_id)
+          return { kind: "ok", sessionId: details.id, primingDigest: monitor.session.priming_digest ?? null };
       } catch {
         // fall through to rebind below
       }
@@ -605,14 +614,16 @@ export class MonitorEngine {
         (registry) => {
           const record = registry.monitors.find((entry) => entry.id === monitor.id);
           if (!record) return registry;
-          record.session = { session_id: created.session_id, title: created.title, primed_at: iso(now) };
+          // A rebound session is a brand-new, empty context: its priming state is
+          // reset so the very next admitted message carries the role block.
+          record.session = { session_id: created.session_id, title: created.title, primed_at: iso(now), priming_digest: null };
           monitorHistory(record, "session-primed", { session_id: created.session_id }, now);
           record.updated_at = iso(now);
           return registry;
         },
         { now },
       );
-      return { kind: "ok", sessionId: created.session_id };
+      return { kind: "ok", sessionId: created.session_id, primingDigest: null };
     } catch (error) {
       return { kind: "session-error", reason: errorCode(error) ?? "creation-failed" };
     }
@@ -678,6 +689,7 @@ export class MonitorEngine {
     sessionId: string,
     evidence: { fingerprint: string; category: string },
     summary?: CanonicalSummary,
+    sessionPrimingDigest?: string | null,
   ): Promise<WakeOutcome> {
     // Operational recovery is not a production-code repair; the W2 budget is
     // applied through the deterministic classifier below.
@@ -770,7 +782,10 @@ export class MonitorEngine {
     }
     const actionId = `recovery_${randomUUID().replaceAll("-", "")}`;
     const priming = summary ? this.primingDigest(monitor, summary) : null;
-    const prime = priming !== null && monitor.session.priming_digest !== priming;
+    // The digest comes from ensureSession, not from the stale claim snapshot, so
+    // a rebind in this wake re-primes instead of running the role block late.
+    const currentDigest = sessionPrimingDigest !== undefined ? sessionPrimingDigest : (monitor.session.priming_digest ?? null);
+    const prime = priming !== null && currentDigest !== priming;
     const prompt = this.buildRecoveryPrompt(monitor, evidence, actionId, summary, prime);
     await withRegistry(
       this.project,

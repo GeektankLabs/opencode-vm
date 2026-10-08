@@ -69,16 +69,20 @@ type FakeState = {
   abortPendingAfter: { permissions: number; questions: number } | null;
   abortActivityAfter: "idle" | "busy" | "retry";
   readFailCode: string | null;
+  lostSessionId: string | null;
+  createdSessionId: string;
 };
 
 function fakes(state: FakeState) {
   const gateway: MonitorGatewayLike = {
     async createSession(title: string) {
-      return { project: { id: "p", name: "p" }, session_id: "ses_monitor", title, agent: "build", provider_id: "deep-provider", model_id: "deep-model", state: "created" };
+      return { project: { id: "p", name: "p" }, session_id: state.createdSessionId, title, agent: "build", provider_id: "deep-provider", model_id: "deep-model", state: "created" };
     },
-    async getSessionDetails() {
+    async getSessionDetails(sessionId?: string) {
+      const id = sessionId ?? "ses_monitor";
+      if (state.lostSessionId && id === state.lostSessionId) throw new Error("Could not inspect OpenCode session.");
       return {
-        id: "ses_monitor",
+        id,
         title: "Monitor",
         created: 1,
         updated: 2,
@@ -176,6 +180,8 @@ function baseState(): FakeState {
     abortPendingAfter: { permissions: 0, questions: 0 },
     abortActivityAfter: "idle",
     readFailCode: null,
+    lostSessionId: null,
+    createdSessionId: "ses_monitor",
   };
 }
 
@@ -812,6 +818,61 @@ test("engine: wake prompt stays inside its token budget and names the bounded mi
     for (const marker of ["Mission: 1) verify progress", "exactly ONE next permitted step", "bounded no-op", "INPUT_REQUIRED only for a real missing decision"]) {
       assert.ok(mission.includes(marker), `mission marker missing: ${marker}`);
     }
+  } finally {
+    await cleanup();
+  }
+});
+
+test("engine: a session rebind inside the same wake primes the brand-new session immediately", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    const { gateway, board } = fakes(state);
+    const engine = new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => 100_000 });
+    await withRegistry(project, (registry) => {
+      const created = defaultMonitorRecord("M", TASK, {}, 100_000);
+      created.scheduler.next_run_at = 0;
+      registry.monitors.push(created);
+      return registry;
+    });
+    // First wake: session is created and primed in one admitted message.
+    assert.equal(await engine.tick(), "dispatched");
+    assert.equal(state.sends.length, 1);
+    assert.match(state.sends[0]!, /\[MANAGEMENT-PRIMING mgmt-v1\]/);
+    const primed = await readRegistrySnapshot(project);
+    assert.equal(primed.registry.monitors[0]!.session.session_id, "ses_monitor");
+    assert.equal(typeof primed.registry.monitors[0]!.session.priming_digest, "string");
+
+    // The bound session is lost; the engine rebinds during the next wake.
+    state.lostSessionId = "ses_monitor";
+    state.createdSessionId = "ses_rebound";
+    state.taskUpdated = "2026-10-09T00:00:00.000Z";
+    await withRegistry(project, (registry) => {
+      registry.monitors[0]!.scheduler.next_run_at = 0;
+      return registry;
+    });
+    assert.equal(await engine.tick(), "dispatched");
+    assert.equal(state.sends.length, 2, "the rebind wake admits exactly one message");
+    assert.match(state.sends[1]!, /\[MANAGEMENT-PRIMING mgmt-v1\]/,
+      "the brand-new empty session receives the role block in the same wake, not one interval later");
+    assert.match(state.sends[1]!, /\[MONITOR-ACTION wake_/);
+    const rebound = await readRegistrySnapshot(project);
+    assert.equal(rebound.registry.monitors[0]!.session.session_id, "ses_rebound");
+    assert.equal(typeof rebound.registry.monitors[0]!.session.priming_digest, "string");
+    assert.equal(rebound.registry.monitors[0]!.history.filter((entry) => entry.type === "manager-primed").length, 2);
+    assert.equal(rebound.registry.monitors[0]!.history.filter((entry) => entry.type === "session-primed").length, 2);
+
+    // With the rebound session healthy and the context unchanged, no re-priming.
+    state.lostSessionId = null;
+    state.taskUpdated = "2026-10-10T00:00:00.000Z";
+    await withRegistry(project, (registry) => {
+      registry.monitors[0]!.scheduler.next_run_at = 0;
+      return registry;
+    });
+    assert.equal(await engine.tick(), "dispatched");
+    assert.ok(!state.sends[2]!.includes("[MANAGEMENT-PRIMING"), "no repeated priming for the same context");
+    const after = await readRegistrySnapshot(project);
+    assert.equal(after.registry.monitors[0]!.history.filter((entry) => entry.type === "manager-primed").length, 2);
   } finally {
     await cleanup();
   }
