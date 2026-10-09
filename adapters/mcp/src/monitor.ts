@@ -91,7 +91,14 @@ export type MonitorRecord = {
   autonomy_profile: MonitorAutonomyProfile;
   runtime_profile: MonitorRuntimeProfile;
   session: { session_id: string | null; title: string | null; primed_at: string | null; priming_digest?: string | null };
-  state: { work: MonitorWorkState; parked_reason?: string; last_seen_digest: string | null; watermark: string | null };
+  state: {
+    work: MonitorWorkState;
+    parked_reason?: string;
+    last_seen_digest: string | null;
+    watermark: string | null;
+    /** Bounded digest of the worker index observed at the last admitted wake. */
+    worker_digest?: string | null;
+  };
   cursors: Record<string, string>;
   budget: Record<string, { no_progress: number; entries: MonitorRepairEntry[] }>;
   read_episodes: Record<
@@ -744,4 +751,25 @@ export async function getWorker(
   const snapshot = await readRegistrySnapshot(project);
   const monitor = findMonitorOrThrow(snapshot.registry, monitorId);
   return (monitor.workers ?? []).find((entry) => entry.worker_key === workerKey) ?? null;
+}
+
+/**
+ * Bounded, deterministic digest of a monitor's worker index. The engine folds
+ * this into its wake-change detection so a worker creation/receipt/lifecycle/
+ * synthesis delta reaches the manager as a wake instead of being swallowed by
+ * the unchanged-board no-op.
+ */
+export function workerIndexDigest(monitor: MonitorRecord): string {
+  return digest(
+    (monitor.workers ?? []).map((worker) => ({
+      k: worker.worker_key,
+      a: worker.alias,
+      l: worker.lifecycle,
+      r: worker.runtime_session_id,
+      c: worker.creation_receipt,
+      d: worker.dispatch_receipt,
+      s: worker.last_synthesis_at,
+      u: worker.updated_at,
+    })),
+  );
 }

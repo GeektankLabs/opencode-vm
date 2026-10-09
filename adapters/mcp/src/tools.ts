@@ -19,13 +19,22 @@ import { SUPPORTED_ATTACHMENT_TYPES } from "./attachments.js";
 import { PROFILE_NAMES, describePolicy, profileState, readPolicy, resolveProfile, type PolicySelection } from "./agent-control.js";
 import { commitFinalFallback, commitProfileFallback, commitStrategies } from "./policy-commit.js";
 import {
+  confirmWorkerCreation,
   defaultMonitorRecord,
   ensureManagerAlias,
+  getWorker,
   monitorHistory,
   readRegistrySnapshot,
+  rebindWorker,
+  reconcileWorkerCreate,
+  reserveWorker,
+  reuseWorker,
+  setWorkerLifecycle,
+  setWorkerSynthesis,
   withRegistry,
 } from "./monitor.js";
-import type { MonitorRecord } from "./monitor.js";
+import type { MonitorRecord, MonitorWorkerRecord } from "./monitor.js";
+import type { CreateSessionResult } from "./types.js";
 
 import {
   ACTIVITY_TYPES,
@@ -1105,6 +1114,62 @@ const monitorAbortOutput = z
     guidance: z.string().optional(),
   })
   .strict();
+const monitorWorkerLifecycleSchema = z.enum(["reserved", "active", "idle", "archived"]);
+const monitorWorkerOutput = z
+  .object({
+    worker_key: z.string(),
+    alias: z.string(),
+    lifecycle: monitorWorkerLifecycleSchema,
+    task_id: z.string().nullable(),
+    context_path: z.string(),
+    runtime_session_id: z.string().nullable(),
+    creation_receipt: z.string().nullable(),
+    dispatch_receipt: z.string().nullable(),
+    last_synthesis_at: z.string().nullable(),
+    updated_at: z.string(),
+  })
+  .strict();
+const createMonitorWorkerInput = z
+  .object({
+    monitor_id: monitorIdSchema,
+    title: z.string().trim().min(1).max(160).optional(),
+    task_id: monitorAnchorTaskId.optional(),
+    scope: z.string().trim().min(1).max(400).optional(),
+    worktree: z.string().trim().min(1).max(400).optional(),
+  })
+  .strict();
+const createMonitorWorkerOutput = z
+  .object({
+    worker: monitorWorkerOutput,
+    generation: z.number().int(),
+    uncertain: z.boolean(),
+    observed_at: z.string(),
+  })
+  .strict();
+const listMonitorWorkersInput = z.object({ monitor_id: monitorIdSchema }).strict();
+const listMonitorWorkersOutput = z
+  .object({
+    monitor_id: z.string(),
+    alias: z.string().nullable(),
+    workers: z.array(monitorWorkerOutput),
+    generation: z.number().int(),
+    observed_at: z.string(),
+  })
+  .strict();
+const updateMonitorWorkerInput = z
+  .object({
+    monitor_id: monitorIdSchema,
+    worker_key: z.string().regex(/^worker_[0-9a-f]{32}$/),
+    action: z.enum(["reconcile_created", "reconcile_absent", "reuse", "rebind", "idle", "archive", "synthesis"]),
+    runtime_session_id: z.string().min(1).max(200).optional(),
+    creation_receipt: z.string().min(1).max(200).optional(),
+    dispatch_receipt: z.string().min(1).max(200).optional(),
+    synthesis_at: z.string().min(1).max(40).optional(),
+  })
+  .strict();
+const updateMonitorWorkerOutput = z
+  .object({ worker: monitorWorkerOutput, generation: z.number().int(), observed_at: z.string() })
+  .strict();
 
 const createSessionOutputSchema = z
   .object({
@@ -1975,6 +2040,182 @@ export function createMcpServer(
     );
   });
 
+  // ---- W2-F1 consumer wiring: monitor worker identity/context metadata ----
+  const workerSummary = (worker: MonitorWorkerRecord) => ({
+    worker_key: worker.worker_key,
+    alias: worker.alias,
+    lifecycle: worker.lifecycle,
+    task_id: worker.task_id,
+    context_path: worker.context_path,
+    runtime_session_id: worker.runtime_session_id,
+    creation_receipt: worker.creation_receipt,
+    dispatch_receipt: worker.dispatch_receipt,
+    last_synthesis_at: worker.last_synthesis_at,
+    updated_at: worker.updated_at,
+  });
+  const appendWorkerAudit = async (
+    project: string,
+    monitorId: string,
+    type: string,
+    detail: Record<string, unknown>,
+    now: number,
+  ): Promise<void> => {
+    await withRegistry(
+      project,
+      (registry) => {
+        const monitor = registry.monitors.find((entry) => entry.id === monitorId);
+        if (!monitor) return registry;
+        monitorHistory(monitor, type, detail, now);
+        monitor.updated_at = new Date(now).toISOString();
+        return registry;
+      },
+      { now },
+    );
+  };
+  const createMonitorWorkerHandler = safeHandler(async (input: z.output<typeof createMonitorWorkerInput>) => {
+    const project = monitorRuntime().project;
+    const now = Date.now();
+    // Reserve the alias + context path under the registry lock BEFORE the
+    // non-idempotent session create; the record stays reserved until the create
+    // response is observed.
+    const reservation = await reserveWorker(
+      project,
+      input.monitor_id,
+      { task_id: input.task_id ?? null, scope: input.scope ?? null, worktree: input.worktree ?? null },
+      { now },
+    );
+    let created: CreateSessionResult | null = null;
+    try {
+      created = await gateway.createSession(input.title);
+    } catch {
+      created = null;
+    }
+    const worker = created
+      ? await confirmWorkerCreation(
+          project,
+          input.monitor_id,
+          reservation.worker_key,
+          { runtime_session_id: created.session_id, creation_receipt: created.session_id },
+          { now },
+        )
+      : await getWorker(project, input.monitor_id, reservation.worker_key);
+    if (!worker) throw new AdapterError("INTERNAL_ERROR", "Worker reservation disappeared during creation.");
+    await appendWorkerAudit(
+      project,
+      input.monitor_id,
+      created ? "worker-created" : "worker-create-uncertain",
+      { worker_key: worker.worker_key, alias: worker.alias, worker_session_id: created?.session_id ?? null },
+      now,
+    );
+    const snapshot = await readRegistrySnapshot(project);
+    const uncertain = created === null;
+    return success(
+      {
+        worker: workerSummary(worker),
+        generation: snapshot.registry.generation,
+        uncertain,
+        observed_at: new Date().toISOString(),
+      },
+      uncertain
+        ? `Reserved worker ${worker.alias} but the session creation was uncertain; reconcile with update_monitor_worker (reconcile_created or reconcile_absent) before any retry.`
+        : `Created worker ${worker.alias} as session ${created!.session_id}; use send_message with that session_id.`,
+    );
+  });
+  const listMonitorWorkersHandler = safeHandler(async (input: z.output<typeof listMonitorWorkersInput>) => {
+    const project = monitorRuntime().project;
+    const snapshot = await readRegistrySnapshot(project);
+    const monitor = snapshot.registry.monitors.find((entry) => entry.id === input.monitor_id);
+    if (!monitor) throw new AdapterError("MONITOR_NOT_FOUND", "Monitor does not exist in this project registry.");
+    const workers = monitor.workers ?? [];
+    return success(
+      {
+        monitor_id: monitor.id,
+        alias: monitor.alias ?? null,
+        workers: workers.map(workerSummary),
+        generation: snapshot.registry.generation,
+        observed_at: new Date().toISOString(),
+      },
+      `Returned ${workers.length} worker(s) for ${monitor.id}${monitor.alias ? ` (${monitor.alias})` : ""}.`,
+    );
+  });
+  const updateMonitorWorkerHandler = safeHandler(async (input: z.output<typeof updateMonitorWorkerInput>) => {
+    const project = monitorRuntime().project;
+    const now = Date.now();
+    let worker: MonitorWorkerRecord;
+    switch (input.action) {
+      case "reconcile_created": {
+        if (!input.runtime_session_id)
+          throw new AdapterError("INVALID_ARGUMENT", "reconcile_created requires runtime_session_id.");
+        worker = await reconcileWorkerCreate(
+          project,
+          input.monitor_id,
+          input.worker_key,
+          { outcome: "created", runtime_session_id: input.runtime_session_id, creation_receipt: input.creation_receipt ?? null },
+          { now },
+        );
+        break;
+      }
+      case "reconcile_absent": {
+        worker = await reconcileWorkerCreate(project, input.monitor_id, input.worker_key, { outcome: "absent" }, { now });
+        break;
+      }
+      case "reuse": {
+        if (!input.runtime_session_id)
+          throw new AdapterError("INVALID_ARGUMENT", "reuse requires runtime_session_id.");
+        worker = await reuseWorker(
+          project,
+          input.monitor_id,
+          input.worker_key,
+          { runtime_session_id: input.runtime_session_id, dispatch_receipt: input.dispatch_receipt ?? null },
+          { now },
+        );
+        break;
+      }
+      case "rebind": {
+        if (!input.runtime_session_id)
+          throw new AdapterError("INVALID_ARGUMENT", "rebind requires runtime_session_id.");
+        worker = await rebindWorker(
+          project,
+          input.monitor_id,
+          input.worker_key,
+          { runtime_session_id: input.runtime_session_id, dispatch_receipt: input.dispatch_receipt ?? null },
+          { now },
+        );
+        break;
+      }
+      case "idle": {
+        worker = await setWorkerLifecycle(project, input.monitor_id, input.worker_key, "idle", { now });
+        break;
+      }
+      case "archive": {
+        worker = await setWorkerLifecycle(project, input.monitor_id, input.worker_key, "archived", { now });
+        break;
+      }
+      case "synthesis": {
+        if (!input.synthesis_at) throw new AdapterError("INVALID_ARGUMENT", "synthesis requires synthesis_at.");
+        await setWorkerSynthesis(project, input.monitor_id, input.worker_key, input.synthesis_at, { now });
+        const updated = await getWorker(project, input.monitor_id, input.worker_key);
+        if (!updated) throw new AdapterError("INTERNAL_ERROR", "Worker disappeared during synthesis update.");
+        worker = updated;
+        break;
+      }
+      default:
+        throw new AdapterError("INVALID_ARGUMENT", "Unknown worker action.");
+    }
+    await appendWorkerAudit(
+      project,
+      input.monitor_id,
+      `worker-${input.action}`,
+      { worker_key: worker.worker_key, alias: worker.alias, lifecycle: worker.lifecycle, worker_session_id: worker.runtime_session_id },
+      now,
+    );
+    const snapshot = await readRegistrySnapshot(project);
+    return success(
+      { worker: workerSummary(worker), generation: snapshot.registry.generation, observed_at: new Date().toISOString() },
+      `Applied ${input.action} to worker ${worker.alias} (${worker.lifecycle}).`,
+    );
+  });
+
   const uploadAttachmentHandler = safeHandler(
     async ({
       session_id,
@@ -2517,6 +2758,45 @@ export function createMcpServer(
     monitorHistoryHandler,
   );
 
+  server.registerTool(
+    "create_monitor_worker",
+    {
+      title: "Create Monitor Worker",
+      description:
+        "Reserve a worker alias/context under the monitor registry lock BEFORE creating a root work session, then confirm it against the observed create response. Non-idempotent: an uncertain creation stays reserved and must be reconciled with update_monitor_worker, never retried blindly. The alias is cooperative identity, not an authorization.",
+      inputSchema: createMonitorWorkerInput,
+      outputSchema: createMonitorWorkerOutput,
+      annotations: writeAnnotations,
+    },
+    createMonitorWorkerHandler,
+  );
+
+  server.registerTool(
+    "list_monitor_workers",
+    {
+      title: "List Monitor Workers",
+      description:
+        "Read the bounded worker index of one monitor: stable worker_key/alias, lifecycle, task binding, context path, runtime session and creation/dispatch receipts. Read-only; a receipt is not task completion.",
+      inputSchema: listMonitorWorkersInput,
+      outputSchema: listMonitorWorkersOutput,
+      annotations: readOnlyAnnotations,
+    },
+    listMonitorWorkersHandler,
+  );
+
+  server.registerTool(
+    "update_monitor_worker",
+    {
+      title: "Update Monitor Worker",
+      description:
+        "Reconcile an uncertain worker creation (reconcile_created/reconcile_absent), reuse or rebind an own worker after a runtime loss, or mark idle/archive/synthesis. Operates only on workers of the given monitor; foreign workers are refused. Cooperative metadata, not authenticated caller isolation.",
+      inputSchema: updateMonitorWorkerInput,
+      outputSchema: updateMonitorWorkerOutput,
+      annotations: writeAnnotations,
+    },
+    updateMonitorWorkerHandler,
+  );
+
   // Repo Live MCP app: one UI resource rendered by `open_repo_live`; data flows
   // through the same bounded projection the browser dashboard serves. Read-only.
   const controlOverviewHandler = safeHandler(async () =>
@@ -2734,6 +3014,12 @@ export function createMcpServer(
             return validatedToolCall(monitorIdInput, monitorDeleteOutput, input, deleteMonitorHandler);
           case "get_monitor_history":
             return validatedToolCall(monitorHistoryInput, monitorHistoryOutput, input, monitorHistoryHandler);
+          case "create_monitor_worker":
+            return validatedToolCall(createMonitorWorkerInput, createMonitorWorkerOutput, input, createMonitorWorkerHandler);
+          case "list_monitor_workers":
+            return validatedToolCall(listMonitorWorkersInput, listMonitorWorkersOutput, input, listMonitorWorkersHandler);
+          case "update_monitor_worker":
+            return validatedToolCall(updateMonitorWorkerInput, updateMonitorWorkerOutput, input, updateMonitorWorkerHandler);
           case "upload_attachment":
             return validatedToolCall(
               uploadAttachmentInputSchema,

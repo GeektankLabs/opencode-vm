@@ -7,6 +7,7 @@ import {
   readRegistrySnapshot,
   recordRepair,
   withRegistry,
+  workerIndexDigest,
 } from "./monitor.js";
 import { isRecord } from "./types.js";
 import type {
@@ -289,6 +290,10 @@ export class MonitorEngine {
     const previously = monitor.state.last_seen_digest;
     const triggered = monitor.wake_request !== null;
     const decisionsSince = canonical.decisionsSince;
+    // Worker creation/receipt/lifecycle/synthesis deltas must reach the manager
+    // as a wake, not be swallowed by the unchanged-board no-op (W4 wake progress).
+    const workerDigest = workerIndexDigest(monitor);
+    const previousWorkerDigest = monitor.state.worker_digest ?? null;
 
     // ---- WAL reconciliation before ANY next admission / no-op shortcut ----
     // An unreconciled non-idempotent dispatch is never silently overridden by
@@ -307,6 +312,7 @@ export class MonitorEngine {
           if (record.dispatch_wal) record.dispatch_wal.message_id = reconciled.messageId;
           monitorHistory(record, "dispatch-reconciled", { message_id: reconciled.messageId }, now);
           record.state.last_seen_digest = summary.digest;
+          record.state.worker_digest = workerDigest;
           record.wake_request = null;
           this.appendDecisionSummary(record, summary, decisionsSince, now);
         });
@@ -321,9 +327,10 @@ export class MonitorEngine {
       return "dispatch-uncertain";
     }
 
-    // Cheap unchanged path: no model call, no note growth. A pending trigger is
-    // consumed with a single bounded receipt entry.
-    if (summary.digest === previously && !triggered) {
+    // Cheap unchanged path: no model call, no note growth. A pending trigger or
+    // a changed worker index (creation/receipt/lifecycle/synthesis) is not a
+    // no-op and proceeds to a bounded wake.
+    if (summary.digest === previously && workerDigest === previousWorkerDigest && !triggered) {
       await this.release(id, now, null);
       return "noop-unchanged";
     }
@@ -418,6 +425,7 @@ export class MonitorEngine {
           await this.release(id, now, reconciled.kind === "found" ? "dispatch-reconciled" : "dispatch-uncertain", (record) => {
             if (record.dispatch_wal) record.dispatch_wal.message_id = reconciled.kind === "found" ? reconciled.messageId : null;
             record.state.last_seen_digest = summary.digest;
+            record.state.worker_digest = workerDigest;
             record.wake_request = null;
             if (reconciled.kind === "found") {
               monitorHistory(record, "dispatch-reconciled", { message_id: reconciled.messageId }, now);
@@ -438,6 +446,7 @@ export class MonitorEngine {
       await this.release(id, now, "dispatched", (record) => {
         if (record.dispatch_wal && record.dispatch_wal.action_id === actionId) record.dispatch_wal.message_id = result.message_id;
         record.state.last_seen_digest = summary.digest;
+        record.state.worker_digest = workerDigest;
         record.wake_request = null;
         if (prime) this.recordPriming(record, priming, now);
         monitorHistory(record, triggered ? "noop-trigger" : "dispatched", { message_id: result.message_id, action_id: actionId, primed: prime }, now);
@@ -1007,6 +1016,22 @@ export class MonitorEngine {
     monitorHistory(record, "manager-primed", { contract: PRIMING_CONTRACT, digest: priming.slice(0, 16) }, now);
   }
 
+  /** Bounded, metadata-only worker index for the wake prompt (no secrets, no
+   * arguments). Keeps the most recent 20 workers and reports any omission. */
+  private workerIndexLine(monitor: MonitorRecord): string {
+    const workers = monitor.workers ?? [];
+    if (workers.length === 0) return "none";
+    const shown = workers.slice(-20);
+    const parts = shown.map((worker) => {
+      const task = worker.task_id ? `/${worker.task_id}` : "";
+      const runtime = worker.runtime_session_id ? `@${worker.runtime_session_id}` : "";
+      const synth = worker.last_synthesis_at ? `~${worker.last_synthesis_at}` : "";
+      return `${worker.alias}:${worker.lifecycle}${runtime}${task}${synth}`;
+    });
+    const omitted = workers.length - shown.length;
+    return `${parts.join("; ")}${omitted > 0 ? ` (+${omitted} older omitted)` : ""}`;
+  }
+
   private buildWakePrompt(
     monitor: MonitorRecord,
     summary: CanonicalSummary,
@@ -1018,6 +1043,7 @@ export class MonitorEngine {
     const mission = [
       `[MONITOR-ACTION ${actionId}] MANAGEMENT wake${triggered ? " (operator trigger)" : ""} · monitor ${monitor.id} · master ${summary.task.id} "${summary.task.title}" (${summary.task.status}).`,
       `Delta: checkpoint ${summary.checkpoint ?? "none"}; newest decision ${summary.newest_decision ?? "none"}; decisions since last wake ${decisionsSince}; documents ${summary.documents.length ? summary.documents.map((doc) => `${doc.role}@${doc.revision ?? "unversioned"}`).join(",") : "none"} (coverage ${summary.coverage}).`,
+      `Worker index: ${this.workerIndexLine(monitor)}`,
       `Mission: 1) verify progress of this master/work package, 2) read the current worker and receipt results, 3) decide and execute exactly ONE next permitted step, delegating implementation/tests to a worker session, 4) analyse blockers and resolve or escalate them within the existing grants, 5) if nothing relevant changed, end briefly (bounded no-op) without duplicate orders.`,
       `Reads: journal checkpoint/tail first; open canonical C/P only when a listed revision changed. Report INPUT_REQUIRED only for a real missing decision; keep state, journal and compact context updated.`,
     ];

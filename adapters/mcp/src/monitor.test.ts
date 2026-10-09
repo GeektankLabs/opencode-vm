@@ -341,6 +341,55 @@ test("engine: unchanged monitor is a cheap no-op without a model call; changed c
   }
 });
 
+test("W4 wake progress: a worker-index delta reaches the manager instead of a no-op", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    const { gateway, board } = fakes(state);
+    const engine = new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => 100_000 });
+    await withRegistry(project, (registry) => {
+      const monitor = defaultMonitorRecord("M", TASK, { interval_seconds: 60 }, 100_000);
+      monitor.scheduler.next_run_at = 0;
+      monitor.state.last_seen_digest = "different";
+      registry.monitors.push(monitor);
+      return registry;
+    });
+    assert.equal(await engine.tick(), "dispatched");
+    assert.equal(state.sends.length, 1);
+    const monitorId = (await readRegistrySnapshot(project)).registry.monitors[0]!.id;
+
+    // Same canonical board state, but a worker receipt/lifecycle delta must wake
+    // the manager rather than be swallowed by the unchanged-board no-op.
+    const reserved = await reserveWorker(project, monitorId, {}, { now: 100_500 });
+    await confirmWorkerCreation(
+      project,
+      monitorId,
+      reserved.worker_key,
+      { runtime_session_id: "ses_w", creation_receipt: "msg_w" },
+      { now: 100_600 },
+    );
+    const engine2 = new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => 200_000 });
+    await withRegistry(project, (registry) => {
+      registry.monitors[0]!.scheduler.next_run_at = 100_000;
+      return registry;
+    });
+    assert.equal(await engine2.tick(), "dispatched");
+    assert.equal(state.sends.length, 2, "worker delta must reach the manager");
+    assert.ok(state.sends[1]!.includes("M1-A:active@ses_w"), "wake prompt carries the bounded worker index");
+
+    // Board and worker index unchanged again -> cheap no-op.
+    const engine3 = new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => 300_000 });
+    await withRegistry(project, (registry) => {
+      registry.monitors[0]!.scheduler.next_run_at = 100_000;
+      return registry;
+    });
+    assert.equal(await engine3.tick(), "noop-unchanged");
+    assert.equal(state.sends.length, 2);
+  } finally {
+    await cleanup();
+  }
+});
+
 test("engine: canonical read passes a bounded limit and reports deterministic contract errors honestly", async () => {
   const { project, cleanup } = await setup();
   try {
