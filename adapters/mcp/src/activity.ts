@@ -15,6 +15,7 @@ import type {
   AttentionResult,
   AttentionReceipt,
   EventSubscription,
+  PreparedAttentionEntry,
   ActivityQuery,
   ActivitySnapshot,
   ActivityType,
@@ -96,6 +97,39 @@ export class ActivityJournal {
       return { epoch: store.epoch, updated_at: new Date(info.mtimeMs).toISOString(), recent: store.events.filter(event => sessions.has(event.session_id ?? ""))
         .slice(-10).map(event => ({ event_id: event.event_id, session_id: event.session_id,
           message_id: event.message_id ?? null, type: event.type, timestamp: event.timestamp })) };
+    } finally { await file.close(); }
+  }
+
+  /**
+   * W3 bounded read of the existing prepared-attention queue for the Repo Live
+   * projection. A missing journal means prepared attention is disabled; an
+   * unsafe/invalid journal is unavailable; both are reported with a precise,
+   * non-empty reason (never a fake empty success). Returning all entries lets
+   * the projection report an honest total/omitted; no entry is ever labelled
+   * resolved/accepted here.
+   */
+  static async readPreparedAttention(path: string, project: string): Promise<PreparedAttentionEntry[]> {
+    let file;
+    try {
+      file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT")
+        throw new AdapterError("ACTIVITY_DISABLED", "Prepared attention is disabled (no activity journal).");
+      throw new AdapterError("ACTIVITY_UNAVAILABLE", "Prepared attention journal is unavailable.");
+    }
+    try {
+      const info = await file.stat();
+      if (!info.isFile() || info.uid !== process.getuid?.() || (info.mode & 0o777) !== 0o600 || info.size > 32 * 1024 * 1024)
+        throw new AdapterError("ACTIVITY_UNAVAILABLE", "Prepared attention journal is unsafe.");
+      const store = JSON.parse(await file.readFile("utf8")) as Store;
+      if (!validStore(store, project))
+        throw new AdapterError("ACTIVITY_UNAVAILABLE", "Prepared attention journal is invalid.");
+      return Object.values(store.attention ?? {})
+        .sort((a, b) => b.event_sequence - a.event_sequence)
+        .map(preparedAttentionEntry);
+    } catch (error) {
+      if (error instanceof AdapterError) throw error;
+      throw new AdapterError("ACTIVITY_UNAVAILABLE", "Prepared attention journal is invalid.");
     } finally { await file.close(); }
   }
 
@@ -1086,6 +1120,31 @@ function eventName(type: ActivityEvent["type"]): string | undefined {
     case "session.input_required": return "worker.input_required";
     default: return undefined;
   }
+}
+
+/** Read-only projection of one attention entry. `resolution` is always
+ * "unverified" here: only a freshly read canonical decision/result evidence
+ * could support resolved/accepted, and reading it is a separate authorized
+ * step — a `discussed`/rendered/delivered receipt is never resolved. */
+function preparedAttentionEntry(entry: AttentionEntry): PreparedAttentionEntry {
+  return {
+    event_id: entry.event_id,
+    source_revision: entry.source_revision ?? null,
+    classification: entry.classification,
+    lifecycle: entry.lifecycle,
+    session_id: entry.session_id ?? null,
+    task_id: entry.task_id ?? null,
+    master_task_id: entry.master_task_id ?? null,
+    work_package_id: entry.work_package_id ?? null,
+    hierarchy_status: entry.hierarchy_status,
+    occurred_at: entry.occurred_at,
+    observed_at: entry.observed_at,
+    prepared_summary: entry.prepared_summary,
+    next_safe_step: entry.next_safe_step,
+    resolution: "unverified",
+    evidence_complete: entry.evidence?.complete === true,
+    superseded_by: entry.superseded_by ?? null,
+  };
 }
 
 function validStore(store: Store, project: string): boolean {

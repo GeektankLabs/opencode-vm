@@ -641,9 +641,23 @@ Instruction/source-bound synthetic traces must use the shipped dispatch preceden
 - Enabled journal reports `ACTIVITY_UNAVAILABLE`: disclose the enabled-journal fault, use working backend reads for exact existing receipts, and reconcile uncertain sends rather than replaying them.
 - Journal-free active completion: bounded exact-receipt rounds retain authorized scope, deadlines, fairness and no-blind-retry; no host delay support means on-demand checkpoint, never a tight loop or post-turn timer.
 - Old Repo Live Activity file is readable but writer has failed: `fresh/complete` file-read labels do not override disabled/unavailable mode; no automatic notice, persistent resolution or retrospective disabled-interval coverage is claimed. Task Management Journal stays a separate capability.
+
 ## Fresh-start and integration worktree cleanup
 
 - Integrated source branch, clean checkout, disposable ignored caches, owner stopped and cleanup authorized: integrator removes the checkout with Git, verifies the registration is gone and the branch still retains the exact source, and records the cleanup decision.
 - Integrated checkout still needed by acceptance: retain with the reason until its authorized boundary; opencode-vm locks do not survive the explicitly agreed fresh-VM disposal boundary. Commit/save needed work before that fresh start.
 - Unmerged/dirty/ignored/locked task checkout at an operator-authorized opencode-vm fresh start: remove the scoped working copy, preserve existing source branches, and retain detached commits on a branch first. During ordinary live work, technical completion alone still grants no forced discard.
 - New opencode-vm fresh start after successful prior-runtime finalization: project-local cleanup runs before cloning; reconnect/cancel or failed finalization causes no sweep. Main/other project state, temporary checkout locations and source branches stay outside disposal; symlinked/unverifiable paths are reported rather than guessed.
+
+## Monitor-manager cooperative rules (management-priming line, integrated at r49)
+
+| Scenario | Required behavior |
+|---|---|
+| Manager considers native subtask for internal parallel research | Refused by the rule: no native subtasks for management work; delegate serially to own root worker sessions; no parallel sub-managers. Worker self-chosen subtasks inside its own scope/permissions are fine and need no new enablement. |
+| Own monitor config change seems convenient (interval, autonomy, expiry, disable/delete/trigger) | Manager never self-applies; it recommends via attention/journal. Legitimate `INPUT_REQUIRED` parking stays permitted and is communication, not a config change; scheduler cadence unaffected. |
+| Worker reports business `input_required` | Once the actual decision exists in existing profile/scope, resolve with a normal same-session follow-up after idle/no-pending checks; a genuine missing operator decision escalates `INPUT_REQUIRED`; a pending security permission is never answered or bypassed. |
+| Session with matching title but no creation receipt/registry identity | Not own: never take over, steer or relabel; title is orientation, ownership comes from persisted identity evidence. |
+| Temptation to claim the skill "blocked" a rule violation | Cooperative rules are not technical enforcement: report a model violation as a violation with evidence, no invented `BLOCKED` event, caller-identity proof or attack-detection guarantee; existing authentication and tool guards stay as-is. |
+| Board task seems needed to carry worker context or record a proposal | Never create internal board tasks or task floods; keep the worker context in its persistent project-state file and the proposal in journal/attention; external board privileges remain untouched. |
+| Worker teardown with unfinished or uncertain dispatch state | No cleanup: secure handover first (synthesize/open items/belege verified and read back), then idle/no-pending/no-uncertain, reversible archive, then exact own context file removal only; never stop live work to tidy up, never delete permanent evidence. |
+>>>>>>> 96631b5ee3dbe4e4242767bb905d861419ee4b1b

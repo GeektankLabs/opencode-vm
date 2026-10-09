@@ -46,6 +46,12 @@ export async function main(): Promise<void> {
     board: () => { if (!board) throw new Error("Board unavailable"); return board.readDashboardTasks(); },
     activityJournalStatus: () => gateway.activityJournalStatus(),
     activity: ids => ActivityJournal.readDashboard(activityPath!, runtime.projectHash, ids),
+    // Journal-disabled sessions never open the store: the prepared-attention
+    // reader reports that truthfully (ACTIVITY_DISABLED) instead of touching
+    // journal state; the dashboard surfaces the reason and preserves last data.
+    attention: () => activityPath
+      ? ActivityJournal.readPreparedAttention(activityPath, runtime.projectHash)
+      : Promise.reject({ code: "ACTIVITY_DISABLED", message: "Prepared attention is disabled with this session's activity journal." }),
   });
   const service: UiService = { kind: "mcp-app", generation: runtime.generation, adapterVersion: ADAPTER_VERSION };
   gateway.dashboardControl = createDashboardControl(collector, service);

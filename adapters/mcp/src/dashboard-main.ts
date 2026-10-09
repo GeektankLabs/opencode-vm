@@ -56,6 +56,7 @@ async function main() {
     activityJournalStatus: () => ({ enabled: runtime.activityJournalEnabled !== false,
       state: runtime.activityJournalEnabled === false ? "disabled" : "ready" }),
     activity: ids => ActivityJournal.readDashboard(`${runtime.project}/.opencode-vm/mcp/activity.json`, runtime.projectHash, ids),
+    attention: () => ActivityJournal.readPreparedAttention(`${runtime.project}/.opencode-vm/mcp/activity.json`, runtime.projectHash),
   });
   const assets = resolve(dirname(fileURLToPath(import.meta.url)), "../dashboard");
   const server = await dashboardServer({ projectHash: runtime.projectHash, generation: runtime.generation,

@@ -9,9 +9,12 @@ import { isRecord } from "./types.js";
  * The registry is the single canonical truth for every monitor: scheduler
  * state, work state, run/technical activity, runtime profile reference,
  * autonomy profile, activity cursors, repair budget, read episodes, wake
- * requests, bounded run history and bounded logs. All writers (engine service
- * and MCP tools) serialize through a cooperating mkdir lock and CAS with a
- * monotonic generation counter; publication is atomic (tmp + rename).
+ * requests, bounded run history and bounded logs, plus the additive W2
+ * cooperative identity metadata (monotonic M alias high-water, per-monitor
+ * worker ordinals and worker records with owner/receipt/context/lifecycle).
+ * All writers (engine service and MCP tools) serialize through a cooperating
+ * mkdir lock and CAS with a monotonic generation counter; publication is
+ * atomic (tmp + rename). Aliases are cooperative identity, not authentication.
  */
 
 export const MONITOR_SCHEMA = 1;
@@ -49,6 +52,35 @@ export type MonitorRepairEntry = {
   note?: string;
 };
 
+/**
+ * W2 cooperative worker identity. A worker record is additive metadata behind a
+ * short alias; it never grants authority and is not an authenticated caller
+ * guarantee. `reserved` means a non-idempotent create is about to be attempted;
+ * the record becomes `active` only after the real create response is observed.
+ */
+export type MonitorWorkerLifecycle = "reserved" | "active" | "idle" | "archived";
+export type MonitorWorkerRecord = {
+  worker_key: string;
+  alias: string;
+  monitor_id: string;
+  manager_alias: string;
+  creator_manager_session_id: string | null;
+  created_at: string;
+  runtime_session_id: string | null;
+  creation_receipt: string | null;
+  dispatch_receipt: string | null;
+  /** Latest observed terminal assistant message of a dispatched worker; proves
+   * a fresh result/receipt delta for the manager without a subscription. */
+  result_receipt: string | null;
+  scope: string | null;
+  worktree: string | null;
+  task_id: string | null;
+  context_path: string;
+  lifecycle: MonitorWorkerLifecycle;
+  last_synthesis_at: string | null;
+  updated_at: string;
+};
+
 export type MonitorRecord = {
   id: string;
   title: string;
@@ -62,7 +94,14 @@ export type MonitorRecord = {
   autonomy_profile: MonitorAutonomyProfile;
   runtime_profile: MonitorRuntimeProfile;
   session: { session_id: string | null; title: string | null; primed_at: string | null; priming_digest?: string | null };
-  state: { work: MonitorWorkState; parked_reason?: string; last_seen_digest: string | null; watermark: string | null };
+  state: {
+    work: MonitorWorkState;
+    parked_reason?: string;
+    last_seen_digest: string | null;
+    watermark: string | null;
+    /** Bounded digest of the worker index observed at the last admitted wake. */
+    worker_digest?: string | null;
+  };
   cursors: Record<string, string>;
   budget: Record<string, { no_progress: number; entries: MonitorRepairEntry[] }>;
   read_episodes: Record<
@@ -83,12 +122,16 @@ export type MonitorRecord = {
   logs: MonitorLogEntry[];
   created_at: string;
   updated_at: string;
+  alias?: string;
+  worker_high_water?: number;
+  workers?: MonitorWorkerRecord[];
 };
 
 export type MonitorRegistry = {
   schema: 1;
   generation: number;
   monitors: MonitorRecord[];
+  alias_high_water?: number;
 };
 
 export type RegistrySnapshot = { registry: MonitorRegistry; path: string };
@@ -161,6 +204,8 @@ function shapeOk(registry: unknown): registry is MonitorRegistry {
   if (!isRecord(registry)) return false;
   if (registry.schema !== MONITOR_SCHEMA) return false;
   if (!Number.isSafeInteger(registry.generation) || (registry.generation as number) < 0) return false;
+  if (registry.alias_high_water !== undefined &&
+    (!Number.isSafeInteger(registry.alias_high_water) || (registry.alias_high_water as number) < 0)) return false;
   if (!Array.isArray(registry.monitors)) return false;
   const ids = new Set<string>();
   for (const monitor of registry.monitors) {
@@ -180,6 +225,35 @@ function shapeOk(registry: unknown): registry is MonitorRegistry {
       !(["active", "parked_input_required", "complete_pass", "stopped"] as const).includes(monitor.state.work as never)) return false;
     if (!Array.isArray(monitor.history) || !Array.isArray(monitor.logs)) return false;
     if (!validIso(monitor.created_at) || !validIso(monitor.updated_at)) return false;
+    if (monitor.alias !== undefined &&
+      (typeof monitor.alias !== "string" || !/^M[1-9][0-9]*$/.test(monitor.alias))) return false;
+    if (monitor.worker_high_water !== undefined &&
+      (!Number.isSafeInteger(monitor.worker_high_water) || (monitor.worker_high_water as number) < 0)) return false;
+    if (monitor.workers !== undefined && !workersShapeOk(monitor.id as string, monitor.workers)) return false;
+  }
+  return true;
+}
+
+function workersShapeOk(monitorId: string, workers: unknown): workers is MonitorWorkerRecord[] {
+  if (!Array.isArray(workers)) return false;
+  const keys = new Set<string>();
+  const aliases = new Set<string>();
+  for (const worker of workers) {
+    if (!isRecord(worker)) return false;
+    if (typeof worker.worker_key !== "string" || !/^worker_[0-9a-f]{32}$/.test(worker.worker_key)) return false;
+    if (typeof worker.alias !== "string" || !/^M[1-9][0-9]*-[A-Z]+$/.test(worker.alias)) return false;
+    if (worker.monitor_id !== monitorId) return false;
+    if (typeof worker.manager_alias !== "string" || !/^M[1-9][0-9]*$/.test(worker.manager_alias)) return false;
+    if (typeof worker.context_path !== "string" || worker.context_path.length < 1) return false;
+    if (!(["reserved", "active", "idle", "archived"] as const).includes(worker.lifecycle as never)) return false;
+    for (const field of ["creator_manager_session_id", "runtime_session_id", "creation_receipt", "dispatch_receipt", "result_receipt", "scope", "worktree", "task_id", "last_synthesis_at"] as const) {
+      const value = worker[field];
+      if (value !== null && typeof value !== "string") return false;
+    }
+    if (!validIso(worker.created_at) || !validIso(worker.updated_at)) return false;
+    if (keys.has(worker.worker_key) || aliases.has(worker.alias)) return false;
+    keys.add(worker.worker_key);
+    aliases.add(worker.alias);
   }
   return true;
 }
@@ -352,4 +426,355 @@ export function readEpisode(
   }
   monitor.read_episodes[fingerprint] = episode;
   return decision;
+}
+
+/**
+ * W2 identity allocation and context layout. All metadata changes go through
+ * `withRegistry` (existing mkdir lock + generation CAS + atomic rename); there
+ * is deliberately no second store and no unlocked registry mutation. Aliases
+ * are monotonic high-water marks and are never reused, so archived context
+ * removal cannot cause a collision. Aliases are cooperative once-only identity,
+ * not authentication.
+ */
+
+export function managerAliasFor(ordinal: number): string {
+  if (!Number.isSafeInteger(ordinal) || ordinal < 1) throw new Error("invalid manager alias ordinal");
+  return `M${ordinal}`;
+}
+
+export function workerAliasFor(managerAlias: string, ordinal: number): string {
+  if (!/^M[1-9][0-9]*$/.test(managerAlias)) throw new Error("invalid manager alias");
+  if (!Number.isSafeInteger(ordinal) || ordinal < 1) throw new Error("invalid worker alias ordinal");
+  let n = ordinal;
+  let letters = "";
+  while (n > 0) {
+    n -= 1;
+    letters = String.fromCharCode(65 + (n % 26)) + letters;
+    n = Math.floor(n / 26);
+  }
+  return `${managerAlias}-${letters}`;
+}
+
+export function monitorWorkersDirectory(project: string): string {
+  return join(project, ".opencode-vm", "monitor", "workers");
+}
+export function monitorWorkerContextPath(project: string, monitorId: string, workerKey: string): string {
+  return join(monitorWorkersDirectory(project), monitorId, `${workerKey}.md`);
+}
+export function monitorManagerContextPath(project: string, monitorId: string): string {
+  return join(monitorWorkersDirectory(project), monitorId, "manager.md");
+}
+
+function findMonitorOrThrow(registry: MonitorRegistry, monitorId: string): MonitorRecord {
+  const monitor = registry.monitors.find((entry) => entry.id === monitorId);
+  if (!monitor) throw new Error("monitor not found in this project registry");
+  return monitor;
+}
+
+function findOwnedWorkerOrThrow(
+  registry: MonitorRegistry,
+  monitorId: string,
+  workerKey: string,
+): { monitor: MonitorRecord; worker: MonitorWorkerRecord } {
+  const monitor = findMonitorOrThrow(registry, monitorId);
+  const worker = (monitor.workers ?? []).find((entry) => entry.worker_key === workerKey);
+  if (!worker) throw new Error("worker not found for this monitor");
+  if (worker.monitor_id !== monitorId) throw new Error("worker belongs to a foreign monitor");
+  return { monitor, worker };
+}
+
+export function ensureManagerAlias(registry: MonitorRegistry, monitor: MonitorRecord): string {
+  if (monitor.alias) return monitor.alias;
+  const next = (registry.alias_high_water ?? 0) + 1;
+  registry.alias_high_water = next;
+  monitor.alias = managerAliasFor(next);
+  return monitor.alias;
+}
+
+export async function assignMonitorAlias(
+  project: string,
+  monitorId: string,
+  options: { now?: number; expected?: number } = {},
+): Promise<{ monitor_id: string; alias: string; generation: number }> {
+  const now = options.now ?? Date.now();
+  let alias = "";
+  const registry = await withRegistry(
+    project,
+    (draft) => {
+      const monitor = findMonitorOrThrow(draft, monitorId);
+      alias = ensureManagerAlias(draft, monitor);
+      monitor.updated_at = new Date(now).toISOString();
+      return draft;
+    },
+    { ...(options.expected !== undefined ? { expected: options.expected } : {}), now },
+  );
+  return { monitor_id: monitorId, alias, generation: registry.generation };
+}
+
+export type WorkerCreateInput = {
+  creator_manager_session_id?: string | null;
+  runtime_session_id?: string | null;
+  task_id?: string | null;
+  scope?: string | null;
+  worktree?: string | null;
+};
+
+export type WorkerReservation = { worker_key: string; alias: string; context_path: string; generation: number };
+
+/**
+ * Reserve a worker identity and alias *before* a non-idempotent create. The
+ * record starts `reserved`; only a confirmed create response makes it `active`.
+ */
+export async function reserveWorker(
+  project: string,
+  monitorId: string,
+  input: WorkerCreateInput = {},
+  options: { now?: number; expected?: number } = {},
+): Promise<WorkerReservation> {
+  const now = options.now ?? Date.now();
+  const at = new Date(now).toISOString();
+  let reserved!: WorkerReservation;
+  const registry = await withRegistry(
+    project,
+    (draft) => {
+      const monitor = findMonitorOrThrow(draft, monitorId);
+      const managerAlias = ensureManagerAlias(draft, monitor);
+      const ordinal = (monitor.worker_high_water ?? 0) + 1;
+      monitor.worker_high_water = ordinal;
+      const workerKey = `worker_${randomUUID().replaceAll("-", "")}`;
+      const record: MonitorWorkerRecord = {
+        worker_key: workerKey,
+        alias: workerAliasFor(managerAlias, ordinal),
+        monitor_id: monitorId,
+        manager_alias: managerAlias,
+        creator_manager_session_id: input.creator_manager_session_id ?? null,
+        created_at: at,
+        runtime_session_id: input.runtime_session_id ?? null,
+        creation_receipt: null,
+        dispatch_receipt: null,
+        result_receipt: null,
+        scope: input.scope ?? null,
+        worktree: input.worktree ?? null,
+        task_id: input.task_id ?? null,
+        context_path: monitorWorkerContextPath(project, monitorId, workerKey),
+        lifecycle: "reserved",
+        last_synthesis_at: null,
+        updated_at: at,
+      };
+      monitor.workers = [...(monitor.workers ?? []), record];
+      monitor.updated_at = at;
+      reserved = { worker_key: workerKey, alias: record.alias, context_path: record.context_path, generation: 0 };
+      return draft;
+    },
+    { ...(options.expected !== undefined ? { expected: options.expected } : {}), now },
+  );
+  reserved.generation = registry.generation;
+  return reserved;
+}
+
+export async function confirmWorkerCreation(
+  project: string,
+  monitorId: string,
+  workerKey: string,
+  input: { runtime_session_id: string; creation_receipt: string },
+  options: { now?: number; expected?: number } = {},
+): Promise<MonitorWorkerRecord> {
+  const now = options.now ?? Date.now();
+  const at = new Date(now).toISOString();
+  let result!: MonitorWorkerRecord;
+  await withRegistry(
+    project,
+    (draft) => {
+      const { monitor, worker } = findOwnedWorkerOrThrow(draft, monitorId, workerKey);
+      if (worker.lifecycle !== "reserved") throw new Error("worker creation already resolved");
+      worker.runtime_session_id = input.runtime_session_id;
+      worker.creation_receipt = input.creation_receipt;
+      worker.lifecycle = "active";
+      worker.updated_at = at;
+      monitor.updated_at = at;
+      result = worker;
+      return draft;
+    },
+    { ...(options.expected !== undefined ? { expected: options.expected } : {}), now },
+  );
+  return result;
+}
+
+/**
+ * Reconcile an uncertain create after a reset: readback either confirms the
+ * created runtime (-> active with receipt) or proves it absent (-> archived,
+ * no orphan active record). It never spawns a second create.
+ */
+export async function reconcileWorkerCreate(
+  project: string,
+  monitorId: string,
+  workerKey: string,
+  input: { outcome: "created" | "absent"; runtime_session_id?: string | null; creation_receipt?: string | null },
+  options: { now?: number; expected?: number } = {},
+): Promise<MonitorWorkerRecord> {
+  const now = options.now ?? Date.now();
+  const at = new Date(now).toISOString();
+  let result!: MonitorWorkerRecord;
+  await withRegistry(
+    project,
+    (draft) => {
+      const { monitor, worker } = findOwnedWorkerOrThrow(draft, monitorId, workerKey);
+      if (worker.lifecycle !== "reserved") throw new Error("worker creation already resolved");
+      if (input.outcome === "created") {
+        if (!input.runtime_session_id) throw new Error("confirmed create requires the observed runtime session id");
+        worker.runtime_session_id = input.runtime_session_id;
+        worker.creation_receipt = input.creation_receipt ?? null;
+        worker.lifecycle = "active";
+      } else {
+        worker.runtime_session_id = null;
+        worker.creation_receipt = null;
+        worker.lifecycle = "archived";
+      }
+      worker.updated_at = at;
+      monitor.updated_at = at;
+      result = worker;
+      return draft;
+    },
+    { ...(options.expected !== undefined ? { expected: options.expected } : {}), now },
+  );
+  return result;
+}
+
+/**
+ * Reuse or rebind an own worker after a runtime loss. Reuse targets an idle or
+ * archived own worker; rebind replaces the runtime reference for an active
+ * worker whose runtime is gone. Foreign workers are always refused by key.
+ */
+export async function reuseWorker(
+  project: string,
+  monitorId: string,
+  workerKey: string,
+  input: { runtime_session_id: string; dispatch_receipt?: string | null },
+  options: { now?: number; expected?: number } = {},
+): Promise<MonitorWorkerRecord> {
+  return rebindOwnWorker(project, monitorId, workerKey, input, options, ["idle", "archived"]);
+}
+
+export async function rebindWorker(
+  project: string,
+  monitorId: string,
+  workerKey: string,
+  input: { runtime_session_id: string; dispatch_receipt?: string | null },
+  options: { now?: number; expected?: number } = {},
+): Promise<MonitorWorkerRecord> {
+  return rebindOwnWorker(project, monitorId, workerKey, input, options, ["active", "idle", "archived"]);
+}
+
+async function rebindOwnWorker(
+  project: string,
+  monitorId: string,
+  workerKey: string,
+  input: { runtime_session_id: string; dispatch_receipt?: string | null },
+  options: { now?: number; expected?: number },
+  allowed: MonitorWorkerLifecycle[],
+): Promise<MonitorWorkerRecord> {
+  const now = options.now ?? Date.now();
+  const at = new Date(now).toISOString();
+  let result!: MonitorWorkerRecord;
+  await withRegistry(
+    project,
+    (draft) => {
+      const { monitor, worker } = findOwnedWorkerOrThrow(draft, monitorId, workerKey);
+      if (!allowed.includes(worker.lifecycle)) throw new Error(`worker cannot be rebound from ${worker.lifecycle}`);
+      worker.runtime_session_id = input.runtime_session_id;
+      if (input.dispatch_receipt !== undefined) worker.dispatch_receipt = input.dispatch_receipt;
+      worker.lifecycle = "active";
+      worker.updated_at = at;
+      monitor.updated_at = at;
+      result = worker;
+      return draft;
+    },
+    { ...(options.expected !== undefined ? { expected: options.expected } : {}), now },
+  );
+  return result;
+}
+
+export async function setWorkerLifecycle(
+  project: string,
+  monitorId: string,
+  workerKey: string,
+  lifecycle: Extract<MonitorWorkerLifecycle, "idle" | "archived">,
+  options: { now?: number; expected?: number } = {},
+): Promise<MonitorWorkerRecord> {
+  const now = options.now ?? Date.now();
+  const at = new Date(now).toISOString();
+  let result!: MonitorWorkerRecord;
+  await withRegistry(
+    project,
+    (draft) => {
+      const { monitor, worker } = findOwnedWorkerOrThrow(draft, monitorId, workerKey);
+      worker.lifecycle = lifecycle;
+      if (lifecycle === "archived") worker.last_synthesis_at = at;
+      worker.updated_at = at;
+      monitor.updated_at = at;
+      result = worker;
+      return draft;
+    },
+    { ...(options.expected !== undefined ? { expected: options.expected } : {}), now },
+  );
+  return result;
+}
+
+export async function setWorkerSynthesis(
+  project: string,
+  monitorId: string,
+  workerKey: string,
+  at: string,
+  options: { now?: number; expected?: number } = {},
+): Promise<void> {
+  const now = options.now ?? Date.now();
+  await withRegistry(
+    project,
+    (draft) => {
+      const { monitor, worker } = findOwnedWorkerOrThrow(draft, monitorId, workerKey);
+      worker.last_synthesis_at = at;
+      worker.updated_at = new Date(now).toISOString();
+      monitor.updated_at = new Date(now).toISOString();
+      return draft;
+    },
+    { ...(options.expected !== undefined ? { expected: options.expected } : {}), now },
+  );
+}
+
+export async function listWorkers(project: string, monitorId: string): Promise<MonitorWorkerRecord[]> {
+  const snapshot = await readRegistrySnapshot(project);
+  const monitor = findMonitorOrThrow(snapshot.registry, monitorId);
+  return monitor.workers ?? [];
+}
+
+export async function getWorker(
+  project: string,
+  monitorId: string,
+  workerKey: string,
+): Promise<MonitorWorkerRecord | null> {
+  const snapshot = await readRegistrySnapshot(project);
+  const monitor = findMonitorOrThrow(snapshot.registry, monitorId);
+  return (monitor.workers ?? []).find((entry) => entry.worker_key === workerKey) ?? null;
+}
+
+/**
+ * Bounded, deterministic digest of a monitor's worker index. The engine folds
+ * this into its wake-change detection so a worker creation/receipt/lifecycle/
+ * synthesis delta reaches the manager as a wake instead of being swallowed by
+ * the unchanged-board no-op.
+ */
+export function workerIndexDigest(monitor: MonitorRecord): string {
+  return digest(
+    (monitor.workers ?? []).map((worker) => ({
+      k: worker.worker_key,
+      a: worker.alias,
+      l: worker.lifecycle,
+      r: worker.runtime_session_id,
+      c: worker.creation_receipt,
+      d: worker.dispatch_receipt,
+      rr: worker.result_receipt,
+      s: worker.last_synthesis_at,
+      u: worker.updated_at,
+    })),
+  );
 }

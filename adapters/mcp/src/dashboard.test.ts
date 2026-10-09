@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createServer, request } from "node:http";
 import { once } from "node:events";
-import { DashboardCollector } from "./dashboard.js";
+import { DashboardCollector, prepareAttention, PREPARED_ATTENTION_LIMIT } from "./dashboard.js";
 import type { DashboardReader, Inventory, Session, Tasks } from "./dashboard.js";
+import type { PreparedAttentionEntry } from "./types.js";
 import { dashboardHandler } from "./dashboard-http.js";
 import { OpenCodeGateway } from "./opencode.js";
 import type { RuntimeDescriptor } from "./types.js";
@@ -23,12 +24,25 @@ export function fixture() {
   rows.get("ses_child")!.parent_session_id = "ses_A"; rows.get("ses_child")!.kind = "child";
   const tasks: Tasks = ["task_A","task_B"].map(task_id => ({ task_id, title: task_id, board_status: "done", board_project_id: "workstream", links: [{ session_id: "ses_A", message_id: "msg_old" }] }));
   let boardFail = false, sessionFail = false, calls = 0;
+  let attentionEntries: PreparedAttentionEntry[] = [];
+  let attentionFail: string | null = null;
   const reader: DashboardReader = { inventory: async () => inventory,
     session: async s => { calls++; if(sessionFail)throw new Error(); return { ...rows.get(s.id)!, observed_at:new Date(time).toISOString() }; },
-    board: async () => { if(boardFail)throw new Error(); return tasks; }, activity: async () => ({ epoch:"epoch",recent:[] }) };
+    board: async () => { if(boardFail)throw new Error(); return tasks; }, activity: async () => ({ epoch:"epoch",recent:[] }),
+    attention: async () => { if(attentionFail) throw Object.assign(new Error("activity"), { code: attentionFail }); return attentionEntries; } };
   const collector = new DashboardCollector({ id:"project",name:"Test" },"generation",reader,()=>time);
   return { collector, reader, inventory, rows, tasks, native, row, advance:(n:number)=>time+=n,
-    boardFail:()=>boardFail=true, sessionFail:()=>sessionFail=true, calls:()=>calls };
+    boardFail:()=>boardFail=true, sessionFail:()=>sessionFail=true, calls:()=>calls,
+    setAttention:(entries: PreparedAttentionEntry[])=>{ attentionEntries = entries; },
+    attentionFail:(code: string | null)=>{ attentionFail = code; } };
+}
+
+export function attentionEntry(overrides: Partial<PreparedAttentionEntry> = {}): PreparedAttentionEntry {
+  return { event_id: "evt_1", source_revision: "r1", classification: "ready", lifecycle: "new",
+    session_id: "ses_A", task_id: "task_A", master_task_id: null, work_package_id: null,
+    hierarchy_status: "resolved", occurred_at: "2026-10-09T10:00:00.000Z", observed_at: "2026-10-09T10:00:00.000Z",
+    prepared_summary: "result available", next_safe_step: "review the result", resolution: "unverified",
+    evidence_complete: true, superseded_by: null, ...overrides };
 }
 
 test("ALL, multi-task IDs, indirect child provenance, unbound turns and runtime separation",async()=>{
@@ -246,4 +260,71 @@ test("readiness separates demonstrated service from data coverage; partial stays
   assert.equal(g.status,200);assert.equal(g.body.status,"ok");assert.equal(g.body.coverage,"complete");
   assert.equal(g.body.sources.discovery!.state,"fresh");
   assert.equal(g.body.sources.sessions!.complete,true);
+});
+
+test("W3 prepared attention: existing queue surfaced, ordered, discussed is never resolved", async () => {
+  const f = fixture();
+  f.setAttention([
+    attentionEntry({ event_id: "evt_ready", classification: "ready", occurred_at: "2026-10-09T10:00:00.000Z" }),
+    attentionEntry({ event_id: "evt_input", classification: "action_required", lifecycle: "new", occurred_at: "2026-10-09T09:00:00.000Z" }),
+    attentionEntry({ event_id: "evt_err", classification: "attention", lifecycle: "discussed", occurred_at: "2026-10-09T11:00:00.000Z" }),
+    attentionEntry({ event_id: "evt_unlinked", session_id: null, task_id: null, hierarchy_status: "unlinked" }),
+  ]);
+  await f.collector.tick();
+  const s = f.collector.snapshot(false) as any;
+  assert.equal(s.capabilities.prepared_attention, true);
+  const pa = s.prepared_attention;
+  assert.equal(pa.available, true); assert.equal(pa.reason, null);
+  assert.deepEqual(pa.entries.map((e: any) => e.event_id), ["evt_input", "evt_err", "evt_ready", "evt_unlinked"]);
+  assert.deepEqual(pa.ordering, ["input_required", "error_abort", "ready_result"]);
+  assert.equal(pa.total, 4); assert.equal(pa.omitted, 0); assert.equal(pa.coverage, "complete");
+  assert.equal(pa.entries.find((e: any) => e.event_id === "evt_err").resolution, "unverified");
+  assert.ok(pa.entries.every((e: any) => e.resolution === "unverified"), "no entry claims resolved");
+  const unlinked = pa.entries.find((e: any) => e.event_id === "evt_unlinked");
+  assert.equal(unlinked.hierarchy_status, "unlinked"); assert.equal(unlinked.task_id, null);
+  assert.equal(s.sources.prepared.state, "fresh");
+});
+
+test("W3 prepared attention: >10 capped honestly and a newer event revision updates in place", () => {
+  const many = Array.from({ length: 13 }, (_, i) => attentionEntry({ event_id: `evt_${i}`,
+    occurred_at: `2026-10-09T00:00:${String(i).padStart(2, "0")}.000Z` }));
+  const first = prepareAttention(many);
+  assert.equal(first.total, 13); assert.equal(first.omitted, 3);
+  assert.equal(first.entries.length, PREPARED_ATTENTION_LIMIT); assert.equal(first.coverage, "paged");
+  const few = many.slice(0, 5);
+  const updated = prepareAttention([...few, attentionEntry({ event_id: "evt_0", source_revision: "r2",
+    observed_at: "2026-10-09T12:00:00.000Z", lifecycle: "discussed" })]);
+  assert.equal(updated.total, 5, "revision update is not a duplicate");
+  const evt0 = updated.entries.find(e => e.event_id === "evt_0");
+  assert.equal(evt0?.lifecycle, "discussed"); assert.equal(evt0?.source_revision, "r2");
+  assert.equal(updated.entries.filter(e => e.event_id === "evt_0").length, 1);
+});
+
+test("W3 prepared attention: disabled/unavailable is honest with reason and preserves last data", async () => {
+  const f = fixture();
+  f.attentionFail("ACTIVITY_DISABLED");
+  await f.collector.tick();
+  const s1 = f.collector.snapshot(false) as any;
+  assert.equal(s1.capabilities.prepared_attention, false);
+  assert.equal(s1.prepared_attention.available, false);
+  assert.equal(s1.prepared_attention.reason, "ACTIVITY_DISABLED");
+  assert.deepEqual(s1.prepared_attention.entries, []);
+  assert.equal(s1.sources.prepared.error, "ACTIVITY_DISABLED");
+  assert.ok(Array.isArray(s1.sessions), "direct slices are not blocked by a disabled attention source");
+  f.setAttention([attentionEntry({ event_id: "evt_x" })]); f.attentionFail(null);
+  f.advance(5000); await f.collector.tick();
+  const s2 = f.collector.snapshot(false) as any;
+  assert.equal(s2.prepared_attention.entries[0]?.event_id, "evt_x");
+  const observed = s2.sources.prepared.observed_at;
+  f.attentionFail("ACTIVITY_UNAVAILABLE"); f.advance(5000); await f.collector.tick();
+  const s3 = f.collector.snapshot(false) as any;
+  assert.equal(s3.prepared_attention.available, false);
+  assert.equal(s3.prepared_attention.reason, "ACTIVITY_UNAVAILABLE");
+  assert.equal(s3.prepared_attention.entries[0]?.event_id, "evt_x", "last data preserved on outage");
+  assert.equal(s3.sources.prepared.observed_at, observed, "last observed time preserved on outage");
+  assert.equal(s3.sources.prepared.state, "degraded");
+  f.attentionFail(null); f.advance(5000); await f.collector.tick();
+  const s4 = f.collector.snapshot(false) as any;
+  assert.equal(s4.prepared_attention.available, true);
+  assert.equal(s4.prepared_attention.entries.length, 1, "reconnect does not duplicate entries");
 });
