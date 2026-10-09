@@ -1,7 +1,7 @@
 Task-ID: task_efbe63cf-53da-5e79-be25-f7ac8efe9916
 Title: Management-MCP-Bindung und Orchestrator – kanonischer konsolidierter MVP-Plan
-Status: FIXED_PENDING_REQC (EFBE-MVP-IMPLEMENTATION-20261009-R1) — W1/W2 unabhängig PASS; W4_QC_FAIL (W4-F1 Doctor-Framing) minimal repariert in `0f1c65d`; fokussierte Re-QC aussteht; kein Selbst-PASS; W3→W5 sequenziell offen (W3 gated)
-Last-concept-update: 2026-10-09T15:00:09Z
+Status: W3_IMPLEMENTED_PENDING_QC (EFBE-MVP-IMPLEMENTATION-20261009-R1) — W1/W2/W4 unabhängig PASS (W4_REQC_PASS `0f1c65d`); W3-Kandidat `3952df2…` wartet auf unabhängige QC; kein Selbst-PASS; W5 sequenziell offen
+Last-concept-update: 2026-10-09T15:13:56Z
 Konzeptrevision: EFBE-MVP-COOPERATIVE-J59-R1 (Konzeptbasis); Execution-Contract-Aktiv: EFBE-MVP-IMPLEMENTATION-20261009-R1
 Entscheidungsstand: Journal #52–#59; #59 0c07a7a8-0456-424c-b02d-fe00bb604c00; Implementierungs-Freigabe #60; W1-QC_FAIL #63; Reset-Recovery #64–#65; W1-F1-Reparatur; W1_REQC_PASS; W2-Umsetzung; W2_QC_PASS; W4-Umsetzung; W4-Vervollständigung (Ersatz-Autorensession)
 
@@ -513,5 +513,63 @@ implementation_commits=0f1c65df66379ed367a5e18cc163a00aa63bb7f1
 components=opencode-vm.sh (OCVM_DOCTOR_SH), docs/MCP-INTERFACE.md, tests/mcp_adapter_test.sh
 tests/acceptance=Konformanztest EXIT0; vm_doctor C21a–d; install/release metadata+state; bash -n/shellcheck
 change_path=git revert 0f1c65d
+```
+
+**Nachtrag 2026-10-09T15:13Z — W4_REQC_PASS und W3-Umsetzung (W3_IMPLEMENTED_PENDING_QC):** Der unabhängige W4-F1-Re-QC `ses_edf07a6e0fferQF9lnwg9pyvnK` (Receipt `msg_ff2cdbb7eb094d4bbb5a59d06fe2ed37` → Terminal `msg_12133cd87001aVEohD3fxJ2oxj`, SHA-256 `063d6e1dae6f081af2e5c50282031366bb58d9a7d101e0ae2867a0e1a9fd6979`, 1739 B) bestätigte **W4_REQC_PASS** auf `0f1c65d` (Baseline-Helfer 400 header_mismatch, fixierter Helfer 44 Tools gegen reale `McpHttpServer`-Instanz) und gab W3 frei. Die nonblocking W4-Beobachtungen (W4-F3 Worker-Index-Cap, observeWorkers-≤5-Fairness, fehlende Fehl-Mutations-Audits, kein Identity-Marker, reconcile_created-Vertrauen, C/P-Historie) bleiben dokumentiert (W5/Folge).
+
+**W3-Kandidat:** `3952df2ac673e2ed91f0c78e4d9b565d8c8fd55b` / Tree `c424a048954a47ee6cf759bf23c38d78aa71b46f` (Parent `0f1c65d…`), clean; 14 Dateien, +315/−23. **Prepared Attention in der bestehenden RepoLive-Projektion** (§10; A10–A12): derselbe Collector/`/api/v1/…`-Pfad, keine zweite Queue/Dashboard/Subscription. `DashboardReader.attention?` injiziert; `ActivityJournal.readPreparedAttention` liest die bestehende Attention-Queue sicher (O_NOFOLLOW, 0600, Größen-/Owner-Grenze) und wirft kodierte Fehler (`ACTIVITY_DISABLED` bei fehlendem Journal [neuer additiver Code], `ACTIVITY_UNAVAILABLE` bei unsicher/invalid). Die Projektion (`prepareAttention`) ordnet InputRequired → Fehler/Abort → bereites Ergebnis, innerhalb einer Klasse neueste zuerst, dedupliziert je `event_id` (neuere `source_revision`/`observed_at` aktualisiert in place), begrenzt auf zehn mit explizitem `total`/`omitted`/`coverage` und ordnungsarray. Jeder Eintrag trägt `session_id`/`task_id`/`master_task_id`/`work_package_id`/`hierarchy_status` (tasklos/unlinked ehrlich), `prepared_summary`, `next_safe_step`, `evidence_complete`, `superseded_by` und `resolution`. **`resolution` ist immer `unverified`** — kein erfundener generalisierter Resolved-State; nur ein frisch gelesener kanonischer Entscheidungs-/Ergebnisbeleg könnte resolved tragen (separater autorisierter Schritt), `discussed`/angezeigt/zugestellt ist nie resolved. `capabilities.prepared_attention` reflektiert die tatsächliche Verfügbarkeit. Disabled/unavailable → `available:false` + präziser Grund, letzte Einträge+Zeitstempel bleiben (stale statt leer), direkte Session-/Board-/Recent-Slices unberührt; Reconnect dedupliziert. UI (`dashboard/app.js`, `index.html`) rendert den Prepared-Attention-Block mit Klassifikation/Lifecycle/„zur Prüfung unverifiziert"/unlinked/omitted/Reihenfolge/Nicht-verfügbar-Grund.
+
+**Tests (Author):** Adapter 221 → **219 pass/0 fail/2 bekannte Skips**; 3 neue dashboard-Tests (Anzeige/Ordnung/diskutiert≠gelöst/taskless-unlinked; >10 omitted + Revisions-Update in place; disabled/stale/reconnect + Capability/letzte-Daten); Browser-Fixture-Parität `repo-live-app-browser.mjs` (Prepared-Attention-Rendering; Browser-Job, hier nicht ausgeführt → UNVERIFIED live). `install`/`mcp_adapter`/`vm_doctor`/`monitor_service` EXIT0; `release_metadata`/`release_state` 5 OK; `bash -n`/`shellcheck` sauber.
+
+**Version/Pin:** Adapter `0.1.38→0.1.39`, finaler Repin `54c23987c9e7b9e4f371c8c224abab2fd665e852630fea5872b36373db5b3ea6` (zwei byte-identische Builds inkl. `dashboard/`-Assets); Script `0.7.28`, Tags `v0.7.28`; AGENTS 0.1.39; docs/MCP-INTERFACE RepoLive-Abschnitt ergänzt. Skillbundle r47 unverändert.
+
+**Ehrlich verbleibend:** hosted ChatGPT/MCP-App-Timer/Rendering, Mac/Lima/Safari/VoiceOver, Langlauf, installierte Runtime, echte Modell-/Wake-Befolgung bleiben UNVERIFIED; die Planziele ~10 s/35 s sind nicht gemessen/keine Capability. **Nächster Schritt W3_IMPLEMENTED_PENDING_QC:** unabhängige QC exakt `3952df2`/`c424a048`, danach W5. Kein Main-Merge/Push/Tag/Release/Live-Aktion.
+
+```text
+AUTONOMOUS_MVP_DECISION
+decision_id=W3-D1-existing-queue-projection; task/phase=efbe63cf W3; time=2026-10-09T15:12Z
+strategy_source=P §10/§12 W3; A10–A12; YAGNI/POLA
+question=Prepared Attention: neue Queue/Event-Plattform vs. bestehende Attention-Queue in die vorhandene RepoLive-Projektion surfacen
+alternatives=zweite Queue/neues Dashboard/Event-Subscription (verboten); bestehende Queue read-only projizieren
+choice/rationale=optionaler attention-Reader im bestehenden Collector; readPreparedAttention über den vorhandenen Store; prepareAttention ordnet/begrenzt; keine neue Subscription
+uncertainty=Live-/hosted-Rendering UNVERIFIED; reversibility=git revert 3952df2; Aufwand moderat
+PRE_DECISION_HEAD=0f1c65df66379ed367a5e18cc163a00aa63bb7f1
+worktree/owner=.opencode-vm/worktrees/task_efbe63cf-mvp-impl, task/efbe63cf-mvp-impl
+implementation_commits=3952df2ac673e2ed91f0c78e4d9b565d8c8fd55b
+components=adapters/mcp/src/{dashboard.ts,activity.ts,main.ts,dashboard-main.ts,types.ts,dashboard.test.ts}, adapters/mcp/dashboard/{app.js,index.html}, docs/MCP-INTERFACE.md
+tests/acceptance=Adapter 221 (219/0/2); Browser-Fixture-Parität
+change_path=git revert 3952df2
+```
+
+```text
+AUTONOMOUS_MVP_DECISION
+decision_id=W3-D2-no-inferred-resolution; task/phase=efbe63cf W3; time=2026-10-09T15:12Z
+strategy_source=P §10 „diskutiert vs gelöst"; A10
+question=Auflösungsstatus: aus Lifecycle ableiten vs. ausschließlich frischem kanonischem Beleg vorbehalten
+alternatives=discussed/rendered als resolved (verboten); neuer allgemeiner resolved-State (verboten); `resolution` fest `unverified` bis echter Beleg
+choice/rationale=Projektion setzt immer `unverified`; UI labelt „zur Prüfung unverifiziert"; kein erfundener resolved; Admission-Resolution nicht konflatiert
+uncertainty=kein resolved-Pfad im MVP (bewusst); reversibility=git revert 3952df2; Aufwand minimal
+PRE_DECISION_HEAD=0f1c65df66379ed367a5e18cc163a00aa63bb7f1
+worktree/owner=wie oben
+implementation_commits=3952df2ac673e2ed91f0c78e4d9b565d8c8fd55b
+components=adapters/mcp/src/{activity.ts,dashboard.ts,dashboard.test.ts}, adapters/mcp/dashboard/app.js
+tests/acceptance=Test „discussed is never resolved" + Browser-Fixture
+change_path=git revert 3952df2
+```
+
+```text
+AUTONOMOUS_MVP_DECISION
+decision_id=W3-D3-disabled-honesty; task/phase=efbe63cf W3; time=2026-10-09T15:12Z
+strategy_source=Aktueller Auftrag „disabled must honestly show unavailable with reason"; A11
+question=Deaktiviertes Journal: leere Erfolgsliste vs. `available:false` mit Grund + letzte Daten
+alternatives=leere Liste/stiller Erfolg (verboten); `available:false` + `ACTIVITY_DISABLED`/`ACTIVITY_UNAVAILABLE`, letzte Daten+Zeit erhalten, direkte Slices unblockiert
+choice/rationale=neuer additiver Fehlercode ACTIVITY_DISABLED; Collector bewahrt letzten Stand; UI zeigt Grund; kein Enablement/keine Journal-Calls
+uncertainty=none lokal; reversibility=git revert 3952df2; Aufwand minimal
+PRE_DECISION_HEAD=0f1c65df66379ed367a5e18cc163a00aa63bb7f1
+worktree/owner=wie oben
+implementation_commits=3952df2ac673e2ed91f0c78e4d9b565d8c8fd55b
+components=adapters/mcp/src/{types.ts,activity.ts,dashboard.ts,dashboard.test.ts}
+tests/acceptance=disabled/stale/reconnect-Test
+change_path=git revert 3952df2
 ```
 
