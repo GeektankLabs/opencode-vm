@@ -390,6 +390,48 @@ test("W4 wake progress: a worker-index delta reaches the manager instead of a no
   }
 });
 
+test("W4 worker completion: a dispatched worker's finished turn yields a fresh result/terminal state and wakes the manager", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    const { gateway, board } = fakes(state);
+    const engine = new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => 100_000 });
+    await withRegistry(project, (registry) => {
+      const monitor = defaultMonitorRecord("M", TASK, { interval_seconds: 60 }, 100_000);
+      monitor.scheduler.next_run_at = 0;
+      monitor.state.last_seen_digest = "different";
+      registry.monitors.push(monitor);
+      return registry;
+    });
+    assert.equal(await engine.tick(), "dispatched");
+    const monitorId = (await readRegistrySnapshot(project)).registry.monitors[0]!.id;
+
+    // An already-dispatched active worker whose runtime turn is finished.
+    const reserved = await reserveWorker(project, monitorId, { runtime_session_id: "ses_worker" }, { now: 100_400 });
+    await confirmWorkerCreation(project, monitorId, reserved.worker_key, { runtime_session_id: "ses_worker", creation_receipt: "msg_create" }, { now: 100_500 });
+    await rebindWorker(project, monitorId, reserved.worker_key, { runtime_session_id: "ses_worker", dispatch_receipt: "msg_dispatch" }, { now: 100_600 });
+    state.status = okStatus({ assistant_message_ids: ["msg_result"] });
+
+    const engine2 = new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => 200_000 });
+    await withRegistry(project, (registry) => { registry.monitors[0]!.scheduler.next_run_at = 100_000; return registry; });
+    assert.equal(await engine2.tick(), "dispatched", "observed worker completion must wake the manager");
+    assert.equal(state.sends.length, 2);
+    const after = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    const worker = after.workers![0]!;
+    assert.equal(worker.lifecycle, "idle");
+    assert.equal(worker.result_receipt, "msg_result");
+    assert.ok(after.history.some((entry) => entry.type === "worker-observed-complete"));
+
+    // No board or worker change next -> cheap no-op (no repeated wake).
+    const engine3 = new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => 300_000 });
+    await withRegistry(project, (registry) => { registry.monitors[0]!.scheduler.next_run_at = 100_000; return registry; });
+    assert.equal(await engine3.tick(), "noop-unchanged");
+    assert.equal(state.sends.length, 2);
+  } finally {
+    await cleanup();
+  }
+});
+
 test("engine: canonical read passes a bounded limit and reports deterministic contract errors honestly", async () => {
   const { project, cleanup } = await setup();
   try {

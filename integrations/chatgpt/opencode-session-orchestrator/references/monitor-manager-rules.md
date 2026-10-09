@@ -16,7 +16,8 @@ Ordinary OpenCode implementation sessions do not use the management MCP; their w
 ## Serial, root-only management delegation
 
 - The manager uses **no native subtasks** for management work — not even small read-only research. Management decisions and control stay **serial**; no parallel sub-managers.
-- Delegation goes through **own root worker sessions** via existing MCP tools: create fresh ones, or reuse a session only when the creation receipt/registry identity verifiably shows the same manager created it. A session title is orientation, never proof of ownership.
+- Delegation goes through **own root worker sessions** via the supported worker tools: `create_monitor_worker` reserves a monotonic `M<n>-<A..Z,AA..>` alias and context path under the monitor registry lock **before** the non-idempotent root-session create and confirms it against the observed response; read the index with `list_monitor_workers`; reuse/rebind an own worker, or mark it idle/archive/synthesis, with `update_monitor_worker`, only when its creation/dispatch receipt verifiably shows the same manager created it. A session title is orientation, never proof of ownership.
+- Worker registry metadata is changed **only** through those locked tools — never by editing the registry JSON directly, and never with a second, unlocked store. An uncertain creation stays `reserved` and is reconciled through the tool (`reconcile_created`/`reconcile_absent`); never issue a second create for it.
 - Never take over, steer or retroactively relabel foreign existing sessions. Never spawn board tasks; existing authorized tasks/work packages are reused, new task needs go to the operator as a proposal (see matrix).
 - Workers decide **themselves** whether they use native subtasks for their own subject work inside their existing assignment, scope and technical permissions. No extra enablement ceremony, no manager micromanagement of worker parallelism.
 
@@ -31,7 +32,7 @@ Ordinary OpenCode implementation sessions do not use the management MCP; their w
 | Area | Internal monitor/manager | Notes |
 |---|---|---|
 | Read tasks/WP/policy/monitor state/sessions/attention; verify originals | Permitted within commissioned project/task scope | A read never authorizes steering a foreign session. |
-| Journal and context upkeep; additive non-authorizing notes/result references | Permitted and required (append-only; keep C/P, journal and worker index current) | Notes and links are evidence, not approvals; never rewrite existing task requirements, only append. |
+| Journal and context upkeep; additive non-authorizing notes/result references | Permitted and required (append-only; keep C/P, journal and the `list_monitor_workers` index current) | Notes and links are evidence, not approvals; never rewrite existing task requirements, only append. |
 | Own root workers: create/send/followup/reuse/runtime update; configured fallback and compaction continuation | Permitted after the standard gates (idle/no-pending, receipt/ownership, catalog/readback, one send, reconcile) | Worker runtime fallback stays possible per policy; it is not the manager's own-profile control. |
 | Own monitor/manager config: autonomy profile, runtime, interval, expiry, enable/disable, delete/cancel/trigger, approval or management-tool settings | **Never self-change** — propose to the operator via attention/journal | Legitimate `INPUT_REQUIRED` parking is communication, not a config change; it never disables the scheduler. |
 | Board tasks: create/spawn, reprioritize, self-authorization | **Not permitted internally**; proposals only; existing external creation privileges stay | No task-spawn floods, no task-per-context-file; persistent context exists without board tickets by design. |
@@ -41,14 +42,14 @@ Ordinary OpenCode implementation sessions do not use the management MCP; their w
 
 ## Wake duty loop (every actual wake)
 
-1. Load own persistent manager context, canonical C/P revision and the worker index; reload detail files only on changed revisions.
+1. Load own persistent manager context, canonical C/P revision and the worker index (`list_monitor_workers`); reload detail files only on changed revisions.
 2. Reconcile actual session/order states and every open or uncertain receipt; observed already-admitted work is not re-sent.
 3. Fully read new originals against exact receipts and **synthesize key findings continuously** — after steps and at each delivered result, even when the worker stays alive for follow-ups. Preserve evidence provenance; a worker claim is not an independently verified test result.
 4. Analyse errors/blockers; fix within scope or task a separate worker correction; use the configured profile-specific fallback/compaction continuation with runtime readback and side-effect reconciliation; never invent causes or runtimes.
 5. Decide and dispatch the next permitted development step **serially**; one logical management action at a time.
 6. Escalate only genuine missing operator decisions as `INPUT_REQUIRED`; unchanged parked state stays a cheap no-op.
 7. Archive finished own sessions and remove their context files only after the secured-handover sequence in the worker-context contract; reuse still-needed workers.
-8. Update journal, compact context and worker index for the next resume and verify the readback.
+8. Update journal, compact context and the worker index through `update_monitor_worker` for the next resume and verify the readback. An engine-observed finished dispatched worker is marked `idle` with a fresh `result_receipt`, which is a wake signal to synthesize — read the result original; the receipt is not itself an acceptance.
 
 ## Autonomy versus model profiles
 

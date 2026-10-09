@@ -257,6 +257,13 @@ export class MonitorEngine {
   }
 
   private async runWake(id: string, now: number, monitor: MonitorRecord): Promise<WakeOutcome> {
+    // Observe bounded own-worker completion first so a finished dispatched
+    // worker changes the worker index before the change/no-op decision.
+    if (await this.observeWorkers(monitor, now)) {
+      const observed = await readRegistrySnapshot(this.project);
+      const synced = observed.registry.monitors.find((entry) => entry.id === id);
+      if (synced) monitor.workers = synced.workers;
+    }
     // ---- operator abort request: verified native abort, no canonical read ----
     if (monitor.abort_request) {
       const ensured = await this.ensureSession(monitor, now);
@@ -456,6 +463,54 @@ export class MonitorEngine {
     }
     await this.release(id, now, null);
     return "noop-unchanged";
+  }
+
+  /**
+   * W4 minimal existing-path observation: poll a bounded number of dispatched
+   * own workers (active + dispatch receipt + runtime session) through the
+   * existing session-status gateway. A worker whose turn has reached a
+   * terminal completed state is marked `idle` with a fresh `result_receipt`,
+   * which changes workerIndexDigest so the manager is woken to synthesize the
+   * result. No subscription, no new timer, cadence unchanged.
+   */
+  private async observeWorkers(monitor: MonitorRecord, now: number): Promise<boolean> {
+    const candidates = (monitor.workers ?? [])
+      .filter((worker) => worker.lifecycle === "active" && worker.runtime_session_id && worker.dispatch_receipt)
+      .slice(0, 5);
+    if (candidates.length === 0) return false;
+    let changed = false;
+    for (const worker of candidates) {
+      let status: SessionStatusResult;
+      try {
+        status = await this.gateway.getSessionStatus(worker.runtime_session_id as string);
+      } catch {
+        continue; // unobservable now; never a silent completion
+      }
+      if (status.backend_activity !== "idle" || status.state !== "completed") continue;
+      const resultReceipt = status.assistant_message_ids.at(-1) ?? null;
+      if (resultReceipt === null) continue;
+      await withRegistry(
+        this.project,
+        (registry) => {
+          const monitorRecord = registry.monitors.find((entry) => entry.id === monitor.id);
+          const record = monitorRecord?.workers?.find((entry) => entry.worker_key === worker.worker_key);
+          if (!monitorRecord || !record || record.lifecycle !== "active") return registry;
+          record.lifecycle = "idle";
+          record.result_receipt = resultReceipt;
+          record.updated_at = iso(now);
+          monitorRecord.updated_at = iso(now);
+          monitorHistory(monitorRecord, "worker-observed-complete", {
+            worker_key: record.worker_key,
+            alias: record.alias,
+            result_receipt: resultReceipt,
+          }, now);
+          changed = true;
+          return registry;
+        },
+        { now },
+      );
+    }
+    return changed;
   }
 
   private appendDecisionSummary(

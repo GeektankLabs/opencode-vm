@@ -1125,6 +1125,7 @@ const monitorWorkerOutput = z
     runtime_session_id: z.string().nullable(),
     creation_receipt: z.string().nullable(),
     dispatch_receipt: z.string().nullable(),
+    result_receipt: z.string().nullable(),
     last_synthesis_at: z.string().nullable(),
     updated_at: z.string(),
   })
@@ -2050,6 +2051,7 @@ export function createMcpServer(
     runtime_session_id: worker.runtime_session_id,
     creation_receipt: worker.creation_receipt,
     dispatch_receipt: worker.dispatch_receipt,
+    result_receipt: worker.result_receipt,
     last_synthesis_at: worker.last_synthesis_at,
     updated_at: worker.updated_at,
   });

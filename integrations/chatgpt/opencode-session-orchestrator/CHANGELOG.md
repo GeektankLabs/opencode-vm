@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-09-r47
+
+- Link the [monitor-manager worker rules](references/monitor-manager-rules.md) to the supported locked worker tools: `create_monitor_worker` (reserve-before-create + confirm against the observed response), `list_monitor_workers` (bounded index read) and `update_monitor_worker` (reconcile/reuse/rebind/idle/archive/synthesis). Worker registry metadata is changed only through these tools — never by editing the registry JSON directly and never via a second unlocked store; an uncertain create stays `reserved` and is reconciled through the tool, never by a second create.
+- Note that the engine observes a finished dispatched own worker and marks it `idle` with a fresh `result_receipt`, which is a wake signal to synthesize the result original; the receipt is not itself an acceptance.
+
 ## 2026-10-09-r46
 
 - Add [Monitor-manager rules](references/monitor-manager-rules.md): the operator-set mission (actively drive the commissioned development to the agreed result within the configured autonomy profile; pure status observation is not delivery), the two audiences (external commissioned orchestration within real auth/scope; explicitly established internal OpenCode monitor/manager sessions), and the rule that ordinary implementation sessions and their subtasks gain no management authority from tool or skill visibility.

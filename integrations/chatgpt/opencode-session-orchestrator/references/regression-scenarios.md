@@ -635,7 +635,7 @@ Instruction/source-bound synthetic traces must use the shipped dispatch preceden
 | Mixed read errors, repair attempts, Pause/Resume and an uncertain non-idempotent receipt | Separate handling: reads use the read episode, real product repairs use the repair counter; the uncertain write/send is reconciled by exact receipt readback, never blindly retried or duplicated; Resume neither replenishes nor resets budgets. |
 | Repo/skill structural check versus host/scheduler E2E | Clearly labeled separately: repository/spec/protocol simulations (inventoried source traces, fake connectors, mutation controls) are not a production-engine (W3) or real-hosted acceptance proof; no synthetic E2E PASS. |
 
-## Monitor-manager cooperative rules (r46)
+## Monitor-manager cooperative rules (r47)
 
 | Scenario | Required behavior |
 |---|---|

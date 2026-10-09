@@ -34,7 +34,7 @@ OPENLIVE_PREVIOUS_COMMAND="$OPENLIVE_DIR/previous-command"
 OPENLIVE_AUTH_MARKER="__opencode_vm_openlive__"
 OPENLIVE_LOCK_PATH=""
 OPENLIVE_ADAPTER_VERSION="0.1.7"
-OPENLIVE_ADAPTER_TAG="v0.7.25"
+OPENLIVE_ADAPTER_TAG="v0.7.26"
 OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.7.tar"
 OPENLIVE_ADAPTER_SHA256="39a50c5127b0a577b54e4790b5c3c1f463b35a52b42c4343aa639dcea53bad47"
 OPENLIVE_ACP_SDK_VERSION="1.2.1"
@@ -44,15 +44,15 @@ OPENLIVE_MANAGER_DESCRIPTION="Read-only OpenLive voice session manager"
 OPENLIVE_MANAGER_PROMPT="You manage an OpenLive voice call. The voice_sessions tool is available and you must call it before listing, inspecting, summarizing, checking, attaching to, or creating project sessions. Never claim session details without a successful tool result. Ask for clarification if a requested session is ambiguous. Create a new work session only when the user explicitly asks for one. Apart from that explicit create action, you are read-only: do not edit files, run shell commands, create tasks, or mutate sessions. Keep responses brief and conversational: one or two plain sentences without Markdown, paths, URLs, code, or stray symbols. When attachment or creation succeeds, tell the user the next voice prompt will continue in that session."
 MCP_CONNECTOR_DIR="$SHARE_ROOT/mcp-connector"
 MCP_ADAPTER_CACHE_ROOT="$MCP_CONNECTOR_DIR/adapters"
-MCP_ADAPTER_VERSION="0.1.37"
-MCP_ADAPTER_TAG="v0.7.25"
-MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.37.tar"
-MCP_ADAPTER_SHA256="d48ac3f54ea48e5c7b400e7eaa45e77ec8c72607550a81aee5cc83db686a069a"
+MCP_ADAPTER_VERSION="0.1.38"
+MCP_ADAPTER_TAG="v0.7.26"
+MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.38.tar"
+MCP_ADAPTER_SHA256="7edeee8e52716f285be4e74a183979f3f312b32d6f0b982f34b62d4f60818475"
 MCP_SDK_VERSION="1.30.1"
 MCP_OPENCODE_SDK_VERSION="1.18.21"
 MCP_TESTED_PROTOCOL_VERSION="2025-11-25"
 MCP_TUNNEL_DIR="$SHARE_ROOT/mcp-tunnel/openai"
-HUB_ASSET_TAG="v0.7.25"
+HUB_ASSET_TAG="v0.7.26"
 HUB_ASSET_FILENAME="opencode-vm-hub-1.tar"
 HUB_ASSET_SHA256="7842dc3167c22eac33ed8c2f1d2a96d60938f5694e079690ca822304ebd45be0"
 
@@ -287,7 +287,7 @@ TASKBOARD_ARM64_SHA256="3749fb985f544fdb6788ba1dff69761e599ff82b3fe86d39ca54307c
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.7.25"
+OCVM_VERSION="0.7.26"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -15259,6 +15259,25 @@ _doctor_run() {
   else "$@" 2>/dev/null; fi
 }
 
+# Real MCP tools/list inventory (NOT /experimental/tool/ids, which is an
+# OpenCode-internal tool-id map, not an MCP client view). Uses the protocol
+# 2026-07-28 stateless tools/list POST with the token passed via a curl config
+# on stdin so the secret never appears in argv. Prints one tool name per line;
+# returns non-zero when the inventory cannot be obtained (never a silent pass).
+_doctor_mcp_tools() {
+  local port="$1" token="$2" out="" bodyfile=""
+  [ -n "$port" ] && [ -n "$token" ] || return 1
+  bodyfile="$(mktemp "${DOCTOR_TMPDIR:-/tmp}/ocvm-doctor-tools.XXXXXX" 2>/dev/null)" || return 1
+  chmod 600 "$bodyfile" 2>/dev/null || true
+  printf '%s' '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' > "$bodyfile" 2>/dev/null || { rm -f "$bodyfile"; return 1; }
+  out="$(printf 'header = "X-OCVM-MCP-Token: %s"\nheader = "Content-Type: application/json"\nheader = "mcp-protocol-version: 2026-07-28"\n' "$token" |
+    _doctor_run "$DOCTOR_PROBE_TIMEOUT" curl -fsS --config - --max-time "$DOCTOR_PROBE_TIMEOUT" \
+      --data-binary "@$bodyfile" "http://127.0.0.1:$port/mcp")" || out=""
+  rm -f "$bodyfile"
+  [ -n "$out" ] || return 1
+  printf '%s' "$out" | jq -r '.result.tools[]?.name // empty' 2>/dev/null | head -n 200
+}
+
 # --- redaction and output chokepoint ---------------------------------------
 doctor_redact() {
   sed -E \
@@ -15713,6 +15732,34 @@ doctor_collect_adapter() {
   elif [ "$cfg" != "not-configured" ]; then
     _doctor_add_finding "mcp adapter staged but no ready.json (adapter not running in this session mode or stopped)"
   fi
+  # Real MCP client inventory, kept distinct from mere healthz connectivity.
+  if [ -f "$rj" ] && [ -n "$port" ] && [ -f "$DOCTOR_SHARE/mcp/credential" ]; then
+    local tprobe_token="" tprobe_tools="" tprobe_missing="" tprobe_count="0"
+    tprobe_token="$(head -c 512 "$DOCTOR_SHARE/mcp/credential" 2>/dev/null | head -n 1)" || tprobe_token=""
+    if [ -n "$tprobe_token" ]; then
+      if tprobe_tools="$(_doctor_mcp_tools "$port" "$tprobe_token")"; then
+        tprobe_count="$(printf '%s\n' "$tprobe_tools" | grep -c . 2>/dev/null || printf '0')"
+        local _t
+        for _t in list_monitors create_monitor create_monitor_worker list_monitor_workers update_monitor_worker; do
+          printf '%s\n' "$tprobe_tools" | grep -qxF "$_t" || tprobe_missing="$tprobe_missing $_t"
+        done
+        if [ -z "$tprobe_missing" ]; then
+          _dout "[vm-doctor] mcp-tools: listed=${tprobe_count} core-management=complete (real tools/list POST; /experimental/tool/ids is NOT an MCP client inventory)"
+          DOCTOR_PASS=$((DOCTOR_PASS + 1))
+        else
+          _dout "[vm-doctor] mcp-tools: listed=${tprobe_count} core-management=MISSING:${tprobe_missing# } (real tools/list POST)"
+          _doctor_add_finding "mcp tools/list is missing core management tools:${tprobe_missing}"
+          DOCTOR_FAIL=$((DOCTOR_FAIL + 1)); DOCTOR_MAIN_EXIT=1
+        fi
+      else
+        _dout "[vm-doctor] mcp-tools: UNVERIFIED(real tools/list probe failed; healthz connectivity alone is not a tool inventory)"
+        DOCTOR_UNVERIFIED=$((DOCTOR_UNVERIFIED + 1))
+      fi
+    else
+      _dout "[vm-doctor] mcp-tools: UNVERIFIED(no readable credential for tools/list probe)"
+      DOCTOR_UNVERIFIED=$((DOCTOR_UNVERIFIED + 1))
+    fi
+  fi
   local last="${DOCTOR_LAST_TOOL_LINE:-not-collected}"
   _dout "[vm-doctor] mcp-adapter: config=$cfg process=$proc readiness=$ready last-success=$last"
   return 0
@@ -16062,6 +16109,33 @@ doctor_flush() {
   return 0
 }
 
+# --- management binding preflight (skill mount + honest standalone) ---------
+doctor_collect_binding() {
+  local skill_dir="$DOCTOR_SHARE/config/opencode/skills/orchestrator/opencode-session-orchestrator"
+  local state="not-mounted" rev=""
+  if [ -f "$skill_dir/SKILL.md" ] && [ ! -L "$skill_dir/SKILL.md" ]; then
+    rev="$(grep -m1 -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}-r[0-9]+' "$skill_dir/SKILL.md" 2>/dev/null || true)"
+    state="mounted(${rev:-revision-unknown})"
+    DOCTOR_PASS=$((DOCTOR_PASS + 1))
+  else
+    # Opt-out or a session without the canonical orchestrator skill: honest, not a silent pass.
+    DOCTOR_UNVERIFIED=$((DOCTOR_UNVERIFIED + 1))
+  fi
+  _dout "[vm-doctor] skill-binding: canonical-orchestrator=$state (mounted-file evidence; a startup claim alone is not proof)"
+  _dout "[vm-doctor] binding-note: management tool visibility requires BOTH a loaded skill and a real MCP tools/list inventory; /experimental/tool/ids is an OpenCode-internal tool-id map, NOT an MCP client inventory, and is never used as proof"
+  # Standalone/offline source truth: where the skill source comes from, or explicit absence.
+  local cache="$HOME/.opencode-vm/skills-src" state_src="unknown"
+  if [ -d "$cache" ] && [ ! -L "$cache" ]; then
+    state_src="downloaded-cache($cache)"
+  elif [ -n "${OCVM_INTERNAL_SOURCE_ONLY:-}" ]; then
+    state_src="checkout-adjacent"
+  else
+    state_src="absent(no checkout adjacency or download cache)"
+  fi
+  _dout "[vm-doctor] skill-source: $state_src"
+  return 0
+}
+
 doctor_main() {
   local area="${1:-show}" expected_share="${2:-}"
   doctor_reset
@@ -16073,6 +16147,7 @@ doctor_main() {
         _doctor_section opencode && doctor_collect_opencode
         _doctor_section roundtrip && doctor_collect_roundtrip
         _doctor_section adapter && doctor_collect_adapter
+        _doctor_section binding && doctor_collect_binding
         _doctor_section tunnel && doctor_collect_tunnel
         _doctor_section services && doctor_collect_services
         _doctor_section errors && doctor_collect_errors
@@ -16087,6 +16162,7 @@ doctor_main() {
         _doctor_section opencode && doctor_collect_opencode
         _doctor_section roundtrip && doctor_collect_roundtrip
         _doctor_section adapter && doctor_collect_adapter
+        _doctor_section binding && doctor_collect_binding
         _doctor_section errors && doctor_collect_errors
         _doctor_section excerpts && doctor_collect_excerpts adapter
         _doctor_section excerpts-backend && doctor_collect_excerpts backend

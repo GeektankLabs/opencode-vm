@@ -69,6 +69,9 @@ export type MonitorWorkerRecord = {
   runtime_session_id: string | null;
   creation_receipt: string | null;
   dispatch_receipt: string | null;
+  /** Latest observed terminal assistant message of a dispatched worker; proves
+   * a fresh result/receipt delta for the manager without a subscription. */
+  result_receipt: string | null;
   scope: string | null;
   worktree: string | null;
   task_id: string | null;
@@ -243,7 +246,7 @@ function workersShapeOk(monitorId: string, workers: unknown): workers is Monitor
     if (typeof worker.manager_alias !== "string" || !/^M[1-9][0-9]*$/.test(worker.manager_alias)) return false;
     if (typeof worker.context_path !== "string" || worker.context_path.length < 1) return false;
     if (!(["reserved", "active", "idle", "archived"] as const).includes(worker.lifecycle as never)) return false;
-    for (const field of ["creator_manager_session_id", "runtime_session_id", "creation_receipt", "dispatch_receipt", "scope", "worktree", "task_id", "last_synthesis_at"] as const) {
+    for (const field of ["creator_manager_session_id", "runtime_session_id", "creation_receipt", "dispatch_receipt", "result_receipt", "scope", "worktree", "task_id", "last_synthesis_at"] as const) {
       const value = worker[field];
       if (value !== null && typeof value !== "string") return false;
     }
@@ -549,6 +552,7 @@ export async function reserveWorker(
         runtime_session_id: input.runtime_session_id ?? null,
         creation_receipt: null,
         dispatch_receipt: null,
+        result_receipt: null,
         scope: input.scope ?? null,
         worktree: input.worktree ?? null,
         task_id: input.task_id ?? null,
@@ -768,6 +772,7 @@ export function workerIndexDigest(monitor: MonitorRecord): string {
       r: worker.runtime_session_id,
       c: worker.creation_receipt,
       d: worker.dispatch_receipt,
+      rr: worker.result_receipt,
       s: worker.last_synthesis_at,
       u: worker.updated_at,
     })),
