@@ -239,6 +239,8 @@
     const entries = Array.isArray(prepared.entries) ? prepared.entries : [];
     if (!entries.length) { host.append(node("p", "empty", "Keine vorbereiteten Attention-Einträge.")); return; }
     const classLabel = { action_required: "Input erforderlich", attention: "Fehler/Abort", ready: "Ergebnis bereit" };
+    const lifecycleLabel = { new: "neu", ready: "bereit", offered: "angeboten", discussed: "diskutiert", superseded: "abgelöst" };
+    const orderingLabel = { input_required: "Input erforderlich", error_abort: "Fehler/Abort", ready_result: "Ergebnis bereit" };
     for (const entry of entries) {
       const link = entry.task_id ? ` · ${entry.task_id}` : entry.hierarchy_status === "unlinked" ? " · unverknüpft" : "";
       const resolved = entry.resolution === "resolved" ? "abgenommen" : "zur Prüfung unverifiziert";
@@ -246,11 +248,11 @@
       const summary = entry.prepared_summary ? ` · ${entry.prepared_summary}` : "";
       const next = entry.next_safe_step ? ` · Nächster Schritt: ${entry.next_safe_step}` : "";
       host.append(node("p", "detail-line",
-        `${classLabel[entry.classification] || entry.classification} · ${entry.lifecycle}` +
+        `${classLabel[entry.classification] || entry.classification} · ${lifecycleLabel[entry.lifecycle] || entry.lifecycle}` +
         `${entry.session_id ? ` · ${entry.session_id}` : ""}${link} · ${resolved}${superseded}${summary}${next}`));
     }
     if (prepared.omitted) host.append(node("p", "caption", `Weitere ${prepared.omitted} von ${prepared.total} Einträgen ausgelassen (begrenzte Queue).`));
-    if (prepared.ordering) host.append(node("p", "caption", `Reihenfolge: ${prepared.ordering.join(" → ")}.`));
+    if (prepared.ordering) host.append(node("p", "caption", `Reihenfolge: ${prepared.ordering.map((name) => orderingLabel[name] || name).join(" → ")}.`));
   }
 
   function render() {

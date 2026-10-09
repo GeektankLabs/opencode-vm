@@ -155,6 +155,20 @@ try {
   await page.evaluate(() => window.pushTitle('Umsetzung Control-UI (Push aktualisiert)'));
   await frame.waitForFunction(() => document.querySelector('.title')?.textContent.includes('Push aktualisiert'));
 
+  // W3-F2: an unavailable prepared-attention source shows the reason honestly
+  // and keeps the last-known entries as stale data (no empty-list pretence).
+  await page.evaluate(() => {
+    window.overview.prepared_attention = { available: false, reason: 'ACTIVITY_DISABLED', coverage: 'unavailable',
+      ordering: ['input_required', 'error_abort', 'ready_result'], total: 1, omitted: null,
+      entries: window.overview.prepared_attention.entries.slice(0, 1) };
+    document.getElementById('app').contentWindow.postMessage({ jsonrpc: '2.0', method: 'ui/notifications/tool-result',
+      params: { structuredContent: structuredClone(window.overview) } }, '*');
+  });
+  await frame.waitForFunction(() => document.getElementById('prepared-attention')?.textContent.includes('ACTIVITY_DISABLED'));
+  const unavailableText = await frame.textContent('#prepared-attention');
+  assert.ok(unavailableText.includes('nicht verfügbar'), unavailableText);
+  assert.ok(unavailableText.includes('Letzter bekannter Stand, nicht frisch: 1'), unavailableText);
+
   // Failure path: no empty-list pretence, previous stand stays visible.
   await page.evaluate(() => { window.hostFail = true; });
   await frame.click('#refresh');
