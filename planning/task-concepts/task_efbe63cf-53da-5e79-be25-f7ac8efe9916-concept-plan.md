@@ -1,9 +1,9 @@
 Task-ID: task_efbe63cf-53da-5e79-be25-f7ac8efe9916
 Title: Management-MCP-Bindung und Orchestrator – kanonischer konsolidierter MVP-Plan
-Status: FIXED_PENDING_REQC (EFBE-MVP-IMPLEMENTATION-20261009-R1) — W1_QC_FAIL F1 mode-only repariert, unabhängige Re-QC ausstehend, kein Selbst-PASS; W2-W5 sequenziell offen
-Last-concept-update: 2026-10-09T14:00:22Z
+Status: W2_IMPLEMENTED_PENDING_QC (EFBE-MVP-IMPLEMENTATION-20261009-R1) — W1_REQC_PASS; W2-Kandidat `f1644ce0…` wartet auf unabhängige QC; kein Selbst-PASS; W4→W3→W5 sequenziell offen
+Last-concept-update: 2026-10-09T14:14:17Z
 Konzeptrevision: EFBE-MVP-COOPERATIVE-J59-R1 (Konzeptbasis); Execution-Contract-Aktiv: EFBE-MVP-IMPLEMENTATION-20261009-R1
-Entscheidungsstand: Journal #52–#59; #59 0c07a7a8-0456-424c-b02d-fe00bb604c00; Implementierungs-Freigabe #60; W1-QC_FAIL #63; Reset-Recovery #64–#65; W1-F1-Reparatur (Ersatz-Autorensession, dieser Auftrag)
+Entscheidungsstand: Journal #52–#59; #59 0c07a7a8-0456-424c-b02d-fe00bb604c00; Implementierungs-Freigabe #60; W1-QC_FAIL #63; Reset-Recovery #64–#65; W1-F1-Reparatur; W1_REQC_PASS; W2-Umsetzung (Ersatz-Autorensession)
 
 # Kanonischer Design-, Entscheidungs- und Testplan
 
@@ -320,4 +320,58 @@ change_path=git revert der beiden Zeilen; keine Runtime-Auswirkung (Beschreibung
 **Nachtrag 2026-10-09T14:00Z — W1_QC_FAIL und W1-F1-Reparatur (aktueller Stand, ersetzt den 05:40Z-Autorenstand oben):** Der unabhängige Reviewer `ses_ee19af651ffeLTL8BX4XnYvRFc` bestätigte W1 am 09:58Z als **W1_QC_FAIL** (Receipt `msg_56f55029560f4439aa1161eb12f092d2` → Terminal `msg_120198411001P9jh96ICgNwzZu`, SHA-256 `a2c7fc0bdd8acccd43d44382c6fb3d1d3f000a91c1965af5907b74cf42797510`, 3155 B). Genau ein blockierendes Finding **W1-F1**: `a94b68e` nimmt `opencode-vm.sh` das Execute-Bit (`100755→100644`, einzige Modeänderung des Diffs), `install_test.sh` EXIT 1; `chmod +x` im Review-Isolat allein macht sie grün. **W1-F2** (Registry-Reformatierung fremder `commands`-Arrays in `0bc2fd8`) rein kosmetisch, kein Gate. Alle übrigen Flächen am `a94b68e` bereits unabhängig grün: Adapter 209/0/2, Skill 85, P1-Source 5/5, Doppelbuild-Pin `d8a98ad5…`. Bericht `…-w1-independent-review-20261009.md` (SHA-256 `2caa02da749b0a43f3ab38bd68c123c4531f0e685c4811f513e8d0c757e8dc65`) bleibt unverändert.
 
 Nach VM-Reset (ursprüngliche Autorensession `ses_ee242a27fffezjq7kitLNoyGpc` `SESSION_NOT_FOUND`; Zwischenadmission `ses_edf147f5dffe7uzRDFk0II1eP7` endete 13:50Z mit leerer Assistant-Nachricht/Provider-Fehler ohne Write; Originale + Contract aus Reset-Handoff `task_083bc1b8` J1–2 gelesen, kein zweiter Master) reconcilierte die Ersatz-Autorensession (EFBE-W1-RESET-RECOVERY-FIX1-20261009-1348) read-only: Branch `task/efbe63cf-mvp-impl` auf `a94b68e`/Tree `0f8c1497` intakt, `opencode-vm.sh` `100644`/Blob `d7b0ef40`, kein Folgecommit, kein fremder Owner, kein bestehender Fix/Konflikt; Worktree sweeps-bedingt aus überlebendem Branch re-etabliert. **Erste W1-F1-Reparatur (mode-only, taskrein):** ein Folgecommit `d2b5a1b49166ac684c101af9509fbbdead58e5a5` (Parent `a94b68e`, neuer Tree `a386127e3690420fa897a43c3674d399a4e65255`), `opencode-vm.sh` `100755`, Blob byte-identisch `d7b0ef40…`; Diff ausschließlich Modus, kein weiterer Tree-Eintrag geändert, kein W1-F2/Fremdfixture mitgezogen. Isolierter `git archive`-Export: `a94b68e` `install_test.sh` EXIT 1 → `d2b5a1b` EXIT 0; Mode/Commit/Tree/Blob verifiziert; `bash -n` OK. Fremdinventar erhalten: 14 tracked-modified + 62 untracked (61 historisch + Reviewbericht), 0 staged. Runtime/Policy Build + Execution rev61 `opencode/deepseek-v4-flash/high`; Journal-frei beabsichtigt. Produktions-No-Progress-Zähler max 2 über Reset/Runtime erhalten, Doku/Read/Test ausgenommen. **Nächster Schritt FIXED_READY_FOR_INDEPENDENT_REQC:** unabhängige Re-QC exakt `d2b5a1b`/Tree `a386127e` (Modus-/Install-/Blob-Check genügt), danach W2→W4→W3→W5. Kein Main-Merge/Push/Tag/Release/Live-Aktion; W2 nicht gestartet.
+
+**Nachtrag 2026-10-09T14:14Z — W1_REQC_PASS und W2-Umsetzung (aktueller Stand):** Der unabhängige Re-QC `ses_edf07a6e0fferQF9lnwg9pyvnK` (Receipt `msg_753113a077d444e0a31366a82aa0b419` → Terminal `msg_120fbfbdb001odM8XDJ9fyy0Tp`, SHA-256 `305beed6738f6c3f86167c37eb84630822b1bdfddac9ed0f9a32777a71e2f94c`, 1625 B) bestätigte **W1_REQC_PASS** auf `d2b5a1b`/Tree `a386127e`; W1-F1 geschlossen. Die Ersatz-Autorensession (W2, Execution rev63 `opencode/deepseek-v4.1-flash/low`) hat darauf den W2-Kandidaten umgesetzt.
+
+**W2-Kandidat:** `f1644ce0dc26c140636e65b5cd8d5835e8182fc5` / Tree `2683f647b399242feded97cfc75a79d181ba93cb` (Parent `d2b5a1b…`, Base-Tree `a386127e…`) auf `task/efbe63cf-mvp-impl`, Arbeitsbaum clean; 8 Dateien, +601/−17 (`monitor.ts`, `monitor.test.ts`, `tools.ts`, `types.ts`, `package.json`, `package-lock.json`, `opencode-vm.sh`, `AGENTS.md`). Inhalte nach §8/§9 (G1/G4): additive Identitäts-/Ownermetadaten auf dem bestehenden mkdir-Lock/Generation-CAS/rename (kein Zweitstore, keine ungelockten Registry-Writes) — monotones Registry-`alias_high_water`, per-Monitor `worker_high_water`/Workerrecords (Owner/Creator-Session, Runtime-Referenz, Creation-/Dispatch-Receipt, Scope/Worktree, optional Task, Context-Pfad, Lifecycle, letzte Synthese); `reserveWorker` reserviert Alias+Contextpfad vor nicht-idempotentem Create; `confirmWorkerCreation`/`reconcileWorkerCreate`/`reuseWorker`/`rebindWorker`/`setWorkerLifecycle`/`setWorkerSynthesis` bewahren volle Evidenz hinter kurzen Aliassen; fremde Worker per Key verweigert (known-vs-foreign); tasklose Worker ohne Boardticket bzw. erfundenen MCP-Dokumentservice; Manager-/Worker-Kontexte unter ignoriertem `.opencode-vm/monitor/workers/<monitor_id>/<worker_key>.md` (`manager.md`). Monitor-Create vergibt den Manager-Alias. Alias = kooperative Identität, keine authentifizierte Caller-Isolation; bestehende Permissions/Auth unverändert.
+
+**Version/Pin:** Adapter `0.1.35→0.1.36`, Repin aus zwei byte-identischen GNU-tar-Builds `532c91f1485b273c412db1a5a4fd17fda1bc56eda701175198c4775f29007a7e`; Script `0.7.23→0.7.24`, Tags `MCP_ADAPTER_TAG`/`HUB_ASSET_TAG`/`OPENLIVE_ADAPTER_TAG` = `v0.7.24`; `ADAPTER_VERSION`/package(-lock) kohärent; AGENTS auf 0.1.36. **Tests (Author):** Adapter-Suite 215 → **213 pass/0 fail/2 bekannte Skips** (Basis 209/0/2 + 4 neue W2-Tests, A7/A8); `install_test.sh` EXIT0 (Exec-Bit erhalten); `mcp_adapter_test.sh` EXIT0 (Tar-SHA = Pin); `release_metadata_test` 5 OK; `release_state_test` 5 OK; `monitor_service_test.sh` EXIT0; `bash -n` + `shellcheck --severity=error` sauber. Fremdstand erhalten: Main `c08bfa7`, 14 tracked-modified/63 untracked, 0 staged. **Nächster Schritt W2_IMPLEMENTED_PENDING_QC:** unabhängige QC exakt `f1644ce0`/Tree `2683f647`, danach W4→W3→W5. Kein Main-Merge/Push/Tag/Release/Live-Aktion; W4 nicht gestartet.
+
+```text
+AUTONOMOUS_MVP_DECISION
+decision_id=W2-D1-additive-schema1-identity; task/phase=efbe63cf W2; time=2026-10-09T14:10Z
+strategy_source=P §8/§9 G1; ADR-ähnliche bounded choice
+question=neue Identitätsfelder als Schema-Bump (2) mit Migration vs. additiv-optionale Felder auf Schema 1
+alternatives=Schema-2-Bump (zwingt Migration/Reparatur bestehender Registries, mehr Risiko); separater Zweitstore (explizit verboten)
+choice/rationale=additiv-optionale Felder (registry.alias_high_water, monitor.alias/worker_high_water/workers) mit Validierung nur wenn vorhanden; alte Registries bleiben lesbar, keine Migration
+uncertainty=spätere Phasen können bei Bedarf einen Bump beschließen; reversibility=git revert des Commits; Aufwand minimal
+PRE_DECISION_HEAD=d2b5a1b49166ac684c101af9509fbbdead58e5a5
+worktree/owner=.opencode-vm/worktrees/task_efbe63cf-mvp-impl, task/efbe63cf-mvp-impl
+implementation_commits=f1644ce0dc26c140636e65b5cd8d5835e8182fc5
+components=adapters/mcp/src/{monitor.ts,monitor.test.ts,tools.ts}
+tests/acceptance=Adapter 215 (213/0/2); W2-A7/A8-Tests in monitor.test.ts
+change_path=git revert f1644ce
+```
+
+```text
+AUTONOMOUS_MVP_DECISION
+decision_id=W2-D2-identity-in-existing-module; task/phase=efbe63cf W2; time=2026-10-09T14:10Z
+strategy_source=P §8/§9; Release-/Build-Kohärenz
+question=neue Datei monitor-workers.ts + build-script-Kopie vs. Erweiterung des bereits veröffentlichten monitor.ts
+alternatives=neue Datei (zusätzliche Release-Kopierliste/build-mcp-adapter.sh-Änderung, mehr Kopplung); Erweiterung monitor.ts
+choice/rationale=alles in monitor.ts/monitor.test.ts (bereits im Release-Tar bzw. Testlauf), damit keine Build-Skript-Änderung nötig ist; kleinster kohärenter Fußabdruck
+uncertainty=none lokal; reversibility=git revert; Aufwand minimal
+PRE_DECISION_HEAD=d2b5a1b49166ac684c101af9509fbbdead58e5a5
+worktree/owner=wie oben
+implementation_commits=f1644ce0dc26c140636e65b5cd8d5835e8182fc5
+components=adapters/mcp/src/monitor.ts (nur)
+tests/acceptance=Adapter 215 grün; keine Build-Skript-Änderung
+change_path=git revert f1644ce
+```
+
+```text
+AUTONOMOUS_MVP_DECISION
+decision_id=W2-D3-no-new-tool-surface; task/phase=efbe63cf W2; time=2026-10-09T14:10Z
+strategy_source=P §8/§9; YAGNI/POLA
+question=neue MCP-Tools für Worker/Alias vs. interne Source-APIs ohne Oberflächenänderung
+alternatives=neue Tools + Output-Schema-Änderung (kein belegter Konsument, bricht strikte Schemata); interne exportierte APIs + Manager-Alias bei create
+choice/rationale=keine neuen Tools/Tool-Output-Felder (Tool-Output-Schemata bleiben unverändert); die Metadaten-APIs sind die gelockten Source-APIs; Monitor-Create nutzt `ensureManagerAlias`
+uncertainty=spätere Phase (W4/W5) kann bei echtem Konsumenten eine Oberfläche ergänzen; reversibility=git revert
+PRE_DECISION_HEAD=d2b5a1b49166ac684c101af9509fbbdead58e5a5
+worktree/owner=wie oben
+implementation_commits=f1644ce0dc26c140636e65b5cd8d5835e8182fc5
+components=adapters/mcp/src/{monitor.ts,tools.ts}
+tests/acceptance=Adapter 215 grün; Tool-Schemata unverändert
+change_path=git revert f1644ce
+```
 
