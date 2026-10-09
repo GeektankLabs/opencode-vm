@@ -21,24 +21,24 @@ pass() { printf 'ok - %s\n' "$1"; }
 [[ "$(skills_registry_field orchestrator .default_active)" == "false" ]] || fail 'must stay opt-in'
 pass 'orchestrator package is a registered opt-in single_bundled loader'
 
-# 2) Source identity: actual bytes of the canonical r43 revision.
+# 2) Source identity: actual bytes of the canonical r46 revision.
 source_root="$(skills_source_root_for orchestrator)"
 skill_dir="$source_root/opencode-session-orchestrator"
 [[ -d "$skill_dir" ]] || fail 'orchestrator source dir missing'
-grep -q '2026-10-07-r43' "$skill_dir/SKILL.md" || fail 'SKILL.md revision marker missing'
-grep -q '^## 2026-10-07-r43' "$skill_dir/CHANGELOG.md" || fail 'CHANGELOG revision missing'
+grep -q '2026-10-09-r46' "$skill_dir/SKILL.md" || fail 'SKILL.md revision marker missing'
+grep -q '^## 2026-10-09-r46' "$skill_dir/CHANGELOG.md" || fail 'CHANGELOG revision missing'
 python3 - "$source_root" <<'PY'
 import json, hashlib, sys, pathlib
 base = pathlib.Path(sys.argv[1])
 manifest = json.loads((base / "bundle.json").read_text())
-assert manifest["revision"] == "2026-10-07-r43", manifest["revision"]
+assert manifest["revision"] == "2026-10-09-r46", manifest["revision"]
 zip_bytes = (base / "opencode-session-orchestrator.zip").read_bytes()
 digest = hashlib.sha256(zip_bytes).hexdigest()
 assert (base / "opencode-session-orchestrator.zip.sha256").read_text().strip().startswith(digest)
 latest = json.loads((base / "latest.json").read_text())
 assert latest["revision"] == manifest["revision"] and latest["sha256"] == digest
 PY
-pass 'canonical source bytes are revision r43 and bundle/ZIP/latest are coherent'
+pass 'canonical source bytes are revision r46 and bundle/ZIP/latest are coherent'
 
 # 3) Mount into a session share (local load path) with actual bytes.
 share="$TMP/share"; mkdir -p "$share"
@@ -48,7 +48,7 @@ skills_mount_for_session "$share" "$TMP/project" >/dev/null
 dest="$share/config/opencode/skills/orchestrator/opencode-session-orchestrator"
 [[ -f "$dest/SKILL.md" ]] || fail 'mounted SKILL.md missing'
 cmp -s "$skill_dir/SKILL.md" "$dest/SKILL.md" || fail 'mounted bytes differ from canonical source'
-grep -q '2026-10-07-r43' "$dest/SKILL.md" || fail 'mounted revision missing'
+grep -q '2026-10-09-r46' "$dest/SKILL.md" || fail 'mounted revision missing'
 grep -q 'orchestrator/opencode-session-orchestrator' "$share/skills-manifest.txt" || fail 'manifest entry missing'
 pass 'session share load mounts the canonical bytes and records the manifest'
 

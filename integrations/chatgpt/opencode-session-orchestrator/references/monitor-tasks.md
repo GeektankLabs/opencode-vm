@@ -1,6 +1,6 @@
 # Scheduler-supported Monitor Tasks
 
-Use only for explicit authorized recurring supervision through an **external, currently available scheduler**. This instruction-only skill does not implement a scheduler, polling daemon or notification channel. Stateless reasoning, stateful system: recover from one master task plus live evidence, not chat memory. The same loop supports [sequential Work Packages](work-packages.md#monitored-work-packages-v1) and [long integration/system tests](integration-test-monitor.md).
+Use only for explicit authorized recurring supervision through an **external, currently available scheduler**. This instruction-only skill does not implement a scheduler, polling daemon or notification channel. Stateless reasoning, stateful system: recover from one master task plus live evidence, not chat memory. The same loop supports [sequential Work Packages](work-packages.md#monitored-work-packages-v1) and [long integration/system tests](integration-test-monitor.md). For the **internal OpenCode monitor/manager** side (mission, two audiences, serial root-only delegation, wake duty loop, cooperative matrix) see [Monitor-manager rules](monitor-manager-rules.md); this file covers the external scheduler bootstrap only.
 
 ## Master and Monitorability Gate
 

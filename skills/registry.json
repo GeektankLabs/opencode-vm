@@ -24,7 +24,7 @@
       }
     },
     "orchestrator": {
-      "description": "Canonical OpenCode session orchestrator skill (integrations/chatgpt/opencode-session-orchestrator, revision r43) for local Monitor/management sessions",
+      "description": "Canonical OpenCode session orchestrator skill (integrations/chatgpt/opencode-session-orchestrator; revision per integrations/chatgpt/bundle.json) for local Monitor/management sessions",
       "default_active": false,
       "resolver": "single_bundled",
       "skill_dir_name": "opencode-session-orchestrator",
@@ -39,7 +39,10 @@
       "default_active": true,
       "resolver": "single_bundled",
       "skill_dir_name": "besprechung",
-      "commands": ["besprechung.md", "besprechung-dialog.md"],
+      "commands": [
+        "besprechung.md",
+        "besprechung-dialog.md"
+      ],
       "install": {
         "type": "bundled",
         "sparse_path": "skills/besprechung"
@@ -49,7 +52,9 @@
       "description": "Language-filtered subset of ECC skills (~30 skills, ~2-4k tokens)",
       "default_active": false,
       "resolver": "ecc_filtered",
-      "mutually_exclusive_with": ["ecc-all"],
+      "mutually_exclusive_with": [
+        "ecc-all"
+      ],
       "install": {
         "type": "git",
         "repo_var": "ECC_REPO",
@@ -80,30 +85,64 @@
           "mcp-server-patterns"
         ],
         "language_prefixes": {
-          "typescript": ["frontend-", "backend-", "bun-runtime", "react-"],
-          "golang": ["golang-"],
-          "python": ["django-", "python-"],
-          "php": ["laravel-"],
-          "java": ["java-", "jpa-", "hexagonal-architecture"],
+          "typescript": [
+            "frontend-",
+            "backend-",
+            "bun-runtime",
+            "react-"
+          ],
+          "golang": [
+            "golang-"
+          ],
+          "python": [
+            "django-",
+            "python-"
+          ],
+          "php": [
+            "laravel-"
+          ],
+          "java": [
+            "java-",
+            "jpa-",
+            "hexagonal-architecture"
+          ],
           "kotlin": [
             "kotlin-",
             "android-clean-architecture",
             "compose-multiplatform-patterns"
           ],
-          "swift": ["foundation-models-on-device"],
-          "csharp": ["csharp-", "dotnet-patterns"],
-          "cpp": ["cpp-"],
-          "dart": ["dart-flutter-patterns", "flutter-dart-code-review"],
-          "web": ["frontend-design", "design-system", "accessibility"]
+          "swift": [
+            "foundation-models-on-device"
+          ],
+          "csharp": [
+            "csharp-",
+            "dotnet-patterns"
+          ],
+          "cpp": [
+            "cpp-"
+          ],
+          "dart": [
+            "dart-flutter-patterns",
+            "flutter-dart-code-review"
+          ],
+          "web": [
+            "frontend-design",
+            "design-system",
+            "accessibility"
+          ]
         },
-        "exclude": ["continuous-learning-v2"]
+        "exclude": [
+          "continuous-learning-v2"
+        ]
       }
     },
     "ecc-all": {
       "description": "Every ECC skill (~180 skills, ~10-15k tokens) — for 128k+ context models only",
       "default_active": false,
       "resolver": "ecc_all",
-      "mutually_exclusive_with": ["ecc-auto"],
+      "mutually_exclusive_with": [
+        "ecc-auto"
+      ],
       "install": {
         "type": "git",
         "repo_var": "ECC_REPO",
@@ -112,7 +151,9 @@
         "skills_subpath": "skills"
       },
       "filter": {
-        "exclude": ["continuous-learning-v2"]
+        "exclude": [
+          "continuous-learning-v2"
+        ]
       }
     }
   }

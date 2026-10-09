@@ -634,3 +634,15 @@ Instruction/source-bound synthetic traces must use the shipped dispatch preceden
 | Two production-code repairs of the same fingerprint without evidenced progress | Park (`PARKED_INPUT_REQUIRED`); no third production-code repair; no silent reset across session/model/pause/message/time; history retained; mutation control: an infrastructure/test/doc/management fix of the same fingerprint must not count toward the cap or trigger the park. |
 | Mixed read errors, repair attempts, Pause/Resume and an uncertain non-idempotent receipt | Separate handling: reads use the read episode, real product repairs use the repair counter; the uncertain write/send is reconciled by exact receipt readback, never blindly retried or duplicated; Resume neither replenishes nor resets budgets. |
 | Repo/skill structural check versus host/scheduler E2E | Clearly labeled separately: repository/spec/protocol simulations (inventoried source traces, fake connectors, mutation controls) are not a production-engine (W3) or real-hosted acceptance proof; no synthetic E2E PASS. |
+
+## Monitor-manager cooperative rules (r46)
+
+| Scenario | Required behavior |
+|---|---|
+| Manager considers native subtask for internal parallel research | Refused by the rule: no native subtasks for management work; delegate serially to own root worker sessions; no parallel sub-managers. Worker self-chosen subtasks inside its own scope/permissions are fine and need no new enablement. |
+| Own monitor config change seems convenient (interval, autonomy, expiry, disable/delete/trigger) | Manager never self-applies; it recommends via attention/journal. Legitimate `INPUT_REQUIRED` parking stays permitted and is communication, not a config change; scheduler cadence unaffected. |
+| Worker reports business `input_required` | Once the actual decision exists in existing profile/scope, resolve with a normal same-session follow-up after idle/no-pending checks; a genuine missing operator decision escalates `INPUT_REQUIRED`; a pending security permission is never answered or bypassed. |
+| Session with matching title but no creation receipt/registry identity | Not own: never take over, steer or relabel; title is orientation, ownership comes from persisted identity evidence. |
+| Temptation to claim the skill "blocked" a rule violation | Cooperative rules are not technical enforcement: report a model violation as a violation with evidence, no invented `BLOCKED` event, caller-identity proof or attack-detection guarantee; existing authentication and tool guards stay as-is. |
+| Board task seems needed to carry worker context or record a proposal | Never create internal board tasks or task floods; keep the worker context in its persistent project-state file and the proposal in journal/attention; external board privileges remain untouched. |
+| Worker teardown with unfinished or uncertain dispatch state | No cleanup: secure handover first (synthesize/open items/belege verified and read back), then idle/no-pending/no-uncertain, reversible archive, then exact own context file removal only; never stop live work to tidy up, never delete permanent evidence. |

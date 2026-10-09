@@ -484,15 +484,59 @@ class SkillPackageTest(unittest.TestCase):
             with self.subTest(marker=marker):
                 self.assertIn(marker, notice)
 
+    def test_r46_monitor_manager_cooperative_root_only_and_deferred_enforcement(self):
+        source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
+        skill = (source / "SKILL.md").read_text()
+        rules = (source / "references/monitor-manager-rules.md").read_text()
+        tasks = (source / "references/monitor-tasks.md").read_text()
+        changelog = (source / "CHANGELOG.md").read_text()
+        manifest, _ = BUILDER.package_content(ROOT)
+        self.assertEqual(manifest["revision"], "2026-10-09-r46")
+        self.assertIn("references/monitor-manager-rules.md", manifest["files"])
+        self.assertIn("## 2026-10-09-r46\n", changelog)
+        self.assertIn("Monitor-manager rules](references/monitor-manager-rules.md)", skill)
+        self.assertIn("Monitor-manager rules](monitor-manager-rules.md)", tasks)
+        for marker in (
+            "drives the commissioned development to the agreed result",
+            "Pure status observation is not delivery",
+            "Two audiences",
+            "Ordinary OpenCode implementation sessions do not use the management MCP",
+            "Tool visibility is not authorization",
+            "no technical enforcement is claimed",
+            "no native subtasks",
+            "not even small read-only research",
+            "creation receipt/registry identity",
+            "Never take over, steer or retroactively relabel foreign existing sessions",
+            "Workers decide **themselves** whether they use native subtasks",
+            "No extra enablement ceremony",
+            "serial", "no parallel sub-managers",
+            "normal same-session follow-up",
+            "escalate as `INPUT_REQUIRED`",
+            "never answered or bypassed by the manager",
+            "Never self-change",
+            "propose to the operator via attention/journal",
+            "never disables the scheduler",
+            "technical `BLOCKED` event",
+            "caller-identity proof",
+            "attack detection",
+        ):
+            self.assertIn(marker, rules, f"rules marker missing: {marker}")
+        self.assertIn("separate deferred follow-up", rules)
+        self.assertIn("not a board ticket, not git-tracked", rules)
+        self.assertIn("reversible archive", rules)
+        self.assertIn("context files only after", rules)
+
+
     def test_r45_per_profile_fallback_mode_is_additive_explicit_and_finite(self):
         source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
         skill = (source / "SKILL.md").read_text()
         routing = (source / "references/fallback-routing.md").read_text()
         changelog = (source / "CHANGELOG.md").read_text()
         manifest, _ = BUILDER.package_content(ROOT)
-        self.assertEqual(manifest["revision"], "2026-10-08-r45")
+        self.assertEqual(manifest["revision"], "2026-10-09-r46")
         self.assertIn("## 2026-10-08-r45\n", changelog)
-        self.assertIn("**2026-10-08-r45**", skill)
+        self.assertIn("**2026-10-09-r46**", skill)
+        self.assertIn("## 2026-10-08-r45\n", changelog)
         self.assertIn("references/fallback-routing.md", skill)
         self.assertIn("routing.regime: per_profile", skill)
         section = routing.split("## Per-profile fallback mode (additive schema 4)\n", 1)[1] \
@@ -3179,7 +3223,7 @@ class TaskDoneArchiveTraceTest(unittest.TestCase):
         monitor = (source / "references/monitor-tasks.md").read_text()
         content = (source / "references/content-protocol.md").read_text()
         scenarios = (source / "references/regression-scenarios.md").read_text()
-        self.assertIn("2026-10-08-r45", skill)
+        self.assertIn("2026-10-09-r46", skill)
         self.assertIn("## Cooperative Pause and Weiter/Go", skill)
         self.assertIn("references/pause-go.md", skill)
         for required in ("next safe Tool/Receipt return",
@@ -3405,7 +3449,7 @@ class TaskDoneArchiveTraceTest(unittest.TestCase):
         monitor = (source / "references/monitor-tasks.md").read_text()
         packages = (source / "references/work-packages.md").read_text()
         mvp = (source / "references/optimistic-mvp.md").read_text()
-        self.assertIn("2026-10-08-r45", skill)
+        self.assertIn("2026-10-09-r46", skill)
         self.assertIn("## 2026-10-08-r44", (source / "CHANGELOG.md").read_text())
         # Production-Code-Only cap with excluded classes, progress and no-reset.
         for required in ("at most two autonomous PRODUCTION-CODE repair cycles",
