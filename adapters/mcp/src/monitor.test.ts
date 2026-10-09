@@ -4,13 +4,28 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  assignMonitorAlias,
+  confirmWorkerCreation,
   defaultMonitorRecord,
+  getWorker,
+  listWorkers,
+  managerAliasFor,
   monitorHistory,
+  monitorManagerContextPath,
   monitorRegistryPath,
+  monitorWorkerContextPath,
+  monitorWorkersDirectory,
   readEpisode,
   readRegistrySnapshot,
+  reconcileWorkerCreate,
   recordRepair,
+  rebindWorker,
+  reserveWorker,
+  reuseWorker,
+  setWorkerLifecycle,
+  setWorkerSynthesis,
   withRegistry,
+  workerAliasFor,
 } from "./monitor.js";
 import {
   MonitorEngine,
@@ -890,6 +905,181 @@ test("engine: a session rebind inside the same wake primes the brand-new session
     assert.ok(!state.sends[2]!.includes("[MANAGEMENT-PRIMING"), "no repeated priming for the same context");
     const after = await readRegistrySnapshot(project);
     assert.equal(after.registry.monitors[0]!.history.filter((entry) => entry.type === "manager-primed").length, 2);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("W2 naming: worker ordinals roll A..Z then AA.. and manager aliases are M<high-water>", () => {
+  assert.equal(managerAliasFor(1), "M1");
+  assert.equal(managerAliasFor(12), "M12");
+  assert.equal(workerAliasFor("M1", 1), "M1-A");
+  assert.equal(workerAliasFor("M1", 26), "M1-Z");
+  assert.equal(workerAliasFor("M1", 27), "M1-AA");
+  assert.equal(workerAliasFor("M1", 28), "M1-AB");
+  assert.equal(workerAliasFor("M1", 52), "M1-AZ");
+  assert.equal(workerAliasFor("M1", 53), "M1-BA");
+  assert.throws(() => workerAliasFor("bad", 1), /invalid manager alias/);
+  assert.throws(() => workerAliasFor("M1", 0), /invalid worker alias ordinal/);
+});
+
+test("W2 identity: monotonic manager and worker aliases never reuse codes under concurrency", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    await withRegistry(project, (registry) => {
+      registry.monitors.push(defaultMonitorRecord("One", TASK, {}, 1000));
+      registry.monitors.push(defaultMonitorRecord("Two", TASK, {}, 1000));
+      return registry;
+    });
+    const snapshot = await readRegistrySnapshot(project);
+    const [a, b] = snapshot.registry.monitors;
+    assert.equal((await assignMonitorAlias(project, a!.id, { now: 1000 })).alias, "M1");
+    assert.equal((await assignMonitorAlias(project, b!.id, { now: 1000 })).alias, "M2");
+    // Stable identity: re-assignment keeps the same alias and does not advance the high-water.
+    assert.equal((await assignMonitorAlias(project, a!.id, { now: 1100 })).alias, "M1");
+    const reservations = await Promise.all(
+      Array.from({ length: 5 }, (_, index) =>
+        reserveWorker(project, a!.id, { runtime_session_id: `ses_${index}` }, { now: 1200 }),
+      ),
+    );
+    assert.deepEqual(
+      reservations.map((entry) => entry.alias).sort(),
+      ["M1-A", "M1-B", "M1-C", "M1-D", "M1-E"],
+    );
+    assert.equal(new Set(reservations.map((entry) => entry.worker_key)).size, 5);
+    const stored = await listWorkers(project, a!.id);
+    assert.equal(stored.length, 5);
+    assert.equal(new Set(stored.map((entry) => entry.alias)).size, 5);
+    assert.equal(new Set(stored.map((entry) => entry.worker_key)).size, 5);
+    // The second monitor keeps its own ordinal namespace and worker high-water.
+    const bReservation = await reserveWorker(project, b!.id, {}, { now: 1300 });
+    assert.equal(bReservation.alias, "M2-A");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("W2 CAS: a pinned generation rejects a racing reservation", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    await withRegistry(project, (registry) => {
+      registry.monitors.push(defaultMonitorRecord("One", TASK, {}, 1000));
+      return registry;
+    });
+    const id = (await readRegistrySnapshot(project)).registry.monitors[0]!.id;
+    await assert.rejects(
+      reserveWorker(project, id, {}, { expected: 0, now: 1000 }),
+      /changed concurrently/,
+    );
+    const snapshot = await readRegistrySnapshot(project);
+    assert.equal(snapshot.registry.monitors[0]!.workers, undefined);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("W2 workers: reserve-before-create, uncertain reconcile, foreign refusal, reuse/rebind, taskless context", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    await withRegistry(project, (registry) => {
+      registry.monitors.push(defaultMonitorRecord("One", TASK, {}, 1000));
+      registry.monitors.push(defaultMonitorRecord("Two", TASK, {}, 1000));
+      return registry;
+    });
+    const snapshot = await readRegistrySnapshot(project);
+    const [a, b] = snapshot.registry.monitors;
+
+    // Reserve (taskless) an identity and context path before any non-idempotent create.
+    const reservation = await reserveWorker(project, a!.id, { scope: "W2", worktree: "/wt" }, { now: 1000 });
+    assert.equal(reservation.alias, "M1-A");
+    assert.equal(
+      reservation.context_path,
+      join(monitorWorkersDirectory(project), a!.id, `${reservation.worker_key}.md`),
+    );
+    assert.equal(reservation.context_path, monitorWorkerContextPath(project, a!.id, reservation.worker_key));
+    const reserved = await getWorker(project, a!.id, reservation.worker_key);
+    assert.equal(reserved?.lifecycle, "reserved");
+    assert.equal(reserved?.task_id, null);
+    assert.equal(reserved?.creation_receipt, null);
+
+    // Foreign negatives: another monitor cannot read or mutate this worker by key.
+    assert.equal(await getWorker(project, b!.id, reservation.worker_key), null);
+    await assert.rejects(
+      confirmWorkerCreation(project, b!.id, reservation.worker_key, { runtime_session_id: "ses_x", creation_receipt: "msg_x" }),
+      /worker not found/,
+    );
+
+    // Uncertain create resolved absent -> archived, never a second create attempt.
+    const uncertain = await reserveWorker(project, a!.id, {}, { now: 1100 });
+    const reconciledAbsent = await reconcileWorkerCreate(project, a!.id, uncertain.worker_key, { outcome: "absent" }, { now: 1200 });
+    assert.equal(reconciledAbsent.lifecycle, "archived");
+    assert.equal(reconciledAbsent.runtime_session_id, null);
+
+    // Confirmed create records the real runtime + receipt and cannot be re-confirmed.
+    const active = await confirmWorkerCreation(
+      project,
+      a!.id,
+      reservation.worker_key,
+      { runtime_session_id: "ses_worker_1", creation_receipt: "msg_create_1" },
+      { now: 1300 },
+    );
+    assert.equal(active.lifecycle, "active");
+    assert.equal(active.runtime_session_id, "ses_worker_1");
+    assert.equal(active.creation_receipt, "msg_create_1");
+    await assert.rejects(
+      confirmWorkerCreation(project, a!.id, reservation.worker_key, { runtime_session_id: "ses_dup", creation_receipt: "m" }),
+      /already resolved/,
+    );
+
+    // Uncertain create resolved present -> active with the observed receipt.
+    const uncertainPresent = await reserveWorker(project, a!.id, {}, { now: 1400 });
+    const reconciledCreated = await reconcileWorkerCreate(
+      project,
+      a!.id,
+      uncertainPresent.worker_key,
+      { outcome: "created", runtime_session_id: "ses_worker_2", creation_receipt: "msg_create_2" },
+      { now: 1500 },
+    );
+    assert.equal(reconciledCreated.lifecycle, "active");
+    assert.equal(reconciledCreated.creation_receipt, "msg_create_2");
+    await assert.rejects(
+      reconcileWorkerCreate(project, a!.id, uncertainPresent.worker_key, { outcome: "absent" }),
+      /already resolved/,
+    );
+
+    // Reset/rebind: the lost runtime reference is replaced on the same stable identity.
+    const rebound = await rebindWorker(
+      project,
+      a!.id,
+      reservation.worker_key,
+      { runtime_session_id: "ses_worker_1b", dispatch_receipt: "msg_dispatch_1" },
+      { now: 1600 },
+    );
+    assert.equal(rebound.lifecycle, "active");
+    assert.equal(rebound.runtime_session_id, "ses_worker_1b");
+    assert.equal(rebound.worker_key, reservation.worker_key);
+    assert.equal(rebound.alias, reservation.alias);
+
+    // Synthesis, idle, then own-worker reuse keeps alias/key.
+    await setWorkerSynthesis(project, a!.id, reservation.worker_key, "2026-10-09T14:10:00.000Z", { now: 1700 });
+    assert.equal((await getWorker(project, a!.id, reservation.worker_key))?.last_synthesis_at, "2026-10-09T14:10:00.000Z");
+    assert.equal((await setWorkerLifecycle(project, a!.id, reservation.worker_key, "idle", { now: 1800 })).lifecycle, "idle");
+    const reused = await reuseWorker(project, a!.id, reservation.worker_key, { runtime_session_id: "ses_worker_1c" }, { now: 1900 });
+    assert.equal(reused.lifecycle, "active");
+    assert.equal(reused.runtime_session_id, "ses_worker_1c");
+    assert.equal(reused.alias, reservation.alias);
+    assert.ok(reused.last_synthesis_at);
+
+    // Archive lifecycle on the absent-resolved worker.
+    assert.equal((await setWorkerLifecycle(project, a!.id, uncertain.worker_key, "archived", { now: 2000 })).lifecycle, "archived");
+
+    // Manager context layout mirrors worker contexts under the ignored directory.
+    assert.equal(monitorManagerContextPath(project, a!.id), join(monitorWorkersDirectory(project), a!.id, "manager.md"));
+
+    // Full readback keeps all three distinct aliases and stable keys.
+    const workers = await listWorkers(project, a!.id);
+    assert.deepEqual(workers.map((entry) => entry.alias), ["M1-A", "M1-B", "M1-C"]);
+    assert.deepEqual(workers.map((entry) => entry.lifecycle), ["active", "archived", "active"]);
   } finally {
     await cleanup();
   }

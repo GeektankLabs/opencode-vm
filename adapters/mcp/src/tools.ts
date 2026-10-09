@@ -20,6 +20,7 @@ import { PROFILE_NAMES, describePolicy, profileState, readPolicy, resolveProfile
 import { commitFinalFallback, commitProfileFallback, commitStrategies } from "./policy-commit.js";
 import {
   defaultMonitorRecord,
+  ensureManagerAlias,
   monitorHistory,
   readRegistrySnapshot,
   withRegistry,
@@ -1793,7 +1794,8 @@ export function createMcpServer(
         },
         now,
       );
-      monitorHistory(record, "created", { interval_seconds: record.scheduler.interval_seconds }, now);
+      ensureManagerAlias(registry, record);
+      monitorHistory(record, "created", { alias: record.alias, interval_seconds: record.scheduler.interval_seconds }, now);
       registry.monitors.push(record);
       return registry;
     });
