@@ -17,6 +17,23 @@ Key design goals:
 
 ## Architecture
 
+**Activity Journal opt-in hotfix (script 0.7.23 / adapter 0.1.35 / skill r47):**
+fresh sessions default journal-free; `web --journal` / configured MCP terminal
+`start --journal` opt in. Attach retains `SESS_JOURNAL_ENABLED`; absent legacy
+fields retain enabled behavior, and reconnect never changes mode silently.
+Disabled sessions neither open/migrate the journal nor collect Activity/SSE or
+Attention. The full connector baseline below applies when the journal is on;
+the default catalog omits exactly five tools (Activity read/wait, Attention
+read/ACK, auditable submission override) and Events, while native
+send/follow-up/status/result/runtime and separate Task Management Journal
+functions remain available. Ordinary session reads and health expose
+`activity_journal:{enabled,state}`; cached disabled calls use ACTIVITY_DISABLED,
+enabled failures remain ACTIVITY_UNAVAILABLE. Repo Live cannot label disabled
+or failed journal collection fresh. Skill r47 selects bounded exact-receipt
+observation when journal-free. This Main hotfix is separate from the retained,
+QC-failed logging candidate aa2bd963 and the unintegrated management-priming
+workstream. Full contract: [`docs/MCP-INTERFACE.md`](docs/MCP-INTERFACE.md).
+
 **Agent-managed work sessions:** actual agentic WORK creation/admission through MCP, A2A or OpenLive is adopted automatically by the backend; reads and pure management stay neutral, and manual sessions stay manual until work adoption. Managed children/reuse follow the same contract. Explicit read-only/review/task restrictions remain binding. Missing business decisions end as ordinary readable `INPUT_REQUIRED` text for an orchestrator follow-up in the same session, without native Questions. See `docs/MANAGED-SESSIONS.md`. For candidate-to-release completion, exact-commit verification and preserving a working runtime while the gate is red or unverified, follow [`docs/RELEASING.md`](docs/RELEASING.md).
 
 **ACH-1 consolidated integration (script 0.6.6 / MCP 0.1.20 / skill r23):** Hub follows Profiles → Connections → Logs with stable honest states (`not_configured`, `unverified`, `not_ready`, `ready`), local help, preserved drafts/focus and explicit conflict/uncertain-save readback. Schema 1/2 readers normalize Deep/Standard/Execution/Design/Review; base writes retain schema 1, first optional mapping checks active MCP tool schemas and backs up exact original bytes before atomic schema-2 publication. Schema 3 adds exactly one additive `finalFallback` key — the configured final **error-fallback** runtime (`total` default / `degrading` option), configurable in the Hub profile area and written through `PUT /api/control/fallback` or the MCP tool `set_project_model_policy_fallback` under the same CAS/exact-bytes-backup contract on the shared project policy lock, read by `get_project_model_policy` as `final_fallback`, and strictly separate from the resolution `fallbacks` map; an unconfigured slot means management routing reports a precise `INPUT_REQUIRED`, never an automatic provider choice. Schema 4 adds exactly two additive keys — `profileFallbacks` (an optional own fallback per profile card) and `strategies` (`degrading`, `providerSkip`, each `true`/`false`/`null` for "not explicitly set") — read back as `profile_fallbacks`, `strategies` and `routing` (`regime` `per_profile` vs unchanged `legacy_final_fallback`, `legacy_final_stage_applies`, `strategies_effective`, deterministic `candidate_order`); the legacy global final stage is never reinterpreted nor silently appended to a per-profile chain, an unset switch is never a hidden default, an exhausted finite chain ends in a readable `INPUT_REQUIRED` instead of a crash, and every Hub model picker sorts models alphabetically by displayed name (locale-aware, case-insensitive, deterministic `model_id`/`provider_id` tie-breaker) with IDs, variants, provider separation and routing unchanged. Design → Standard and Review → Deep → Standard skip only null and stop at configured unavailable/incomplete mappings. Review evaluates without automatic findings implementation. This incorporates the r21 additive task writes and Header/r22 contracts; real Mac/Safari/VoiceOver and external operator acceptance remain separate. See `hub/README.md` and the ACH-1 task concept plan.

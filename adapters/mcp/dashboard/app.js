@@ -232,7 +232,7 @@
     byId("project").textContent = `${snapshot.project.name} · Repo Live`;
     const counts = snapshot.counts || {};
     byId("counts").textContent = `${counts.active_sessions ?? `≥${counts.known_active_sessions ?? "?"} (Coverage unvollständig)`} aktive Sessions · ${counts.active_tasks ?? "?"} Tasks · ${counts.attention_sessions ?? "?"} Attention`;
-    byId("error").textContent = Object.entries(snapshot.sources || {}).filter(([, source]) => source.state !== "fresh")
+    byId("error").textContent = Object.entries(snapshot.sources || {}).filter(([, source]) => source.state !== "fresh" && source.state !== "disabled")
       .map(([name, source]) => `${name}: ${source.state} (${source.error ?? "Datenalter"})`).join(" · ");
     renderFacts();
     const keys = new Set();
@@ -298,12 +298,14 @@
     const parts = ["sessions", "board", "discovery", "activity"].map(name => {
       const source = snapshot.sources[name];
       if (!source) return null;
+      if (source.state === "disabled") return `${name}: Journal deaktiviert`;
       const seconds = source.observed_at ? Math.max(0, Math.round((Date.now() - Date.parse(source.observed_at)) / 1000)) : null;
       return `${name}: ${seconds === null ? "unbekannt" : `${seconds} s`} (${source.state})`;
     }).filter(Boolean);
     byId("freshness").textContent = `${parts.join(" · ")} · Stand ${time(snapshot.generated_at)}`;
     const details = byId("source-details"); details.replaceChildren();
     for (const [name, source] of Object.entries(snapshot.sources || {})) details.append(node("p", "detail-line",
+      source.state === "disabled" ? `${name}: Journal deaktiviert` :
       `${name}: ${source.observed_at ?? "unbekannt"} · ${source.state} · ${source.complete ? "vollständig" : "Coverage unvollständig"}${source.error ? ` · ${source.error}` : ""}`));
   }
 

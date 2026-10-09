@@ -160,7 +160,11 @@ export class McpHttpServer {
             process: "up",
             listener: "bound",
             backend_connectivity: backend,
-            events_channel: this.gateway.handleMcpEventMethod ? "enabled" : "disabled",
+            events_channel: this.runtime.activityJournalEnabled === false ? "disabled" : this.gateway.handleMcpEventMethod ? "enabled" : "disabled",
+            activity_journal: this.gateway.activityJournalStatus?.() ?? {
+              enabled: this.runtime.activityJournalEnabled !== false,
+              state: this.runtime.activityJournalEnabled === false ? "disabled" : "unavailable",
+            },
             last_tool_success: roundtrips.last_success,
             last_tool_error: roundtrips.last_error,
           },
@@ -342,8 +346,17 @@ export class McpHttpServer {
       writeJson(response, 200, { jsonrpc: "2.0", id, result: {
         resultType: "complete",
         supportedVersions: ["2026-07-28"],
-        capabilities: { tools: {}, resources: {}, events: {} },
+        capabilities: { tools: {}, resources: {}, ...(this.runtime.activityJournalEnabled === false ? {} : { events: {} }) },
       } });
+      return;
+    }
+    if (this.runtime.activityJournalEnabled === false) {
+      if (method === "events/list") {
+        writeJson(response, 200, { jsonrpc: "2.0", id, result: { events: [] } });
+      } else {
+        writeJson(response, 200, { jsonrpc: "2.0", id, error: { code: -32014,
+          message: "Activity journal is disabled for this session.", data: { code: "ACTIVITY_DISABLED" } } });
+      }
       return;
     }
     if (!this.gateway.handleMcpEventMethod) {
@@ -356,6 +369,11 @@ export class McpHttpServer {
     } catch (error) {
       if (error instanceof Error && "code" in error) {
         const code = String((error as { code: unknown }).code);
+        if (code === "ACTIVITY_DISABLED" || code === "ACTIVITY_UNAVAILABLE") {
+          writeJson(response, 200, { jsonrpc: "2.0", id, error: { code: -32014,
+            message: code === "ACTIVITY_DISABLED" ? "Activity journal is disabled." : "Activity journal is unavailable.", data: { code } } });
+          return;
+        }
         if (code === "INVALID_ARGUMENT") {
           writeJson(response, 200, { jsonrpc: "2.0", id, error: { code: -32602, message: error.message } });
           return;

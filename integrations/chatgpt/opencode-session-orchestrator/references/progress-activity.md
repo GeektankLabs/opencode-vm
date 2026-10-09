@@ -4,6 +4,14 @@ Use these capabilities only when the selected connector actually exposes them. D
 
 ## Which question is being answered?
 
+First apply the [journal-mode branch](../SKILL.md#journal-mode-before-queueevent-workflows).
+With `activity_journal.state:disabled` use bounded exact-receipt status/progress
+and result/history/content reads; no Activity/Attention/ACK or event subscription
+exists. With `state:unavailable` preserve the enabled-journal fault and reconcile
+working backend reads, never blindly retry work. Repo Live freshness of a file
+read is not writer-health evidence. Missing journal capabilities do not remove
+native history or the separate Task Management Journal.
+
 - **What is this session doing?** Prefer a compact tool-progress snapshot.
 - **Has this exact task finished?** Use correlated task status/result search with the submitted user ID.
 - **What is newly ready for the operator across sessions?** Prefer `get_project_attention` and its prepared queue when exposed; use the activity journal for raw event history/reconciliation.

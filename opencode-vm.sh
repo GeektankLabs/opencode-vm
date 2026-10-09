@@ -34,7 +34,7 @@ OPENLIVE_PREVIOUS_COMMAND="$OPENLIVE_DIR/previous-command"
 OPENLIVE_AUTH_MARKER="__opencode_vm_openlive__"
 OPENLIVE_LOCK_PATH=""
 OPENLIVE_ADAPTER_VERSION="0.1.7"
-OPENLIVE_ADAPTER_TAG="v0.7.22"
+OPENLIVE_ADAPTER_TAG="v0.7.23"
 OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.7.tar"
 OPENLIVE_ADAPTER_SHA256="39a50c5127b0a577b54e4790b5c3c1f463b35a52b42c4343aa639dcea53bad47"
 OPENLIVE_ACP_SDK_VERSION="1.2.1"
@@ -44,15 +44,15 @@ OPENLIVE_MANAGER_DESCRIPTION="Read-only OpenLive voice session manager"
 OPENLIVE_MANAGER_PROMPT="You manage an OpenLive voice call. The voice_sessions tool is available and you must call it before listing, inspecting, summarizing, checking, attaching to, or creating project sessions. Never claim session details without a successful tool result. Ask for clarification if a requested session is ambiguous. Create a new work session only when the user explicitly asks for one. Apart from that explicit create action, you are read-only: do not edit files, run shell commands, create tasks, or mutate sessions. Keep responses brief and conversational: one or two plain sentences without Markdown, paths, URLs, code, or stray symbols. When attachment or creation succeeds, tell the user the next voice prompt will continue in that session."
 MCP_CONNECTOR_DIR="$SHARE_ROOT/mcp-connector"
 MCP_ADAPTER_CACHE_ROOT="$MCP_CONNECTOR_DIR/adapters"
-MCP_ADAPTER_VERSION="0.1.34"
-MCP_ADAPTER_TAG="v0.7.22"
-MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.34.tar"
-MCP_ADAPTER_SHA256="2e09e5d8564b73d96fbfd810b54ab30d9e83851961bc816bcaaa94a139a66a05"
+MCP_ADAPTER_VERSION="0.1.35"
+MCP_ADAPTER_TAG="v0.7.23"
+MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.35.tar"
+MCP_ADAPTER_SHA256="b8841c547a76ff14609cc52cb330b2b00ea2e9ce79ad50b5c77ecdc349aa5161"
 MCP_SDK_VERSION="1.30.1"
 MCP_OPENCODE_SDK_VERSION="1.18.21"
 MCP_TESTED_PROTOCOL_VERSION="2025-11-25"
 MCP_TUNNEL_DIR="$SHARE_ROOT/mcp-tunnel/openai"
-HUB_ASSET_TAG="v0.7.22"
+HUB_ASSET_TAG="v0.7.23"
 HUB_ASSET_FILENAME="opencode-vm-hub-1.tar"
 HUB_ASSET_SHA256="7842dc3167c22eac33ed8c2f1d2a96d60938f5694e079690ca822304ebd45be0"
 
@@ -286,7 +286,7 @@ TASKBOARD_ARM64_SHA256="3749fb985f544fdb6788ba1dff69761e599ff82b3fe86d39ca54307c
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.7.22"
+OCVM_VERSION="0.7.23"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -484,6 +484,7 @@ parse_web_flags() {
   SESSION_A2A="${OCVM_A2A:-1}"
   SESSION_MCP_MODE=""
   SESSION_MCP_PORT=""
+  SESSION_JOURNAL_MODE=""
   SESSION_HUB_MODE=""
   SESSION_TASKBOARD_MODE=""
   SESSION_EDITOR_MODE=""
@@ -506,6 +507,7 @@ parse_web_flags() {
       --require-a2a) SESSION_REQUIRE_A2A=1 ;;
       --no-a2a) SESSION_A2A=0 ;;
       --mcp) SESSION_MCP_MODE="enable"; _saw_mcp=1 ;;
+      --journal) SESSION_JOURNAL_MODE="enable" ;;
       --mcp-port) shift; SESSION_MCP_PORT="${1:?Missing MCP port value}"; _saw_mcp_port=1 ;;
       --mcp-port=*) SESSION_MCP_PORT="${1#*=}"; _saw_mcp_port=1 ;;
       --no-mcp) SESSION_MCP_MODE="disable"; _saw_no_mcp=1 ;;
@@ -558,6 +560,10 @@ parse_web_flags() {
     exit 2
   fi
   [[ -z "${_saw_mcp_port:-}" ]] || SESSION_MCP_MODE="enable"
+  if [[ "$SESSION_JOURNAL_MODE" == enable && "$SESSION_MCP_MODE" == disable ]]; then
+    echo "--journal requires MCP; it cannot be combined with --no-mcp." >&2
+    exit 2
+  fi
   [[ -z "${SESSION_MCP_PORT:-}" ]] || validate_mcp_port "$SESSION_MCP_PORT"
 
   # Host environment as a fallback source of the secret, so it never has to
@@ -574,6 +580,7 @@ parse_web_flags() {
 }
 
 parse_attach_flags() {
+  SESSION_JOURNAL_MODE=""
   SESSION_LAUNCHER_ENABLED=1
   SESSION_HUB_MODE=""
   SESSION_TASKBOARD_MODE=""
@@ -604,6 +611,7 @@ parse_start_flags() {
   KEEP_HISTORY=0
   ON_EXISTING=""   # "", "reconnect", "fresh", "cancel"
   SESSION_MCP_MODE=""
+  SESSION_JOURNAL_MODE=""
   while [[ "$#" -gt 0 ]]; do
     case "$1" in
       --keep-history) KEEP_HISTORY=1 ;;
@@ -611,10 +619,33 @@ parse_start_flags() {
       --fresh) ON_EXISTING="fresh" ;;
       --cancel-if-exists) ON_EXISTING="cancel" ;;
       --no-mcp) SESSION_MCP_MODE="disable" ;;
+      --journal) SESSION_JOURNAL_MODE="enable" ;;
       *) echo "Unknown option: $1" >&2; exit 2 ;;
     esac
     shift
   done
+  if [[ "$SESSION_JOURNAL_MODE" == enable && "$SESSION_MCP_MODE" == disable ]]; then
+    echo "--journal requires MCP; it cannot be combined with --no-mcp." >&2
+    exit 2
+  fi
+}
+
+# Fresh sessions opt in explicitly; attach retains even legacy enabled sessions.
+# A request to change an existing mode is rejected before lifecycle takeover.
+session_journal_enabled() {
+  local operation="$1" stored="${2:-}" requested="${SESSION_JOURNAL_MODE:-}"
+  if [[ "$operation" == fresh ]]; then
+    if [[ "$requested" == enable ]]; then printf '1\n'; else printf '0\n'; fi
+    return 0
+  fi
+  [[ "$operation" == attach ]] || return 1
+  [[ -n "$stored" ]] || stored=1
+  case "$stored" in 0|1) : ;; *) echo "[journal] Invalid stored journal mode; session preserved." >&2; return 1 ;; esac
+  if [[ "$requested" == enable && "$stored" != 1 ]]; then
+    echo "[journal] This session is journal-free. Use --journal on a separately authorized fresh start; attach retains its mode." >&2
+    return 1
+  fi
+  printf '%s\n' "$stored"
 }
 
 get_host_ip() {
@@ -4785,7 +4816,7 @@ _vmcfg_offer_stop_and_resize() {
     return 1
   fi
   unset SESS_NAME SESS_PROJ SESS_CONTROLLER SESS_AUTH_GENERATION SESS_MODE SESS_PORT SESS_KEEP_HISTORY SESS_TLS CFG_HASH_AT_START
-  unset SESS_MCP_ENABLED SESS_MCP_PORT SESS_EDITOR_ENABLED SESS_EDITOR_DISABLED
+  unset SESS_MCP_ENABLED SESS_MCP_PORT SESS_EDITOR_ENABLED SESS_EDITOR_DISABLED SESS_JOURNAL_ENABLED
   # shellcheck disable=SC1090
   if ! source "$senv"; then
     lifecycle_lock_release
@@ -7891,7 +7922,7 @@ cleanup_sessions() {
         continue
       fi
       if [[ ! -f "$senv" ]]; then lifecycle_lock_release; continue; fi
-      unset SESS_MCP_ENABLED SESS_MCP_PORT SESS_EDITOR_ENABLED SESS_EDITOR_DISABLED
+      unset SESS_MCP_ENABLED SESS_MCP_PORT SESS_EDITOR_ENABLED SESS_EDITOR_DISABLED SESS_JOURNAL_ENABLED
       # shellcheck disable=SC1090
       source "$senv"
       if [[ "${SESS_PROJ:-}" != "$_cleanup_proj" ]]; then
@@ -13878,7 +13909,8 @@ start_dashboard() {
       --arg board "http://127.0.0.1:$((OC_PORT + 5))" --arg metadata "${OC_TASKBOARD_METADATA_FILE:-}" --arg manager "$SESS_SHARE/openlive/manager.json" \
       --arg version "$(opencode --version 2>/dev/null || true)" --arg cert "$OC_TLS_CERT" --arg key "$OC_TLS_KEY" \
       --argjson port "$port" --argjson web_port "$OC_PORT" --argjson board_port "$((OC_PORT + 5))" --argjson auth_enabled "$auth_enabled" \
-      '{schema:1,projectHash:$hash,generation:$generation,authEnabled:$auth_enabled,auth:(if $auth_enabled then {username:env.DASH_AUTH_USERNAME,password:env.DASH_AUTH_PASSWORD} else null end),cert:$cert,key:$key,navigation:{web_port:$web_port,board_port:$board_port,opencode_version:$version},runtime:{schema:1,project:$project,projectHash:$hash,projectName:$name,generation:$generation,backendUrl:$backend,opencodeVersion:$version,listenHost:"127.0.0.1",listenPort:$port,credentialFile:"",managerFile:$manager,taskboardUrl:$board,taskboardMetadataFile:$metadata}}' > "$tmp" ||
+      --argjson journal "${OC_JOURNAL_ENABLED:-1}" \
+      '{schema:1,projectHash:$hash,generation:$generation,authEnabled:$auth_enabled,auth:(if $auth_enabled then {username:env.DASH_AUTH_USERNAME,password:env.DASH_AUTH_PASSWORD} else null end),cert:$cert,key:$key,navigation:{web_port:$web_port,board_port:$board_port,opencode_version:$version},runtime:{schema:1,project:$project,projectHash:$hash,projectName:$name,generation:$generation,backendUrl:$backend,opencodeVersion:$version,listenHost:"127.0.0.1",listenPort:$port,credentialFile:"",managerFile:$manager,taskboardUrl:$board,taskboardMetadataFile:$metadata,activityJournalEnabled:($journal == 1)}}' > "$tmp" ||
       ! chmod 600 "$tmp" || ! mv -f "$tmp" "$dir/runtime-input.json"; then
     rm -f "$tmp"; dashboard_failure "Runtime input could not be published."; return 1
   fi
@@ -14645,13 +14677,19 @@ prepare_mcp_adapter() {
      --arg credentialFile "$SESS_SHARE/mcp/credential" --arg managerFile "$SESS_SHARE/openlive/manager.json" \
      --arg taskboardUrl "http://127.0.0.1:$((OC_PORT + 5))" --arg taskboardMetadataFile "${OC_TASKBOARD_METADATA_FILE:-}" \
      --argjson listenPort "$OC_MCP_PORT" \
+     --argjson journal "${OC_JOURNAL_ENABLED:-1}" \
      '{schema:1,project:$project,projectHash:$projectHash,projectName:$projectName,
        backendUrl:$backendUrl,generation:$generation,opencodeVersion:$opencodeVersion,
        listenHost:"127.0.0.1",listenPort:$listenPort,credentialFile:$credentialFile,
-       managerFile:$managerFile,taskboardUrl:$taskboardUrl,taskboardMetadataFile:$taskboardMetadataFile}' > "$tmp" || return 1
+        managerFile:$managerFile,taskboardUrl:$taskboardUrl,taskboardMetadataFile:$taskboardMetadataFile,activityJournalEnabled:($journal == 1)}' > "$tmp" || return 1
   chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
   mv -f "$tmp" "$runtime" || { rm -f "$tmp"; return 1; }
   export OCVM_MCP_RUNTIME="$runtime"
+  if [[ "${OC_JOURNAL_ENABLED:-1}" == 1 ]]; then
+    echo "[journal] Activity journal enabled for this session."
+  else
+    echo "[journal] Activity journal disabled; session/status/result tools remain available."
+  fi
 }
 
 stop_mcp_adapter() (
@@ -16419,9 +16457,12 @@ attach_session() {
 
   lifecycle_lock_acquire "$proj" || return 1
   if [[ ! -f "$senv" ]]; then lifecycle_lock_release; return 1; fi
+  unset SESS_JOURNAL_ENABLED
   # shellcheck disable=SC1090
   source "$senv"
   local old_auth_generation="${SESS_AUTH_GENERATION:-$SESS_NAME}"
+  local sess_journal_enabled
+  sess_journal_enabled="$(session_journal_enabled attach "${SESS_JOURNAL_ENABLED:-}")" || { lifecycle_lock_release; return 1; }
   local old_controller="${SESS_CONTROLLER:-$old_auth_generation}"
   local attach_was_stopped=0
   local attach_controller
@@ -16694,7 +16735,7 @@ attach_session() {
     return 1
   fi
   write_senv "$senv" "$SESS_NAME" "${SESS_PROJ:-$proj}" "${CFG_HASH_AT_START:-}" \
-    "$sess_mode" "$sess_port" "${SESS_KEEP_HISTORY:-0}" "$sess_tls" "$new_auth_generation" "$attach_controller" "$sess_mcp_enabled" "$sess_mcp_port" "$sess_editor_enabled" "$sess_editor_disabled" || {
+    "$sess_mode" "$sess_port" "${SESS_KEEP_HISTORY:-0}" "$sess_tls" "$new_auth_generation" "$attach_controller" "$sess_mcp_enabled" "$sess_mcp_port" "$sess_editor_enabled" "$sess_editor_disabled" "$sess_journal_enabled" || {
       _attach_transition_fail
       return 1
     }
@@ -16840,6 +16881,7 @@ attach_session() {
        OC_HUB_ENABLED="${23:-0}"
        OC_HUB_ASSET_DIR="${24:-}"
        OC_HUB_GENERATION="$OC_MCP_GENERATION"
+       OC_JOURNAL_ENABLED="${25:-1}"
 
     # Shared in-VM web library (materialized into the session share by
     # install_web_lib on the host, and mounted here at the same path). It owns
@@ -17137,7 +17179,7 @@ attach_session() {
 
     # Sync-back happens via the EXIT trap installed above (covers Ctrl+C as
     # well as normal exit).
-    ' "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$effective_base" "$host_lan_ip" "${OC_WEB_TUI:-false}" "$sess_tls" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up" "$(proj_hash "$proj")" "$OCVM_VERSION" "$sess_mcp_enabled" "$sess_mcp_port" "$attach_controller" "$sess_editor_enabled" "$proj/.opencode-vm/taskboard/taskboard.db" "$sess_taskboard_enabled" "${SESSION_LAUNCHER_ENABLED:-1}" "$(project_state_dir "$proj")/taskboard/taskboard.db" "$(test -f "$(project_state_dir "$proj")/taskboard/taskboard.db" && printf 1 || printf 0)" "$sess_hub_enabled" "$hub_asset_dir" || {
+    ' "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$effective_base" "$host_lan_ip" "${OC_WEB_TUI:-false}" "$sess_tls" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up" "$(proj_hash "$proj")" "$OCVM_VERSION" "$sess_mcp_enabled" "$sess_mcp_port" "$attach_controller" "$sess_editor_enabled" "$proj/.opencode-vm/taskboard/taskboard.db" "$sess_taskboard_enabled" "${SESSION_LAUNCHER_ENABLED:-1}" "$(project_state_dir "$proj")/taskboard/taskboard.db" "$(test -f "$(project_state_dir "$proj")/taskboard/taskboard.db" && printf 1 || printf 0)" "$sess_hub_enabled" "$hub_asset_dir" "$sess_journal_enabled" || {
     stop_mcp_host_watcher || true
     echo "[attach] Session command failed." >&2
     return 1
@@ -17490,8 +17532,8 @@ write_senv() {
   mcp_port="${12:-}"
   mkdir -p "$(dirname "$senv")"
   tmp="$(mktemp "${senv}.tmp.XXXXXX")" || return 1
-  printf 'SESS_NAME=%q\nSESS_PROJ=%q\nCFG_HASH_AT_START=%q\nSESS_MODE=%q\nSESS_PORT=%q\nSESS_KEEP_HISTORY=%q\nSESS_TLS=%q\nSESS_AUTH_GENERATION=%q\nSESS_CONTROLLER=%q\nSESS_MCP_ENABLED=%q\nSESS_MCP_PORT=%q\nSESS_EDITOR_ENABLED=%q\nSESS_EDITOR_DISABLED=%q\n' \
-    "$name" "$proj" "$cfg_hash" "$mode" "$port" "$keep_history" "$tls" "$auth_generation" "$controller" "$mcp_enabled" "$mcp_port" "${13:-0}" "${14:-0}" > "$tmp"
+  printf 'SESS_NAME=%q\nSESS_PROJ=%q\nCFG_HASH_AT_START=%q\nSESS_MODE=%q\nSESS_PORT=%q\nSESS_KEEP_HISTORY=%q\nSESS_TLS=%q\nSESS_AUTH_GENERATION=%q\nSESS_CONTROLLER=%q\nSESS_MCP_ENABLED=%q\nSESS_MCP_PORT=%q\nSESS_EDITOR_ENABLED=%q\nSESS_EDITOR_DISABLED=%q\nSESS_JOURNAL_ENABLED=%q\n' \
+    "$name" "$proj" "$cfg_hash" "$mode" "$port" "$keep_history" "$tls" "$auth_generation" "$controller" "$mcp_enabled" "$mcp_port" "${13:-0}" "${14:-0}" "${15:-${SESS_JOURNAL_ENABLED:-1}}" > "$tmp"
   chmod 600 "$tmp"
   mv -f "$tmp" "$senv"
 }
@@ -17573,7 +17615,8 @@ _update_senv_mode() {
   local senv="$1" new_mode="$2" new_port="$3"
   [[ -f "$senv" ]] || return 0
   # shellcheck disable=SC1090
-  ( source "$senv"
+  ( unset SESS_JOURNAL_ENABLED
+    source "$senv"
     if [[ "$new_mode" == web && "${SESS_MODE:-tui}" != web ]]; then
       SESS_MCP_ENABLED=1
     fi
@@ -17591,6 +17634,7 @@ _destroy_prev_session() {
   lifecycle_lock_acquire "$proj" || return 1
   if [[ ! -f "$senv" ]]; then lifecycle_lock_release; return 0; fi
 
+  unset SESS_JOURNAL_ENABLED
   # shellcheck disable=SC1090
   source "$senv"
   local old_sess="$SESS_NAME"
@@ -17958,6 +18002,11 @@ apply_openai_header_timeout_default() {
 start_session() {
   proj="$(pwd)"
   SESSION_MODE="$(mcp_session_mode "$SESSION_MODE" "$proj")" || return 1
+  if [[ "${SESSION_JOURNAL_MODE:-}" == enable &&
+        ( "${SESSION_MCP_MODE:-}" == disable || ( "$SESSION_MODE" != web && "$SESSION_MODE" != tui-mcp ) ) ]]; then
+    echo "[journal] --journal requires web MCP or a configured terminal MCP connection; existing sessions are preserved." >&2
+    return 1
+  fi
   if [[ "$SESSION_MODE" == tui-mcp ]]; then SESSION_PORT="${SESSION_PORT:-$DEFAULT_OC_PORT}"; fi
   local trust_rc
   if vscode_trust_preflight "$proj"; then
@@ -18022,6 +18071,8 @@ start_session() {
   sess="oc-$(date +%Y%m%d-%H%M%S)"
   local controller_id="${sess}-controller-$$"
   local effective_mcp_enabled=0 effective_mcp_port=""
+  local effective_journal_enabled
+  effective_journal_enabled="$(session_journal_enabled fresh)" || return 1
   local effective_editor_disabled=0 effective_editor_enabled
   local effective_taskboard_enabled=0
   local effective_hub_enabled=0 hub_asset_dir=""
@@ -18041,6 +18092,11 @@ start_session() {
     echo "[mcp] End state: disabled — suppressed by --no-mcp for this invocation."
   else
     echo "[mcp] End state: disabled — no server-backed MCP mode or OpenAI assignment for this session."
+  fi
+
+  if [[ "$effective_journal_enabled" == 1 && "$effective_mcp_enabled" != 1 ]]; then
+    echo "[journal] --journal requires web MCP or a configured terminal MCP connection." >&2
+    return 1
   fi
 
   if ! base_exists; then
@@ -18405,7 +18461,7 @@ start_session() {
   echo "[run] Clone complete, lock released $(_ts)"
 
   # Track session
-  write_senv "$senv" "$sess" "$proj" "$cfg_hash" "$SESSION_MODE" "${SESSION_PORT:-}" "${KEEP_HISTORY:-0}" "${SESSION_TLS:-0}" "$sess" "$controller_id" "$effective_mcp_enabled" "$effective_mcp_port" "$effective_editor_enabled" "$effective_editor_disabled"
+  write_senv "$senv" "$sess" "$proj" "$cfg_hash" "$SESSION_MODE" "${SESSION_PORT:-}" "${KEEP_HISTORY:-0}" "${SESSION_TLS:-0}" "$sess" "$controller_id" "$effective_mcp_enabled" "$effective_mcp_port" "$effective_editor_enabled" "$effective_editor_disabled" "$effective_journal_enabled"
 
   cleanup() {
     trap - EXIT HUP TERM
@@ -18818,6 +18874,7 @@ start_session() {
        OC_HUB_ENABLED="${23:-0}"
        OC_HUB_ASSET_DIR="${24:-}"
        OC_HUB_GENERATION="$OC_MCP_GENERATION"
+       OC_JOURNAL_ENABLED="${25:-1}"
 
       # Shared in-VM web library (materialized into the session share by
     # install_web_lib on the host, and mounted here at the same path). It owns
@@ -19202,7 +19259,7 @@ EOF
 
     # Sync back happens via the EXIT trap installed above (covers both clean
     # exit and Ctrl+C-driven termination of the web server).
-    ' "$proj" "$sess_share" "$SESSION_MODE" "$effective_base" "${OC_WEB_TUI:-false}" "$host_lan_ip" "${SESSION_TLS:-0}" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up" "$(proj_hash "$proj")" "$OCVM_VERSION" "$effective_mcp_enabled" "${effective_mcp_port:-$DEFAULT_MCP_PORT}" "$controller_id" "$effective_editor_enabled" "$proj/.opencode-vm/taskboard/taskboard.db" "$effective_taskboard_enabled" "${SESSION_LAUNCHER_ENABLED:-1}" "$proj_state/taskboard/taskboard.db" "$(test -f "$proj_state/taskboard/taskboard.db" && printf 1 || printf 0)" "$effective_hub_enabled" "$hub_asset_dir"; then
+    ' "$proj" "$sess_share" "$SESSION_MODE" "$effective_base" "${OC_WEB_TUI:-false}" "$host_lan_ip" "${SESSION_TLS:-0}" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up" "$(proj_hash "$proj")" "$OCVM_VERSION" "$effective_mcp_enabled" "${effective_mcp_port:-$DEFAULT_MCP_PORT}" "$controller_id" "$effective_editor_enabled" "$proj/.opencode-vm/taskboard/taskboard.db" "$effective_taskboard_enabled" "${SESSION_LAUNCHER_ENABLED:-1}" "$proj_state/taskboard/taskboard.db" "$(test -f "$proj_state/taskboard/taskboard.db" && printf 1 || printf 0)" "$effective_hub_enabled" "$hub_asset_dir" "$effective_journal_enabled"; then
     if ! stop_mcp_host_watcher; then
       echo "[mcp] Host readiness did not complete successfully; session failed closed." >&2
       return 1
@@ -19515,7 +19572,7 @@ opencode-vm v$OCVM_VERSION
 Usage:
   opencode-vm --version                    # print the current version
   opencode-vm install                      # install script to ~/bin and configure PATH
-  opencode-vm start [--no-mcp] [--keep-history] [--reconnect|--fresh|--cancel-if-exists]
+  opencode-vm start [--no-mcp|--journal] [--keep-history] [--reconnect|--fresh|--cancel-if-exists]
                                            # start a session VM in current directory
                                            # ('run' is an alias for 'start')
                                            # Configured OpenAI MCP starts automatically;
@@ -19533,7 +19590,7 @@ Usage:
                                            # --reconnect/--fresh/--cancel-if-exists:
                                            #   non-interactive override of the prompt
    opencode-vm web [--port PORT] [--password PW|--no-auth] [--no-tls] [--tui]
-                    [--no-a2a|--require-a2a] [--mcp-port PORT|--no-mcp]
+                     [--no-a2a|--require-a2a] [--mcp-port PORT|--no-mcp] [--journal]
                     [--no-hub] [--no-taskboard]
                    [--no-editor|--editor] [--no-launcher|--launcher]
                   [--keep-history] [--reconnect|--fresh|--cancel-if-exists]
@@ -19577,6 +19634,7 @@ Usage:
                                             #   only after authenticated host readiness passes.
                                              # --no-mcp: suppress the connector and OpenAI tunnel
                                              #   for this run only; the next normal start resumes them.
+                                             # --journal: opt in to Activity/Attention/Events (fresh sessions default off)
                                             # This differs from 'opencode-vm mcps', which manages
                                             #   tool servers consumed by OpenCode itself.
                                            # Session prompt/exit behavior matches 'start'.

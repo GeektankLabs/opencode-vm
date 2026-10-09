@@ -1553,6 +1553,51 @@ try {
       await mcpClient.callTool({ name: "list_sessions", arguments: {} }),
     ).sessions.some((item) => item.id === reportSession),
   );
+  // Journal-free startup must even tolerate an existing corrupt journal without
+  // opening, resetting or migrating it, while native work remains functional.
+  await mcpClient.close(); mcpClient = undefined;
+  await stopChild(mcp); mcp = undefined;
+  const journalPath = join(project, ".opencode-vm", "mcp", "activity.json");
+  const savedJournal = await readFile(journalPath);
+  const sentinel = Buffer.from("deliberately invalid preserved journal\n");
+  await writeFile(journalPath, sentinel);
+  const descriptor = JSON.parse(await readFile(runtimeFile, "utf8"));
+  await writeFile(runtimeFile, JSON.stringify({ ...descriptor, activityJournalEnabled: false }));
+  ({ child: mcp } = await startAdapter(runtimeFile, readyFile));
+  mcpClient = await connectMcp(mcpPort, token);
+  const noJournalTools = (await mcpClient.listTools()).tools.map(tool => tool.name);
+  for (const name of ["get_project_activity", "wait_for_project_activity", "get_project_attention",
+    "acknowledge_project_attention", "supersede_unresolved_submission"])
+    assert.ok(!noJournalTools.includes(name));
+  const disabledReply = await mcpClient.callTool({ name: "get_project_activity", arguments: {} });
+  assert.equal(disabledReply._meta["opencode-vm/error"].code, "ACTIVITY_DISABLED");
+  assert.equal(disabledReply.structuredContent.error_code, "ACTIVITY_DISABLED");
+  const freeSession = structured(await mcpClient.callTool({ name: "create_session", arguments: { title: "Journal-free smoke" } })).session_id;
+  const freeDetails = structured(await mcpClient.callTool({ name: "get_session", arguments: { session_id: freeSession } }));
+  assert.deepEqual(freeDetails.activity_journal, { enabled: false, state: "disabled" });
+  structured(await mcpClient.callTool({ name: "update_session_runtime", arguments: { session_id: freeSession,
+    provider_id: "integration", model_id: "other-model", variant: "high" } }));
+  const freeReceipt = structured(await mcpClient.callTool({ name: "send_message", arguments: {
+    session_id: freeSession, message: "journal-free report" } }));
+  assert.equal(freeReceipt.activity_cursor, undefined);
+  await waitForTask(freeSession, freeReceipt.message_id);
+  const freeResult = structured(await mcpClient.callTool({ name: "get_task_result", arguments: {
+    session_id: freeSession, submitted_message_id: freeReceipt.message_id } }));
+  assert.equal(freeResult.state, "completed");
+  const freeOverview = structured(await mcpClient.callTool({ name: "refresh_repo_live", arguments: {} }));
+  assert.equal(freeOverview.sources.activity.state, "disabled");
+  assert.equal(freeOverview.sources.activity.complete, false);
+  assert.deepEqual(await readFile(journalPath), sentinel, "journal-free work never touches the old journal");
+  await mcpClient.close(); mcpClient = undefined;
+  await stopChild(mcp); mcp = undefined;
+  await writeFile(journalPath, savedJournal);
+  await writeFile(runtimeFile, JSON.stringify({ ...descriptor, activityJournalEnabled: true }));
+  ({ child: mcp } = await startAdapter(runtimeFile, readyFile));
+  mcpClient = await connectMcp(mcpPort, token);
+  assert.ok((await mcpClient.listTools()).tools.some(tool => tool.name === "get_project_activity"));
+  assert.equal(structured(await mcpClient.callTool({ name: "get_session", arguments: { session_id: freeSession } }))
+    .activity_journal.state, "ready");
+  process.stderr.write("[integration] journal-free native send/status/result/runtime and untouched corrupt journal; explicit re-enable verified\n");
   process.stdout.write("MCP real OpenCode integration passed.\n");
 } finally {
   if (previousManagedSocket === undefined) delete process.env.OCVM_MANAGED_POLICY_SOCKET;

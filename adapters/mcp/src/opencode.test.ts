@@ -437,6 +437,51 @@ function progressPart(
   };
 }
 
+test("explicit journal-free mode avoids journal state and preserves reads, writes and admission checks", async t => {
+  const state = baseState();
+  state.messages = [stored("user_jfree", "request"), stored("assistant_jfree", "result", "user_jfree")];
+  let subscriptions = 0;
+  const gateway = new OpenCodeGateway({ ...runtime(), activityJournalEnabled: false }, {
+    ...fakeClient(state), event: { subscribe() { subscriptions++; throw new Error("must never subscribe"); } },
+  } as never);
+  t.after(() => gateway.close());
+  // If enableActivity touches disk, this deliberately invalid path fails.
+  await gateway.enableActivity("/proc/nonexistent-journal/activity.json");
+  gateway.startActivityCollection();
+  assert.equal(subscriptions, 0);
+  assert.deepEqual(gateway.activityJournalStatus(), { enabled: false, state: "disabled" });
+  assert.equal((await gateway.getSessionStatus("ses_work", "user_jfree")).state, "completed");
+  assert.equal((await gateway.getTaskResult("ses_work", "user_jfree")).state, "completed");
+  assert.equal((await gateway.getSessionProgress("ses_work")).source, "backend_snapshot");
+  assert.equal((await gateway.updateSessionRuntime("ses_work", { variant: "medium" })).state, "updated");
+  const sent = await gateway.sendMessage("ses_work", "journal-free request");
+  assert.equal(sent.state, "submitted");
+  assert.equal(sent.activity_cursor, undefined);
+  state.statuses.ses_work = { type: "busy" };
+  await assert.rejects(gateway.sendMessage("ses_work", "must be refused"), { code: "SESSION_BUSY" });
+  const followup = await gateway.sendFollowup("ses_work", "next turn");
+  assert.equal(followup.activity_cursor, undefined);
+  state.questions = [{ sessionID: "ses_work" }];
+  await assert.rejects(gateway.sendFollowup("ses_work", "must be refused"), { code: "INPUT_REQUIRED" });
+  for (const read of [() => gateway.getProjectActivity(), () => gateway.getProjectAttention(),
+    () => gateway.waitForProjectActivity({ after_cursor: "unused", timeout_ms: 1 }),
+    () => gateway.handleMcpEventMethod("events/list", {})])
+    await assert.rejects(read(), { code: "ACTIVITY_DISABLED" });
+});
+
+test("enabled journal failure is unavailable, never silently downgraded to journal-free", async t => {
+  const state = baseState(), gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  const path = await enableTestJournal(t, gateway);
+  assert.deepEqual(gateway.activityJournalStatus(), { enabled: true, state: "ready" });
+  await rm(path.substring(0, path.lastIndexOf("/")), { recursive: true, force: true });
+  state.statuses.ses_work = { type: "busy" };
+  await assert.rejects(gateway.captureActivity("ses_work"), { code: "ACTIVITY_UNAVAILABLE" });
+  assert.deepEqual(gateway.activityJournalStatus(), { enabled: true, state: "unavailable" });
+  state.messages = [stored("user_failedjournal", "request"), stored("assistant_failedjournal", "result", "user_failedjournal")];
+  await assert.rejects(gateway.getSessionStatus("ses_work", "user_failedjournal"), { code: "ACTIVITY_UNAVAILABLE" });
+  assert.equal((await gateway.getSessionDetails("ses_work")).activity, "busy");
+});
+
 test("Delivery B: progress exposes only observed tool metadata and exact task correlation", async () => {
   const state = baseState();
   const stepA = stored("stepA", "B_PRIVATE_TEXT", "userA", "tool-calls");

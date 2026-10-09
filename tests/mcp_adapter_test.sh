@@ -376,4 +376,5 @@ pass "start/attach/doctor name exactly one honest MCP end state with concrete ca
 ) || fail "provenance report did not classify invocations or name gaps"
 pass "provenance report classifies invocation and names concrete asset gaps read-only"
 
+bash "$ROOT/tests/activity_journal_test.sh"
 printf 'All MCP adapter lifecycle tests passed.\n'

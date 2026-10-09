@@ -24,7 +24,7 @@
       }
     },
     "orchestrator": {
-      "description": "Canonical OpenCode session orchestrator skill (integrations/chatgpt/opencode-session-orchestrator, revision r43) for local Monitor/management sessions",
+      "description": "Canonical OpenCode session orchestrator skill (integrations/chatgpt/opencode-session-orchestrator) for local Monitor/management sessions",
       "default_active": false,
       "resolver": "single_bundled",
       "skill_dir_name": "opencode-session-orchestrator",

@@ -44,6 +44,25 @@ test("ALL, multi-task IDs, indirect child provenance, unbound turns and runtime 
   assert.equal(f.collector.snapshot(true).snapshot_id,s.snapshot_id);
   assert.ok(!JSON.stringify(s).includes("description"));
 });
+test("activity disabled/unavailable never reads stale journal data or claims fresh coverage", async () => {
+  for (const state of ["disabled", "unavailable"] as const) {
+    const f = fixture(); let reads = 0;
+    f.reader.activityJournalStatus = () => ({ enabled: state !== "disabled", state });
+    f.reader.activity = async () => { reads++; throw new Error("must not read"); };
+    await f.collector.tick();
+    const s = f.collector.snapshot(false);
+    assert.ok("recent" in s);
+    assert.equal(reads, 0);
+    assert.equal(s.recent, null);
+    assert.equal(s.sources.activity?.state, state === "disabled" ? "disabled" : "degraded");
+    assert.equal(s.sources.activity?.complete, false);
+    assert.equal(s.sources.sessions?.state, "fresh");
+  }
+  const f = fixture();
+  f.reader.activity = async () => ({ recent: [], updated_at: new Date(1).toISOString() });
+  await f.collector.tick();
+  assert.equal(f.collector.snapshot(false).sources.activity?.state, "stale", "file read time is not writer freshness");
+});
 test("idle parent does not hide busy child; archived busy remains anomaly",async()=>{
   const f=fixture(); const parent=f.rows.get("ses_A")!;
   parent.backend_activity="idle"; parent.turns=[];

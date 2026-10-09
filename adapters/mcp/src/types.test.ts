@@ -42,6 +42,15 @@ test("runtime and credential loading require canonical private files", async () 
     );
 
     assert.equal((await loadRuntimeDescriptor(runtime)).project, project);
+    assert.equal((await loadRuntimeDescriptor(runtime)).activityJournalEnabled, true, "legacy descriptors retain enabled mode");
+    const descriptor = JSON.parse(await readFile(runtime, "utf8"));
+    for (const enabled of [false, true]) {
+      await writeFile(runtime, JSON.stringify({ ...descriptor, activityJournalEnabled: enabled }));
+      assert.equal((await loadRuntimeDescriptor(runtime)).activityJournalEnabled, enabled);
+    }
+    await writeFile(runtime, JSON.stringify({ ...descriptor, activityJournalEnabled: "false" }));
+    await assert.rejects(loadRuntimeDescriptor(runtime), /must be a boolean/u);
+    await writeFile(runtime, JSON.stringify(descriptor));
     assert.equal(await loadCredential(credential), "a".repeat(43));
 
     await chmod(credential, 0o644);

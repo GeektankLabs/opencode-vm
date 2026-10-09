@@ -70,6 +70,49 @@ test("classic 2025-11-25 path serves the Repo Live resource and the read-only to
   assert.equal((missing._meta?.["opencode-vm/error"] as { code?: string } | undefined)?.code, "SESSION_NOT_FOUND");
 });
 
+test("journal-free discovery hides exactly five tools and cached calls/events fail explicitly on both protocols", async t => {
+  const disabled = { ...runtime(), activityJournalEnabled: false };
+  const fake = gateway();
+  let eventCalls = 0;
+  fake.handleMcpEventMethod = async () => { eventCalls++; throw new Error("must not be called"); };
+  const adapter = new McpHttpServer(disabled, token, fake);
+  const port = await adapter.start(); t.after(() => adapter.close());
+  const legacy = new McpHttpServer(runtime(), token, gateway());
+  const legacyPort = await legacy.start(); t.after(() => legacy.close());
+  const post = async (method: string, params: Record<string, unknown> = {}, modern = true, target = port) => {
+    const response = await fetch(`http://127.0.0.1:${target}/mcp`, { method: "POST",
+      headers: { "content-type": "application/json", "X-OCVM-MCP-Token": token,
+        ...(modern ? { "Mcp-Method": method, "MCP-Protocol-Version": "2026-07-28",
+          ...(method === "tools/call" ? { "Mcp-Name": String(params.name) } : {}) } :
+          { "MCP-Protocol-Version": "2025-11-25", accept: "application/json, text/event-stream" }) },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params: { ...params,
+        ...(modern ? { _meta: { "io.modelcontextprotocol/protocolVersion": "2026-07-28" } } : {}) } }) });
+    return response.json() as Promise<any>;
+  };
+  const baseline = (await post("tools/list", {}, true, legacyPort)).result.tools.map((tool: any) => tool.name);
+  const removed = ["get_project_activity", "wait_for_project_activity", "get_project_attention",
+    "acknowledge_project_attention", "supersede_unresolved_submission"];
+  for (const modern of [false, true]) {
+    const names = (await post("tools/list", {}, modern)).result.tools.map((tool: any) => tool.name);
+    assert.deepEqual([...baseline.filter((name: string) => !names.includes(name))].sort(), [...removed].sort());
+    for (const name of removed) {
+      const result = (await post("tools/call", { name, arguments: {} }, modern)).result;
+      assert.equal(result.isError, true);
+      assert.equal(result._meta["opencode-vm/error"].code, "ACTIVITY_DISABLED");
+      assert.equal(result.structuredContent.error_code, "ACTIVITY_DISABLED");
+    }
+  }
+  assert.equal((await post("server/discover")).result.capabilities.events, undefined);
+  assert.deepEqual((await post("events/list")).result.events, []);
+  assert.equal((await post("events/subscribe")).error.data.code, "ACTIVITY_DISABLED");
+  assert.equal(eventCalls, 0);
+  const health = await (await fetch(`http://127.0.0.1:${port}/healthz`, {
+    headers: { "X-OCVM-MCP-Token": token } })).json() as any;
+  assert.equal(health.healthy, true);
+  assert.deepEqual(health.granularity.activity_journal, { enabled: false, state: "disabled" });
+  assert.equal(health.granularity.events_channel, "disabled");
+});
+
 test("2026-07-28 path dispatches resources and tools through the same handlers", async t => {
   const adapter = new McpHttpServer(runtime(), token, gateway());
   const port = await adapter.start();

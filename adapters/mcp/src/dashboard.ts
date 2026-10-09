@@ -2,6 +2,7 @@ import type { OpenCodeGateway } from "./opencode.js";
 import type { ProjectBoardService } from "./taskboard.js";
 import { READ_PAYLOAD_BYTES, jsonBytes } from "./content.js";
 import { isRecord } from "./types.js";
+import type { ActivityJournalCapability } from "./types.js";
 
 export type Inventory = Awaited<ReturnType<OpenCodeGateway["readDashboardInventory"]>>;
 export type Session = Awaited<ReturnType<OpenCodeGateway["readDashboardSession"]>>;
@@ -11,6 +12,7 @@ export type DashboardReader = {
   session(session: Inventory["sessions"][number]): Promise<Session>;
   board(): Promise<Tasks>;
   activity(ids: Set<string>): Promise<unknown>;
+  activityJournalStatus?(): ActivityJournalCapability;
 };
 
 /** Read-only projection surface shared by the browser dashboard and the MCP app.
@@ -26,7 +28,7 @@ export type UiService = {
   generation: string;
   adapterVersion?: string;
 };
-type Source = { observed_at: string | null; last_success_at: string | null; complete: boolean; error: string | null };
+type Source = { observed_at: string | null; last_success_at: string | null; complete: boolean; error: string | null; disabled?: boolean };
 const source = (): Source => ({ observed_at: null, last_success_at: null, complete: false, error: null });
 const operational = (s: Session) => s.backend_activity !== "idle" || s.pending_input.permissions + s.pending_input.questions > 0 || s.turns.some(t => t.active || t.state === "submitted");
 
@@ -122,11 +124,23 @@ export class DashboardCollector {
           title: item.title.slice(0,240), parent_session_id: item.parentID ?? null, archived: Boolean(item.time.archived) }));
         return !failed && offset >= items.length && result.length <= 200 && result.filter(operational).length <= 50;
       });
-      await this.read("activity", async () => {
-        const recent = await this.reader.activity(new Set(this.sessions.map(s => s.session_id)));
-        if (generation !== this.generation) return false;
-        this.recent = recent; return true;
-      });
+      const journal = this.reader.activityJournalStatus?.();
+      if (journal?.state === "disabled") {
+        this.recent = null;
+        this.sources.activity = { ...source(), disabled: true };
+      } else if (journal?.state === "unavailable") {
+        this.recent = null;
+        this.sources.activity = { ...this.sources.activity, complete: false, error: "ACTIVITY_UNAVAILABLE" };
+      } else {
+        await this.read("activity", async () => {
+          const recent = await this.reader.activity(new Set(this.sessions.map(s => s.session_id)));
+          if (generation !== this.generation) return false;
+          this.recent = recent; return true;
+        });
+        // A successful file read is not evidence that the writer is current.
+        if (!this.sources.activity.error && isRecord(this.recent) && typeof this.recent.updated_at === "string")
+          this.sources.activity.observed_at = this.recent.updated_at;
+      }
       await board;
       this.revision++;
     })().finally(() => { this.collecting = undefined; });
@@ -194,7 +208,7 @@ export class DashboardCollector {
       const age = value.observed_at ? Math.max(0, time - Date.parse(value.observed_at)) : null;
       const threshold = name === "board" || name === "discovery" ? 45000 : 15000;
       return [name, { ...value, age_ms: age, stale_after_ms: threshold,
-        state: value.error ? "degraded" : age === null ? "unknown" : age > threshold ? "stale" : "fresh" }];
+        state: value.disabled ? "disabled" : value.error ? "degraded" : age === null ? "unknown" : age > threshold ? "stale" : "fresh" }];
     }));
     const fresh = (name: string) => sources[name]?.state === "fresh" && sources[name]?.complete;
     const sessions = this.sessions.map(s => this.sessionRow(s,

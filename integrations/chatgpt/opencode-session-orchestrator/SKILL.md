@@ -6,7 +6,7 @@ license: MIT
 
 # OpenCode Session Orchestrator
 
-Release marker: **2026-10-08-r45**. This is the skill revision, not an MCP version.
+Release marker: **2026-10-09-r47**. This is the skill revision, not an MCP version.
 
 This is a client-side workflow skill. The user supplies a working compatible MCP connection, including when using Secure MCP Tunnel. The skill contains no tunnel, account, server alias or credentials and does not configure the connection.
 
@@ -40,6 +40,41 @@ Read references when their workflow is relevant:
 - Verified authorized task-Done follow-through and eligible last-open-linked-task session archive: [Task Done and archive](references/task-done-archive.md).
 
 ## Discover capabilities and respect scope
+
+### Journal mode before queue/event workflows
+
+Discover the current tool catalog and read `activity_journal` from a normal
+`list_sessions` or `get_session` response when that field exists. In opencode-vm,
+fresh sessions default journal-free; `--journal` opts in and attach retains the
+existing mode. This is an operator startup choice, not permission for the skill
+to change mode, restart or reinstall a connector.
+
+- `enabled:false, state:disabled`: intentional journal-free operation. Do not
+  call Activity/Attention/ACK/override tools or subscribe to Events, even from a
+  cached catalog. Observe known receipts with `get_session_status`,
+  `get_session_progress`, `get_task_result` and original message/content reads.
+  No activity cursor, persistent receipt resolution or automatic notification is
+  promised. Task Management Journal and Board capabilities are separate.
+- `enabled:true, state:ready`: use discovered queue/events capabilities under
+  their usual scope, cursor and presentation rules.
+- `enabled:true, state:unavailable` or `ACTIVITY_UNAVAILABLE`: report the fault
+  once and use working exact-session/backend reads where available. Do not
+  bypass journal guards or blindly retry a send/runtime update; reconcile its
+  original receipt and actual backend state first.
+- `ACTIVITY_DISABLED`: refresh discovery once, use the intentional journal-free
+  branch, and never treat it as invalid arguments. Missing mode metadata on a
+  legacy connector means capability discovery, not an invented mode or flag.
+
+The journal-free branch takes precedence over queue-only requirements in the
+references: during an authorized active wait/completion run, replace each queue
+round with one bounded exact-receipt status/progress round, then bounded result
+search/original reading when terminal, unknown or outside the status window.
+Retain existing deadlines, fair-channel ordering, error budgets, read coverage,
+Pause/Go and no-blind-retry rules. Without host wait/execution support use
+on-demand reads and a checkpoint; never a tight loop or a post-turn timer.
+Read/refresh of an old journal file (including Repo Live `fresh/complete`) is
+not proof of a working writer. Re-enabling never proves coverage of the disabled
+interval. Diagnosis logs and the Activity Journal are independent facilities.
 
 - Discover the selected connector's actual tool schemas before calling it. Rediscover once when the user reports a connection upgrade. Reuse schemas during the work segment; do not invent functions, parameters or a generic call wrapper.
 - Match capabilities rather than a server name. If multiple compatible connections exist, use the one established by the user's project/context; ask a short target question only when ambiguous. Do not pick the first similarly named session across unrelated connections.

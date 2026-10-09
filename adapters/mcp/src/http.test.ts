@@ -683,6 +683,7 @@ test("official MCP client discovers forty-one stateless HTTP tools and invokes s
     assert.ok("structuredContent" in result);
     assert.deepEqual(result.structuredContent, {
       project: { id: "hash", name: "project" },
+      activity_journal: { enabled: true, state: "unavailable" },
       sessions: [
         { id: "ses", title: "Work", created: 1, updated: 2, activity: "idle" },
       ],
@@ -1744,7 +1745,8 @@ test("healthz granularity is additive, connectivity-backed and never fabricates 
   assert.equal(health.adapterVersion, ADAPTER_VERSION);
   const granularity = health.granularity as Record<string, unknown>;
   assert.deepEqual(Object.keys(granularity).sort(),
-    ["backend_connectivity", "configuration", "events_channel", "last_tool_error", "last_tool_success", "listener", "process"]);
+    ["activity_journal", "backend_connectivity", "configuration", "events_channel", "last_tool_error", "last_tool_success", "listener", "process"]);
+  assert.deepEqual(granularity.activity_journal, { enabled: true, state: "unavailable" });
   assert.equal(granularity.configuration, "validated");
   assert.equal(granularity.process, "up");
   assert.equal(granularity.listener, "bound");

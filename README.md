@@ -292,7 +292,17 @@ OpenCode Web UI browser tabs use the project directory name as their title (for 
 opencode-vm web
 opencode-vm web --mcp-port 40960
 opencode-vm web --no-mcp
+opencode-vm web --journal                # opt in to Activity/Attention/Events
 ```
+
+Fresh sessions are **journal-free by default** (script 0.7.23 / adapter 0.1.35).
+Use `--journal` on web or a configured MCP-capable terminal `start` to enable
+the Activity Journal for that session. Attach retains the mode, including older
+enabled sessions; a new fresh start without the flag defaults off. The disabled
+mode retains native send/status/result/runtime functionality and Board/Task
+Management Journal reads, but omits the five journal-only tools and MCP Events.
+`list_sessions`/`get_session` report `activity_journal` as disabled/ready/unavailable;
+intentional disabled operation is not an outage. See the [mode contract](docs/MCP-INTERFACE.md#activity-journal-default-off-explicit-session-opt-in).
 
 New sessions select a free loopback port from `40960..41059`; the first available endpoint is `http://127.0.0.1:40960/mcp`. Explicit ports and reconnects keep their selected port. The adapter uses stateless Streamable HTTP and exposes thirty-nine core session/attention tools, including `get_project_attention`, revision-bound `acknowledge_project_attention`, native busy-session `send_session_followup`, verified `abort_session_turn`, the project monitor management surface (scheduler/work/run states separate) and the final-fallback policy write `set_project_model_policy_fallback` (shared project lock, revision CAS, exact-bytes backup), plus nineteen optional board-neutral tools. MCP Events discovery and `events/list`, `events/subscribe`, `events/unsubscribe` provide signed HTTPS webhook delivery for prefetched worker outcomes; delivery is separate from same-context Work continuation and audible Voice acceptance. Project/task lookup (`list_board_projects`, `get_board_project`, `list_project_tasks`, `get_project_task`) is read-only. After a concrete user confirmation, `create_board_project` can establish the default `Inbox` (`INBOX`) or another workstream; `create_project_task` never creates a Project implicitly. `reclassify_project_task` moves a confirmed default/Inbox task to an existing Board Project while preserving its public task ID and links; `get_task_transfer_status` exposes incomplete or uncertain transfer requests. The existing `transfer_project_task` is reserved for the future global/local scope and still fails closed. Additional task tools update/move tickets, add sidecar comments and link sessions. `create_session` accepts an optional title and creates an empty work session using the project's default work agent/model; send its first prompt with `send_message`. `rename_session` updates OpenCode's native title for an idle session and preserves its ID and history. Archived sessions are not renameable. `archive_session` requires an explicit request, preserves history and verifies the archived timestamp; archived content can be read by known ID using `include_archived:true` on the stored-content tools. OpenCode permission requests and questions are handled in Web UI/TUI. See [MCP interface](docs/MCP-INTERFACE.md#optional-project-local-taskboard-tools-adapter-0118).
 

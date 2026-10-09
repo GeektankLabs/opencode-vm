@@ -4,6 +4,25 @@ Use this only when the selected connector actually exposes MCP Events and/or the
 
 ## Read and present prepared results
 
+### Journal-free observation branch
+
+Apply the [journal-mode branch](../SKILL.md#journal-mode-before-queueevent-workflows)
+before the queue/subscription protocols below. Disabled means intentional,
+healthy reduced operation, not a read-error retry episode. The operator enables
+the Activity Journal with `--journal` on a fresh start; the skill never enables
+it, restarts the VM or substitutes another connector. When disabled, replace a
+queue round with a bounded `get_session_status`/`get_session_progress` read for
+each known submitted message, then `get_task_result` and original content reads
+as required. For an overview with no known receipt, one bounded `list_sessions`
+read may locate exposed sessions; unknown history remains a coverage gap.
+
+Retain the same active-run budgets, standalone Voice deadline, best-effort
+cadence, fair selected-channel rounds and action/receipt deduplication. No host
+wait support means on-demand/checkpoint, not a polling process. No ACK or
+activity cursor is expected and no automatic notification, persisted override
+resolution or disabled-interval event coverage is claimed. A failed enabled
+journal (`ACTIVITY_UNAVAILABLE`) is not silently reclassified as disabled.
+
 For a semantic question about other work, a natural end-of-topic handoff, or a request such as "what else is ready?":
 
 1. Prefer `get_project_attention` before scanning sessions. It returns a bounded, already prefetched project view. Check lifecycle, class, source revision, evidence completeness, event age and `has_more`; do not call a truncated page complete.

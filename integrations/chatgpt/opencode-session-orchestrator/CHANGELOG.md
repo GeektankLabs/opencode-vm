@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-10-09-r47
+
+- Discover the connector's explicit disabled/ready/unavailable Activity-Journal state through ordinary session reads; fresh opencode-vm sessions default journal-free and `--journal` is an operator-only startup opt-in retained by attach.
+- In journal-free mode use bounded exact-receipt status/progress/result/content reads in place of queue rounds, preserving active-run limits, fairness, Pause/Go, read coverage and no-blind-retry behavior. No activity cursors, persistent resolution/override records, automatic notifications or fabricated retrospective coverage.
+- Treat ACTIVITY_DISABLED as intentional capability absence and ACTIVITY_UNAVAILABLE as an enabled journal fault, not invalid arguments or permission to change runtime infrastructure. Task Management Journal, Board, native OpenCode history and diagnosis logging remain distinct.
+- Revision r46 belongs to the separate unintegrated management-priming workstream; this hotfix advances the Main bundle directly from r45 to r47 without importing that workstream.
+
 ## 2026-10-08-r45
 
 - Add the additive per-profile fallback mode (policy schema 4) to error-fallback routing: each profile card may carry its own optional fallback runtime, and two independent switches (Degrading, Provider-Skip) govern the chain. `routing.regime` distinguishes `per_profile` from the unchanged `legacy_final_fallback`; the legacy global final stage stays stored and readable but is not part of the per-profile chain and is never silently appended. Unset switches mean "not activated" (published as `routing.strategies_effective`), never a hidden default.

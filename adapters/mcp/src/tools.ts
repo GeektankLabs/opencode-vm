@@ -705,18 +705,24 @@ const attentionReceiptInput = z.object({ event_id: z.string().min(1).max(256), s
   lifecycle: z.enum(["offered", "discussed"]) }).strict();
 const attentionReceiptOutput = z.object({ event_id: z.string(), source_revision: z.string(), lifecycle: z.enum(["new", "ready", "offered", "discussed", "superseded"]) }).strict();
 
+const journalCapabilitySchema = z.object({ enabled: z.boolean(), state: z.enum(["disabled", "ready", "unavailable"]) }).strict();
+const JOURNAL_TOOLS = new Set(["get_project_activity", "wait_for_project_activity", "get_project_attention",
+  "acknowledge_project_attention", "supersede_unresolved_submission"]);
+
 const listSessionsOutputSchema = z
   .object({
     project: projectSchema,
     sessions: z.array(summarySchema),
     next_cursor: z.string().optional(),
     truncated: z.boolean(),
+    activity_journal: journalCapabilitySchema.optional(),
   })
   .strict();
 
 const sessionDetailsOutputSchema = summarySchema
   .extend({
     archived_at: z.number().int().positive().optional(),
+    activity_journal: journalCapabilitySchema.optional(),
     agent: z.string().optional(),
     provider_id: z.string().optional(),
     model_id: z.string().optional(),
@@ -1172,6 +1178,10 @@ export function createMcpServer(
     name: "opencode-vm",
     version: ADAPTER_VERSION,
   });
+  const journalEnabled = runtime?.activityJournalEnabled !== false;
+  const journalCapability = () => gateway.activityJournalStatus?.() ?? {
+    enabled: journalEnabled, state: journalEnabled ? "unavailable" as const : "disabled" as const,
+  };
 
   const board =
     runtime?.taskboardUrl && runtime.taskboardMetadataFile
@@ -1547,7 +1557,7 @@ export function createMcpServer(
     }: z.output<typeof listSessionsInputSchema>) => {
       const result = await gateway.listSessions(limit, value);
       return success(
-        result,
+        { ...result, activity_journal: journalCapability() },
         `Found ${result.sessions.length} exposed session${result.sessions.length === 1 ? "" : "s"} for ${result.project.name}.`,
       );
     },
@@ -1561,7 +1571,7 @@ export function createMcpServer(
         session_id,
         include_archived,
       );
-      return success(result, `Session ${result.id} is ${result.activity}.`);
+      return success({ ...result, activity_journal: journalCapability() }, `Session ${result.id} is ${result.activity}.`);
     },
   );
   const getSessionStatusHandler = safeHandler(
@@ -2166,6 +2176,7 @@ export function createMcpServer(
       inputSchema: policyStrategiesInput, outputSchema: modelPolicyOutput, annotations: { ...writeAnnotations, openWorldHint: false } },
     setStrategiesHandler,
   );
+  if (journalEnabled) {
   server.registerTool(
     "get_project_activity",
     {
@@ -2201,6 +2212,7 @@ export function createMcpServer(
     inputSchema: attentionReceiptInput, outputSchema: attentionReceiptOutput,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   }, acknowledgeAttentionHandler);
+  }
 
   server.registerTool(
     "create_session",
@@ -2332,6 +2344,7 @@ export function createMcpServer(
     sendMessageHandler,
   );
 
+  if (journalEnabled) {
   server.registerTool(
     "supersede_unresolved_submission",
     {
@@ -2344,6 +2357,7 @@ export function createMcpServer(
     },
     supersedeSubmissionHandler,
   );
+  }
 
   server.registerTool(
     "send_session_followup",
@@ -2551,6 +2565,9 @@ export function createMcpServer(
     async (request, extra) => {
       const input = request.params.arguments ?? {};
       return traceToolCall(request.params.name, input, async () => {
+        if (!journalEnabled && JOURNAL_TOOLS.has(request.params.name))
+          return errorResult(new AdapterError("ACTIVITY_DISABLED",
+            "Activity journal is disabled for this session; opt in with --journal on a fresh start."));
         try {
         switch (request.params.name) {
           case "get_session_progress":
@@ -3150,6 +3167,8 @@ function errorResult(
   );
   return {
     isError: true,
+    ...(["ACTIVITY_DISABLED", "ACTIVITY_UNAVAILABLE"].includes(error.code)
+      ? { structuredContent: { error_code: error.code, message: error.message } } : {}),
     _meta: {
       "opencode-vm/error": {
         code: error.code,

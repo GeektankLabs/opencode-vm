@@ -2,7 +2,7 @@
 
 This document defines the incoming MCP interface exposed by `opencode-vm web` sessions (enabled by default since 0.5.61) and by terminal `start` sessions with a project-specific OpenAI MCP assignment (since 0.5.62). It describes the server side that external MCP clients use. It is separate from `opencode-vm mcps`, which configures MCP servers that OpenCode consumes as tools.
 
-The implemented adapter is version **0.1.33**, uses `@modelcontextprotocol/sdk` **1.30.1** and `@opencode-ai/sdk` **1.18.21**. The existing tool transport uses MCP **2025-11-25**; the additive authenticated Events discovery/webhook path implements the OpenAI MCP Events draft for **2026-07-28** without changing legacy tool negotiation. It uses stateless Streamable HTTP with JSON responses. The adapter does not perform semantic duplicate/task detection for normal conversation continuation. An old unresolved receipt remains available as per-request status, but does not block a new prompt when backend activity and pending input permit it. Only current backend activity, pending input, an in-flight MCP write, or an exact immediate retry of an uncertain transport request can reject `send_message`. See [admission diagnostics](../PLAN_MCP_ADMISSION.md).
+The implemented adapter is version **0.1.35**, uses `@modelcontextprotocol/sdk` **1.30.1** and `@opencode-ai/sdk` **1.18.21**. The existing tool transport uses MCP **2025-11-25**; the additive authenticated Events discovery/webhook path implements the OpenAI MCP Events draft for **2026-07-28** without changing legacy tool negotiation. It uses stateless Streamable HTTP with JSON responses. The adapter does not perform semantic duplicate/task detection for normal conversation continuation. An old unresolved receipt remains available as per-request status, but does not block a new prompt when backend activity and pending input permit it. Only current backend activity, pending input, an in-flight MCP write, or an exact immediate retry of an uncertain transport request can reject `send_message`. See [admission diagnostics](../PLAN_MCP_ADMISSION.md).
 
 ## 1. Runtime model
 
@@ -20,7 +20,47 @@ existing OpenCode server and sessions
 
 The adapter does not start a second OpenCode process, create an MCP manager session, or maintain a separate conversation database. Web UI, TUI, A2A, OpenLive, and MCP therefore observe the same OpenCode sessions and workspace. Adapter 0.1.2 adds a bounded persistent activity journal containing state/identifier metadata, separate from conversation history.
 
-Activity and prepared attention now share one project-persistent private journal at `.opencode-vm/mcp/activity.json`, migrated once from the previous session-share journal when no project journal exists. The attention projection stores compact result summaries and revision/ID evidence, not full conversation history. See [MCP Events and prepared attention](#mcp-events-and-prepared-attention).
+When opted in with `--journal`, Activity and prepared attention share one project-persistent private journal at `.opencode-vm/mcp/activity.json`, migrated once from the previous session-share journal when no project journal exists. The attention projection stores compact result summaries and revision/ID evidence, not full conversation history. See [MCP Events and prepared attention](#mcp-events-and-prepared-attention).
+
+### Activity Journal: default off, explicit session opt-in
+
+Since script 0.7.23 / adapter 0.1.35, **fresh sessions default journal-free**.
+`opencode-vm web --journal` or `opencode-vm start --journal` (with the project's
+configured terminal MCP connection) opts in for this session. A fresh session
+without the flag defaults off again; attach retains the recorded mode.
+`web --journal --reconnect` refuses a mode change before lifecycle takeover.
+Legacy records/descriptors with no mode field retain their former enabled
+behavior. Existing sessions are not automatically changed, and no base rebuild
+or additional VM package is required. `--journal` conflicts with `--no-mcp`.
+
+The schema-1 runtime descriptor adds optional boolean `activityJournalEnabled`;
+omission means legacy enabled, never a guessed new-session default. New session
+records add `SESS_JOURNAL_ENABLED=0|1`. The disabled branch never opens, creates,
+migrates or validates `.opencode-vm/mcp/activity.json` and does not start the
+Activity SSE/reconciliation/attention collectors. Existing journal bytes remain
+untouched; native conversation history and the separate Task Management Journal
+remain available. Diagnosis logging is independent.
+
+In disabled mode these five tools are omitted from both protocol catalogs:
+`get_project_activity`, `wait_for_project_activity`, `get_project_attention`,
+`acknowledge_project_attention`, `supersede_unresolved_submission`. Cached calls
+receive `ACTIVITY_DISABLED` in text, `_meta["opencode-vm/error"].code` and
+`structuredContent.error_code`, not `INVALID_ARGUMENT`. Events discovery does
+not advertise `events`; `events/list` is empty, subscribe/unsubscribe return
+Unsupported with `error.data.code=ACTIVITY_DISABLED` and make no callback.
+
+Ordinary `list_sessions`/`get_session` reads add `activity_journal:{enabled,state}`
+(`disabled`, `ready`, `unavailable`), also exposed in `/healthz.granularity`.
+An enabled journal that fails remains `unavailable`; it never silently falls
+back to journal-free writes. Journal-free status/result reads omit only the
+optional persistent `receipt_resolution`. Sends/follow-ups still return native
+message IDs but no activity cursor; runtime switches retain backend readback,
+Busy/Pending-input checks and no-blind-retry semantics.
+
+Repo Live shows Activity `state:disabled, complete:false` without reading an old
+journal. An enabled failed writer is degraded in the MCP app; file-based
+dashboard freshness uses file update time, not successful-read time. Neither
+re-enabling nor file readability proves complete coverage of a disabled gap.
 
 The endpoint is enabled by default for new web sessions:
 

@@ -53,6 +53,8 @@ async function main() {
   const collector = new DashboardCollector({ id: runtime.projectHash, name: runtime.projectName }, runtime.generation, {
     inventory: () => gateway.readDashboardInventory(), session: session => gateway.readDashboardSession(session),
     board: () => { if (!board) throw new Error("Board unavailable"); return board.readDashboardTasks(); },
+    activityJournalStatus: () => ({ enabled: runtime.activityJournalEnabled !== false,
+      state: runtime.activityJournalEnabled === false ? "disabled" : "ready" }),
     activity: ids => ActivityJournal.readDashboard(`${runtime.project}/.opencode-vm/mcp/activity.json`, runtime.projectHash, ids),
   });
   const assets = resolve(dirname(fileURLToPath(import.meta.url)), "../dashboard");

@@ -29,8 +29,10 @@ export async function main(): Promise<void> {
   const gateway = new OpenCodeGateway(runtime);
   await gateway.compatibilityCheck();
   const legacyJournal = join(dirname(runtimePath), "activity.json");
-  const activityPath = await projectActivityJournalPath(runtime.project);
-  await gateway.enableActivity(activityPath, legacyJournal);
+  // Disabled sessions must not open, migrate, create or validate journal state.
+  const activityPath = runtime.activityJournalEnabled === false
+    ? undefined : await projectActivityJournalPath(runtime.project);
+  if (activityPath) await gateway.enableActivity(activityPath, legacyJournal);
 
   // One lazy Repo Live collector behind the shared read-only projection; it
   // collects on demand (first MCP app read, then at most every 2s) so unused
@@ -42,7 +44,8 @@ export async function main(): Promise<void> {
     inventory: () => gateway.readDashboardInventory(),
     session: session => gateway.readDashboardSession(session),
     board: () => { if (!board) throw new Error("Board unavailable"); return board.readDashboardTasks(); },
-    activity: ids => ActivityJournal.readDashboard(activityPath, runtime.projectHash, ids),
+    activityJournalStatus: () => gateway.activityJournalStatus(),
+    activity: ids => ActivityJournal.readDashboard(activityPath!, runtime.projectHash, ids),
   });
   const service: UiService = { kind: "mcp-app", generation: runtime.generation, adapterVersion: ADAPTER_VERSION };
   gateway.dashboardControl = createDashboardControl(collector, service);

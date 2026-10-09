@@ -76,6 +76,8 @@ export class ActivityJournal {
   private closed = false;
   private readonly waiters = new Set<() => void>();
 
+  get available(): boolean { return !this.failed && !this.closed; }
+
   private constructor(
     private readonly path: string,
     private store: Store,
@@ -91,7 +93,7 @@ export class ActivityJournal {
       if (!info.isFile() || info.uid !== process.getuid?.() || (info.mode & 0o777) !== 0o600 || info.size > 32 * 1024 * 1024) throw new Error("Unsafe activity journal");
       const store = JSON.parse(await file.readFile("utf8")) as Store;
       if (!validStore(store, project) || !validEvents(store)) throw new Error("Invalid activity journal");
-      return { epoch: store.epoch, recent: store.events.filter(event => sessions.has(event.session_id ?? ""))
+      return { epoch: store.epoch, updated_at: new Date(info.mtimeMs).toISOString(), recent: store.events.filter(event => sessions.has(event.session_id ?? ""))
         .slice(-10).map(event => ({ event_id: event.event_id, session_id: event.session_id,
           message_id: event.message_id ?? null, type: event.type, timestamp: event.timestamp })) };
     } finally { await file.close(); }

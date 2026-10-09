@@ -4,6 +4,12 @@ This is a declared **decision policy**, not broader execution permission, a sche
 
 ## Resolve the effective contract
 
+The [journal-mode branch](../SKILL.md#journal-mode-before-queueevent-workflows)
+takes precedence over queue-specific requirements: intentional journal-free
+operation uses bounded exact-receipt reads during an authorized active run.
+Queue absence alone is not a completion blocker when those reads and real host
+wait/execution support are available. No branch creates post-turn monitoring.
+
 Classify the actual requested outcome, context and established scope, **not a literal keyword match**. Examples illustrate intent, not trigger phrases. Resolve these rules **before admission**, and revalidate current contract/overrides at continuation:
 
 | Intent or constraint | Effective behavior |

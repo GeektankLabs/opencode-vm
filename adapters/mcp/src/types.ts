@@ -1,7 +1,7 @@
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { dirname, isAbsolute } from "node:path";
 
-export const ADAPTER_VERSION = "0.1.34";
+export const ADAPTER_VERSION = "0.1.35";
 export const MCP_TRANSPORT = "streamable-http-stateless";
 
 export type RuntimeDescriptor = {
@@ -18,6 +18,13 @@ export type RuntimeDescriptor = {
   managerFile?: string;
   taskboardUrl?: string;
   taskboardMetadataFile?: string;
+  /** Omitted only by legacy descriptors, whose journal was always enabled. */
+  activityJournalEnabled?: boolean;
+};
+
+export type ActivityJournalCapability = {
+  enabled: boolean;
+  state: "disabled" | "ready" | "unavailable";
 };
 
 export type ReadyDescriptor = {
@@ -59,9 +66,11 @@ export type ListSessionsResult = {
   sessions: SessionSummary[];
   next_cursor?: string;
   truncated: boolean;
+  activity_journal?: ActivityJournalCapability;
 };
 
 export type SessionDetailsResult = SessionSummary & {
+  activity_journal?: ActivityJournalCapability;
   archived_at?: number;
   agent?: string;
   provider_id?: string;
@@ -562,6 +571,7 @@ export const ADAPTER_ERROR_CODES = [
   "RUNTIME_UPDATE_FAILED",
   "CURSOR_EXPIRED",
   "ACTIVITY_UNAVAILABLE",
+  "ACTIVITY_DISABLED",
   "INTERNAL_ERROR",
   "MESSAGE_NOT_FOUND",
   "CONTENT_UNAVAILABLE",
@@ -672,6 +682,8 @@ export async function loadRuntimeDescriptor(
     "taskboardMetadataFile",
     4096,
   );
+  if (value.activityJournalEnabled !== undefined && typeof value.activityJournalEnabled !== "boolean")
+    throw new Error("MCP activityJournalEnabled must be a boolean.");
 
   if (!isAbsolute(project)) throw new Error("MCP project must be absolute.");
   if ((await realpath(project).catch(() => undefined)) !== project) {
@@ -719,6 +731,7 @@ export async function loadRuntimeDescriptor(
     listenHost: "127.0.0.1",
     listenPort,
     credentialFile,
+    activityJournalEnabled: value.activityJournalEnabled ?? true,
     ...(managerFile ? { managerFile } : {}),
     ...(taskboardUrl ? { taskboardUrl } : {}),
     ...(taskboardMetadataFile ? { taskboardMetadataFile } : {}),

@@ -58,6 +58,7 @@ import type {
   SendMessageResult,
   AbortSessionTurnResult,
   SessionActivity,
+  ActivityJournalCapability,
   SessionDetailsResult,
   SessionHistoryResult,
   SessionStatusResult,
@@ -119,6 +120,7 @@ type SessionCursor = {
 };
 
 export interface SessionGateway {
+  activityJournalStatus?(): ActivityJournalCapability;
   getSessionProgress(
     sessionId: string,
     messageId?: string,
@@ -290,8 +292,14 @@ export class OpenCodeGateway implements SessionGateway {
   }
 
   async enableActivity(path: string, legacyPath?: string): Promise<void> {
+    if (this.runtime.activityJournalEnabled === false) return;
     this.journal = await ActivityJournal.open(path, this.runtime.projectHash, 5000, legacyPath);
     this.eventBridge = new McpEventBridge(this.journal, this.runtime.projectHash);
+  }
+
+  activityJournalStatus(): ActivityJournalCapability {
+    const enabled = this.runtime.activityJournalEnabled !== false;
+    return { enabled, state: !enabled ? "disabled" : this.journal?.available ? "ready" : "unavailable" };
   }
 
   startActivityCollection(): void {
@@ -328,6 +336,8 @@ export class OpenCodeGateway implements SessionGateway {
   }
 
   async handleMcpEventMethod(method: string, params: unknown): Promise<unknown> {
+    if (this.runtime.activityJournalEnabled === false)
+      throw new AdapterError("ACTIVITY_DISABLED", "Activity journal is disabled for this session; opt in with --journal on a fresh start.");
     if (!this.eventBridge) throw new AdapterError("ACTIVITY_UNAVAILABLE", "MCP Events are not initialized.");
     return this.eventBridge.handle(method, params);
   }
@@ -3237,6 +3247,8 @@ export class OpenCodeGateway implements SessionGateway {
   }
 
   private requireJournal(): ActivityJournal {
+    if (this.runtime.activityJournalEnabled === false)
+      throw new AdapterError("ACTIVITY_DISABLED", "Activity journal is disabled for this session; opt in with --journal on a fresh start.");
     if (!this.journal)
       throw new AdapterError(
         "ACTIVITY_UNAVAILABLE",
