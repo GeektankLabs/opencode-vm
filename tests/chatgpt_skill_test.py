@@ -23,6 +23,17 @@ SPEC.loader.exec_module(BUILDER)
 
 
 class SkillPackageTest(unittest.TestCase):
+    def test_integration_cleanup_decision_and_explicit_fresh_disposal_boundary(self):
+        source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
+        skill = (source / "SKILL.md").read_text()
+        ownership = (source / "references/worktree-ownership.md").read_text()
+        for marker in ("cleanup decision", "git worktree remove", "fresh VM", "disposal boundary",
+                       "Commit/save", "locked", "Never delete source", "Board Done"):
+            self.assertIn(marker, skill)
+        self.assertIn("Cleanup decision is mandatory at integration handback", ownership)
+        self.assertIn("scoped exception", ownership)
+        self.assertIn("Attach/reconnect does not sweep", ownership)
+
     def test_journal_mode_is_capability_bound_and_keeps_exact_receipt_observation(self):
         source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
         skill = (source / "SKILL.md").read_text()
@@ -502,9 +513,9 @@ class SkillPackageTest(unittest.TestCase):
         routing = (source / "references/fallback-routing.md").read_text()
         changelog = (source / "CHANGELOG.md").read_text()
         manifest, _ = BUILDER.package_content(ROOT)
-        self.assertEqual(manifest["revision"], "2026-10-09-r47")
+        self.assertEqual(manifest["revision"], "2026-10-09-r48")
         self.assertIn("## 2026-10-08-r45\n", changelog)
-        self.assertIn("**2026-10-09-r47**", skill)
+        self.assertIn("**2026-10-09-r48**", skill)
         self.assertIn("references/fallback-routing.md", skill)
         self.assertIn("routing.regime: per_profile", skill)
         section = routing.split("## Per-profile fallback mode (additive schema 4)\n", 1)[1] \
@@ -3191,7 +3202,7 @@ class TaskDoneArchiveTraceTest(unittest.TestCase):
         monitor = (source / "references/monitor-tasks.md").read_text()
         content = (source / "references/content-protocol.md").read_text()
         scenarios = (source / "references/regression-scenarios.md").read_text()
-        self.assertIn("2026-10-09-r47", skill)
+        self.assertIn("2026-10-09-r48", skill)
         self.assertIn("## Cooperative Pause and Weiter/Go", skill)
         self.assertIn("references/pause-go.md", skill)
         for required in ("next safe Tool/Receipt return",
@@ -3417,7 +3428,7 @@ class TaskDoneArchiveTraceTest(unittest.TestCase):
         monitor = (source / "references/monitor-tasks.md").read_text()
         packages = (source / "references/work-packages.md").read_text()
         mvp = (source / "references/optimistic-mvp.md").read_text()
-        self.assertIn("2026-10-09-r47", skill)
+        self.assertIn("2026-10-09-r48", skill)
         self.assertIn("## 2026-10-08-r44", (source / "CHANGELOG.md").read_text())
         # Production-Code-Only cap with excluded classes, progress and no-reset.
         for required in ("at most two autonomous PRODUCTION-CODE repair cycles",

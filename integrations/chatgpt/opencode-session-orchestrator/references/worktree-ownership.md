@@ -87,10 +87,24 @@ One integrator owns the common integration tree at a time:
 4. Rebuild shared versioned bundles/pins on the consolidated target when required; run relevant combined regressions.
 5. Record source task/commit/base, target base before, resulting integration commit/HEAD, included/excluded scope and test evidence. A semantic port need not make the source SHA an ancestor of the target; explicitly show the target commit that contains the reconciled change.
 6. Before a dependent wave, reread the real target `HEAD` and verify the required predecessor changes are actually present. “Newer SHA”, Board `done`, or source commit existence alone does not pass this gate.
+7. **Cleanup decision is mandatory at integration handback.** Under the operator's standing cleanup authorization, once the owner has stopped and all retention checks below pass, remove the disposable source checkout through `git worktree remove`, verify directory/registration removal and retained branch, and record source SHA/target SHA/path/outcome. Otherwise retain with a precise reason and next cleanup condition. Do not silently defer every completed checkout forever.
 
 A blocked task does not block a different, genuinely independent wave. Keep the blocked task's worktree and dirty work intact while resolving its business `INPUT_REQUIRED` through the normal same-session follow-up contract. Technical turn completion never means Board completion or integration.
 
 ## Retain safely; cleanup is explicit
+
+The operator can grant standing cleanup authorization, including an explicit
+loss boundary. In opencode-vm a genuinely fresh project VM is that boundary:
+after old-runtime finalization, **all** registered local task worktrees under
+`.opencode-vm/worktrees/` may be force-removed, including unmerged/dirty/ignored/
+locked copies. Commit/save work needed beyond it; a lock does not exempt it.
+Existing branches retain unmerged commits and detached commits receive retained
+branches first. Attach/reconnect does not sweep. The directory is local/Git-
+ignored, not a GitHub-uploaded checkout. This explicit fresh-start disposal rule
+is a scoped exception to the generic live-work retention/force-removal rules
+below, not permission to discard work during ordinary active integration.
+Record any retention until the next boundary; do not delete `.opencode/tasks/`,
+Taskboard, model policy, Monitor or the Main working copy.
 
 Keep the task worktree when a worker is active, the result has not been reviewed, the task is blocked, any relevant staged/unstaged/untracked change remains, integration is uncertain/pending, an external acceptance depends on it, or source evidence is needed for reconciliation. An integrated local commit may still require retention while Hosted/operator acceptance is open.
 

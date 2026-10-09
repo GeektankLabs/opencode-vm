@@ -6,7 +6,7 @@ license: MIT
 
 # OpenCode Session Orchestrator
 
-Release marker: **2026-10-09-r47**. This is the skill revision, not an MCP version.
+Release marker: **2026-10-09-r48**. This is the skill revision, not an MCP version.
 
 This is a client-side workflow skill. The user supplies a working compatible MCP connection, including when using Secure MCP Tunnel. The skill contains no tunnel, account, server alias or credentials and does not configure the connection.
 
@@ -220,6 +220,28 @@ If the new ordinary send itself returns `SUBMISSION_UNCERTAIN`, delivery may hav
 A normal receipt is concise: task purpose, target, ID and verified state. Reserve extended permission diagnostics for an actual fault.
 
 ## Assign worktree ownership before agent-managed repository writes
+
+Every integration architect/integrator must finish with a **cleanup decision**,
+not leave completed source checkouts accumulating silently. After verified
+integration and owner stop, inspect tracked/untracked changes and relevant
+ignored outputs, preserve source history in a durable branch/reference, then
+remove a disposable checkout through `git worktree remove` within the operator's
+standing cleanup authorization. Verify directory/registration removal and
+retained branch, and record the outcome in the canonical handback. If continued
+work or acceptance needs the checkout, retain it with a precise reason. For
+opencode-vm a fresh VM is the explicitly authorized disposal boundary: all
+registered local task worktrees, including unmerged, dirty, ignored and locked
+ones, may be force-removed then. Commit/save work needed beyond that boundary;
+locks do not exempt it. Outside that specific standing disposal scope, no
+forced removal or blanket folder deletion is authorized. Never delete source
+branches or prune Git objects. Fresh cleanup discards working-copy data; it
+never proves integration or authorizes Board Done.
+
+The fresh disposal scope is only the registered project-local task checkout
+directories. Preserve Main and unrelated/unregistered working directories,
+including their uncommitted/untracked/ignored data. Branch refs/commits remain;
+uncommitted data belongs to a working directory, not to an unchecked-out branch.
+Never substitute `git clean`, reset, stash deletion or branch deletion.
 
 An OpenCode session is not a Git isolation boundary. Before the first substantive agent-managed repository write, read [Worktree ownership](references/worktree-ownership.md) and choose one verified working tree/index with one active owner. Sequential, exclusive work may use the integration tree; concurrent independent writes use separate persistent worktrees by default. Capture the actual repository root, start `HEAD`, dirty/untracked state, worktree path/owner, affected/shared surfaces and integration target in the task handoff; keep the authorized Compact Context current when one exists. Never stage, reset, stash, overwrite or commit unrelated user/task changes.
 

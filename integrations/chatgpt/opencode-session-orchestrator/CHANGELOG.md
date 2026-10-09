@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-09-r48
+
+- Require a cleanup decision at every integration handback: remove completed disposable source checkouts after verified integration and owner stop under cleanup authorization, preserve branches/source history and canonical documents, verify removal, or retain with the reason and next boundary.
+- Honor the explicit opencode-vm fresh-VM disposal contract: all registered local task working copies, including unmerged/dirty/untracked/ignored/locked ones, can be force-removed after old-runtime finalization; commit/save anything needed beyond it. Source branches stay and detached commits receive retained branches. Locks do not exempt this boundary. Outside that scope generic live-work retention rules still apply; never blanket-delete Main/project state, delete source branches or prune Git objects, and never infer integration/Board Done from disposal.
+
 ## 2026-10-09-r47
 
 - Discover the connector's explicit disabled/ready/unavailable Activity-Journal state through ordinary session reads; fresh opencode-vm sessions default journal-free and `--journal` is an operator-only startup opt-in retained by attach.

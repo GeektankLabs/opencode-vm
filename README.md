@@ -907,6 +907,18 @@ opencode-vm openlive uninstall
 
 ## Useful Commands
 
+### Task worktrees
+
+Local task checkouts live in `.opencode-vm/worktrees/`, not `.opencode/tasks/`,
+and their directories are Git-ignored rather than uploaded to GitHub.
+Since 0.7.24, every genuinely fresh session start discards all registered local
+task worktrees before cloning, including unmerged, dirty, ignored and locked
+working copies; attach/reconnect does not. This is the operator-authorized loss
+boundary. Existing branches/commits are preserved and detached source commits
+get a retained local branch first. Main and other project state stay outside
+the scope; unsafe/unverifiable paths are reported. See [automatic cleanup and
+the manual bulk/single-worktree guides](docs/WORKTREES.md).
+
 ```bash
 opencode-vm install      # install/update script to ~/bin
 opencode-vm init         # create/recreate base VM

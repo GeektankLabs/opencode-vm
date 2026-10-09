@@ -17,6 +17,18 @@ Key design goals:
 
 ## Architecture
 
+**Fresh-start worktree cleanup (script 0.7.24 / skill r48):** every genuinely
+fresh project-session start sweeps registered project-local task worktrees
+after successful prior-runtime finalization and before cloning. This is the
+explicit loss boundary: all registered project-local task working copies,
+including unmerged/dirty/ignored/locked ones, are force-removed. Existing source
+branches stay; detached commits receive a retained local branch first. Main and
+other project state are outside scope; unsafe/unverifiable paths are reported.
+Attach/reconnect does not sweep; cleanup failure does not abort normal startup.
+Integrators must close with a cleanup decision and commit/save work needed
+beyond the next fresh VM; worktree locks do not exempt that boundary. Manual steps:
+[`docs/WORKTREES.md`](docs/WORKTREES.md).
+
 **Activity Journal opt-in hotfix (script 0.7.23 / adapter 0.1.35 / skill r47):**
 fresh sessions default journal-free; `web --journal` / configured MCP terminal
 `start --journal` opt in. Attach retains `SESS_JOURNAL_ENABLED`; absent legacy

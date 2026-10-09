@@ -34,7 +34,7 @@ OPENLIVE_PREVIOUS_COMMAND="$OPENLIVE_DIR/previous-command"
 OPENLIVE_AUTH_MARKER="__opencode_vm_openlive__"
 OPENLIVE_LOCK_PATH=""
 OPENLIVE_ADAPTER_VERSION="0.1.7"
-OPENLIVE_ADAPTER_TAG="v0.7.23"
+OPENLIVE_ADAPTER_TAG="v0.7.24"
 OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.7.tar"
 OPENLIVE_ADAPTER_SHA256="39a50c5127b0a577b54e4790b5c3c1f463b35a52b42c4343aa639dcea53bad47"
 OPENLIVE_ACP_SDK_VERSION="1.2.1"
@@ -45,14 +45,14 @@ OPENLIVE_MANAGER_PROMPT="You manage an OpenLive voice call. The voice_sessions t
 MCP_CONNECTOR_DIR="$SHARE_ROOT/mcp-connector"
 MCP_ADAPTER_CACHE_ROOT="$MCP_CONNECTOR_DIR/adapters"
 MCP_ADAPTER_VERSION="0.1.35"
-MCP_ADAPTER_TAG="v0.7.23"
+MCP_ADAPTER_TAG="v0.7.24"
 MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.35.tar"
 MCP_ADAPTER_SHA256="b8841c547a76ff14609cc52cb330b2b00ea2e9ce79ad50b5c77ecdc349aa5161"
 MCP_SDK_VERSION="1.30.1"
 MCP_OPENCODE_SDK_VERSION="1.18.21"
 MCP_TESTED_PROTOCOL_VERSION="2025-11-25"
 MCP_TUNNEL_DIR="$SHARE_ROOT/mcp-tunnel/openai"
-HUB_ASSET_TAG="v0.7.23"
+HUB_ASSET_TAG="v0.7.24"
 HUB_ASSET_FILENAME="opencode-vm-hub-1.tar"
 HUB_ASSET_SHA256="7842dc3167c22eac33ed8c2f1d2a96d60938f5694e079690ca822304ebd45be0"
 
@@ -286,7 +286,7 @@ TASKBOARD_ARM64_SHA256="3749fb985f544fdb6788ba1dff69761e599ff82b3fe86d39ca54307c
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.7.23"
+OCVM_VERSION="0.7.24"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -17999,6 +17999,116 @@ apply_openai_header_timeout_default() {
   fi
 }
 
+# A fresh VM is the operator-authorized disposal boundary for task working copies.
+# Discard uncommitted/ignored work, but retain commits and all existing branches.
+# Only registered project-local task paths are in scope; never Main or VM state.
+cleanup_project_worktrees() {
+  local project="$1"
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "[worktrees] Cleanup unavailable (python3 missing); worktrees retained." >&2
+    return 0
+  fi
+  python3 - "$project" <<'WORKTREE_CLEANUP' || {
+import os, pathlib, subprocess, sys
+
+class ProbeError(Exception):
+    pass
+
+def git(directory, *args, accepted=(0,)):
+    try:
+        result = subprocess.run(["git", "-C", str(directory), *args],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ProbeError(type(error).__name__) from error
+    if result.returncode not in accepted:
+        raise ProbeError("git probe failed")
+    return result
+
+def common(directory):
+    return (directory / os.fsdecode(git(directory, "rev-parse", "--git-common-dir").stdout).strip()).resolve()
+
+def run():
+    root = pathlib.Path(sys.argv[1]).resolve(strict=True)
+    top = pathlib.Path(os.fsdecode(git(root, "rev-parse", "--show-toplevel").stdout).strip()).resolve()
+    if top != root:
+        print("[worktrees] Cleanup skipped: start outside the repository root.")
+        return
+    base = root / ".opencode-vm" / "worktrees"
+    for directory in (base.parent, base):
+        if directory.is_symlink():
+            print("[worktrees] Cleanup skipped: symlinked worktree directory.")
+            return
+    if not base.is_dir():
+        print("[worktrees] Cleanup: no project-local task worktrees.")
+        return
+    target = git(root, "rev-parse", "HEAD").stdout.strip()
+    shared = common(root)
+    fields = git(root, "worktree", "list", "--porcelain", "-z").stdout.split(b"\0")
+    records, record = [], {}
+    for field in fields:
+        if not field:
+            if record: records.append(record); record = {}
+            continue
+        key, _, value = field.partition(b" ")
+        record[os.fsdecode(key)] = os.fsdecode(value)
+    if record: records.append(record)
+    removed = retained = failed = 0
+    for record in records:
+        path = pathlib.Path(record.get("worktree", ""))
+        if path.parent != base:
+            continue
+        reason = None
+        try:
+            if path.is_symlink() or path.resolve(strict=True).parent != base:
+                reason = "unsafe or moved path"
+            elif "prunable" in record:
+                reason = "incomplete registration"
+            elif common(path) != shared or pathlib.Path(os.fsdecode(
+                    git(path, "rev-parse", "--show-toplevel").stdout).strip()).resolve() != path.resolve():
+                reason = "foreign Git identity"
+            else:
+                head = git(path, "rev-parse", "HEAD").stdout.strip()
+                branch = record.get("branch")
+                if head.decode("ascii") != record.get("HEAD") or (branch and
+                   git(root, "rev-parse", "--verify", branch).stdout.strip() != head):
+                    reason = "source changed"
+                else:
+                    if not branch:
+                        # Removing the only detached worktree must not orphan a
+                        # committed source. A standard local branch retains it.
+                        name = "ocvm-retained/worktree-" + head.decode("ascii")
+                        exists = git(root, "show-ref", "--verify", "--quiet", "refs/heads/" + name,
+                            accepted=(0, 1)).returncode == 0
+                        if exists and git(root, "rev-parse", "--verify", "refs/heads/" + name).stdout.strip() != head:
+                            raise ProbeError("retained reference mismatch")
+                        if not exists:
+                            git(root, "branch", name, head.decode("ascii"))
+                    if git(root, "rev-parse", "HEAD").stdout.strip() != target:
+                        reason = "integration HEAD changed"
+                    elif git(root, "worktree", "remove", "--force", "--force", str(path), accepted=(0, 1, 128)).returncode:
+                        failed += 1
+                        print(f"[worktrees] Removal failed/incomplete: {path.name}; source branch retained.")
+                        continue
+                    else:
+                        removed += 1
+                        print(f"[worktrees] Removed task worktree: {path.name}; local work discarded, committed source retained.")
+                        continue
+        except (ProbeError, OSError, ValueError):
+            reason = "identity/status could not be verified"
+        retained += 1
+        print(f"[worktrees] Retained {path.name}: {reason}.")
+    print(f"[worktrees] Cleanup: {removed} removed, {retained} retained, {failed} failed.")
+
+try:
+    run()
+except (ProbeError, OSError, ValueError):
+    print("[worktrees] Cleanup unavailable; unverified worktrees retained.")
+WORKTREE_CLEANUP
+    echo "[worktrees] Cleanup unavailable; normal startup continues." >&2
+  }
+  return 0
+}
+
 start_session() {
   proj="$(pwd)"
   SESSION_MODE="$(mcp_session_mode "$SESSION_MODE" "$proj")" || return 1
@@ -18055,7 +18165,7 @@ start_session() {
         return 0
         ;;
       fresh)
-        _destroy_prev_session "$proj"
+        _destroy_prev_session "$proj" || return 1
         ;;
       cancel)
         echo "[start] Cancelled."
@@ -18067,6 +18177,10 @@ start_session() {
         ;;
     esac
   fi
+
+  # Every genuinely fresh project VM runs cleanup before staging/cloning.
+  # Reconnect/cancel returned above; a failed prior-runtime finalization aborts.
+  cleanup_project_worktrees "$proj"
 
   sess="oc-$(date +%Y%m%d-%H%M%S)"
   local controller_id="${sess}-controller-$$"

@@ -47,3 +47,4 @@ ln -s "$ROOT/opencode-vm.sh" "$symlink"
 linked="$(OCVM_DISABLE_UPDATE_CHECK=1 "$symlink" version)"
 [[ "$direct" == opencode-vm\ v* && "$linked" == "$direct" ]]
 printf '%s\n' 'ok - documented direct and symlink start stay executable and agree'
+python3 -B "$ROOT/tests/worktree_cleanup_test.py"
