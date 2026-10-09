@@ -1,7 +1,7 @@
 Task-ID: task_efbe63cf-53da-5e79-be25-f7ac8efe9916
 Title: Management-MCP-Bindung und Orchestrator – kanonischer konsolidierter MVP-Plan
-Status: W4_IMPLEMENTED_PENDING_QC (EFBE-MVP-IMPLEMENTATION-20261009-R1) — W1/W2 unabhängig PASS; kohesiver W4-Kandidat `7fc792e…` (Basis-Slice `64c9a83` + Vervollständigung Preflight/Worker-Completion/Skill r47) wartet auf unabhängige QC; kein Selbst-PASS; W3→W5 sequenziell offen
-Last-concept-update: 2026-10-09T14:44:22Z
+Status: FIXED_PENDING_REQC (EFBE-MVP-IMPLEMENTATION-20261009-R1) — W1/W2 unabhängig PASS; W4_QC_FAIL (W4-F1 Doctor-Framing) minimal repariert in `0f1c65d`; fokussierte Re-QC aussteht; kein Selbst-PASS; W3→W5 sequenziell offen (W3 gated)
+Last-concept-update: 2026-10-09T15:00:09Z
 Konzeptrevision: EFBE-MVP-COOPERATIVE-J59-R1 (Konzeptbasis); Execution-Contract-Aktiv: EFBE-MVP-IMPLEMENTATION-20261009-R1
 Entscheidungsstand: Journal #52–#59; #59 0c07a7a8-0456-424c-b02d-fe00bb604c00; Implementierungs-Freigabe #60; W1-QC_FAIL #63; Reset-Recovery #64–#65; W1-F1-Reparatur; W1_REQC_PASS; W2-Umsetzung; W2_QC_PASS; W4-Umsetzung; W4-Vervollständigung (Ersatz-Autorensession)
 
@@ -489,5 +489,29 @@ implementation_commits=7fc792e8a353766af9a7607f4553986656991e05
 components=integrations/chatgpt/** (r47), tests/chatgpt_skill_test.py, tests/skills_orchestrator_test.sh
 tests/acceptance=build --check OK; chatgpt_skill_test 85 OK; skills_orchestrator r47-Kohärenz
 change_path=git revert 7fc792e
+```
+
+**Nachtrag 2026-10-09T15:00Z — W4_QC_FAIL (W4-F1) und minimale Framing-Reparatur (FIXED_PENDING_REQC):** Der unabhängige W4-QC `ses_edf07a6e0fferQF9lnwg9pyvnK` (Receipt `msg_6feb5f6ef42348c1ad3d4ff00a26db20` → Terminal `msg_1212996dd0015722re25UD72Xl`, SHA-256 `16be92f7698f21f5738f6d22623f644f9c47bb87c28b68f6c534775caa17c6a4`, 2470 B) meldete **W4_QC_FAIL** mit genau einem blockierenden Finding **W4-F1**.
+
+- **W4-F1 (HOCH, blockierend):** `_doctor_mcp_tools` sendete das Protokoll-2026-07-28-`tools/list` ohne `mcp-method`-Header und ohne `params._meta["io.modelcontextprotocol/protocolVersion"]`. Die Adapter-Funktion `validModernRequestHeaders` verlangt beide Elemente; der gepinnte Adapter lehnte die exakte Doctor-Anfrage empirisch mit HTTP 400, Code -32020 `header_mismatch` ab. Damit war die beanspruchte reale Tool-Inventur/Fehl-Kern-Feststellung produktionell unerreichbar (immer UNVERIFIED), und die Curl-Mocks C21a–d maskierten das (grün nur unter künstlichen Bedingungen — strukturell derselbe Befundtyp wie W1-F1). Ehrlich fail-closed, kein Silent-Pass.
+- **Minimale Reparatur (erste Korrektur dieses Fingerprints; max2-no-progress erhalten):** `0f1c65df66379ed367a5e18cc163a00aa63bb7f1` / Tree `4f95fb550d018e0e744d5846f0236f6fc95594e2` (Parent `7fc792e…`), worktree clean, 3 Dateien +63/−7. `_doctor_mcp_tools` ergänzt `mcp-method: tools/list` (curl-Header via stdin) und den Body `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}`; Token weiterhin nur via curl-Config auf stdin, nie argv, Redaction/`deny_secrets` unverändert. **Reproduzierbarer isolierter Konformanztest** in `tests/mcp_adapter_test.sh`: startet einen realen `McpHttpServer` aus dem Kandidaten-`dist`, weist die alte Framing als 400 ab und ruft den echten extrahierten Doctor-Helfer gegen den realen Server auf (44 Tools inkl. aller 5 Kern-Management-Tools). **W4-F2** (stale `docs/MCP-INTERFACE.md` „adapter 0.1.37") mitkorrigiert auf 0.1.38.
+- **Scope/Version:** nur `opencode-vm.sh` (Doctor-Payload), `docs/MCP-INTERFACE.md`, `tests/mcp_adapter_test.sh`. Adapter `0.1.38` / Pin `7edeee8e52716f285be4e74a183979f3f312b32d6f0b982f34b62d4f60818475` / Bundle r47 **unverändert**; Script-Patch `0.7.26→0.7.27`, Tags `v0.7.27`.
+- **Tests:** Konformanztest EXIT0 (alte Framing 400, neue 44 Tools); `vm_doctor_test.sh` ALL_PASS inkl. C21a–d; `install_test.sh` EXIT0; `release_metadata_test` 5 OK; `release_state_test` 5 OK; `bash -n`/`shellcheck --severity=error` sauber. Keine volle Adapter-Suite (adapter-unverändert) nötig.
+- **Ehrlich verbleibend:** Live-/installierte Runtime-Belege, Modell-/Wake-Befolgung, hosted bleiben UNVERIFIED. **Nächster Schritt FIXED_PENDING_REQC:** fokussierte unabhängige Re-QC exakt `0f1c65d`/Tree `4f95fb55`; W3 bleibt gated. Kein Main-Merge/Push/Tag/Release/Live-Aktion.
+
+```text
+AUTONOMOUS_MVP_DECISION
+decision_id=W4-D7-doctor-framing-conformance; task/phase=efbe63cf W4; time=2026-10-09T14:59Z
+strategy_source=W4-QC W4-F1; docs/MCP-INTERFACE 2026-07-28 contract; adapter validModernRequestHeaders
+question=Doctor-tools/list-Framing reparieren: exakt die vom Adapter geforderten zwei Elemente vs. breitere Änderung
+alternatives=Mock anpassen (verboten, maskiert); Adapter lockern (Scope-/Sicherheitsänderung, nicht nötig); Framing konform machen
+choice/rationale=mcp-method-Header + params._meta.protocolVersion ergänzen; echte Konformanz gegen realen McpHttpServer testen; minimal, vertragstreu
+uncertainty=Liveness bleibt UNVERIFIED; reversibility=git revert 0f1c65d; Aufwand minimal
+PRE_DECISION_HEAD=7fc792e8a353766af9a7607f4553986656991e05
+worktree/owner=.opencode-vm/worktrees/task_efbe63cf-mvp-impl, task/efbe63cf-mvp-impl
+implementation_commits=0f1c65df66379ed367a5e18cc163a00aa63bb7f1
+components=opencode-vm.sh (OCVM_DOCTOR_SH), docs/MCP-INTERFACE.md, tests/mcp_adapter_test.sh
+tests/acceptance=Konformanztest EXIT0; vm_doctor C21a–d; install/release metadata+state; bash -n/shellcheck
+change_path=git revert 0f1c65d
 ```
 
