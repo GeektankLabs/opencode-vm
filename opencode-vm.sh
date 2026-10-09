@@ -34,7 +34,7 @@ OPENLIVE_PREVIOUS_COMMAND="$OPENLIVE_DIR/previous-command"
 OPENLIVE_AUTH_MARKER="__opencode_vm_openlive__"
 OPENLIVE_LOCK_PATH=""
 OPENLIVE_ADAPTER_VERSION="0.1.7"
-OPENLIVE_ADAPTER_TAG="v0.7.26"
+OPENLIVE_ADAPTER_TAG="v0.7.27"
 OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.7.tar"
 OPENLIVE_ADAPTER_SHA256="39a50c5127b0a577b54e4790b5c3c1f463b35a52b42c4343aa639dcea53bad47"
 OPENLIVE_ACP_SDK_VERSION="1.2.1"
@@ -45,14 +45,14 @@ OPENLIVE_MANAGER_PROMPT="You manage an OpenLive voice call. The voice_sessions t
 MCP_CONNECTOR_DIR="$SHARE_ROOT/mcp-connector"
 MCP_ADAPTER_CACHE_ROOT="$MCP_CONNECTOR_DIR/adapters"
 MCP_ADAPTER_VERSION="0.1.38"
-MCP_ADAPTER_TAG="v0.7.26"
+MCP_ADAPTER_TAG="v0.7.27"
 MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.38.tar"
 MCP_ADAPTER_SHA256="7edeee8e52716f285be4e74a183979f3f312b32d6f0b982f34b62d4f60818475"
 MCP_SDK_VERSION="1.30.1"
 MCP_OPENCODE_SDK_VERSION="1.18.21"
 MCP_TESTED_PROTOCOL_VERSION="2025-11-25"
 MCP_TUNNEL_DIR="$SHARE_ROOT/mcp-tunnel/openai"
-HUB_ASSET_TAG="v0.7.26"
+HUB_ASSET_TAG="v0.7.27"
 HUB_ASSET_FILENAME="opencode-vm-hub-1.tar"
 HUB_ASSET_SHA256="7842dc3167c22eac33ed8c2f1d2a96d60938f5694e079690ca822304ebd45be0"
 
@@ -287,7 +287,7 @@ TASKBOARD_ARM64_SHA256="3749fb985f544fdb6788ba1dff69761e599ff82b3fe86d39ca54307c
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.7.26"
+OCVM_VERSION="0.7.27"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -15266,11 +15266,16 @@ _doctor_run() {
 # returns non-zero when the inventory cannot be obtained (never a silent pass).
 _doctor_mcp_tools() {
   local port="$1" token="$2" out="" bodyfile=""
+  local proto="2026-07-28"
   [ -n "$port" ] && [ -n "$token" ] || return 1
   bodyfile="$(mktemp "${DOCTOR_TMPDIR:-/tmp}/ocvm-doctor-tools.XXXXXX" 2>/dev/null)" || return 1
   chmod 600 "$bodyfile" 2>/dev/null || true
-  printf '%s' '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' > "$bodyfile" 2>/dev/null || { rm -f "$bodyfile"; return 1; }
-  out="$(printf 'header = "X-OCVM-MCP-Token: %s"\nheader = "Content-Type: application/json"\nheader = "mcp-protocol-version: 2026-07-28"\n' "$token" |
+  # Protocol 2026-07-28 requires the Mcp-Method header and
+  # params._meta["io.modelcontextprotocol/protocolVersion"] to match the
+  # transport headers (adapter validModernRequestHeaders); otherwise the adapter
+  # rejects the request with 400 header_mismatch (-32020).
+  printf '%s' "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"$proto\"}}}" > "$bodyfile" 2>/dev/null || { rm -f "$bodyfile"; return 1; }
+  out="$(printf 'header = "X-OCVM-MCP-Token: %s"\nheader = "Content-Type: application/json"\nheader = "mcp-protocol-version: %s"\nheader = "mcp-method: tools/list"\n' "$token" "$proto" |
     _doctor_run "$DOCTOR_PROBE_TIMEOUT" curl -fsS --config - --max-time "$DOCTOR_PROBE_TIMEOUT" \
       --data-binary "@$bodyfile" "http://127.0.0.1:$port/mcp")" || out=""
   rm -f "$bodyfile"
