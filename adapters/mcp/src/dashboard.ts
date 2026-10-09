@@ -2,6 +2,7 @@ import type { OpenCodeGateway } from "./opencode.js";
 import type { ProjectBoardService } from "./taskboard.js";
 import { READ_PAYLOAD_BYTES, jsonBytes } from "./content.js";
 import { isRecord } from "./types.js";
+import type { PreparedAttentionEntry } from "./types.js";
 
 export type Inventory = Awaited<ReturnType<OpenCodeGateway["readDashboardInventory"]>>;
 export type Session = Awaited<ReturnType<OpenCodeGateway["readDashboardSession"]>>;
@@ -11,6 +12,10 @@ export type DashboardReader = {
   session(session: Inventory["sessions"][number]): Promise<Session>;
   board(): Promise<Tasks>;
   activity(ids: Set<string>): Promise<unknown>;
+  /** Existing bounded prepared-attention queue; throws a coded error when the
+   * activity journal is disabled or unavailable. Optional: absent means the
+   * capability is honestly reported as disabled. */
+  attention?(): Promise<PreparedAttentionEntry[]>;
 };
 
 /** Read-only projection surface shared by the browser dashboard and the MCP app.
@@ -26,6 +31,48 @@ export type UiService = {
   generation: string;
   adapterVersion?: string;
 };
+
+/** W3 prepared-attention projection view over the existing bounded attention
+ * queue. Ordering is InputRequired before errors/abort before a ready result;
+ * entries are capped with an explicit omitted count; `resolution` is never
+ * inferred (discussed/rendered/delivered is not resolved). */
+export const PREPARED_ATTENTION_LIMIT = 10;
+export const PREPARED_ATTENTION_ORDERING = ["input_required", "error_abort", "ready_result"] as const;
+const ATTENTION_RANK: Record<PreparedAttentionEntry["classification"], number> = {
+  action_required: 0, attention: 1, ready: 2,
+};
+export type PreparedAttentionView = {
+  available: boolean;
+  reason: string | null;
+  entries: PreparedAttentionEntry[];
+  total: number | null;
+  omitted: number | null;
+  coverage: "complete" | "paged" | "unavailable";
+  ordering: readonly string[];
+};
+export function unavailableAttention(reason: string, prior?: PreparedAttentionView | null): PreparedAttentionView {
+  return { available: false, reason, entries: prior?.entries ?? [], total: prior?.total ?? null,
+    omitted: prior?.omitted ?? null, coverage: "unavailable", ordering: PREPARED_ATTENTION_ORDERING };
+}
+/** Pure ordering/dedup/cap for prepared attention: one entry per event_id (a
+ * newer revision updates the entry), InputRequired before errors/abort before a
+ * ready result, newest first within a class, bounded to ten with an explicit
+ * omitted count. Never assigns a resolved/accepted state. */
+export function prepareAttention(entries: PreparedAttentionEntry[], limit = PREPARED_ATTENTION_LIMIT) {
+  const dedup = new Map<string, PreparedAttentionEntry>();
+  for (const entry of entries) {
+    const existing = dedup.get(entry.event_id);
+    if (!existing || Date.parse(entry.observed_at) >= Date.parse(existing.observed_at)) dedup.set(entry.event_id, entry);
+  }
+  const ordered = [...dedup.values()].sort((a, b) => {
+    const ra = ATTENTION_RANK[a.classification] ?? 9, rb = ATTENTION_RANK[b.classification] ?? 9;
+    if (ra !== rb) return ra - rb;
+    return Date.parse(b.occurred_at) - Date.parse(a.occurred_at);
+  });
+  const bounded = ordered.slice(0, limit);
+  return { entries: bounded, total: ordered.length, omitted: ordered.length - bounded.length,
+    coverage: ordered.length > bounded.length ? ("paged" as const) : ("complete" as const) };
+}
 type Source = { observed_at: string | null; last_success_at: string | null; complete: boolean; error: string | null };
 const source = (): Source => ({ observed_at: null, last_success_at: null, complete: false, error: null });
 const operational = (s: Session) => s.backend_activity !== "idle" || s.pending_input.permissions + s.pending_input.questions > 0 || s.turns.some(t => t.active || t.state === "submitted");
@@ -37,7 +84,8 @@ export class DashboardCollector {
   private unknown: Array<{ session_id: string; title: string; parent_session_id: string | null; archived: boolean }> = [];
   private tasks: Tasks = [];
   private recent: unknown = null;
-  private sources = { sessions: source(), discovery: source(), board: source(), activity: source() };
+  private prepared: PreparedAttentionView | null = null;
+  private sources = { sessions: source(), discovery: source(), board: source(), activity: source(), prepared: source() };
   private lastDiscovery = -Infinity;
   private lastBoard = -Infinity;
   private revision = 0;
@@ -51,8 +99,8 @@ export class DashboardCollector {
   resetGeneration(generation: string) {
     if (this.generation === generation) return;
     this.generation = generation;
-    this.sessions = []; this.unknown = []; this.tasks = []; this.inventory = undefined; this.recent = null;
-    this.sources = { sessions: source(), discovery: source(), board: source(), activity: source() };
+    this.sessions = []; this.unknown = []; this.tasks = []; this.inventory = undefined; this.recent = null; this.prepared = null;
+    this.sources = { sessions: source(), discovery: source(), board: source(), activity: source(), prepared: source() };
     this.lastDiscovery = this.lastBoard = -Infinity; this.revision++;
   }
 
@@ -127,6 +175,29 @@ export class DashboardCollector {
         if (generation !== this.generation) return false;
         this.recent = recent; return true;
       });
+      // Existing bounded prepared-attention queue: a disabled/unavailable source
+      // is reported honestly with its reason, never a fake empty success, and
+      // does not block the direct session/board/activity slices above.
+      if (this.reader.attention) {
+        try {
+          const entries = await this.reader.attention();
+          if (generation === this.generation) {
+            const prepared = prepareAttention(entries);
+            this.prepared = { available: true, reason: null, ...prepared, ordering: PREPARED_ATTENTION_ORDERING };
+            const at = new Date(this.now()).toISOString();
+            this.sources.prepared = { observed_at: at, last_success_at: at, complete: prepared.coverage === "complete",
+              error: prepared.coverage === "complete" ? null : "READ_COVERAGE_INCOMPLETE" };
+          }
+        } catch (error) {
+          if (generation === this.generation) {
+            const code = isRecord(error) && typeof error.code === "string" ? error.code : "PREPARED_ATTENTION_UNAVAILABLE";
+            // Preserve the last successful entries and their timestamps (stale,
+            // not empty); a reconnect dedups by event_id on the next success.
+            this.prepared = unavailableAttention(code, this.prepared);
+            this.sources.prepared = { ...this.sources.prepared, complete: false, error: code };
+          }
+        }
+      }
       await board;
       this.revision++;
     })().finally(() => { this.collecting = undefined; });
@@ -203,13 +274,15 @@ export class DashboardCollector {
     const attention = active.filter(s => s.state === "input_required" || s.state === "unknown" || s.anomaly);
     const taskIds = new Set(active.flatMap(s => s.associations.map(a => a.task_id)));
     const complete = fresh("sessions") && fresh("discovery");
+    const preparedAttention: PreparedAttentionView = this.prepared ?? unavailableAttention("PREPARED_ATTENTION_DISABLED");
     const base = { schema_version: 1, project: this.project, generation: this.generation,
       snapshot_id: `${this.generation}:${this.revision}`, generated_at: new Date(time).toISOString(), sources,
       counts: { active_sessions: complete ? active.length : null, known_active_sessions: active.length,
         attention_sessions: complete ? attention.length : null, active_tasks: complete && fresh("board") ? taskIds.size : null },
       coverage: { sessions_complete: complete, bindings_complete: fresh("board"), recent_complete: false },
-      capabilities: { all_session_scope: true, task_links: fresh("board"), prepared_attention: false },
-      attention: attention.slice(0, 10).map(s => ({ session_id: s.session_id, state: s.state, anomaly: s.anomaly })) };
+      capabilities: { all_session_scope: true, task_links: fresh("board"), prepared_attention: preparedAttention.available },
+      attention: attention.slice(0, 10).map(s => ({ session_id: s.session_id, state: s.state, anomaly: s.anomaly })),
+      prepared_attention: preparedAttention };
     if (summary) return base;
     return { ...base, sessions, unknown_sessions: this.unknown, tasks: this.tasks.filter(task => sessions.some(s => s.associations.some(a => a.task_id === task.task_id))), recent: this.recent };
   }

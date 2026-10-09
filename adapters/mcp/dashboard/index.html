@@ -7,6 +7,7 @@
 <main>
   <section class="panel" aria-label="Arbeitslage (getrennte Fakten)"><h2>Arbeitslage</h2><div class="facts" id="facts"></div><p class="caption">Boardstatus, Sessionbetrieb, Turnabschluss, QC, Main-Integration und servierender Prozess sind getrennte Fakten; fehlende Nachweise bleiben unbekannt. Ein Turnabschluss ist keine Abnahme.</p></section>
   <nav class="filters" aria-label="Live-Filter"><button id="all" type="button" aria-pressed="true">Alle</button><button id="attention" type="button" aria-pressed="false">Input / Attention</button><button id="running" type="button" aria-pressed="false">Läuft / Retry</button><a id="board" hidden>Taskboard</a></nav>
+  <section class="panel" aria-label="Vorbereitete Attention (bestehende begrenzte Queue)"><h2>Vorbereitete Attention</h2><div id="prepared-attention"></div><p class="caption">Bestehende begrenzte Attention-Queue („neu/offen/diskutiert"); „diskutiert"/angezeigt/zugestellt ist nicht gelöst oder abgenommen. Nur ein frisch gelesener kanonischer Entscheidungs-/Ergebnisbeleg trägt eine Abnahme — sonst „zur Prüfung unverifiziert". Keine neue Queue, kein neues Dashboard.</p></section>
   <p id="placeholder" class="empty">Aktuelle Daten werden beim Öffnen geladen.</p>
   <section id="work" aria-label="Aktive Arbeit"></section>
   <details id="others"><summary>Weitere Sessions</summary><section id="idle"></section></details>

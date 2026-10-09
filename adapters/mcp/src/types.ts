@@ -1,7 +1,7 @@
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { dirname, isAbsolute } from "node:path";
 
-export const ADAPTER_VERSION = "0.1.38";
+export const ADAPTER_VERSION = "0.1.39";
 export const MCP_TRANSPORT = "streamable-http-stateless";
 
 export type RuntimeDescriptor = {
@@ -503,6 +503,31 @@ export type AttentionReceipt = {
   source_revision: string;
   lifecycle: "offered" | "discussed";
 };
+
+/**
+ * W3 prepared-attention projection entry for the existing Repo Live UI. This is
+ * a read-only view of the existing bounded attention queue; `resolution` is
+ * "unverified" unless a freshly read canonical decision/result evidence exists,
+ * so `discussed`/rendered/delivered is never presented as resolved/accepted.
+ */
+export type PreparedAttentionEntry = {
+  event_id: string;
+  source_revision: string | null;
+  classification: AttentionClass;
+  lifecycle: AttentionLifecycle;
+  session_id: string | null;
+  task_id: string | null;
+  master_task_id: string | null;
+  work_package_id: string | null;
+  hierarchy_status: AttentionEntry["hierarchy_status"];
+  occurred_at: string;
+  observed_at: string;
+  prepared_summary: string;
+  next_safe_step: string;
+  resolution: "unverified" | "resolved";
+  evidence_complete: boolean;
+  superseded_by: string | null;
+};
 export type EventSubscription = {
   id: string;
   event_name: string;
@@ -561,6 +586,7 @@ export const ADAPTER_ERROR_CODES = [
   "UNSUPPORTED_CONFIGURATION",
   "RUNTIME_UPDATE_FAILED",
   "CURSOR_EXPIRED",
+  "ACTIVITY_DISABLED",
   "ACTIVITY_UNAVAILABLE",
   "INTERNAL_ERROR",
   "MESSAGE_NOT_FOUND",

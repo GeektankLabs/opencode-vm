@@ -36,8 +36,20 @@ const overview = {
   generated_at: now, sources: sources(),
   counts: { active_sessions: 1, known_active_sessions: 1, attention_sessions: 1, active_tasks: 1 },
   coverage: { sessions_complete: true, bindings_complete: true, recent_complete: false },
-  capabilities: { all_session_scope: true, task_links: true, prepared_attention: false },
+  capabilities: { all_session_scope: true, task_links: true, prepared_attention: true },
   attention: [{ session_id: 'ses_1', state: 'input_required', anomaly: null }],
+  prepared_attention: { available: true, reason: null, total: 11, omitted: 1, coverage: 'paged',
+    ordering: ['input_required', 'error_abort', 'ready_result'],
+    entries: [
+      { event_id: 'evt_input', source_revision: 'rev-a', classification: 'action_required', lifecycle: 'new',
+        session_id: 'ses_1', task_id: 'task_A', master_task_id: null, work_package_id: null, hierarchy_status: 'resolved',
+        occurred_at: now, observed_at: now, prepared_summary: 'Operatorentscheidung benötigt', next_safe_step: 'Entscheidung einholen',
+        resolution: 'unverified', evidence_complete: false, superseded_by: null },
+      { event_id: 'evt_ready', source_revision: 'rev-b', classification: 'ready', lifecycle: 'discussed',
+        session_id: 'ses_1', task_id: null, master_task_id: null, work_package_id: null, hierarchy_status: 'unlinked',
+        occurred_at: now, observed_at: now, prepared_summary: 'Ergebnis liegt vor', next_safe_step: 'Original prüfen',
+        resolution: 'unverified', evidence_complete: true, superseded_by: null },
+    ] },
   tasks: [{ task_id: 'task_A', title: 'Umbau nach Control-Prototyp', board_status: 'in_progress', board_project_id: 'ws',
     links: [{ session_id: 'ses_1', message_id: 'msg_u1' }] }],
   sessions: [session], unknown_sessions: [],
@@ -116,6 +128,13 @@ try {
   assert.ok(facts.turn.includes('kein belegter Abschluss'));
   assert.equal(await frame.locator('.session a').count(), 0, 'no local URL anchors in the MCP app');
   assert.ok((await frame.textContent('#truncation')).length >= 0);
+  const preparedText = await frame.textContent('#prepared-attention');
+  assert.ok(preparedText.includes('Input erforderlich'), preparedText);
+  assert.ok(preparedText.includes('zur Prüfung unverifiziert'), 'discussed/ready is never shown as resolved');
+  assert.ok(preparedText.includes('diskutiert'), 'the discussed lifecycle is surfaced distinctly');
+  assert.ok(preparedText.includes('unverknüpft'), 'an unlinked taskless entry stays honestly unlinked');
+  assert.ok(preparedText.includes('ausgelassen'), 'the omitted count is surfaced for a paged queue');
+  assert.ok(preparedText.includes('Reihenfolge'), 'the ordering is surfaced');
 
   // Refresh: visible loading/success feedback and a second host roundtrip.
   await frame.click('#refresh');

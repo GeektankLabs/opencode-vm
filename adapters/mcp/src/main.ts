@@ -43,6 +43,7 @@ export async function main(): Promise<void> {
     session: session => gateway.readDashboardSession(session),
     board: () => { if (!board) throw new Error("Board unavailable"); return board.readDashboardTasks(); },
     activity: ids => ActivityJournal.readDashboard(activityPath, runtime.projectHash, ids),
+    attention: () => ActivityJournal.readPreparedAttention(activityPath, runtime.projectHash),
   });
   const service: UiService = { kind: "mcp-app", generation: runtime.generation, adapterVersion: ADAPTER_VERSION };
   gateway.dashboardControl = createDashboardControl(collector, service);

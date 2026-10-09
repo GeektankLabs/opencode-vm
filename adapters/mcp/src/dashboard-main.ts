@@ -54,6 +54,7 @@ async function main() {
     inventory: () => gateway.readDashboardInventory(), session: session => gateway.readDashboardSession(session),
     board: () => { if (!board) throw new Error("Board unavailable"); return board.readDashboardTasks(); },
     activity: ids => ActivityJournal.readDashboard(`${runtime.project}/.opencode-vm/mcp/activity.json`, runtime.projectHash, ids),
+    attention: () => ActivityJournal.readPreparedAttention(`${runtime.project}/.opencode-vm/mcp/activity.json`, runtime.projectHash),
   });
   const assets = resolve(dirname(fileURLToPath(import.meta.url)), "../dashboard");
   const server = await dashboardServer({ projectHash: runtime.projectHash, generation: runtime.generation,
