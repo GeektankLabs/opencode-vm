@@ -1,15 +1,15 @@
 Task-ID: task_efbe63cf-53da-5e79-be25-f7ac8efe9916
 Title: Management-MCP-Bindung und Orchestrator – aktueller Wiederaufnahmekontext
-Status: W1_IMPLEMENTATION_ACTIVE (EFBE-MVP-IMPLEMENTATION-20261009-R1)
-Last-updated: 2026-10-09T03:00:00Z
+Status: W1_IMPLEMENTED_PENDING_INDEPENDENT_QC (EFBE-MVP-IMPLEMENTATION-20261009-R1)
+Last-updated: 2026-10-09T05:40:00Z
 Konzeptrevision: EFBE-MVP-COOPERATIVE-J59-R1; Execution-Contract-Aktiv: EFBE-MVP-IMPLEMENTATION-20261009-R1
 
 ## W1-Umsetzungsstand (Journal #60-Freigabe, this section current)
 
-- Re-Review **PASS** auf EFBE-MVP-COOPERATIVE-J59-R1 (`planning/task-concepts/task_efbe63cf-53da-5e79-be25-f7ac8efe9916-concept-re-review-20261009.md`, F1–F8 erledigt/supediert/zurückgestellt; G1/G4→W2, G2 todo/nichtblockierend bestätigt, G3→W1-Szenario).
-- Writer: `.opencode-vm/worktrees/task_efbe63cf-mvp-impl`, Branch `task/efbe63cf-mvp-impl`, Base Main `1aba9e7f…`; **P1-Cherry-Pick `5ef58d204d5f1f41711dcab92dfbe23bf5817daf`** (von `5ebd0d66…`, keine Reimplementierung). Kein Main-Merge/Push/Release/Live-Mutation; fremde 14 tracked/61 untracked und übrige Worktrees unberührt; Autor ist Writer und kanonischer C/P-Publisher, Reviewer getrennt `ses_ee19af651ffeLTL8BX4XnYvRFc`, externer Dispatcher alleiniger Operator.
-- Kanonischer Contract: **P §17 EFBE-MVP-IMPLEMENTATION-20261009-R1** (Scope W1–W5, Importbelege, Phasenreihenfolge P1→W1→W2→W4→W3→W5, Grenzen, Akzeptanz, max 2 same-fingerprint Production-no-progress-Reparaturen ohne Reset bei Modell-/Sessionwechsel, AUTONOMOUS_MVP_DECISION W1-D1/D2/D3 mit PRE_DECISION_HEAD/Rücknahmepfad).
-- W1-Gegenstand: Skill-/Priming-Mission und zwei Adressaten, kooperative Aktionsmatrix ohne Isolations-/Callergarantien, Root-only-Manager ohne native Subtasks, serielle Führung, acht Wake-Pflichten, Autonomie- versus Modellprofile, Ownership/Receipt/Context/Lifecycle-Verweise, G3 Worker-INPUT_REQUIRED-Szenario. W2–W5 noch nicht begonnen; künftige Capabilities nicht behaupten.
+- Writer-Branch `task/efbe63cf-mvp-impl` in `.opencode-vm/worktrees/task_efbe63cf-mvp-impl` (Base Main `1aba9e7f…`, clean): P1-Import `5ef58d20…` (Cherry-Pick `5ebd0d66…`), Skill-r46-Commit `0bc2fd8d…` (Mission/zwei Adressaten/serielle Root-only-Regeln/G3/kooperative Matrix/Wake-Duty-Loop/Lifecycle in neuer `references/monitor-manager-rules.md` + SKILL/CHANGELOG/bundle/latest/ZIP + revisionsfreie Registry-Beschreibung), Engine-Commit `a94b68ea…` (`mgmt-v2`-Priming, Adapter 0.1.35, Doppelbuild-Pin `d8a98ad56f7c4d59b15965d482490560eb82cb1f9524b5e7183c2c3f53d690ff`, MCP-INTERFACE/AGENTS-Kohärenz). Hauptkonzept-Ergebnisupdate: `df1ca005…` (Doku-Branch).
+- Zieltests: Adapter 209/0/2 (bekannte Basis-Skips), Doppelbuild identisch, chatgpt_skill 85 OK, orchestrator-source 5/5, loader r46-Schritte 1–4 OK (Schritt 5 dokumentiertes `web_jq_inplace`-Helperfixture-Altproblem, main-root-identisch reproduziert, D6-separat), mcp_adapter/install/monitor_service/release_metadata/release_state OK, bash -n + shellcheck(error) OK. Priming-Budget-Guard dokumentiert auf ≤5200 (einmalig pro Digest) angehoben; wiederholter Wake unverändert ≤1100.
+- Keine Selbstabnahme: unabhängige W1-QC durch `ses_ee19af651ffeLTL8BX4XnYvRFc` ausstehend; Modellbefolgung/Re-Priming-Lebendnachweis/hosted-Verhalten UNVERIFIED. Kanonische Einzelheiten + AUTONOMOUS_MVP_DECISIONs W1-D1/D2/D3: P §17.
+- Nächster sequentieller Schritt **W2** (G1 Registry-Speicherort additive Root-Felder unter mkdir-Lock/CAS/rename, G4 Managerkontext-Layout, Alias-/Owner-/Contextindex, A7/A8) — nur nach W1-Freigabe; danach W4→W3→W5. Kein Main-Merge/Push/Release/Live-Aktion durch Autor; Contract bleibt unverändert maßgeblich: P §17.
 
 ## Aktueller Auftrag und maßgebliche Dokumente
 

@@ -1,7 +1,7 @@
 Task-ID: task_efbe63cf-53da-5e79-be25-f7ac8efe9916
 Title: Management-MCP-Bindung und Orchestrator – kanonischer konsolidierter MVP-Plan
-Status: W1_IMPLEMENTATION_ACTIVE (EFBE-MVP-IMPLEMENTATION-20261009-R1); Re-Review PASS auf EFBE-MVP-COOPERATIVE-J59-R1
-Last-concept-update: 2026-10-09T03:00:00Z
+Status: W1_IMPLEMENTED_PENDING_INDEPENDENT_QC (EFBE-MVP-IMPLEMENTATION-20261009-R1); W2-W5 sequenziell offen
+Last-concept-update: 2026-10-09T05:40:00Z
 Konzeptrevision: EFBE-MVP-COOPERATIVE-J59-R1 (Konzeptbasis); Execution-Contract-Aktiv: EFBE-MVP-IMPLEMENTATION-20261009-R1
 Entscheidungsstand: Journal #52–#59; #59 0c07a7a8-0456-424c-b02d-fe00bb604c00; Implementierungs-Freigabe Journal #60
 
@@ -277,7 +277,10 @@ choice/rationale=neues references/monitor-manager-rules.md plus ein SKILL.md-Ref
 uncertainty=hosted Skill-Verhalten weiterhin UNVERIFIED; reversibility=Rücknahme per git revert der Bundle-/Dokucommits ohne Produktcode-/Adapterfolgen; Aufwand minimal
 PRE_DECISION_HEAD=5ef58d204d5f1f41711dcab92dfbe23bf5817daf
 worktree/owner=.opencode-vm/worktrees/task_efbe63cf-mvp-impl, task/efbe63cf-mvp-impl, Autor-Session
-implementation_commits=<pending>
+implementation_commits=0bc2fd8da413ff29e71b17e8f974514c3b016c6a (skill r46)
+components=integrations/chatgpt/{bundle.json,latest.json,SKILL.md,CHANGELOG.md,references/{monitor-manager-rules.md,monitor-tasks.md,regression-scenarios.md}},skills/registry.json,tests/{chatgpt_skill_test.py,skills_orchestrator_test.sh},ZIP+sha256
+tests/acceptance=build --check OK (inventory/ZIP/checksum r46); chatgpt_skill_test 85 OK; orchestrator-source 5/5; loader r46-marker pass bis Schritt 5 (bekanntes Helperfixture-Altproblem, main-root-identisch)
+change_path=git revert 0bc2fd8 + Bundle-Rebuild r45; keine Adapter-/Skript-Kopplung
 ```
 
 ```text
@@ -286,23 +289,31 @@ decision_id=W1-D2-priming-contract-bump; task/phase=efbe63cf W1; time=2026-10-09
 strategy_source=Journal #56–#59; P §4/§5/§7
 question=Priming-Text der Monitor-Engine auf Mission/Wake-/Root-only-Regeln aktualisieren und Contract mgmt-v1→mgmt-v2 heben
 alternatives=Text austauschen ohne Contract-Bump (veraltete Primings blieben wirksam, stiller Regelversatz); volle W4-Wake-Mechanik jetzt (Scopevorgriff)
-choice/rationale=buildPrimingBlock-Inhalt um Mission/zwei Adressaten/Aktionsmatrixkurz/Wake-Checkliste/Root-only+seriell/Autonomie-vs-Modellprofile/Restrisiko ohne Garantien ergaenzen; PRIMING_CONTRACT mgmt-v2 nutzt bestehendes digest-gated Re-Priming einmalig automatisch aus; keine neue Digest-/Auditmechanik (W4)
-uncertainty=modellseitige Befolgung UNVERIFIED; Re-Priming-Lebendnachweis W4; reverse=Rücknahme per git revert (alter Contractstring/Digest fuehrt zu erneutem einmaligem Re-Priming)
+choice/rationale=buildPrimingBlock-Inhalt um Mission/zwei Adressaten/Aktionsmatrixkurz/Wake-Checkliste/Root-only+seriell/Autonomie-vs-Modellprofile/Restrisiko ohne Garantien ergänzen; PRIMING_CONTRACT mgmt-v2 nutzt bestehendes digest-gated Re-Priming einmalig automatisch aus; keine neue Digest-/Auditmechanik (W4)
+uncertainty=modellseitige Befolgung UNVERIFIED; Re-Priming-Lebendnachweis W4; reverse=Rücknahme per git revert (alter Contractstring/Digest führt zu erneutem einmaligem Re-Priming)
 PRE_DECISION_HEAD=5ef58d204d5f1f41711dcab92dfbe23bf5817daf
 worktree/owner=wie oben
-implementation_commits=<pending>
+implementation_commits=a94b68eacfc8c264e9a937636a32e5550a910b7e (engine, adapter 0.1.35, Pin d8a98ad56f7c4d59b15965d482490560eb82cb1f9524b5e7183c2c3f53d690ff, AGENTS/MCP-INTERFACE)
+components=adapters/mcp/src/{monitor-engine.ts,monitor.test.ts,types.ts},adapters/mcp/package{.json,-lock.json},opencode-vm.sh,AGENTS.md,docs/MCP-INTERFACE.md
+tests/acceptance=Adapter-Suite 211: 209 pass/0 fail/2 bekannte Skips; Doppelbuild byteidentisch; mcp_adapter/install/monitor_service/release_metadata/release_state OK; bash -n/shellcheck(error) OK; Priming-Budget-Guard dokumentiert auf ≤5200 Zeichen (~1300 Tokens, einmalig pro Digest) erhöht statt der früheren ~330 — Mission/Mehrheit neuer Pflichten sind inhaltlich mandatiert, wiederholter Wake bleibt ≤1100
+change_path=git revert a94b68e; Digest-Wechsel löst einmaliges Re-Priming auf alte Regeln aus; keine Daten-/Formatänderung
 ```
 
 ```text
 AUTONOMOUS_MVP_DECISION
 decision_id=W1-D3-registry-marker-coherence; task/phase=efbe63cf W1; time=2026-10-09T03:00Z
-strategy_source=P §12 Versionkohaerenzregel; reale Bundleänderung r46
+strategy_source=P §12 Versionskohärenzregel; reale Bundleänderung r46
 question=skills/registry.json Orchestratorbeschreibung nennt fest r43 (Altbestand, bereits bei r45 falsch); Loader-/Source-Test erwartet r43
-alternatives=erneut nur dokumentieren (nach echter r46-Aenderung aktiv irrefuehrend); dynamische Registryauflösung (überdimensioniert)
-choice/rationale=Beschreibung auf revisionsfrei ("revision per integrations/chatgpt/bundle.json") und skills_orchestrator_test.sh r43-Referenzen auf die echte neue Bundle-Revision r46 ziehen; minimal, driftfrei, separater Commit hierfuer; Basisaltfehler bleibt als solcher dokumentiert
+alternatives=erneut nur dokumentieren (nach echter r46-Änderung aktiv irreführend); dynamische Registryauflösung (überdimensioniert)
+choice/rationale=Beschreibung auf revisionsfrei ("revision per integrations/chatgpt/bundle.json") und skills_orchestrator_test.sh r43-Referenzen auf die echte neue Bundle-Revision r46 ziehen; minimal, driftfrei, separater Commit hierfür; Basisaltfehler bleibt als solcher dokumentiert
 uncertainty=none lokal; reverse git revert
 PRE_DECISION_HEAD=5ef58d204d5f1f41711dcab92dfbe23bf5817daf
 worktree/owner=wie oben
-implementation_commits=<pending>
+implementation_commits=0bc2fd8da413ff29e71b17e8f974514c3b016c6a (mit W1-D1)
+components=skills/registry.json, tests/skills_orchestrator_test.sh
+tests/acceptance=Schritte 1–4 grün (r46-Kohärenz); Schritt 5 scheitert am dokumentierten Helperfixture-Altproblem (web_jq_inplace nicht im extrahierten Subset) — in main-root byteidentisch reproduziert, bewusst nicht mitgezogen (D6 separat)
+change_path=git revert der beiden Zeilen; keine Runtime-Auswirkung (Beschreibungstext)
 ```
+
+**W1-Ergebnis (2026-10-09T05:40Z):** Writer-Branch `task/efbe63cf-mvp-impl` = `a94b68eacfc8c264e9a937636a32e5550a910b7e` (Base `1aba9e7f…`, P1-Import `5ef58d20…`, Skill `0bc2fd8d…`, Engine `a94b68ea…`), Arbeitsbaum clean. Kanonisches Hauptkonzept-Update: Branch `task/efbe63cf-monitor-mcp-konzept` `df1ca005…`. Kein Main-Merge, kein Push/Release (Operator-Gates). **Nächster sequentieller Schritt W2:** Registry-Alias-/Owner-/Contextindex + G1-Speicherort (additive Root-Felder im bestehenden mkdir-Lock/CAS/rename-Vertrag) + G4-Managerkontext-Layout; A7/A8-Tests; erst nach unabhängiger W1-QC durch `ses_ee19af651ffe…` bzw. Operator-Freigabe. W1-Verifikation durch Autor ersetzt keine unabhängige QC; Modellbefolgung/Wake-Fortschritt bleiben UNVERIFIED bis W4/Abnahme.
 
