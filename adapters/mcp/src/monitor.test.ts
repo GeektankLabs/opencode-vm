@@ -716,9 +716,24 @@ test("engine: MANAGEMENT priming is sent once, later wakes stay short and single
     assert.equal(await engine.tick(), "dispatched");
     assert.equal(state.sends.length, 1, "priming plus mission is one admitted message, never two");
     const first = state.sends[0]!;
-    assert.match(first, /\[MANAGEMENT-PRIMING mgmt-v1\]/);
+    assert.match(first, /\[MANAGEMENT-PRIMING mgmt-v2\]/);
     assert.match(first, /Role: MANAGEMENT/);
     assert.match(first, /coordinate, never implement/);
+    assert.match(first, /drive the commissioned development actively to the agreed result/);
+    assert.match(first, /pure status observation is not delivery/);
+    assert.match(first, /Management decisions and control stay serial/);
+    assert.match(first, /tool visibility is not authorization/);
+    assert.match(first, /no technical enforcement, caller-identity proof or BLOCKED guarantee is claimed/);
+    assert.match(first, /reuse ones verifiably created by you \(creation receipt\/registry identity, never the title\)/);
+    assert.match(first, /never use native subtasks for management work/);
+    assert.match(first, /Workers decide their own subtask use inside existing scope and permissions/);
+    assert.match(first, /normal same-session follow-up once the actual decision exists/);
+    assert.match(first, /pending security permission is never answered or bypassed/);
+    assert.match(first, /create\/spawn or reprioritize board tasks, or self-authorize — recommend instead/);
+    assert.match(first, /journal\/compact-context upkeep, additive non-authorizing notes/);
+    assert.ok(first.includes("wake duty loop") && first.includes("reconcile actual session/order states"), "wake duty loop missing");
+    assert.ok(first.includes("synthesize key findings continuously"), "continuous synthesis duty missing");
+    assert.match(first, /after secured handover archive finished own sessions and remove their context files per contract/);
     assert.match(first, /list_project_tasks, get_project_task links\/documents/);
     assert.match(first, /Sandbox covers the explicitly assigned test estate/);
     assert.match(first, /product source and semantics are out of scope/);
@@ -759,7 +774,7 @@ test("engine: MANAGEMENT priming is sent once, later wakes stay short and single
     });
     state.taskUpdated = "2026-10-09T00:00:00.000Z";
     assert.equal(await engine.tick(), "dispatched");
-    assert.match(state.sends[2]!, /\[MANAGEMENT-PRIMING mgmt-v1\]/);
+    assert.match(state.sends[2]!, /\[MANAGEMENT-PRIMING mgmt-v2\]/);
     assert.match(state.sends[2]!, /Autonomy profile sandbox: apply its operator-contract scope/);
     const reprime = await readRegistrySnapshot(project);
     assert.notEqual(reprime.registry.monitors[0]!.session.priming_digest, digestValue);
@@ -786,7 +801,7 @@ test("engine: compaction continuation repeats the MANAGEMENT role block once", a
     });
     assert.equal(await engine.tick(), "compaction-continued");
     assert.equal(state.sends.length, 1, "exactly one admitted continuation");
-    assert.match(state.sends[0]!, /\[MANAGEMENT-PRIMING mgmt-v1\]/);
+    assert.match(state.sends[0]!, /\[MANAGEMENT-PRIMING mgmt-v2\]/);
     assert.match(state.sends[0]!, /\[MONITOR-COMPACT /);
     const snapshot = await readRegistrySnapshot(project);
     assert.equal(typeof snapshot.registry.monitors[0]!.session.priming_digest, "string");
@@ -811,10 +826,12 @@ test("engine: wake prompt stays inside its token budget and names the bounded mi
     await engine.tick();
     const primedWake = state.sends[0]!;
     const mission = primedWake.slice(primedWake.indexOf("[MONITOR-ACTION"));
-    // Budget guard: the recurring mission text stays small (~150 tokens), the
-    // one-time priming block is bounded as well (~330 tokens).
+    // Budget guard: the recurring mission text stays small (~150 tokens). The one-time
+    // priming block grew with the W1 mission/ownership/wake-duty rules (Contract
+    // EFBE-MVP-IMPLEMENTATION-20261009-R1, decision W1-D2): bounded at ~1100 tokens,
+    // sent once per priming digest, never per tick.
     assert.ok(mission.length <= 1100, `mission text grew to ${mission.length} characters`);
-    assert.ok(primedWake.length - mission.length <= 2400, `priming block grew to ${primedWake.length - mission.length} characters`);
+    assert.ok(primedWake.length - mission.length <= 5200, `priming block grew to ${primedWake.length - mission.length} characters`);
     for (const marker of ["Mission: 1) verify progress", "exactly ONE next permitted step", "bounded no-op", "INPUT_REQUIRED only for a real missing decision"]) {
       assert.ok(mission.includes(marker), `mission marker missing: ${marker}`);
     }
@@ -838,7 +855,7 @@ test("engine: a session rebind inside the same wake primes the brand-new session
     // First wake: session is created and primed in one admitted message.
     assert.equal(await engine.tick(), "dispatched");
     assert.equal(state.sends.length, 1);
-    assert.match(state.sends[0]!, /\[MANAGEMENT-PRIMING mgmt-v1\]/);
+    assert.match(state.sends[0]!, /\[MANAGEMENT-PRIMING mgmt-v2\]/);
     const primed = await readRegistrySnapshot(project);
     assert.equal(primed.registry.monitors[0]!.session.session_id, "ses_monitor");
     assert.equal(typeof primed.registry.monitors[0]!.session.priming_digest, "string");
@@ -853,7 +870,7 @@ test("engine: a session rebind inside the same wake primes the brand-new session
     });
     assert.equal(await engine.tick(), "dispatched");
     assert.equal(state.sends.length, 2, "the rebind wake admits exactly one message");
-    assert.match(state.sends[1]!, /\[MANAGEMENT-PRIMING mgmt-v1\]/,
+    assert.match(state.sends[1]!, /\[MANAGEMENT-PRIMING mgmt-v2\]/,
       "the brand-new empty session receives the role block in the same wake, not one interval later");
     assert.match(state.sends[1]!, /\[MONITOR-ACTION wake_/);
     const rebound = await readRegistrySnapshot(project);
