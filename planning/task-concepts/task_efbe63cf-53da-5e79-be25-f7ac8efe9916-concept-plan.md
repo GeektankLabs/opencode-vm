@@ -1,9 +1,9 @@
 Task-ID: task_efbe63cf-53da-5e79-be25-f7ac8efe9916
 Title: Management-MCP-Bindung und Orchestrator – kanonischer konsolidierter MVP-Plan
-Status: W2_IMPLEMENTED_PENDING_QC (EFBE-MVP-IMPLEMENTATION-20261009-R1) — W1_REQC_PASS; W2-Kandidat `f1644ce0…` wartet auf unabhängige QC; kein Selbst-PASS; W4→W3→W5 sequenziell offen
-Last-concept-update: 2026-10-09T14:14:17Z
+Status: W4_IMPLEMENTED_PENDING_QC (EFBE-MVP-IMPLEMENTATION-20261009-R1) — W1/W2 unabhängig PASS; W4-Kandidat `64c9a83…` wartet auf unabhängige QC (Original-Subpunkt Preflight/Standalone-Honesty offen); kein Selbst-PASS; W3→W5 sequenziell offen
+Last-concept-update: 2026-10-09T14:32:03Z
 Konzeptrevision: EFBE-MVP-COOPERATIVE-J59-R1 (Konzeptbasis); Execution-Contract-Aktiv: EFBE-MVP-IMPLEMENTATION-20261009-R1
-Entscheidungsstand: Journal #52–#59; #59 0c07a7a8-0456-424c-b02d-fe00bb604c00; Implementierungs-Freigabe #60; W1-QC_FAIL #63; Reset-Recovery #64–#65; W1-F1-Reparatur; W1_REQC_PASS; W2-Umsetzung (Ersatz-Autorensession)
+Entscheidungsstand: Journal #52–#59; #59 0c07a7a8-0456-424c-b02d-fe00bb604c00; Implementierungs-Freigabe #60; W1-QC_FAIL #63; Reset-Recovery #64–#65; W1-F1-Reparatur; W1_REQC_PASS; W2-Umsetzung; W2_QC_PASS; W4-Umsetzung (Ersatz-Autorensession)
 
 # Kanonischer Design-, Entscheidungs- und Testplan
 
@@ -373,5 +373,63 @@ implementation_commits=f1644ce0dc26c140636e65b5cd8d5835e8182fc5
 components=adapters/mcp/src/{monitor.ts,tools.ts}
 tests/acceptance=Adapter 215 grün; Tool-Schemata unverändert
 change_path=git revert f1644ce
+```
+
+**Nachtrag 2026-10-09T14:32Z — W2_QC_PASS und W4-Umsetzung (aktueller Stand):** Der unabhängige W2-QC `ses_edf07a6e0fferQF9lnwg9pyvnK` (Receipt `msg_1563810d3dc64430b8afa51d0ee5212d` → Terminal `msg_1210c89d0001I8VguD6bpzOhq0`, SHA-256 `8c475f8340aad1ad8827c26bd882becea662a05a73895d37baf85a4a1ab8475b`, 2245 B) bestätigte **W2_QC_PASS** auf `f1644ce`/Tree `2683f647`; W2-F1 (kein Produktionskonsument) und W2-F2 (kein Tool-level-Alias-Test) waren nichtblockierend und für W4 verbindlich.
+
+**W4-Kandidat:** `64c9a832fa4707deae597c5e9ec95ef6eea8b910` / Tree `05f195aa89057e8489624af2bba835f759faf478` (Parent `f1644ce…`) auf `task/efbe63cf-mvp-impl`, clean; 11 Dateien, +529/−18. **W2-F1-Konsumenten-Verdrahtung:** additive MCP-Oberfläche `create_monitor_worker` (Reserve-vor-Create über `reserveWorker`, Confirm über `confirmWorkerCreation` nach beobachteter Antwort), `list_monitor_workers` (begrenzte Index-Read), `update_monitor_worker` (reconcile_created/absent, reuse, rebind, idle, archive, synthesis) — alle über die gelockten W2-Helfer; fremde Worker per Key verweigert; unsichere Create bleibt `reserved` und wird reconciled, nie blind wiederholt; tasklose Worker ohne Boardticket. **W4-Wake-Fortschritt:** die Engine faltet `workerIndexDigest` in die No-op-Prüfung und trägt den begrenzten Worker-Index in den Wake-Prompt, sodass ein Worker-Creation-/Receipt-/Lifecycle-/Synthesis-Delta einen begrenzten Wake auslöst statt unchanged-status-Schleife (Cadence/Config unverändert). **Minimaler Audit:** tatsächliche metadata-only Management-Toolaufrufe ergänzen begrenzte Monitor-History-Einträge (Tool/Ziel/Outcome/Zeit; keine Rohargumente/Secrets; Identität declared/unknown). **W2-F2:** Tool-level-Test belegt `create_monitor`→M1/M2 + `created`-Detail-Alias plus vollen Worker-Lebenszyklus.
+
+**Version/Pin:** Adapter `0.1.36→0.1.37`, Repin `d48ac3f54ea48e5c7b400e7eaa45e77ec8c72607550a81aee5cc83db686a069a` (zwei byte-identische GNU-tar-Builds); Script `0.7.24→0.7.25`, Tags `v0.7.25`; AGENTS 0.1.37/44 Tools; docs/MCP-INTERFACE Worker-Abschnitt. **Tests:** Adapter 217 → **215 pass/0 fail/2 bekannte Skips**; install/mcp_adapter/monitor_service EXIT0; release_metadata/release_state 5 OK; bash -n/shellcheck sauber. Fremdstand: Main `80c2227`, 14/64/0; `task_053e2e55` `aa2bd96` unberührt.
+
+**Offen/nicht in diesem Slice (ehrlich):** die ursprüngliche W4-Fläche „binding preflight/Doctor/start-attach/standalone honesty" (P §3 U1/U2/U4/U5/U6/U7; `/experimental/tool/ids` kein MCP-Client-Inventar; connected nur mit geladenem Skill + gelisteten Management-Tools) ist im Script nicht vorhanden und nicht implementiert; ebenso keine neue mgmt-v2-Re-Priming-Änderung (bestehendes digest-gated Re-Priming unverändert; Re-Priming-Lebendnachweis bleibt UNVERIFIED). W4-D3 (W2) „keine neuen Tools" war W2-Scope; W4 ergänzt bewusst die kleine begrenzte Oberfläche gemäß W2-F1.
+
+**Nächster Schritt W4_IMPLEMENTED_PENDING_QC:** unabhängige QC exakt `64c9a83`/Tree `05f195aa`, danach W3→W5. Kein Main-Merge/Push/Tag/Release/Live-Aktion; W3 nicht gestartet.
+
+```text
+AUTONOMOUS_MVP_DECISION
+decision_id=W4-D1-worker-consumer-surface; task/phase=efbe63cf W4; time=2026-10-09T14:30Z
+strategy_source=W2-QC W2-F1-Anforderung; P §8/§9; YAGNI
+question=W2-Worker-Metadaten konsumierbar machen: additiv begrenzte MCP-Oberfläche vs. Engine-Auto-Create vs. breite Plattform
+alternatives=Engine erzeugt selbst Worker (vermischt Manager-/Workersession, kein realer Managerpfad); größere Oberfläche (verboten); path-only (W2-QC blockiert)
+choice/rationale=drei begrenzte Tools (create/list/update) auf den vorhandenen gelockten Helfern; realer Manager-ruft-MCP-Pfad; keine neue Security/Trust-Schicht
+uncertainty=Skill-Nutzung/Konsumentenverhalten bleibt UNVERIFIED; reversibility=git revert; Aufwand minimal
+PRE_DECISION_HEAD=f1644ce0dc26c140636e65b5cd8d5835e8182fc5
+worktree/owner=.opencode-vm/worktrees/task_efbe63cf-mvp-impl, task/efbe63cf-mvp-impl
+implementation_commits=64c9a832fa4707deae597c5e9ec95ef6eea8b910
+components=adapters/mcp/src/{tools.ts,monitor.ts}
+tests/acceptance=Adapter 217 (215/0/2); http.test Worker-Lebenszyklus + W2-F2
+change_path=git revert 64c9a83
+```
+
+```text
+AUTONOMOUS_MVP_DECISION
+decision_id=W4-D2-worker-delta-wake; task/phase=efbe63cf W4; time=2026-10-09T14:30Z
+strategy_source=P §7 Wake-Vertrag; W4 „receipt/result-delta wake progress"
+question=Worker-Delta erreicht den Manager: No-op-Digest um Worker-Index erweitern vs. neuer Timer/Subscription
+alternatives=separate Completion-Subscription/Timer (nicht belegt, neue Mechanik); Worker-Delta ignorieren (unchanged-status-Schleife)
+choice/rationale=begrenzter `workerIndexDigest` in die bestehende No-op-Prüfung + Worker-Index im Wake-Prompt; Cadence/Config unverändert, keine neue Subscription
+uncertainty=echter Live-Wake-Fortschritt UNVERIFIED; reversibility=git revert; Aufwand minimal
+PRE_DECISION_HEAD=f1644ce0dc26c140636e65b5cd8d5835e8182fc5
+worktree/owner=wie oben
+implementation_commits=64c9a832fa4707deae597c5e9ec95ef6eea8b910
+components=adapters/mcp/src/{monitor.ts,monitor-engine.ts}
+tests/acceptance=monitor.test W4-Wake: Worker-Delta → dispatched, danach noop-unchanged
+change_path=git revert 64c9a83
+```
+
+```text
+AUTONOMOUS_MVP_DECISION
+decision_id=W4-D3-defer-preflight-honesty; task/phase=efbe63cf W4; time=2026-10-09T14:30Z
+strategy_source=P §3 Bindungsdiagnose; bounded slice
+question=„binding preflight/Doctor/start-attach/standalone honesty" jetzt implementieren vs. als Rest-scope ausweisen
+alternatives=neue Preflight-Mechanik ohne Live-/VM-Beleg (breit, nicht isoliert verifizierbar); ehrlich als nicht implementiert ausweisen
+choice/rationale=im Script existiert keine solche Preflightfläche; kein halbfertiger, unbelegter Claim; Rest-scope offen benannt für Freigabe/QC
+uncertainty=Rest-scope bleibt offen; reversibility=kein Code (nur Dokument); Aufwand--
+PRE_DECISION_HEAD=f1644ce0dc26c140636e65b5cd8d5835e8182fc5
+worktree/owner=wie oben
+implementation_commits=keine (bewusst ausgewiesen)
+components=keine
+tests/acceptance=keine
+change_path=n/a
 ```
 
