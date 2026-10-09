@@ -1,9 +1,9 @@
 Task-ID: task_efbe63cf-53da-5e79-be25-f7ac8efe9916
 Title: Management-MCP-Bindung und Orchestrator – kanonischer konsolidierter MVP-Plan
-Status: CONCEPT_REVISED_RE_REVIEW_PENDING; kein Implementierungs-Go
-Last-concept-update: 2026-10-09T01:29:55Z
-Konzeptrevision: EFBE-MVP-COOPERATIVE-J59-R1
-Entscheidungsstand: Journal #52–#59; #59 0c07a7a8-0456-424c-b02d-fe00bb604c00
+Status: W1_IMPLEMENTATION_ACTIVE (EFBE-MVP-IMPLEMENTATION-20261009-R1); Re-Review PASS auf EFBE-MVP-COOPERATIVE-J59-R1
+Last-concept-update: 2026-10-09T03:00:00Z
+Konzeptrevision: EFBE-MVP-COOPERATIVE-J59-R1 (Konzeptbasis); Execution-Contract-Aktiv: EFBE-MVP-IMPLEMENTATION-20261009-R1
+Entscheidungsstand: Journal #52–#59; #59 0c07a7a8-0456-424c-b02d-fe00bb604c00; Implementierungs-Freigabe Journal #60
 
 # Kanonischer Design-, Entscheidungs- und Testplan
 
@@ -249,3 +249,60 @@ Die vollständigen alten Texte sind über `8a6a7f0` (C/P) und `7e9fa90` (Hauptko
 Weitere unveränderte Historienpfade im selben taskbezogenen Namensraum: `…-concept-plan-details-management-execution.md` (Journal #15–#17/Q1feasibility, J13-Sandbox), `…-concept-plan-details-consolidation.md` (Journal #18–#25, S0–S7/Q1b/Q1c/Q6/Q7/Q8), `…-concept-plan-details-s2.md` (voller Re-QC/Integration), `…-concept-plan-details.md` (UX/Fallback/Pause/S1). Sie sind Quellen früherer Stände, keine konkurrierende aktuelle Regel. Die neuen normativen Abschnitte §2–§13 dieser P haben Vorrang für den aktuellen MVP-Plan.
 
 Unabhängiger Reviewbericht bleibt unverändert, SHA-256 `2071d8f3b570c70681eef7e73d9072f013f5838065d9828ebc69a92fdbdd95e3`, Urteil ÜBERARBEITEN. Neue SHA-/Dokumentcommits im Abschlussreceipt; keine Secretwerte, keine zyklischen Dokument-Selbsthashes, keine Review-Freigabe durch Autor.
+
+## 17 Synthesized Execution Contract — EFBE-MVP-IMPLEMENTATION-20261009-R1 (active)
+
+Operatorfreigabe Journal #60: autonome Umsetzung des konsolidierten Management-MCP/Orchestrator-MVP bis unabhängig geprüft integrationsbereit; Optimistic MVP. Readiness msg_11e93a5ea001zhbYgoZy4gU4ik vollständig gelesen und revalidiert (main `1aba9e7f…`, 14 tracked/61 untracked/0 staged nur fremd, `opencode-vm.sh` identisch `f28898a`↔HEAD, P1-NOT-IN-MAIN, Runtime-Lock/PID 11677 einzige aktive Session, Monitor scheduler `false`, Writer-Pfad/Branch frei).
+
+| Feld | Wert |
+|---|---|
+| phase/revision | **W1** aktiv; SYNTHESIS_REVISION EFBE-MVP-IMPLEMENTATION-20261009-R1; Phasenreihenfolge **P1→W1→W2→W4→W3→W5**, seriell, kein paralleler Wave-Go. |
+| scope | W1-W5 nach §12/§13. W1 jetzt: Skill-/Priming-Regeln (Mission #59, zwei Adressaten, kooperative Aktionsmatrix §5, Root-only-Manager ohne native Subtasks #56/#57, serielle Managementführung, acht Wake-Pflichten #58, Autonomie- versus Modellprofile §6, Ownership/Receipt/Context/Lifecycle-Verweise §8–§10, G3-Regelfall, Restrisiko ohne Block-/Isolationsgarantien §2/§3). W2/3/4/5 noch nicht begonnen; künftige Capabilities nicht behaupten. |
+| writer | alleiniger Produkt-Writer und kanonischer C/P-Publisher: diese Autor-Session (Build/`opencode`/`qwen3.8-flash`/`xhigh`, verifiziert; kein Runtime-/Profil-/Policywechsel durch Autor). |
+| reviewer/dispatch | unabhängiger Reviewer getrennt `ses_ee19af651ffeLTL8BX4XnYvRFc`; externe Orchestrierung/Dispatch ausschließlich beim Operator; keine Selbstabnahme, keine Management-MCP-Selbstdispatches, keine neuen Worker/Subagenten durch Autor. |
+| base/import | Writer-Worktree `.opencode-vm/worktrees/task_efbe63cf-mvp-impl`, Branch `task/efbe63cf-mvp-impl` auf Main `1aba9e7fcdc9286e724cf7323ee17d45932b2ef5`; **P1-Import** Cherry-Pick `5ef58d204d5f1f41711dcab92dfbe23bf5817daf` von `5ebd0d66c1c79756d605ba32e161f471cd9d733f` (2 Dateien, Script 0.7.23) — keine Reimplementierung, kein Main-Merge, kein Rerun. Vorleistungen `259454d3`/`019d2564`/`afc4892` bleiben importierte Ancestors, nicht erneut ausgeführt. |
+| boundaries | **No** Main-Merge/Push/Tag/Release/Deploy/Hostinstallation/Live-Restart/Live-Config-/Monitor-/Profil-/Permission-/Archiv-/Cleanupaktion; keine Secret-/Credentialwerte in Ausgaben; fremde 14 tracked-modified + 61 untracked + alle übrigen Worktrees bleiben byte-/statusgleich; kein Reset/Stash/Stage fremder Änderungen; Produktwrites ausschließlich über explizite absolute Worktree-Pfade mit verifizierter Git-Zieländerung; C/P nur taskeeigene Dateipflege im canonical Mainroot (dort keine Produktwrites, keine alternative C/P-Autorität, keine Symlinks). |
+| versionierung | nur kohärent nach realen Änderungen: Skillbundle `r45→r46` (Marker/Changelog/bundle.json/ZIP+SHA/`--check`), Scriptpatchregel durch P1-Import erfüllt (`0.7.22→0.7.23`, Tags v0.7.23), Adapterbump **0.1.34→0.1.35** nur wegen echtem Priming-Text-/Regelverhalten, Repin aus reproduzierbarem Doppelbuild; Hub/OpenLive ohne Änderung unverändert gepinnt; Publikation bleibt Operator-Gate. |
+| acceptance | §13 A1–A14; W1-Szenarien A3/A4/A5 plus G3 explizit: Worker-`input_required` ⇒ nach tatsächlich vorliegender fachlicher Entscheidung im vorhandenen Profil/Scope normaler same-session Followup (Preconditions wie sonst auch); echte Operatorentscheidung ⇒ INPUT_REQUIRED-Eskalation; Pending-Security-Input niemals umgangen. Regelbefolgung bleibt kooperativ; Verstoß wird als Verstoß gemeldet, nicht als technisch verhindert. |
+| repair budget | maximal **zwei** same-fingerprint Production-no-progress-Reparaturen; Reservierung bei Admission, A→B→A-/Modell-/Session-/Restart-Wechsel **setzen Zähler nie zurück**; management/read/docs/test/harness/infra-Arbeit zählt nie; dokumentierte Altfehler getrennt führen: `skills_orchestrator_test.sh` r43-Erwartung (durch echte Bundleänderung auf aktuellen Stand ziehbar, Basis bereits rot), `mcp_self_connection_test.py`-Helperfixture-Defekt (strikt separater Strand), Registrydescription-r43-Altbestand. |
+| autonomy decisions | AUTONOMOUS_MVP_DECISION-Einträge in diesem Abschnitt mit PRE_DECISION_HEAD und Rücknahmepfad; keine künstlichen Detail-Go-Fragen für profilkonforme reversible technische Wahlen. |
+
+```text
+AUTONOMOUS_MVP_DECISION
+decision_id=W1-D1-skill-reference-file; task/phase=efbe63cf W1; time=2026-10-09T03:00Z
+strategy_source=Operator-J59/Freigabe J60; P §17 (dieser Contract)
+question=neue Referenzdatei vs. Erweiterung monitor-tasks.md fuer interne Monitor-/Managerregeln
+alternatives=monitor-tasks.md anreichern (vermischt externen Scheduler-Bootstrap mit internen Managerregeln); SKILL.md-only (sprengt lightweight-Einstieg)
+choice/rationale=neues references/monitor-manager-rules.md plus ein SKILL.md-Referenzbullet und Querverweis monitor-tasks.md; kleinste additive, querschnittsfreie Variante
+uncertainty=hosted Skill-Verhalten weiterhin UNVERIFIED; reversibility=Rücknahme per git revert der Bundle-/Dokucommits ohne Produktcode-/Adapterfolgen; Aufwand minimal
+PRE_DECISION_HEAD=5ef58d204d5f1f41711dcab92dfbe23bf5817daf
+worktree/owner=.opencode-vm/worktrees/task_efbe63cf-mvp-impl, task/efbe63cf-mvp-impl, Autor-Session
+implementation_commits=<pending>
+```
+
+```text
+AUTONOMOUS_MVP_DECISION
+decision_id=W1-D2-priming-contract-bump; task/phase=efbe63cf W1; time=2026-10-09T03:00Z
+strategy_source=Journal #56–#59; P §4/§5/§7
+question=Priming-Text der Monitor-Engine auf Mission/Wake-/Root-only-Regeln aktualisieren und Contract mgmt-v1→mgmt-v2 heben
+alternatives=Text austauschen ohne Contract-Bump (veraltete Primings blieben wirksam, stiller Regelversatz); volle W4-Wake-Mechanik jetzt (Scopevorgriff)
+choice/rationale=buildPrimingBlock-Inhalt um Mission/zwei Adressaten/Aktionsmatrixkurz/Wake-Checkliste/Root-only+seriell/Autonomie-vs-Modellprofile/Restrisiko ohne Garantien ergaenzen; PRIMING_CONTRACT mgmt-v2 nutzt bestehendes digest-gated Re-Priming einmalig automatisch aus; keine neue Digest-/Auditmechanik (W4)
+uncertainty=modellseitige Befolgung UNVERIFIED; Re-Priming-Lebendnachweis W4; reverse=Rücknahme per git revert (alter Contractstring/Digest fuehrt zu erneutem einmaligem Re-Priming)
+PRE_DECISION_HEAD=5ef58d204d5f1f41711dcab92dfbe23bf5817daf
+worktree/owner=wie oben
+implementation_commits=<pending>
+```
+
+```text
+AUTONOMOUS_MVP_DECISION
+decision_id=W1-D3-registry-marker-coherence; task/phase=efbe63cf W1; time=2026-10-09T03:00Z
+strategy_source=P §12 Versionkohaerenzregel; reale Bundleänderung r46
+question=skills/registry.json Orchestratorbeschreibung nennt fest r43 (Altbestand, bereits bei r45 falsch); Loader-/Source-Test erwartet r43
+alternatives=erneut nur dokumentieren (nach echter r46-Aenderung aktiv irrefuehrend); dynamische Registryauflösung (überdimensioniert)
+choice/rationale=Beschreibung auf revisionsfrei ("revision per integrations/chatgpt/bundle.json") und skills_orchestrator_test.sh r43-Referenzen auf die echte neue Bundle-Revision r46 ziehen; minimal, driftfrei, separater Commit hierfuer; Basisaltfehler bleibt als solcher dokumentiert
+uncertainty=none lokal; reverse git revert
+PRE_DECISION_HEAD=5ef58d204d5f1f41711dcab92dfbe23bf5817daf
+worktree/owner=wie oben
+implementation_commits=<pending>
+```
+

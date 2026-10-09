@@ -1,8 +1,15 @@
 Task-ID: task_efbe63cf-53da-5e79-be25-f7ac8efe9916
 Title: Management-MCP-Bindung und Orchestrator – aktueller Wiederaufnahmekontext
-Status: CONCEPT_REVISED_RE_REVIEW_PENDING; kein Implementierungs-Go
-Last-updated: 2026-10-09T01:29:55Z
-Konzeptrevision: EFBE-MVP-COOPERATIVE-J59-R1
+Status: W1_IMPLEMENTATION_ACTIVE (EFBE-MVP-IMPLEMENTATION-20261009-R1)
+Last-updated: 2026-10-09T03:00:00Z
+Konzeptrevision: EFBE-MVP-COOPERATIVE-J59-R1; Execution-Contract-Aktiv: EFBE-MVP-IMPLEMENTATION-20261009-R1
+
+## W1-Umsetzungsstand (Journal #60-Freigabe, this section current)
+
+- Re-Review **PASS** auf EFBE-MVP-COOPERATIVE-J59-R1 (`planning/task-concepts/task_efbe63cf-53da-5e79-be25-f7ac8efe9916-concept-re-review-20261009.md`, F1–F8 erledigt/supediert/zurückgestellt; G1/G4→W2, G2 todo/nichtblockierend bestätigt, G3→W1-Szenario).
+- Writer: `.opencode-vm/worktrees/task_efbe63cf-mvp-impl`, Branch `task/efbe63cf-mvp-impl`, Base Main `1aba9e7f…`; **P1-Cherry-Pick `5ef58d204d5f1f41711dcab92dfbe23bf5817daf`** (von `5ebd0d66…`, keine Reimplementierung). Kein Main-Merge/Push/Release/Live-Mutation; fremde 14 tracked/61 untracked und übrige Worktrees unberührt; Autor ist Writer und kanonischer C/P-Publisher, Reviewer getrennt `ses_ee19af651ffeLTL8BX4XnYvRFc`, externer Dispatcher alleiniger Operator.
+- Kanonischer Contract: **P §17 EFBE-MVP-IMPLEMENTATION-20261009-R1** (Scope W1–W5, Importbelege, Phasenreihenfolge P1→W1→W2→W4→W3→W5, Grenzen, Akzeptanz, max 2 same-fingerprint Production-no-progress-Reparaturen ohne Reset bei Modell-/Sessionwechsel, AUTONOMOUS_MVP_DECISION W1-D1/D2/D3 mit PRE_DECISION_HEAD/Rücknahmepfad).
+- W1-Gegenstand: Skill-/Priming-Mission und zwei Adressaten, kooperative Aktionsmatrix ohne Isolations-/Callergarantien, Root-only-Manager ohne native Subtasks, serielle Führung, acht Wake-Pflichten, Autonomie- versus Modellprofile, Ownership/Receipt/Context/Lifecycle-Verweise, G3 Worker-INPUT_REQUIRED-Szenario. W2–W5 noch nicht begonnen; künftige Capabilities nicht behaupten.
 
 ## Aktueller Auftrag und maßgebliche Dokumente
 
@@ -38,6 +45,6 @@ P1-Kandidat `5ebd0d66c1c79756d605ba32e161f471cd9d733f`, Branch `task/efbe63cf-sk
 
 Historie: vollständige vorherige C/P am selben Pfad unter Main `8a6a7f0`; Hauptkonzept vollständig in Historiensnapshot `7e9fa907c10b3b48fc9c82ba3f892cd846721127` (SHA `4e1d3efb…`, 87.320 B). Aktuelle Schreibziele: C/P Mainroot, Hauptkonzept bestehender task/efbe63cf-monitor-mcp-konzept-Worktree; fremde dirty unberührt. Keine alternative Hauptdatei.
 
-**Nächster Schritt:** gezielte unabhängige Konzept-Re-Review gemäß P §15 auf exakt übergebener neuer Commit-/SHA-Revision, vorhandenen Bericht und #52–#59 lesen; vier Achsen Widersprüche/technische Lücken/Fachabläufe/Vereinfachung. Aktuelles Reviewprofil separat auflösen, kein Alibaba, keine Autoren-Selbstabnahme. Review oder zukünftige W1–W5-Umsetzung hier nicht starten.
+**Nächster Schritt:** W1-Umsetzung im Writer-Worktree gemäß Contract P §17; danach kanonische Commits/Tests in C/P dokumentieren und W2 (Registry-Alias-/Owner-/Contextindex, G1/G4 festnageln) nur als nächste Freigabephase derselben Serie. Produktfreigaben/Integration bleiben Operator-entschieden.
 
 **UNVERIFIED:** aktuelle reale Skill-/MCP-Bindung, Modell-Regelbefolgung/Wakefortschritt, Worker-/Fallback-/Compaction-/Sideeffect-Kette, Context-/Archive-/Cleanup-Resetpfad, Audit-/Log-Secretfreiheit, Frischeziel und hosted/Native/Langlauf. Harte UID-/proc-/Zweit-Token-/Caller-/Spoof-/Migrationsnachweise nur Folgeticket, kein MVP-Gate. Keine neue echte Fachfrage aus #52–#59; fehlende technische Belege später gezielt prüfen.
