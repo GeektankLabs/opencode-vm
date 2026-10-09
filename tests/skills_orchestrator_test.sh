@@ -64,7 +64,7 @@ lib="$share/lib/web.sh"
 [[ -f "$lib" ]] || fail 'web lib not materialized'
 grep -q 'mcp_self_register || true' "$lib" || fail 'start hook missing'
 grep -q 'mcp_self_unregister || true' "$lib" || fail 'stop hook missing'
-{ awk '/^mcp_self_unregister\(\) \{/,/^\}$/' "$lib"; awk '/^mcp_self_register\(\) \{/,/^\}$/' "$lib"; } > "$TMP/self-mcp-funcs.sh"
+{ awk '/^web_jq_inplace\(\) \{/,/^\}$/' "$lib"; awk '/^mcp_self_unregister\(\) \{/,/^\}$/' "$lib"; awk '/^mcp_self_register\(\) \{/,/^\}$/' "$lib"; } > "$TMP/self-mcp-funcs.sh"
 grep -q '^mcp_self_register() {' "$TMP/self-mcp-funcs.sh" || fail 'register function not extracted'
 # shellcheck disable=SC1090
 source "$TMP/self-mcp-funcs.sh"

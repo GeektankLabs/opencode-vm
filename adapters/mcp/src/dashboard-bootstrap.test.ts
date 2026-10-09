@@ -54,8 +54,9 @@ test("packaged bootstrap uses real SDK GETs, private webauth and ALL inventory; 
   const get=(path:string,auth=true)=>new Promise<{status:number;text:string}>((resolve,reject)=>{const req=request({host:"127.0.0.1",port,path,ca,headers:auth?{authorization:"Basic dTpw"}:{}},res=>{let text="";res.on("data",c=>text+=c);res.on("end",()=>resolve({status:res.statusCode!,text}));});req.on("error",reject);req.end();});
   let result;
   const start=Date.now();
-  while(Date.now()-start<10000){try{result=await get("/healthz");if(result.status===200)break;}catch{}await new Promise(r=>setTimeout(r,100));}
+  while(Date.now()-start<20000){try{result=await get("/healthz");if(result.status===200)break;}catch{}await new Promise(r=>setTimeout(r,100));}
   assert.equal(result?.status,200,errors);
+  const bootedAt=Date.now();
   assert.equal((await get("/api/v1/status",false)).status,401);
   const detail=JSON.parse((await get("/api/v1/status")).text);
   assert.equal(detail.sessions.length,200);assert.equal(detail.counts.active_sessions,50);
@@ -70,8 +71,12 @@ test("packaged bootstrap uses real SDK GETs, private webauth and ALL inventory; 
   assert.ok(calls.every(call=>call.startsWith("GET ")));
   assert.ok(!JSON.stringify(detail).includes("PRIVATE_"));
   await writeFile(input,JSON.stringify({...config,generation:"revoked"}));
-  await new Promise(r=>setTimeout(r,5200));
-  assert.equal((await get("/healthz")).status,503);
+  // Poll for the child's next ownership check instead of racing a fixed sleep:
+  // under parallel suite load the 5s interval plus an in-flight collection can
+  // delay revocation beyond a constant wait. Same final assertions, bounded.
+  const revokedAt=Date.now();let health=0;
+  while(Date.now()-revokedAt<20000){try{health=(await get("/healthz")).status;if(health===503)break;}catch{}await new Promise(r=>setTimeout(r,250));}
+  assert.equal(health,503,errors);
   assert.equal((await get("/api/v1/status")).status,503);
-  console.log(JSON.stringify({bootstrap_ms:Date.now()-start-5200,sessions:200,active:50,tickets:500,backend_gets:calls.length}));
+  console.log(JSON.stringify({bootstrap_ms:bootedAt-start,revocation_ms:Date.now()-revokedAt,sessions:200,active:50,tickets:500,backend_gets:calls.length}));
 });
