@@ -1,9 +1,9 @@
 Task-ID: task_efbe63cf-53da-5e79-be25-f7ac8efe9916
 Title: Management-MCP-Bindung und Orchestrator – kanonischer konsolidierter MVP-Plan
-Status: W4_IMPLEMENTED_PENDING_QC (EFBE-MVP-IMPLEMENTATION-20261009-R1) — W1/W2 unabhängig PASS; W4-Kandidat `64c9a83…` wartet auf unabhängige QC (Original-Subpunkt Preflight/Standalone-Honesty offen); kein Selbst-PASS; W3→W5 sequenziell offen
-Last-concept-update: 2026-10-09T14:32:03Z
+Status: W4_IMPLEMENTED_PENDING_QC (EFBE-MVP-IMPLEMENTATION-20261009-R1) — W1/W2 unabhängig PASS; kohesiver W4-Kandidat `7fc792e…` (Basis-Slice `64c9a83` + Vervollständigung Preflight/Worker-Completion/Skill r47) wartet auf unabhängige QC; kein Selbst-PASS; W3→W5 sequenziell offen
+Last-concept-update: 2026-10-09T14:44:22Z
 Konzeptrevision: EFBE-MVP-COOPERATIVE-J59-R1 (Konzeptbasis); Execution-Contract-Aktiv: EFBE-MVP-IMPLEMENTATION-20261009-R1
-Entscheidungsstand: Journal #52–#59; #59 0c07a7a8-0456-424c-b02d-fe00bb604c00; Implementierungs-Freigabe #60; W1-QC_FAIL #63; Reset-Recovery #64–#65; W1-F1-Reparatur; W1_REQC_PASS; W2-Umsetzung; W2_QC_PASS; W4-Umsetzung (Ersatz-Autorensession)
+Entscheidungsstand: Journal #52–#59; #59 0c07a7a8-0456-424c-b02d-fe00bb604c00; Implementierungs-Freigabe #60; W1-QC_FAIL #63; Reset-Recovery #64–#65; W1-F1-Reparatur; W1_REQC_PASS; W2-Umsetzung; W2_QC_PASS; W4-Umsetzung; W4-Vervollständigung (Ersatz-Autorensession)
 
 # Kanonischer Design-, Entscheidungs- und Testplan
 
@@ -430,6 +430,64 @@ worktree/owner=wie oben
 implementation_commits=keine (bewusst ausgewiesen)
 components=keine
 tests/acceptance=keine
-change_path=n/a
+change_path=n/a  # abgelöst durch W4-D4: Preflight/Standalone-Honesty ist implementiert
+```
+
+**Nachtrag 2026-10-09T14:44Z — W4-Vervollständigung (kohesiver Kandidat, pending independent QC):** Der zuvor ausgewiesene Rest-Scope ist umgesetzt. Kohesiver Kandidat `7fc792e8a353766af9a7607f4553986656991e05` / Tree `579bfdb18445d57288e29b90524ab77fb594d6c7` (Parent `64c9a83…`), worktree clean; 20 Dateien, +277/−37.
+
+- **Preflight/Doctor-Ehrlichkeit (P §3 U1/U2/U4/U5/U6/U7, A1/A2):** `_doctor_mcp_tools` führt einen echten MCP-`tools/list`-POST gegen den loopback-Adapter aus (Protokoll-Header 2026-07-28; Token ausschließlich über eine curl-Konfiguration auf stdin, nie in argv). Der Doctor meldet gelistete Tools und fehlende Kern-Management-Tools als eigene Tatsache, getrennt von healthz-Konnektivität; ein fehlendes Kerntool ist ein explizites Finding, eine fehlgeschlagene Probe ist UNVERIFIED — nie ein stiller Pass. `/experimental/tool/ids` wird ausdrücklich **nicht** als MCP-Inventar verwendet. Eine neue `doctor_collect_binding`-Sektion belegt den real gemounteten Orchestrator-Skill (Revision aus der Mountdatei, nicht Startup-Claim) und die Skill-Quelle (Checkout/Cache/absent). Isolierte Curl-Mock-Tests C21a–d (complete/missing/unavailable/absent), basierend auf real gemounteten Fixture-Pfaden.
+- **Engine-Worker-Completion:** `observeWorkers` pollt begrenzt (≤5) eigene, bereits dispatched Worker (active + dispatch_receipt + runtime_session_id) über den vorhandenen Session-Status-Gateway; ein beendeter Turn (idle/completed mit Assistant-Message) wird als `idle` mit frischem `result_receipt` markiert. Das ändert `workerIndexDigest` und lässt die bestehende Wake-/No-op-Entscheidung den Abschluss beobachten; keine Subscription, kein neuer Timer, Cadence unverändert. Real-Engine-Test: Completion eines dispatched Workers → Wake → danach noop-unchanged. Der reine Creation-/Mutationspfad allein ist damit nicht mehr der einzige Beleg.
+- **mgmt-v2 digest-gated Re-Priming:** unverändert (bestehende Produktionslogik korrekt). Abdeckung durch den bestehenden Real-Engine-Test (Priming einmal, unverändert kein Re-Prime, geänderter Kontext genau einmal) — keine Produktionsänderung nötig.
+- **Skill r46→r47:** `monitor-manager-rules.md` verweist auf die gelockten Worker-Tools (`create_monitor_worker`/`list_monitor_workers`/`update_monitor_worker`) und verbietet direkte/ungelockte Registry-Writes und einen zweiten Store; SKILL-Marker/CHANGELOG/bundle.json/latest.json/ZIP+SHA neu gebaut und `--check`-kohärent; Tests aktualisiert.
+- **Version/Pin:** Adapter `0.1.36→0.1.38` (Basis 0.1.37 + Vervollständigung), finaler Repin `7edeee8e52716f285be4e74a183979f3f312b32d6f0b982f34b62d4f60818475` (zwei byte-identische Builds); Script `0.7.24→0.7.26`, Tags `v0.7.26`; AGENTS 0.1.38/44 Tools.
+- **Tests:** Adapter 218 → **216 pass/0 fail/2 bekannte Skips**; `vm_doctor_test` ALL_PASS inkl. C21a–d; `chatgpt_skill_test` 85 OK; install/mcp_adapter/monitor_service/release_metadata/release_state EXIT0; `bash -n`/`shellcheck` sauber; `skills_orchestrator_test` Schritte 1–4 + r47-Kohärenz OK (Schritt 5 = dokumentiertes base-identisches `web_jq_inplace`-Helperfixture, vorbestehend).
+- **Ehrlich verbleibend (keine Hard-Blocker):** Re-Priming-*Lebendnachweis* auf installierter Runtime, Modell-/Wake-Befolgung, hosted ChatGPT/Mac/Lima/Safari und Langlauf bleiben UNVERIFIED. **Nächster Schritt W4_IMPLEMENTED_PENDING_QC:** unabhängige QC exakt `7fc792e`/Tree `579bfdb1`, danach W3→W5. Kein Main-Merge/Push/Tag/Release/Live-Aktion; W3 nicht gestartet.
+
+```text
+AUTONOMOUS_MVP_DECISION
+decision_id=W4-D4-real-mcp-tools-preflight; task/phase=efbe63cf W4; time=2026-10-09T14:42Z
+strategy_source=P §3 U7/A1/A2; W4-Preflight-Auftrag
+question=Bindungs-Preflight: echte MCP-tools/list-Inventur vs. /experimental/tool/ids/Config-Connectivity
+alternatives=tool/ids als Inventar (explizit falsch); nur healthz (keine Tool-Inventur); neue Preflight-Plattform (verboten)
+choice/rationale=echter tools/list-POST (Protokoll 2026-07-28) mit Token via curl-Config stdin; getrennte Fakten connected vs listed; fehlend=Finding, fehlgeschlagen=UNVERIFIED; skill-binding aus Mountdatei; kleinste additive Doctor-Sektion
+uncertainty=Live-/installierte Runtime-Belege bleiben UNVERIFIED; reversibility=git revert; Aufwand minimal
+PRE_DECISION_HEAD=64c9a832fa4707deae597c5e9ec95ef6eea8b910
+worktree/owner=.opencode-vm/worktrees/task_efbe63cf-mvp-impl, task/efbe63cf-mvp-impl
+implementation_commits=7fc792e8a353766af9a7607f4553986656991e05
+components=opencode-vm.sh (OCVM_DOCTOR_SH payload), tests/vm_doctor_test.sh
+tests/acceptance=vm_doctor_test C21a–d; bash -n/shellcheck
+change_path=git revert 7fc792e
+```
+
+```text
+AUTONOMOUS_MVP_DECISION
+decision_id=W4-D5-engine-worker-completion-observation; task/phase=efbe63cf W4; time=2026-10-09T14:42Z
+strategy_source=P §7 Wake-Vertrag; W4-Completion-Auftrag
+question=Worker-Abschluss beobachtbar machen: begrenztes Status-Polling vs. Completion-Subscription vs. nur Helper-Mutationstest
+alternatives=Subscription/Timer (nicht belegt, neue Mechanik); nur Creation-/Mutationstest (vom Auftrag ausgeschlossen)
+choice/rationale=observeWorkers pollt ≤5 dispatched Worker über den vorhandenen Gateway, markiert beendeten Turn idle + result_receipt, ändert den bestehenden No-op-Digest; keine neue Subscription, Cadence unverändert
+uncertainty=echter Live-Wake-Fortschritt UNVERIFIED; reversibility=git revert; Aufwand minimal
+PRE_DECISION_HEAD=64c9a832fa4707deae597c5e9ec95ef6eea8b910
+worktree/owner=wie oben
+implementation_commits=7fc792e8a353766af9a7607f4553986656991e05
+components=adapters/mcp/src/{monitor.ts,monitor-engine.ts,monitor.test.ts,tools.ts}
+tests/acceptance=monitor.test Real-Engine Completion→Wake→noop (218/216/0/2)
+change_path=git revert 7fc792e
+```
+
+```text
+AUTONOMOUS_MVP_DECISION
+decision_id=W4-D6-skill-links-worker-tools; task/phase=efbe63cf W4; time=2026-10-09T14:42Z
+strategy_source=W2-F1/W4-Auftrag „model-facing instructions"; P §8
+question=Modellregeln an die unterstützten Worker-Tools binden: Skillquelle ändern (r47) vs. belassen
+alternatives=belassen (Skill referenziert Worker-Index ohne gelockte Toolanleitung); breite Skilländerung (verboten)
+choice/rationale=gezielte Regeländerung in monitor-manager-rules.md (gelockte Tools, kein direkter Registry-Write, Completion-Receipt), Bundle r46→r47 kohärent neu gebaut
+uncertainty=hosted Modellbefolgung UNVERIFIED; reversibility=git revert; Aufwand moderat
+PRE_DECISION_HEAD=64c9a832fa4707deae597c5e9ec95ef6eea8b910
+worktree/owner=wie oben
+implementation_commits=7fc792e8a353766af9a7607f4553986656991e05
+components=integrations/chatgpt/** (r47), tests/chatgpt_skill_test.py, tests/skills_orchestrator_test.sh
+tests/acceptance=build --check OK; chatgpt_skill_test 85 OK; skills_orchestrator r47-Kohärenz
+change_path=git revert 7fc792e
 ```
 
