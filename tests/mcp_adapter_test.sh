@@ -376,5 +376,58 @@ pass "start/attach/doctor name exactly one honest MCP end state with concrete ca
 ) || fail "provenance report did not classify invocations or name gaps"
 pass "provenance report classifies invocation and names concrete asset gaps read-only"
 
+# Journal-free opt-in behavior test (Main line) and the real-server preflight
+# conformance test (package line) both run last; neither replaces the other.
 bash "$ROOT/tests/activity_journal_test.sh"
+# --- W4-F1: doctor preflight framing conforms to the REAL adapter -----------
+# The doctor's tools/list request must satisfy the adapter's 2026-07-28
+# header/meta contract (Mcp-Method header + params._meta.protocolVersion); a
+# curl mock alone cannot prove this, so this runs the actual doctor request
+# against a real McpHttpServer built from this candidate.
+harness_pid=""
+cleanup_harness() { [[ -n "${harness_pid:-}" ]] && kill "$harness_pid" 2>/dev/null || true; }
+trap 'cleanup_harness; rm -rf "$TMP"' EXIT
+if command -v node >/dev/null 2>&1 && [[ -f "$ROOT/adapters/mcp/dist/http.js" ]]; then
+  harness="$TMP/preflight-harness.mjs"
+  cat > "$harness" <<'HARNESS'
+const { McpHttpServer } = await import(process.env.ADAPTER_HTTP);
+const runtime = { schema: 1, project: "/p", projectHash: "h", projectName: "p", backendUrl: "http://127.0.0.1:1", generation: "g", opencodeVersion: "x", listenHost: "127.0.0.1", listenPort: 0, credentialFile: "/c", managerFile: "/m" };
+const server = new McpHttpServer(runtime, process.env.PREFLIGHT_TOKEN, {});
+const port = await server.start();
+process.stdout.write(String(port) + "\n");
+process.on("SIGTERM", async () => { await server.close().catch(() => {}); process.exit(0); });
+setInterval(() => {}, 1000);
+HARNESS
+  preflight_token="tok-$(printf 'x%.0s' {1..40})"
+  ADAPTER_HTTP="$ROOT/adapters/mcp/dist/http.js" PREFLIGHT_TOKEN="$preflight_token" node "$harness" > "$TMP/preflight.port" 2>"$TMP/preflight.err" &
+  harness_pid=$!
+  for _ in $(seq 1 60); do [[ -s "$TMP/preflight.port" ]] && break; sleep 0.1; done
+  preflight_port="$(head -n 1 "$TMP/preflight.port" 2>/dev/null || true)"
+  [[ -n "$preflight_port" ]] || { cat "$TMP/preflight.err" >&2; fail "preflight harness did not start"; }
+
+  # The pre-W4-F1 framing (no mcp-method, empty params) is what the real
+  # adapter rejects: prove the defect class is observable here.
+  old_code="$(command curl -sS -o "$TMP/preflight-old.json" -w '%{http_code}' \
+    -H "X-OCVM-MCP-Token: $preflight_token" -H "Content-Type: application/json" \
+    -H "mcp-protocol-version: 2026-07-28" \
+    --data-binary '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
+    "http://127.0.0.1:$preflight_port/mcp" 2>/dev/null || true)"
+  assert_eq "$old_code" "400"
+
+  DOCTOR_TMPDIR="$TMP" DOCTOR_PROBE_TIMEOUT=2
+  # Bypass the curl mock defined earlier in this file; use the real binary.
+  _doctor_run() { local t="$1"; shift; command "$@" 2>/dev/null; }
+  eval "$(extract_function _doctor_mcp_tools)"
+  tools_out="$(_doctor_mcp_tools "$preflight_port" "$preflight_token" 2>/dev/null)" || tools_out=""
+  for tool in list_monitors create_monitor create_monitor_worker list_monitor_workers update_monitor_worker; do
+    grep -qxF "$tool" <<<"$tools_out" || fail "doctor tools/list framing did not return $tool"
+  done
+  assert_eq "$(grep -c . <<<"$tools_out")" "44"
+  cleanup_harness
+  harness_pid=""
+  pass "doctor preflight framing conforms to the real adapter (old framing 400, real tools/list returns 44 incl. core management)"
+else
+  pass "doctor preflight conformance skipped (node or built adapter unavailable)"
+fi
+
 printf 'All MCP adapter lifecycle tests passed.\n'

@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-09-r49
+
+- Integrate the management-priming / worker-tools skill line (previously task-branch-local revisions r46/r47: the monitor-manager mission and two audiences, serial root-only delegation with creation-receipt ownership, the cooperative action matrix without enforcement guarantees, the eight-step wake duty loop and G3 input_required handling, persistent worker context/lifecycle, the locked worker-tool linkage `create_monitor_worker`/`list_monitor_workers`/`update_monitor_worker` with reserve-before-create and reconcile-not-retry, and the engine-observed finished-dispatched-worker `result_receipt` wake signal) into the Main bundle alongside the r47 journal-free and r48 cleanup lines. The management-priming content now ships under r49; the branch-local duplicate r46/r47 entries are subsumed here so no revision number is double-assigned.
+
 ## 2026-10-09-r48
 
 - Require a cleanup decision at every integration handback: remove completed disposable source checkouts after verified integration and owner stop under cleanup authorization, preserve branches/source history and canonical documents, verify removal, or retain with the reason and next boundary.
@@ -10,7 +14,7 @@
 - Discover the connector's explicit disabled/ready/unavailable Activity-Journal state through ordinary session reads; fresh opencode-vm sessions default journal-free and `--journal` is an operator-only startup opt-in retained by attach.
 - In journal-free mode use bounded exact-receipt status/progress/result/content reads in place of queue rounds, preserving active-run limits, fairness, Pause/Go, read coverage and no-blind-retry behavior. No activity cursors, persistent resolution/override records, automatic notifications or fabricated retrospective coverage.
 - Treat ACTIVITY_DISABLED as intentional capability absence and ACTIVITY_UNAVAILABLE as an enabled journal fault, not invalid arguments or permission to change runtime infrastructure. Task Management Journal, Board, native OpenCode history and diagnosis logging remain distinct.
-- Revision r46 belongs to the separate unintegrated management-priming workstream; this hotfix advances the Main bundle directly from r45 to r47 without importing that workstream.
+- Revision r46 belongs to the separate unintegrated management-priming workstream; this hotfix advances the Main bundle directly from r45 to r47 without importing that workstream. (Superseded by r49: that workstream is now integrated.)
 
 ## 2026-10-08-r45
 

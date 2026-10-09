@@ -9,6 +9,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { McpHttpServer, MAX_REQUEST_BODY_BYTES } from "./http.js";
 import { MCP_EVENT_DEFINITIONS } from "./events.js";
 import { lastToolRoundtrips, traceToolCall } from "./diagnostics.js";
+import { readRegistrySnapshot } from "./monitor.js";
 import type { SessionGateway } from "./opencode.js";
 import type { AttachmentDescriptor } from "./attachments.js";
 import { AdapterError, ADAPTER_VERSION } from "./types.js";
@@ -213,6 +214,7 @@ class FakeGateway implements SessionGateway {
   listEntered: (() => void) | undefined;
   listBarrier: Promise<void> | undefined;
   createCalls: Array<string | undefined> = [];
+  failNextCreate = false;
   archiveCalls: string[] = [];
   renameCalls: Array<{ session_id: string; title: string }> = [];
   uploadCalls: Array<{
@@ -243,6 +245,10 @@ class FakeGateway implements SessionGateway {
 
   async createSession(title?: string): Promise<CreateSessionResult> {
     this.createCalls.push(title);
+    if (this.failNextCreate) {
+      this.failNextCreate = false;
+      throw new AdapterError("SUBMISSION_UNCERTAIN", "simulated uncertain create");
+    }
     return {
       project: { id: "hash", name: "project" },
       session_id: "ses_new",
@@ -535,7 +541,7 @@ test("final fallback write is callable on both protocol paths with commit, CAS a
   assert.deepEqual(await readFile(policyPath), beforeStale, "an unavailable catalog selection never writes");
 });
 
-test("official MCP client discovers forty-one stateless HTTP tools and invokes session tools by ID", async () => {
+test("official MCP client discovers forty-four stateless HTTP tools and invokes session tools by ID", async () => {
   const gateway = new FakeGateway();
   const server = new McpHttpServer(runtime(), token, gateway);
   const port = await server.start();
@@ -554,6 +560,7 @@ test("official MCP client discovers forty-one stateless HTTP tools and invokes s
       "archive_session",
       "cancel_monitor_future",
       "create_monitor",
+      "create_monitor_worker",
       "create_session",
       "delete_monitor",
       "disable_monitor",
@@ -572,6 +579,7 @@ test("official MCP client discovers forty-one stateless HTTP tools and invokes s
       "get_session_runtime_options",
       "get_session_status",
       "get_task_result",
+      "list_monitor_workers",
       "list_monitors",
       "list_sessions",
       "open_repo_live",
@@ -586,6 +594,7 @@ test("official MCP client discovers forty-one stateless HTTP tools and invokes s
       "supersede_unresolved_submission",
       "trigger_monitor",
       "update_monitor",
+      "update_monitor_worker",
       "update_session_runtime",
       "upload_attachment",
       "wait_for_project_activity",
@@ -1820,3 +1829,108 @@ function rawRequest(
     request.end();
   });
 }
+
+test("W2-F2/W4: monitor workers use the locked identity lifecycle through the MCP surface", async () => {
+  const project = await mkdtemp(join(tmpdir(), "ocvm-monitor-worker-"));
+  const gateway = new FakeGateway();
+  const adapter = new McpHttpServer({ ...runtime(), project }, token, gateway);
+  const port = await adapter.start();
+  const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`),
+    { requestInit: { headers: { "X-OCVM-MCP-Token": token } } });
+  const client = new Client({ name: "monitor-worker", version: "1.0.0" });
+  try {
+    await client.connect(transport);
+    const created = await client.callTool({
+      name: "create_monitor",
+      arguments: { title: "Worker monitor", task_id: "task_11111111-1111-4111-8111-111111111111" },
+    });
+    const monitorId = (created.structuredContent as { monitor: { monitor_id: string } }).monitor.monitor_id;
+
+    // W2-F2: create_monitor assigns a monotonic manager alias and records it.
+    const snapshot = await readRegistrySnapshot(project);
+    assert.equal(snapshot.registry.alias_high_water, 1);
+    assert.equal(snapshot.registry.monitors[0]!.alias, "M1");
+    const history = await client.callTool({ name: "get_monitor_history", arguments: { monitor_id: monitorId } });
+    const createdEntry = (history.structuredContent as {
+      history: Array<{ type: string; detail?: { alias?: string } }>;
+    }).history.find((entry) => entry.type === "created");
+    assert.equal(createdEntry?.detail?.alias, "M1");
+
+    // Reserve-before-create + confirm through the locked helper (taskless worker).
+    const worker = await client.callTool({
+      name: "create_monitor_worker",
+      arguments: { monitor_id: monitorId, scope: "W4" },
+    });
+    const w0 = (worker.structuredContent as {
+      worker: { worker_key: string; alias: string; lifecycle: string; runtime_session_id: string | null; creation_receipt: string | null };
+      uncertain: boolean;
+    }).worker;
+    assert.equal(w0.alias, "M1-A");
+    assert.equal(w0.lifecycle, "active");
+    assert.equal(w0.runtime_session_id, "ses_new");
+    assert.equal(w0.creation_receipt, "ses_new");
+    assert.equal((worker.structuredContent as { uncertain: boolean }).uncertain, false);
+
+    const listed = await client.callTool({ name: "list_monitor_workers", arguments: { monitor_id: monitorId } });
+    assert.equal((listed.structuredContent as { workers: unknown[] }).workers.length, 1);
+    assert.equal((listed.structuredContent as { alias: string | null }).alias, "M1");
+
+    // Own-worker reuse after idle and rebind after a lost runtime keep the alias.
+    await client.callTool({ name: "update_monitor_worker", arguments: { monitor_id: monitorId, worker_key: w0.worker_key, action: "idle" } });
+    const reused = await client.callTool({
+      name: "update_monitor_worker",
+      arguments: { monitor_id: monitorId, worker_key: w0.worker_key, action: "reuse", runtime_session_id: "ses_reuse", dispatch_receipt: "msg_d1" },
+    });
+    const w1 = (reused.structuredContent as {
+      worker: { lifecycle: string; runtime_session_id: string | null; dispatch_receipt: string | null; alias: string };
+    }).worker;
+    assert.equal(w1.lifecycle, "active");
+    assert.equal(w1.runtime_session_id, "ses_reuse");
+    assert.equal(w1.dispatch_receipt, "msg_d1");
+    assert.equal(w1.alias, "M1-A");
+    const rebound = await client.callTool({
+      name: "update_monitor_worker",
+      arguments: { monitor_id: monitorId, worker_key: w0.worker_key, action: "rebind", runtime_session_id: "ses_rebind" },
+    });
+    assert.equal((rebound.structuredContent as { worker: { runtime_session_id: string } }).worker.runtime_session_id, "ses_rebind");
+
+    // Uncertain create stays reserved and is reconciled, never retried blindly.
+    gateway.failNextCreate = true;
+    const uncertain = await client.callTool({ name: "create_monitor_worker", arguments: { monitor_id: monitorId } });
+    const w2 = (uncertain.structuredContent as { worker: { worker_key: string; alias: string; lifecycle: string } }).worker;
+    assert.equal((uncertain.structuredContent as { uncertain: boolean }).uncertain, true);
+    assert.equal(w2.lifecycle, "reserved");
+    assert.notEqual(uncertain.isError, true, JSON.stringify(uncertain.content));
+    const reconciled = await client.callTool({
+      name: "update_monitor_worker",
+      arguments: { monitor_id: monitorId, worker_key: w2.worker_key, action: "reconcile_created", runtime_session_id: "ses_recovered", creation_receipt: "msg_rec" },
+    });
+    const w3 = (reconciled.structuredContent as { worker: { lifecycle: string; creation_receipt: string | null } }).worker;
+    assert.equal(w3.lifecycle, "active");
+    assert.equal(w3.creation_receipt, "msg_rec");
+
+    // A foreign monitor cannot mutate this worker; it gets its own M2 alias.
+    const created2 = await client.callTool({
+      name: "create_monitor",
+      arguments: { title: "Other", task_id: "task_33333333-3333-4333-8333-333333333333" },
+    });
+    const monitorId2 = (created2.structuredContent as { monitor: { monitor_id: string } }).monitor.monitor_id;
+    const foreign = await client.callTool({
+      name: "update_monitor_worker",
+      arguments: { monitor_id: monitorId2, worker_key: w0.worker_key, action: "archive" },
+    });
+    assert.equal(foreign.isError, true);
+    assert.equal((await readRegistrySnapshot(project)).registry.monitors.find((m) => m.id === monitorId2)?.alias, "M2");
+
+    // Actual metadata-only management audit is visible on the monitor history.
+    const hist2 = await client.callTool({ name: "get_monitor_history", arguments: { monitor_id: monitorId, limit: 50 } });
+    const types = (hist2.structuredContent as { history: Array<{ type: string }> }).history.map((entry) => entry.type);
+    assert.ok(types.includes("worker-created"));
+    assert.ok(types.includes("worker-reuse"));
+    assert.ok(types.includes("worker-rebind"));
+    assert.ok(types.includes("worker-create-uncertain"));
+    assert.ok(types.includes("worker-reconcile_created"));
+  } finally {
+    await client.close(); await adapter.close(); await rm(project, { recursive: true, force: true });
+  }
+});

@@ -160,6 +160,8 @@ OPENCODE_PIDS=""
 OPENCODE_PID=""
 CURL_FAIL_HEALTH=""
 CURL_FAIL_ADAPTER=""
+CURL_FAIL_MCP_TOOLS=""
+MCP_TOOLS_JSON=""
 NOW_FILE="$TMP/now-counter"
 NOW_STEP=0
 printf '1000' > "$NOW_FILE"
@@ -211,6 +213,9 @@ curl() {
     *":40961/healthz")
       if [ -n "$CURL_FAIL_ADAPTER" ]; then return 1; fi
       out="{\"healthy\":true,\"project\":{\"id\":\"$HASH\"},\"generation\":\"gen-1\"}" ;;
+    *":40961/mcp")
+      if [ -n "$CURL_FAIL_MCP_TOOLS" ]; then return 1; fi
+      if [ -n "${MCP_TOOLS_JSON:-}" ]; then out="$MCP_TOOLS_JSON"; else return 1; fi ;;
     *":7784/healthz") out='{"service":"agent-hub","status":"ok"}' ;;
     *":7783/healthz") out='{"service":"repo-dashboard","status":"ok"}' ;;
     *":7782/api/projects") out='[]' ;;
@@ -592,6 +597,43 @@ env -i HOME="$HOME" PATH="/usr/bin:/bin" OCVM_DOCTOR_MOUNTS_FILE="$TMP/mounts-no
 need_out "$TMP/c2n.out" "canonical library not staged"
 rm -rf "$NOLIB"
 pass "C2 wrapper end-to-end: any cwd, clean env, focused area, missing-library exit 4"
+
+# --- C21 preflight/doctor management binding: real tools/list, not tool/ids --
+SKILL_ROOT="$SHARE/config/opencode/skills/orchestrator/opencode-session-orchestrator"
+mkdir -p "$SKILL_ROOT"
+printf 'Release marker: **2026-10-09-r47**.\n' > "$SKILL_ROOT/SKILL.md"
+CORE_TOOLS='"name":"list_monitors"},{"name":"create_monitor"},{"name":"create_monitor_worker"},{"name":"list_monitor_workers"},{"name":"update_monitor_worker"'
+MCP_TOOLS_JSON="{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[{$CORE_TOOLS},{\"name\":\"send_message\"}]}}"
+rc="$(run_main mcp "$TMP/c21-ok.out" "$TMP/c21-ok.err")"
+need_out "$TMP/c21-ok.out" "mcp-tools: listed=6 core-management=complete"
+deny_out "$TMP/c21-ok.out" "core-management=MISSING"
+need_out "$TMP/c21-ok.out" "skill-binding: canonical-orchestrator=mounted(2026-10-09-r47)"
+need_out "$TMP/c21-ok.out" "NOT an MCP client inventory"
+deny_secrets "$TMP/c21-ok.out" "$TMP/c21-ok.err"
+pass "C21a real tools/list inventory + skill mount evidence; /experimental/tool/ids explicitly not proof"
+
+# Missing core tool -> explicit MISSING finding (fail closed, never silent)
+MCP_TOOLS_JSON='{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"list_monitors"},{"name":"create_monitor"}]}}'
+run_main mcp "$TMP/c21-miss.out" "$TMP/c21-miss.err" >/dev/null || true
+need_out "$TMP/c21-miss.out" "core-management=MISSING:"
+need_out "$TMP/c21-miss.out" "update_monitor_worker"
+pass "C21b missing core management tools are an explicit finding, not a silent pass"
+
+# tools/list probe failure -> explicit UNVERIFIED, distinct from healthz
+MCP_TOOLS_JSON=""; CURL_FAIL_MCP_TOOLS=1
+run_main mcp "$TMP/c21-fail.out" "$TMP/c21-fail.err" >/dev/null || true
+need_out "$TMP/c21-fail.out" "mcp-tools: UNVERIFIED"
+CURL_FAIL_MCP_TOOLS=""
+pass "C21c failed real tools/list is UNVERIFIED (connectivity alone is not inventory)"
+
+# Skill absent -> honest not-mounted (opt-out/local), still honest
+rm -f "$SKILL_ROOT/SKILL.md"
+MCP_TOOLS_JSON="{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[{$CORE_TOOLS}]}}"
+run_main mcp "$TMP/c21-noskill.out" "$TMP/c21-noskill.err" >/dev/null || true
+need_out "$TMP/c21-noskill.out" "skill-binding: canonical-orchestrator=not-mounted"
+need_out "$TMP/c21-noskill.out" "skill-source:"
+MCP_TOOLS_JSON=""
+pass "C21d absent orchestrator skill is honest not-mounted with a source line"
 
 # --- final hygiene ----------------------------------------------------------
 [[ -z "$(jobs -p)" ]] || fail "leftover background jobs at end"

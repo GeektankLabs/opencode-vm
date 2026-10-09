@@ -7,6 +7,7 @@ import {
   readRegistrySnapshot,
   recordRepair,
   withRegistry,
+  workerIndexDigest,
 } from "./monitor.js";
 import { isRecord } from "./types.js";
 import type {
@@ -117,7 +118,7 @@ export type CanonicalSummary = {
 
 const READ_FINGERPRINT = "canonical-read";
 /** Version of the MANAGEMENT role/context contract. Bumping it re-primes once. */
-const PRIMING_CONTRACT = "mgmt-v1";
+const PRIMING_CONTRACT = "mgmt-v2";
 
 function iso(now: number): string {
   return new Date(now).toISOString();
@@ -256,6 +257,13 @@ export class MonitorEngine {
   }
 
   private async runWake(id: string, now: number, monitor: MonitorRecord): Promise<WakeOutcome> {
+    // Observe bounded own-worker completion first so a finished dispatched
+    // worker changes the worker index before the change/no-op decision.
+    if (await this.observeWorkers(monitor, now)) {
+      const observed = await readRegistrySnapshot(this.project);
+      const synced = observed.registry.monitors.find((entry) => entry.id === id);
+      if (synced) monitor.workers = synced.workers;
+    }
     // ---- operator abort request: verified native abort, no canonical read ----
     if (monitor.abort_request) {
       const ensured = await this.ensureSession(monitor, now);
@@ -289,6 +297,10 @@ export class MonitorEngine {
     const previously = monitor.state.last_seen_digest;
     const triggered = monitor.wake_request !== null;
     const decisionsSince = canonical.decisionsSince;
+    // Worker creation/receipt/lifecycle/synthesis deltas must reach the manager
+    // as a wake, not be swallowed by the unchanged-board no-op (W4 wake progress).
+    const workerDigest = workerIndexDigest(monitor);
+    const previousWorkerDigest = monitor.state.worker_digest ?? null;
 
     // ---- WAL reconciliation before ANY next admission / no-op shortcut ----
     // An unreconciled non-idempotent dispatch is never silently overridden by
@@ -307,6 +319,7 @@ export class MonitorEngine {
           if (record.dispatch_wal) record.dispatch_wal.message_id = reconciled.messageId;
           monitorHistory(record, "dispatch-reconciled", { message_id: reconciled.messageId }, now);
           record.state.last_seen_digest = summary.digest;
+          record.state.worker_digest = workerDigest;
           record.wake_request = null;
           this.appendDecisionSummary(record, summary, decisionsSince, now);
         });
@@ -321,9 +334,10 @@ export class MonitorEngine {
       return "dispatch-uncertain";
     }
 
-    // Cheap unchanged path: no model call, no note growth. A pending trigger is
-    // consumed with a single bounded receipt entry.
-    if (summary.digest === previously && !triggered) {
+    // Cheap unchanged path: no model call, no note growth. A pending trigger or
+    // a changed worker index (creation/receipt/lifecycle/synthesis) is not a
+    // no-op and proceeds to a bounded wake.
+    if (summary.digest === previously && workerDigest === previousWorkerDigest && !triggered) {
       await this.release(id, now, null);
       return "noop-unchanged";
     }
@@ -418,6 +432,7 @@ export class MonitorEngine {
           await this.release(id, now, reconciled.kind === "found" ? "dispatch-reconciled" : "dispatch-uncertain", (record) => {
             if (record.dispatch_wal) record.dispatch_wal.message_id = reconciled.kind === "found" ? reconciled.messageId : null;
             record.state.last_seen_digest = summary.digest;
+            record.state.worker_digest = workerDigest;
             record.wake_request = null;
             if (reconciled.kind === "found") {
               monitorHistory(record, "dispatch-reconciled", { message_id: reconciled.messageId }, now);
@@ -438,6 +453,7 @@ export class MonitorEngine {
       await this.release(id, now, "dispatched", (record) => {
         if (record.dispatch_wal && record.dispatch_wal.action_id === actionId) record.dispatch_wal.message_id = result.message_id;
         record.state.last_seen_digest = summary.digest;
+        record.state.worker_digest = workerDigest;
         record.wake_request = null;
         if (prime) this.recordPriming(record, priming, now);
         monitorHistory(record, triggered ? "noop-trigger" : "dispatched", { message_id: result.message_id, action_id: actionId, primed: prime }, now);
@@ -447,6 +463,54 @@ export class MonitorEngine {
     }
     await this.release(id, now, null);
     return "noop-unchanged";
+  }
+
+  /**
+   * W4 minimal existing-path observation: poll a bounded number of dispatched
+   * own workers (active + dispatch receipt + runtime session) through the
+   * existing session-status gateway. A worker whose turn has reached a
+   * terminal completed state is marked `idle` with a fresh `result_receipt`,
+   * which changes workerIndexDigest so the manager is woken to synthesize the
+   * result. No subscription, no new timer, cadence unchanged.
+   */
+  private async observeWorkers(monitor: MonitorRecord, now: number): Promise<boolean> {
+    const candidates = (monitor.workers ?? [])
+      .filter((worker) => worker.lifecycle === "active" && worker.runtime_session_id && worker.dispatch_receipt)
+      .slice(0, 5);
+    if (candidates.length === 0) return false;
+    let changed = false;
+    for (const worker of candidates) {
+      let status: SessionStatusResult;
+      try {
+        status = await this.gateway.getSessionStatus(worker.runtime_session_id as string);
+      } catch {
+        continue; // unobservable now; never a silent completion
+      }
+      if (status.backend_activity !== "idle" || status.state !== "completed") continue;
+      const resultReceipt = status.assistant_message_ids.at(-1) ?? null;
+      if (resultReceipt === null) continue;
+      await withRegistry(
+        this.project,
+        (registry) => {
+          const monitorRecord = registry.monitors.find((entry) => entry.id === monitor.id);
+          const record = monitorRecord?.workers?.find((entry) => entry.worker_key === worker.worker_key);
+          if (!monitorRecord || !record || record.lifecycle !== "active") return registry;
+          record.lifecycle = "idle";
+          record.result_receipt = resultReceipt;
+          record.updated_at = iso(now);
+          monitorRecord.updated_at = iso(now);
+          monitorHistory(monitorRecord, "worker-observed-complete", {
+            worker_key: record.worker_key,
+            alias: record.alias,
+            result_receipt: resultReceipt,
+          }, now);
+          changed = true;
+          return registry;
+        },
+        { now },
+      );
+    }
+    return changed;
   }
 
   private appendDecisionSummary(
@@ -985,14 +1049,16 @@ export class MonitorEngine {
       : "none registered";
     return [
       `[MANAGEMENT-PRIMING ${PRIMING_CONTRACT}]`,
-      `Role: MANAGEMENT for monitor ${monitor.id} — coordinate, never implement. Delegate analysis, implementation and tests to separate worker sessions through the existing interfaces.`,
+      `Mission: drive the commissioned development actively to the agreed result within your operator-set autonomy profile — decide permitted matters yourself, task and supervise your own worker sessions, remove obstacles, initiate the next steps; pure status observation is not delivery. Role: MANAGEMENT for monitor ${monitor.id} — coordinate, never implement; delegate analysis, implementation and tests to separate worker sessions through the existing interfaces. Management decisions and control stay serial.`,
+      `Audiences: (a) the external operator's commissioned orchestration within real auth/scope; (b) explicitly established OpenCode monitor/manager sessions for a work package or master task. Ordinary implementation sessions do not use this binding; tool visibility is not authorization. Rules are cooperative — no technical enforcement, caller-identity proof or BLOCKED guarantee is claimed.`,
       `Master anchor: ${summary.task.id} — "${summary.task.title}". Resolve Master/Work-Package → member tickets → their sessions with existing tools only (list_project_tasks, get_project_task links/documents, get_task_management_history, list_sessions, get_session_status); no second assignment store.`,
       `Canonical context, read on demand and never duplicated here: ${documents}; the anchor task's management journal. Keep task state, journal checkpoints and the compact context current after every decided step.`,
-      `Autonomy profile ${monitor.autonomy_profile}: apply its operator-contract scope. Sandbox covers the explicitly assigned test estate (harness, test code and tests, test services/DB/containers/images, assigned cleanup and rebuild); product source and semantics are out of scope, production, foreign or unknown targets never.`,
-      `Worker failures: analyse from the exact receipt, safe error details and originals, then report visibly on management level — task/session/work, error class and evidenced cause, impact, recovery attempt and budget, blocker, next action. Separate a failed turn from busy and from an externally still-running job. Terminal timeout/quota follows the configured project fallback policy (read it; never substitute a model yourself), keeping idle / no-pending-input / catalog / update-readback / one-send / reconcile / no-duplicate discipline.`,
-      `Delegated authorization: within the documented grants you may concretize an existing authorization and re-task a worker without a new human loop, and answer a superfluous business question from that grant. Never bypass or auto-approve a real host/security permission or a denied connector action; escalate those and any unclear target or scope.`,
-      `Self-steering: never write to this management session or its own monitor binding (no self-target send, runtime switch, archive or rename). The technical guard is a separate pending decision; the rule binds regardless.`,
-      `Cadence: at most one bounded step per wake; when nothing relevant changed, end briefly without new orders (bounded no-op). Never infer task completion from a technical turn end.`,
+      `Autonomy profile ${monitor.autonomy_profile}: apply its operator-contract scope. Sandbox covers the explicitly assigned test estate (harness, test code and tests, test services/DB/containers/images, assigned cleanup and rebuild); product source and semantics are out of scope, production, foreign or unknown targets never. Autonomy governs decision latitude; execution/standard/deep/design/review are separate runtime model profiles resolved from project policy with readback — never conflate them.`,
+      `Ownership: delegate only to your own root worker sessions — create fresh ones or reuse ones verifiably created by you (creation receipt/registry identity, never the title); never take over, steer or relabel foreign existing sessions; never use native subtasks for management work, including internal parallel research. Workers decide their own subtask use inside existing scope and permissions; no extra enablement, no micromanagement. No parallel sub-managers.`,
+      `Delegated authorization: within documented grants you may concretize an existing authorization and re-task a worker without a new human loop; the prior contract supplies authority, silence never does. Never bypass or auto-approve a real host/security permission or a denied connector action; escalate those and any unclear target or scope.`,
+      `Worker failures: analyse from the exact receipt, safe error details and originals; report visibly — task/session/work, error class and evidenced cause, impact, recovery attempt and budget, blocker, next action; a failed turn differs from busy and from an externally still-running job. Terminal timeout/quota follows the configured project fallback policy (read it; never substitute a model yourself) with idle / no-pending-input / catalog / update-readback / one-send / reconcile / no-duplicate discipline. A worker's business input_required: resolve with a normal same-session follow-up once the actual decision exists in profile/scope; a genuine operator decision escalates as INPUT_REQUIRED; a pending security permission is never answered or bypassed.`,
+      `Self-steering: never write to this management session or its own monitor binding (no self-target send, runtime switch, archive or rename). Never change your own monitor/autonomy/runtime/expiry/scheduler state, approval or taskboard/management-tool settings, create/spawn or reprioritize board tasks, or self-authorize — recommend instead via attention/journal. Reads, journal/compact-context upkeep, additive non-authorizing notes, own worker control with configured fallback, and legitimate INPUT_REQUIRED parking remain permitted. The technical guard is a separate pending decision; the rule binds regardless.`,
+      `Cadence: at most one bounded step per wake; each wake runs the wake duty loop — load your persistent context and worker index; reconcile actual session/order states and open or uncertain receipts without duplicate orders; fully read new originals against receipts and synthesize key findings continuously, even while a worker stays alive; analyse errors/blockers, fix within scope or task a separate worker correction with the configured fallback continuation and readback, never inventing causes or runtimes; decide and dispatch the next permitted step serially; escalate only real operator decisions; after secured handover archive finished own sessions and remove their context files per contract; update journal, compact context and worker index for the next resume. When nothing relevant changed, end briefly without new orders (bounded no-op). Never infer task completion from a technical turn end.`,
     ].join("\n");
   }
 
@@ -1003,6 +1069,22 @@ export class MonitorEngine {
     record.session.priming_digest = priming;
     record.session.primed_at = iso(now);
     monitorHistory(record, "manager-primed", { contract: PRIMING_CONTRACT, digest: priming.slice(0, 16) }, now);
+  }
+
+  /** Bounded, metadata-only worker index for the wake prompt (no secrets, no
+   * arguments). Keeps the most recent 20 workers and reports any omission. */
+  private workerIndexLine(monitor: MonitorRecord): string {
+    const workers = monitor.workers ?? [];
+    if (workers.length === 0) return "none";
+    const shown = workers.slice(-20);
+    const parts = shown.map((worker) => {
+      const task = worker.task_id ? `/${worker.task_id}` : "";
+      const runtime = worker.runtime_session_id ? `@${worker.runtime_session_id}` : "";
+      const synth = worker.last_synthesis_at ? `~${worker.last_synthesis_at}` : "";
+      return `${worker.alias}:${worker.lifecycle}${runtime}${task}${synth}`;
+    });
+    const omitted = workers.length - shown.length;
+    return `${parts.join("; ")}${omitted > 0 ? ` (+${omitted} older omitted)` : ""}`;
   }
 
   private buildWakePrompt(
@@ -1016,6 +1098,7 @@ export class MonitorEngine {
     const mission = [
       `[MONITOR-ACTION ${actionId}] MANAGEMENT wake${triggered ? " (operator trigger)" : ""} · monitor ${monitor.id} · master ${summary.task.id} "${summary.task.title}" (${summary.task.status}).`,
       `Delta: checkpoint ${summary.checkpoint ?? "none"}; newest decision ${summary.newest_decision ?? "none"}; decisions since last wake ${decisionsSince}; documents ${summary.documents.length ? summary.documents.map((doc) => `${doc.role}@${doc.revision ?? "unversioned"}`).join(",") : "none"} (coverage ${summary.coverage}).`,
+      `Worker index: ${this.workerIndexLine(monitor)}`,
       `Mission: 1) verify progress of this master/work package, 2) read the current worker and receipt results, 3) decide and execute exactly ONE next permitted step, delegating implementation/tests to a worker session, 4) analyse blockers and resolve or escalate them within the existing grants, 5) if nothing relevant changed, end briefly (bounded no-op) without duplicate orders.`,
       `Reads: journal checkpoint/tail first; open canonical C/P only when a listed revision changed. Report INPUT_REQUIRED only for a real missing decision; keep state, journal and compact context updated.`,
     ];
