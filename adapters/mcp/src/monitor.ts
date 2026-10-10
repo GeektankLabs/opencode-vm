@@ -85,7 +85,9 @@ export type MonitorWorkerRecord = {
    * Purely additive: the lifecycle enum stays unchanged, older readers ignore
    * the field and older records simply have none. The manager wakes exactly
    * once per distinct terminal error through the lifecycle/updated_at/
-   * result_receipt digest transition this marking accompanies.
+   * result_receipt digest transition this marking accompanies. Reactivating a
+   * worker (reuse/rebind) clears it to null: it always describes the CURRENT
+   * dispatch episode, never a stale previous one (QC F1).
    */
   last_error?: MonitorWorkerErrorMarker | null;
 };
@@ -745,6 +747,10 @@ async function rebindOwnWorker(
       if (!allowed.includes(worker.lifecycle)) throw new Error(`worker cannot be rebound from ${worker.lifecycle}`);
       worker.runtime_session_id = input.runtime_session_id;
       if (input.dispatch_receipt !== undefined) worker.dispatch_receipt = input.dispatch_receipt;
+      // QC-F1 (waveA-qc SHA765c4f03): reactivating starts a fresh episode — the
+      // previous terminal failure marker must not render as the NEW dispatch's
+      // current error. History keeps the audited observation; the record clears.
+      worker.last_error = null;
       worker.lifecycle = "active";
       worker.updated_at = at;
       monitor.updated_at = at;

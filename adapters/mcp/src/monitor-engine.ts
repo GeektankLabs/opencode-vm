@@ -369,7 +369,15 @@ export class MonitorEngine {
     // no-op and proceeds to a bounded wake.
     if (summary.digest === previously && workerDigest === previousWorkerDigest && !triggered) {
       await this.release(id, now, null, (record) => {
-        monitorDecision(record, "noop-unchanged", { reason: "canonical-and-worker-index-unchanged" }, "noop-unchanged", now);
+        // QC-F2 (waveA-qc SHA765c4f03): cause-specific merge keys — never mix
+        // different noop causes into one count that only names the first reason.
+        monitorDecision(
+          record,
+          "noop-unchanged",
+          { reason: "canonical-and-worker-index-unchanged" },
+          "noop-unchanged:canonical-and-worker-index-unchanged",
+          now,
+        );
       });
       return "noop-unchanged";
     }
@@ -494,7 +502,13 @@ export class MonitorEngine {
       return triggered ? "noop-trigger" : "dispatched";
     }
     await this.release(id, now, null, (record) => {
-      monitorDecision(record, "noop-unchanged", { reason: "runtime-resolved-without-dispatch" }, "noop-unchanged", now);
+      monitorDecision(
+        record,
+        "noop-unchanged",
+        { reason: "runtime-resolved-without-dispatch" },
+        "noop-unchanged:runtime-resolved-without-dispatch",
+        now,
+      );
     });
     return "noop-unchanged";
   }

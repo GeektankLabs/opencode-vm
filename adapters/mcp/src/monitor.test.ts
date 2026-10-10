@@ -1323,7 +1323,7 @@ test("Welle A: a foreign turn's failure is never attributed — the worker sessi
     const after = (await readRegistrySnapshot(project)).registry.monitors[0]!;
     const worker = after.workers!.find((entry) => entry.worker_key === seed.workerKey)!;
     assert.equal(worker.lifecycle, "active");
-    assert.equal(worker.last_error, undefined, "a foreign failed turn is never marked as this worker's error");
+    assert.equal(worker.last_error, null, "a foreign failed turn is never marked as this worker's error");
     const held = after.history.filter((entry) => entry.type === "worker-observe-held");
     assert.equal(held.length, 1);
     assert.equal((held[0]!.detail as { reason?: string }).reason, "turn-not-attributable");
@@ -1352,8 +1352,7 @@ test("Welle A: unknown-category evidence marks as observation only with no provi
     const marked = await getWorker(project, seed.monitorId, seed.workerKey);
     assert.equal(marked?.lifecycle, "idle");
     assert.equal(marked?.last_error?.category, "unknown");
-    const fingerprintBefore = marked?.last_error?.fingerprint;
-    assert.ok(fingerprintBefore, "unknown-category terminal failure keeps its evidence fingerprint");
+    assert.ok(marked?.last_error?.fingerprint, "unknown-category terminal failure keeps its evidence fingerprint");
     assert.equal(state.updates.length, 0, "wave A observation never routes providers");
     assert.ok(!state.sends[1]!.includes("[MONITOR-RECOVERY"), "the wake stays a normal synthesis wake");
 
@@ -1373,13 +1372,7 @@ test("Welle A: unknown-category evidence marks as observation only with no provi
       assert.equal(await engine.tick(), "dispatched", `${reason}: the rebind delta still wakes`);
       const worker = await getWorker(project, seed.monitorId, seed.workerKey);
       assert.equal(worker?.lifecycle, "active", `${reason}: held, not marked`);
-      assert.deepEqual(worker?.last_error, {
-        at: new Date(200_000).toISOString(),
-        category: "unknown",
-        fingerprint: worker?.last_error?.fingerprint ?? "",
-        receipt: "msg_u",
-      }, `${reason}: the held state never rewrites the earlier marker`);
-      if (worker?.last_error) assert.equal(worker.last_error.fingerprint, fingerprintBefore, `${reason}: fingerprint unchanged`);
+      assert.equal(worker?.last_error, null, `${reason}: reactivation cleared the previous episode marker (QC-F1) and the held state writes nothing`);
       const record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
       const held = record.history.filter((entry) => entry.type === "worker-observe-held"
         && (entry.detail as { reason?: string }).reason === reason);
@@ -1543,6 +1536,95 @@ test("Welle A: concurrent-wake and no-due ticks name themselves once with bounde
     releaseGate();
     assert.equal(await first, "dispatched");
     assert.equal(logs.filter((line) => line.includes("wake tick skipped")).length, 1, "the silent concurrent-skip path is now named");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("Welle A QC-F1: reuseWorker and rebindWorker clear last_error — a stale category never renders as the new dispatch's current error", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    const { gateway, board } = fakes(state);
+    const seed = await seedMonitorWithDispatchedWorker(project, gateway, board, 100_000);
+    const failedWorker = okStatus({
+      session_id: "ses_worker",
+      state: "failed",
+      assistant_message_ids: ["msg_err"],
+      error_details: [failedDetail("provider_timeout")],
+    });
+    state.statusFor = () => failedWorker;
+    await advanceDue(project, 200_000);
+    assert.equal(await seed.engineFactory(200_000).tick(), "dispatched");
+    const marked = await getWorker(project, seed.monitorId, seed.workerKey);
+    assert.equal(marked?.lifecycle, "idle");
+    assert.equal(marked?.last_error?.category, "provider_timeout");
+    assert.match(state.sends.at(-1)!, /M1-A:idle!provider_timeout/, "the marked episode renders the failure");
+
+    // Reuse reactivates: the previous episode's marker is cleared to null.
+    await reuseWorker(project, seed.monitorId, seed.workerKey, { runtime_session_id: "ses_worker" }, { now: 210_000 });
+    const reused = await getWorker(project, seed.monitorId, seed.workerKey);
+    assert.equal(reused?.lifecycle, "active");
+    assert.equal(reused?.last_error, null, "reactivation never keeps the old error as the current one");
+
+    // Rebind (new dispatch) also clears, and the next wake prompt renders the
+    // fresh active episode WITHOUT the stale category.
+    state.statusFor = () => okStatus({ session_id: "ses_worker", state: "running", backend_activity: "busy" });
+    await rebindWorker(project, seed.monitorId, seed.workerKey, { runtime_session_id: "ses_new", dispatch_receipt: "msg_d2" }, { now: 220_000 });
+    const rebound = await getWorker(project, seed.monitorId, seed.workerKey);
+    assert.equal(rebound?.lifecycle, "active");
+    assert.equal(rebound?.last_error, null);
+    await advanceDue(project, 300_000);
+    assert.equal(await seed.engineFactory(300_000).tick(), "dispatched", "the rebind delta wakes");
+    assert.match(state.sends.at(-1)!, /M1-A:active@ses_new/, "fresh dispatch renders without any error marker");
+    assert.ok(!state.sends.at(-1)!.includes("!provider_timeout"), "no stale category in the wake prompt");
+    // The earlier observation stays auditable in history, not on the live record.
+    const record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.ok(record.history.some((entry) => entry.type === "worker-observed-failed"));
+  } finally {
+    await cleanup();
+  }
+});
+
+test("Welle A QC-F2: noop merge keys are cause-specific — different causes keep separate entries and per-cause counts", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    const { gateway, board } = fakes(state);
+    const engineFactory = (now: number) =>
+      new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => now, log: () => undefined });
+    await withRegistry(project, (registry) => {
+      const monitor = defaultMonitorRecord("M", TASK, { interval_seconds: 60 }, 100_000);
+      monitor.scheduler.next_run_at = 0;
+      registry.monitors.push(monitor);
+      return registry;
+    });
+    // Prime once (real digest stored), then two consecutive digest-gate no-ops
+    // merge into ONE cause-specific entry.
+    assert.equal(await engineFactory(100_000).tick(), "dispatched");
+    await withRegistry(project, (registry) => { registry.monitors[0]!.scheduler.next_run_at = 0; return registry; });
+    assert.equal(await engineFactory(200_000).tick(), "noop-unchanged");
+    await withRegistry(project, (registry) => { registry.monitors[0]!.scheduler.next_run_at = 0; return registry; });
+    assert.equal(await engineFactory(300_000).tick(), "noop-unchanged");
+    const merged = await readRegistrySnapshot(project);
+    const noopEntries = merged.registry.monitors[0]!.history.filter((entry) => entry.type === "noop-unchanged");
+    assert.equal(noopEntries.length, 1);
+    assert.equal((noopEntries[0]!.detail as { count?: number }).count, 2);
+    assert.equal((noopEntries[0]!.detail as { merge?: string }).merge, "noop-unchanged:canonical-and-worker-index-unchanged",
+      "the recorded merge key names its cause");
+
+    // A different cause must land in a SEPARATE entry and must not inflate or
+    // mislabel the first one (Repro2 regression at the helper the engine uses).
+    const record = merged.registry.monitors[0]!;
+    monitorDecision(record, "noop-unchanged", { reason: "runtime-resolved-without-dispatch" }, "noop-unchanged:runtime-resolved-without-dispatch", 400_000);
+    monitorDecision(record, "noop-unchanged", { reason: "canonical-and-worker-index-unchanged" }, "noop-unchanged:canonical-and-worker-index-unchanged", 500_000);
+    const byCause = record.history.filter((entry) => entry.type === "noop-unchanged");
+    assert.equal(byCause.length, 2, "causes never conflate into one mixed entry");
+    const canonicalEntry = byCause.find((entry) => (entry.detail as { reason?: string }).reason === "canonical-and-worker-index-unchanged")!;
+    const runtimeEntry = byCause.find((entry) => (entry.detail as { reason?: string }).reason === "runtime-resolved-without-dispatch")!;
+    assert.equal((canonicalEntry.detail as { count?: number }).count, 3, "only same-cause repeats increment");
+    assert.equal((runtimeEntry.detail as { count?: number }).count, 1, "the other cause keeps its own count and reason");
+    assert.equal((canonicalEntry.detail as { first_at?: string }).first_at, new Date(200_000).toISOString(), "first_at stays per cause");
   } finally {
     await cleanup();
   }
