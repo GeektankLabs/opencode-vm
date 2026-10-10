@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   digest,
+  monitorDecision,
   monitorHistory,
   monitorLog,
   readEpisode,
@@ -9,6 +10,7 @@ import {
   withRegistry,
   workerIndexDigest,
 } from "./monitor.js";
+import type { MonitorWorkerErrorMarker, MonitorWorkerRecord } from "./monitor.js";
 import { isRecord } from "./types.js";
 import type {
   MonitorRecord,
@@ -150,6 +152,24 @@ export class MonitorEngine {
   private readonly now: () => number;
   private readonly log: (level: "info" | "warn" | "error", message: string) => void;
   private waking = false;
+  /** Wave A bounded streak logging: silent tick paths name themselves once and
+   * then only periodically, with first time and count visible — never per tick. */
+  private readonly streaks = new Map<string, { first: number; count: number }>();
+
+  private logStreak(key: string, now: number, message: (count: number, firstAt: string) => string, every = 60): void {
+    const streak = this.streaks.get(key);
+    if (!streak) {
+      this.streaks.set(key, { first: now, count: 1 });
+      this.log("info", message(1, new Date(now).toISOString()));
+      return;
+    }
+    streak.count += 1;
+    if (streak.count % every === 0) this.log("info", message(streak.count, new Date(streak.first).toISOString()));
+  }
+
+  private clearStreak(key: string): void {
+    this.streaks.delete(key);
+  }
 
   constructor(deps: MonitorEngineDeps) {
     this.project = deps.project;
@@ -162,7 +182,11 @@ export class MonitorEngine {
 
   /** One deterministic scan; at most one bounded action per call. */
   async tick(): Promise<WakeOutcome> {
-    if (this.waking) return "skipped";
+    if (this.waking) {
+      this.logStreak("wake-skipped", this.now(), (count, firstAt) =>
+        `wake tick skipped: engine already waking (streak ${count}, since ${firstAt})`);
+      return "skipped";
+    }
     this.waking = true;
     try {
       const now = this.now();
@@ -180,7 +204,13 @@ export class MonitorEngine {
           return (a.scheduler.next_run_at ?? 0) - (b.scheduler.next_run_at ?? 0) || a.id.localeCompare(b.id);
         });
       const next = due[0];
-      if (!next) return "no-due";
+      if (!next) {
+        this.logStreak("no-due", now, (count, firstAt) =>
+          count === 1 ? `wake no-due: no enabled monitor due (since ${firstAt})`
+            : `wake no-due streak: ${count} ticks, first ${firstAt}`);
+        return "no-due";
+      }
+      this.clearStreak("no-due");
       return await this.wakeOne(next.id, now);
     } finally {
       this.waking = false;
@@ -338,7 +368,9 @@ export class MonitorEngine {
     // a changed worker index (creation/receipt/lifecycle/synthesis) is not a
     // no-op and proceeds to a bounded wake.
     if (summary.digest === previously && workerDigest === previousWorkerDigest && !triggered) {
-      await this.release(id, now, null);
+      await this.release(id, now, null, (record) => {
+        monitorDecision(record, "noop-unchanged", { reason: "canonical-and-worker-index-unchanged" }, "noop-unchanged", now);
+      });
       return "noop-unchanged";
     }
 
@@ -461,55 +493,155 @@ export class MonitorEngine {
       });
       return triggered ? "noop-trigger" : "dispatched";
     }
-    await this.release(id, now, null);
+    await this.release(id, now, null, (record) => {
+      monitorDecision(record, "noop-unchanged", { reason: "runtime-resolved-without-dispatch" }, "noop-unchanged", now);
+    });
     return "noop-unchanged";
   }
 
   /**
-   * W4 minimal existing-path observation: poll a bounded number of dispatched
-   * own workers (active + dispatch receipt + runtime session) through the
-   * existing session-status gateway. A worker whose turn has reached a
-   * terminal completed state is marked `idle` with a fresh `result_receipt`,
-   * which changes workerIndexDigest so the manager is woken to synthesize the
-   * result. No subscription, no new timer, cadence unchanged.
+   * W4 minimal existing-path observation, Wave A-extended: poll a bounded number
+   * of dispatched own workers (active + dispatch receipt + runtime session)
+   * through the existing session-status gateway WITH the worker's own
+   * dispatch_receipt as the correlation argument, so only the worker's own
+   * turn is ever attributed (foreign or manually driven turns are not).
+   *
+   * A terminal completed turn is marked `idle` with a fresh `result_receipt`.
+   * A terminal FAILED turn (classifyEvidence blocked, category `unknown`
+   * included — observation may use the full classifier) is marked
+   * conservatively `idle` plus an additive error marker (category, fingerprint,
+   * time, correlated receipt, explicit null when none). Both change hashed
+   * fields, so workerIndexDigest moves and the existing W4 mechanism wakes the
+   * manager exactly once per distinct terminal error; an already-marked worker
+   * leaves the candidate set, so repeated observation of the same state writes
+   * nothing (idempotent, no endless delta wake). No lifecycle enum value is
+   * added. Observation never routes providers: unknown, fachlich, pending and
+   * aborted evidence is held as an honest named note, not a fallback decision.
+   * Unobservability (status read failure) stays unobservability — it is logged,
+   * never a silent continue. No subscription, no new timer, cadence unchanged.
    */
   private async observeWorkers(monitor: MonitorRecord, now: number): Promise<boolean> {
     const candidates = (monitor.workers ?? [])
       .filter((worker) => worker.lifecycle === "active" && worker.runtime_session_id && worker.dispatch_receipt)
       .slice(0, 5);
     if (candidates.length === 0) return false;
-    let changed = false;
+    type Observation =
+      | { kind: "mark-complete"; worker: MonitorWorkerRecord; resultReceipt: string }
+      | { kind: "mark-failed"; worker: MonitorWorkerRecord; resultReceipt: string | null; marker: MonitorWorkerErrorMarker }
+      | { kind: "note"; worker: MonitorWorkerRecord; type: string; reason: string; extra?: Record<string, unknown> };
+    const observations: Observation[] = [];
     for (const worker of candidates) {
+      const sessionId = worker.runtime_session_id as string;
+      const dispatchReceipt = worker.dispatch_receipt as string;
       let status: SessionStatusResult;
       try {
-        status = await this.gateway.getSessionStatus(worker.runtime_session_id as string);
-      } catch {
-        continue; // unobservable now; never a silent completion
+        status = await this.gateway.getSessionStatus(sessionId, dispatchReceipt);
+      } catch (error) {
+        const code = (errorCode(error) ?? "unknown").slice(0, 64);
+        observations.push({ kind: "note", worker, type: "worker-observe-error", reason: "status-read-failed", extra: { code } });
+        this.log("warn", `worker status read failed monitor=${monitor.id} worker=${worker.worker_key} alias=${worker.alias} code=${code}`);
+        continue; // unobservable now; never a silent completion, never a fabricated event
       }
-      if (status.backend_activity !== "idle" || status.state !== "completed") continue;
-      const resultReceipt = status.assistant_message_ids.at(-1) ?? null;
-      if (resultReceipt === null) continue;
-      await withRegistry(
-        this.project,
-        (registry) => {
-          const monitorRecord = registry.monitors.find((entry) => entry.id === monitor.id);
-          const record = monitorRecord?.workers?.find((entry) => entry.worker_key === worker.worker_key);
-          if (!monitorRecord || !record || record.lifecycle !== "active") return registry;
+      if (status.backend_activity !== "idle") continue; // running turn: cadence, nothing decided yet
+      if (status.state === "completed") {
+        const resultReceipt = status.assistant_message_ids.at(-1) ?? null;
+        if (resultReceipt === null) {
+          observations.push({ kind: "note", worker, type: "worker-observe-held", reason: "completed-without-terminal-receipt" });
+          continue;
+        }
+        observations.push({ kind: "mark-complete", worker, resultReceipt });
+        continue;
+      }
+      if (status.state === "failed") {
+        const evidenced = classifyEvidence(status);
+        if (evidenced.kind === "blocked") {
+          const resultReceipt = status.assistant_message_ids.at(-1) ?? null;
+          observations.push({
+            kind: "mark-failed",
+            worker,
+            resultReceipt,
+            marker: { at: iso(now), category: evidenced.category, fingerprint: evidenced.fingerprint, receipt: resultReceipt },
+          });
+        } else if (status.error_details && status.error_details.length > 0) {
+          observations.push({ kind: "note", worker, type: "worker-observe-held", reason: "failed-aborted-terminal-no-provider-evidence" });
+        } else {
+          observations.push({ kind: "note", worker, type: "worker-observe-held", reason: "failed-without-error-evidence" });
+        }
+        continue;
+      }
+      if (status.state === "aborted") {
+        observations.push({ kind: "note", worker, type: "worker-observe-held", reason: "turn-aborted" });
+        continue;
+      }
+      if (status.pending_input.permissions + status.pending_input.questions > 0) {
+        observations.push({ kind: "note", worker, type: "worker-observe-held", reason: "turn-input-required" });
+        continue;
+      }
+      observations.push({
+        kind: "note",
+        worker,
+        type: "worker-observe-held",
+        reason: status.state === "unknown" ? "turn-not-attributable" : "turn-not-terminal",
+        ...(status.task_status_reason ? { extra: { evidence: status.task_status_reason } } : {}),
+      });
+    }
+    if (observations.length === 0) return false;
+    let changed = false;
+    await withRegistry(
+      this.project,
+      (registry) => {
+        const monitorRecord = registry.monitors.find((entry) => entry.id === monitor.id);
+        if (!monitorRecord) return registry;
+        for (const observation of observations) {
+          const record = monitorRecord.workers?.find((entry) => entry.worker_key === observation.worker.worker_key);
+          // Idempotence across racing writers: only an still-own active worker is marked or noted.
+          if (!record || record.lifecycle !== "active") continue;
+          if (observation.kind === "note") {
+            monitorDecision(
+              monitorRecord,
+              observation.type,
+              { worker_key: record.worker_key, alias: record.alias, reason: observation.reason, ...(observation.extra ?? {}) },
+              `${observation.type}:${record.worker_key}:${observation.reason}`,
+              now,
+            );
+            continue;
+          }
+          if (observation.kind === "mark-complete") {
+            record.lifecycle = "idle";
+            record.result_receipt = observation.resultReceipt;
+            record.updated_at = iso(now);
+            monitorRecord.updated_at = iso(now);
+            monitorHistory(monitorRecord, "worker-observed-complete", {
+              worker_key: record.worker_key,
+              alias: record.alias,
+              result_receipt: observation.resultReceipt,
+            }, now);
+            changed = true;
+            continue;
+          }
           record.lifecycle = "idle";
-          record.result_receipt = resultReceipt;
+          record.result_receipt = observation.resultReceipt;
+          record.last_error = observation.marker;
           record.updated_at = iso(now);
           monitorRecord.updated_at = iso(now);
-          monitorHistory(monitorRecord, "worker-observed-complete", {
+          monitorHistory(monitorRecord, "worker-observed-failed", {
             worker_key: record.worker_key,
             alias: record.alias,
-            result_receipt: resultReceipt,
+            dispatch_receipt: record.dispatch_receipt,
+            category: observation.marker.category,
+            fingerprint: observation.marker.fingerprint,
+            result_receipt: observation.resultReceipt,
           }, now);
           changed = true;
-          return registry;
-        },
-        { now },
-      );
-    }
+          this.log(
+            "info",
+            `worker terminal failure observed monitor=${monitor.id} worker=${record.worker_key} alias=${record.alias} category=${observation.marker.category} fingerprint=${observation.marker.fingerprint.slice(0, 16)} receipt=${observation.resultReceipt ?? "none"}`,
+          );
+        }
+        return registry;
+      },
+      { now },
+    );
     return changed;
   }
 
@@ -1081,7 +1213,8 @@ export class MonitorEngine {
       const task = worker.task_id ? `/${worker.task_id}` : "";
       const runtime = worker.runtime_session_id ? `@${worker.runtime_session_id}` : "";
       const synth = worker.last_synthesis_at ? `~${worker.last_synthesis_at}` : "";
-      return `${worker.alias}:${worker.lifecycle}${runtime}${task}${synth}`;
+      const error = worker.last_error ? `!${worker.last_error.category}` : "";
+      return `${worker.alias}:${worker.lifecycle}${error}${runtime}${task}${synth}`;
     });
     const omitted = workers.length - shown.length;
     return `${parts.join("; ")}${omitted > 0 ? ` (+${omitted} older omitted)` : ""}`;

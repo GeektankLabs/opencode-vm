@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -10,6 +10,8 @@ import {
   getWorker,
   listWorkers,
   managerAliasFor,
+  MONITOR_HISTORY_LIMIT,
+  monitorDecision,
   monitorHistory,
   monitorManagerContextPath,
   monitorRegistryPath,
@@ -24,6 +26,7 @@ import {
   reuseWorker,
   setWorkerLifecycle,
   setWorkerSynthesis,
+  workerIndexDigest,
   withRegistry,
   workerAliasFor,
 } from "./monitor.js";
@@ -35,7 +38,7 @@ import {
   fallbackChain,
 } from "./monitor-engine.js";
 import type { MonitorBoardLike, MonitorGatewayLike, MonitorPolicyView } from "./monitor-engine.js";
-import type { AbortSessionTurnResult, RuntimeOptions, SessionStatusResult } from "./types.js";
+import type { AbortSessionTurnResult, CorrelatedErrorDetail, RuntimeOptions, SessionStatusResult } from "./types.js";
 
 const TASK = "task_11111111-1111-4111-8111-111111111111";
 
@@ -86,6 +89,8 @@ type FakeState = {
   readFailCode: string | null;
   lostSessionId: string | null;
   createdSessionId: string;
+  statusCalls: Array<{ session_id: string; message_id: string | null }>;
+  statusFor?: (sessionId: string, messageId?: string) => SessionStatusResult;
 };
 
 function fakes(state: FakeState) {
@@ -108,7 +113,9 @@ function fakes(state: FakeState) {
         pending_input: { permissions: 0, questions: 0 },
       };
     },
-    async getSessionStatus() {
+    async getSessionStatus(sessionId: string, messageId?: string) {
+      state.statusCalls.push({ session_id: sessionId, message_id: messageId ?? null });
+      if (state.statusFor && sessionId !== "ses_monitor") return state.statusFor(sessionId, messageId);
       return state.status;
     },
     async getCombinedPendingInput() {
@@ -197,6 +204,7 @@ function baseState(): FakeState {
     readFailCode: null,
     lostSessionId: null,
     createdSessionId: "ses_monitor",
+    statusCalls: [],
   };
 }
 
@@ -1171,6 +1179,370 @@ test("W2 workers: reserve-before-create, uncertain reconcile, foreign refusal, r
     const workers = await listWorkers(project, a!.id);
     assert.deepEqual(workers.map((entry) => entry.alias), ["M1-A", "M1-B", "M1-C"]);
     assert.deepEqual(workers.map((entry) => entry.lifecycle), ["active", "archived", "active"]);
+  } finally {
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Welle A (task_be951293): receipt-correlated failed-worker observation,
+// idempotent marking with exactly one digest wake per terminal error, honest
+// holds without provider routing, and bounded safe decision logging.
+// ---------------------------------------------------------------------------
+
+function failedDetail(category: CorrelatedErrorDetail["category"], messageId = "msg_err"): CorrelatedErrorDetail {
+  return {
+    category,
+    message: `boom ${category}`,
+    detail_availability: "safe_template",
+    source: "assistant_message_error",
+    assistant_message_id: messageId,
+    attribution: "exact_parent",
+  };
+}
+
+type WaveASeed = {
+  monitorId: string;
+  workerKey: string;
+  logs: string[];
+  engineFactory: (now: number) => MonitorEngine;
+};
+
+async function seedMonitorWithDispatchedWorker(
+  project: string,
+  gateway: MonitorGatewayLike,
+  board: MonitorBoardLike,
+  at: number,
+): Promise<WaveASeed> {
+  const logs: string[] = [];
+  const engineFactory = (now: number) =>
+    new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => now, log: (_level, message) => logs.push(message) });
+  await withRegistry(project, (registry) => {
+    const monitor = defaultMonitorRecord("M", TASK, { interval_seconds: 60 }, at);
+    monitor.scheduler.next_run_at = 0;
+    monitor.state.last_seen_digest = "different";
+    registry.monitors.push(monitor);
+    return registry;
+  });
+  assert.equal(await engineFactory(at).tick(), "dispatched");
+  const monitorId = (await readRegistrySnapshot(project)).registry.monitors[0]!.id;
+  const reserved = await reserveWorker(project, monitorId, { runtime_session_id: "ses_worker" }, { now: at + 400 });
+  await confirmWorkerCreation(project, monitorId, reserved.worker_key, { runtime_session_id: "ses_worker", creation_receipt: "msg_create" }, { now: at + 500 });
+  await rebindWorker(project, monitorId, reserved.worker_key, { runtime_session_id: "ses_worker", dispatch_receipt: "msg_dispatch" }, { now: at + 600 });
+  return { monitorId, workerKey: reserved.worker_key, logs, engineFactory };
+}
+
+async function advanceDue(project: string, now: number): Promise<void> {
+  await withRegistry(project, (registry) => {
+    registry.monitors[0]!.scheduler.next_run_at = now - 1;
+    return registry;
+  });
+}
+
+test("Welle A: a correlated terminal failure marks idle+last_error, moves the digest, wakes the manager exactly once and re-observation stays idempotent", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    const { gateway, board } = fakes(state);
+    const seed = await seedMonitorWithDispatchedWorker(project, gateway, board, 100_000);
+    const failedWorker = okStatus({
+      session_id: "ses_worker",
+      state: "failed",
+      assistant_message_ids: ["msg_err"],
+      error_details: [failedDetail("provider_timeout")],
+    });
+    state.statusFor = (sessionId, messageId) =>
+      sessionId === "ses_worker" && messageId === "msg_dispatch"
+        ? failedWorker
+        : okStatus({ session_id: sessionId, state: "unknown" });
+
+    await advanceDue(project, 200_000);
+    assert.equal(await seed.engineFactory(200_000).tick(), "dispatched");
+    assert.equal(state.sends.length, 2, "the failed worker reaches the manager as a wake");
+    assert.ok(state.statusCalls.some((call) => call.session_id === "ses_worker" && call.message_id === "msg_dispatch"),
+      "observation correlates through the worker's own dispatch receipt");
+    const after = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    const worker = after.workers!.find((entry) => entry.worker_key === seed.workerKey)!;
+    const evidence = classifyEvidence(failedWorker);
+    assert.equal(worker.lifecycle, "idle", "conservative idle plus additive marker, no new enum value");
+    assert.equal(worker.result_receipt, "msg_err");
+    assert.deepEqual(worker.last_error, {
+      at: new Date(200_000).toISOString(),
+      category: "provider_timeout",
+      fingerprint: evidence.kind === "blocked" ? evidence.fingerprint : "unreachable",
+      receipt: "msg_err",
+    });
+    assert.ok(after.history.some((entry) => entry.type === "worker-observed-failed"
+      && (entry.detail as { category?: string }).category === "provider_timeout"));
+    assert.ok(seed.logs.some((line) => line.includes("worker terminal failure observed") && line.includes("provider_timeout")));
+    assert.match(state.sends[1]!, /M1-A:idle!provider_timeout/, "the wake prompt names the failure evidence");
+
+    // Re-observation: the marked worker left the candidate set; the digest is
+    // stable, the wake never repeats and the marker is never rewritten.
+    await advanceDue(project, 300_000);
+    assert.equal(await seed.engineFactory(300_000).tick(), "noop-unchanged");
+    assert.equal(state.sends.length, 2, "the same terminal error wakes exactly once");
+    const again = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    const sameWorker = again.workers!.find((entry) => entry.worker_key === seed.workerKey)!;
+    assert.equal(sameWorker.updated_at, worker.updated_at, "repeated observation does not rewrite the marker");
+    const noopEntries = again.history.filter((entry) => entry.type === "noop-unchanged");
+    assert.equal(noopEntries.length, 1, "the formerly silent no-op is now explainable");
+    assert.equal((noopEntries[0]!.detail as { reason?: string }).reason, "canonical-and-worker-index-unchanged");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("Welle A: a foreign turn's failure is never attributed — the worker session is only consulted correlated with its own dispatch receipt and a non-terminal result holds without marking or wake", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    const { gateway, board } = fakes(state);
+    const seed = await seedMonitorWithDispatchedWorker(project, gateway, board, 100_000);
+    const failedForeign = okStatus({
+      session_id: "ses_worker",
+      state: "failed",
+      assistant_message_ids: ["msg_foreign"],
+      error_details: [failedDetail("provider_error", "msg_foreign")],
+    });
+    state.statusFor = (sessionId, messageId) =>
+      messageId === "msg_dispatch"
+        ? okStatus({ session_id: sessionId, state: "unknown", task_status_reason: "outside_history_or_not_observed" })
+        : failedForeign;
+    // The rebind itself is a worker delta and wakes (unchanged W4 semantics).
+    await advanceDue(project, 200_000);
+    assert.equal(await seed.engineFactory(200_000).tick(), "dispatched");
+    assert.equal(state.sends.length, 2);
+    // A later tick with no new delta: the foreign failure alone must not mark
+    // and must not wake.
+    await advanceDue(project, 300_000);
+    assert.equal(await seed.engineFactory(300_000).tick(), "noop-unchanged");
+    assert.equal(state.sends.length, 2, "the foreign turn's failure produced no additional wake");
+    assert.ok(state.statusCalls.every((call) => call.session_id !== "ses_worker" || call.message_id === "msg_dispatch"),
+      "the worker session is never consulted without its own dispatch receipt");
+    const after = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    const worker = after.workers!.find((entry) => entry.worker_key === seed.workerKey)!;
+    assert.equal(worker.lifecycle, "active");
+    assert.equal(worker.last_error, undefined, "a foreign failed turn is never marked as this worker's error");
+    const held = after.history.filter((entry) => entry.type === "worker-observe-held");
+    assert.equal(held.length, 1);
+    assert.equal((held[0]!.detail as { reason?: string }).reason, "turn-not-attributable");
+    assert.equal((held[0]!.detail as { evidence?: string }).evidence, "outside_history_or_not_observed");
+    assert.equal(state.updates.length, 0, "holding on unclear evidence is never provider routing");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("Welle A: unknown-category evidence marks as observation only with no provider routing; aborted, bare-failed and pending turns hold with a named reason and merge their streak", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    const { gateway, board } = fakes(state);
+    const seed = await seedMonitorWithDispatchedWorker(project, gateway, board, 100_000);
+    // 1) terminal unknown failure -> marked once, ordinary synthesis wake, NO runtime switch.
+    state.statusFor = () => okStatus({
+      session_id: "ses_worker",
+      state: "failed",
+      assistant_message_ids: ["msg_u"],
+      error_details: [failedDetail("unknown", "msg_u")],
+    });
+    await advanceDue(project, 200_000);
+    assert.equal(await seed.engineFactory(200_000).tick(), "dispatched");
+    const marked = await getWorker(project, seed.monitorId, seed.workerKey);
+    assert.equal(marked?.lifecycle, "idle");
+    assert.equal(marked?.last_error?.category, "unknown");
+    const fingerprintBefore = marked?.last_error?.fingerprint;
+    assert.ok(fingerprintBefore, "unknown-category terminal failure keeps its evidence fingerprint");
+    assert.equal(state.updates.length, 0, "wave A observation never routes providers");
+    assert.ok(!state.sends[1]!.includes("[MONITOR-RECOVERY"), "the wake stays a normal synthesis wake");
+
+    // 2) new episodes: aborted, failed-without-error-evidence and pending all hold honestly.
+    const holdCases: Array<[SessionStatusResult, string]> = [
+      [okStatus({ session_id: "ses_worker", state: "aborted" }), "turn-aborted"],
+      [okStatus({ session_id: "ses_worker", state: "failed" }), "failed-without-error-evidence"],
+      [okStatus({ session_id: "ses_worker", state: "input_required", pending_input: { permissions: 1, questions: 0 } }), "turn-input-required"],
+    ];
+    let caseIndex = 0;
+    for (const [status, reason] of holdCases) {
+      caseIndex += 1;
+      await rebindWorker(project, seed.monitorId, seed.workerKey, { runtime_session_id: "ses_worker", dispatch_receipt: `msg_hold_${caseIndex}` }, { now: 210_000 + caseIndex * 1000 });
+      state.statusFor = () => status;
+      await advanceDue(project, 220_000 + caseIndex * 10_000);
+      const engine = seed.engineFactory(220_000 + caseIndex * 10_000);
+      assert.equal(await engine.tick(), "dispatched", `${reason}: the rebind delta still wakes`);
+      const worker = await getWorker(project, seed.monitorId, seed.workerKey);
+      assert.equal(worker?.lifecycle, "active", `${reason}: held, not marked`);
+      assert.deepEqual(worker?.last_error, {
+        at: new Date(200_000).toISOString(),
+        category: "unknown",
+        fingerprint: worker?.last_error?.fingerprint ?? "",
+        receipt: "msg_u",
+      }, `${reason}: the held state never rewrites the earlier marker`);
+      if (worker?.last_error) assert.equal(worker.last_error.fingerprint, fingerprintBefore, `${reason}: fingerprint unchanged`);
+      const record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+      const held = record.history.filter((entry) => entry.type === "worker-observe-held"
+        && (entry.detail as { reason?: string }).reason === reason);
+      assert.equal(held.length, 1, `${reason}: one bounded entry`);
+      assert.equal(state.updates.length, 0, `${reason}: no provider routing`);
+    }
+
+    // 3) same state observed again without any delta: no wake, and the held streak
+    //    merges into the existing single entry instead of appending per tick.
+    const before = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    const beforeHeld = before.history.filter((entry) => entry.type === "worker-observe-held").length;
+    await advanceDue(project, 400_000);
+    assert.equal(await seed.engineFactory(400_000).tick(), "noop-unchanged");
+    const after = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(after.history.filter((entry) => entry.type === "worker-observe-held").length, beforeHeld, "repeats merge, no append");
+    const merged = after.history.filter((entry) => entry.type === "worker-observe-held"
+      && (entry.detail as { reason?: string }).reason === "turn-input-required");
+    assert.equal(merged.length, 1);
+    assert.equal((merged[0]!.detail as { count?: number }).count, 2);
+    assert.equal(state.sends.length, 5, "no additional wake for the unchanged held state");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("Welle A: a worker status read failure names the safe code, merges across ticks and never fabricates an observation or a wake", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    const { gateway, board } = fakes(state);
+    const seed = await seedMonitorWithDispatchedWorker(project, gateway, board, 100_000);
+    state.statusFor = () => {
+      throw Object.assign(new Error("token:supersecret https://private.example/x"), { code: "BACKEND_UNAVAILABLE" });
+    };
+    // The rebind delta from seeding wakes once; the read failure adds nothing.
+    await advanceDue(project, 200_000);
+    assert.equal(await seed.engineFactory(200_000).tick(), "dispatched");
+    assert.equal(state.sends.length, 2);
+    await advanceDue(project, 300_000);
+    assert.equal(await seed.engineFactory(300_000).tick(), "noop-unchanged");
+    const first = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    const errors = first.history.filter((entry) => entry.type === "worker-observe-error");
+    assert.equal(errors.length, 1);
+    assert.equal((errors[0]!.detail as { code?: string }).code, "BACKEND_UNAVAILABLE");
+    assert.equal((errors[0]!.detail as { count?: number }).count, 2, "both observation attempts merged into one entry");
+    assert.ok(!JSON.stringify(errors[0]).includes("supersecret"), "raw error text never reaches the registry");
+    assert.ok(seed.logs.some((line) => line.includes("worker status read failed") && line.includes("BACKEND_UNAVAILABLE")));
+    assert.ok(!seed.logs.join("\n").includes("supersecret"), "raw error text never reaches the service log");
+    const worker = first.workers!.find((entry) => entry.worker_key === seed.workerKey)!;
+    assert.equal(worker.lifecycle, "active", "unobservability stays unobservability");
+    assert.equal(state.sends.length, 2, "the read failure itself fabricated no wake");
+
+    await advanceDue(project, 400_000);
+    assert.equal(await seed.engineFactory(400_000).tick(), "noop-unchanged");
+    const second = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    const merged = second.history.filter((entry) => entry.type === "worker-observe-error");
+    assert.equal(merged.length, 1, "repeated same-key failures merge into one bounded entry");
+    assert.equal((merged[0]!.detail as { count?: number }).count, 3);
+    assert.equal((merged[0]!.detail as { first_at?: string }).first_at, (errors[0]!.detail as { first_at?: string }).first_at);
+    assert.equal((merged[0]!.detail as { last_at?: string }).last_at, new Date(400_000).toISOString());
+  } finally {
+    await cleanup();
+  }
+});
+
+test("Welle A registry compatibility: legacy records stay valid, unknown additive fields survive round-trips, a malformed marker fails closed and decisions stay bounded", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    await withRegistry(project, (registry) => {
+      registry.monitors.push(defaultMonitorRecord("M", TASK, {}, 1000));
+      return registry;
+    });
+    const monitorId = (await readRegistrySnapshot(project)).registry.monitors[0]!.id;
+    // Legacy-shaped worker record (no last_error at all) loads and digests normally.
+    const reserved = await reserveWorker(project, monitorId, { runtime_session_id: "ses_worker" }, { now: 1000 });
+    await confirmWorkerCreation(project, monitorId, reserved.worker_key, { runtime_session_id: "ses_worker", creation_receipt: "msg_c" }, { now: 1100 });
+    const legacy = await readRegistrySnapshot(project);
+    assert.equal(legacy.registry.monitors[0]!.workers![0]!.last_error, undefined);
+    assert.match(workerIndexDigest(legacy.registry.monitors[0]!), /^[0-9a-f]{64}$/);
+
+    // Purely additive: an unknown future field passes validation and survives mutation round-trips.
+    const rawPath = monitorRegistryPath(project);
+    const raw = JSON.parse(await readFile(rawPath, "utf8"));
+    raw.monitors[0].workers[0].zz_future_field = { whatever: 1 };
+    await writeFile(rawPath, JSON.stringify(raw, null, 2) + "\n", { mode: 0o600 });
+    const tolerated = await readRegistrySnapshot(project);
+    assert.deepEqual(
+      (tolerated.registry.monitors[0]!.workers![0] as unknown as { zz_future_field?: unknown }).zz_future_field,
+      { whatever: 1 },
+    );
+    await withRegistry(project, (registry) => {
+      registry.monitors[0]!.title = "M2";
+      return registry;
+    });
+    const roundTripped = await readRegistrySnapshot(project);
+    assert.deepEqual(
+      (roundTripped.registry.monitors[0]!.workers![0] as unknown as { zz_future_field?: unknown }).zz_future_field,
+      { whatever: 1 },
+      "additive unknown fields survive a serialized mutation",
+    );
+
+    // A corrupt additive marker fails closed like any other corrupted registry data.
+    const corrupted = JSON.parse(await readFile(rawPath, "utf8"));
+    corrupted.monitors[0].workers[0].last_error = { category: "provider_timeout" };
+    await writeFile(rawPath, JSON.stringify(corrupted, null, 2) + "\n", { mode: 0o600 });
+    await assert.rejects(readRegistrySnapshot(project), /invalid monitor registry/);
+
+    // monitorDecision: same-key streaks merge with first/last/count visible, history stays bounded.
+    const record = defaultMonitorRecord("B", TASK, {}, 1000);
+    for (let i = 0; i < 3; i += 1) monitorDecision(record, "noop-unchanged", { reason: "x" }, "noop-unchanged", 2000 + i);
+    assert.equal(record.history.length, 1);
+    assert.equal((record.history[0]!.detail as { count?: number }).count, 3);
+    assert.equal((record.history[0]!.detail as { first_at?: string }).first_at, new Date(2000).toISOString());
+    assert.equal((record.history[0]!.detail as { last_at?: string }).last_at, new Date(2002).toISOString());
+    for (let i = 0; i < MONITOR_HISTORY_LIMIT + 120; i += 1) monitorDecision(record, "held", { i }, `held:${i}`, 3000 + i);
+    assert.ok(record.history.length <= MONITOR_HISTORY_LIMIT, `history grew to ${record.history.length}`);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("Welle A: concurrent-wake and no-due ticks name themselves once with bounded streak lines and unchanged outcomes", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const logs: string[] = [];
+    const state = baseState();
+    const { gateway, board } = fakes(state);
+    let nowMs = 100_000;
+    const quiet = new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => nowMs, log: (_level, message) => logs.push(message) });
+    for (let i = 0; i < 59; i += 1) {
+      assert.equal(await quiet.tick(), "no-due");
+      nowMs += 60_000;
+    }
+    assert.equal(logs.filter((line) => line.includes("no-due: no enabled monitor due")).length, 1, "first no-due names itself once");
+    assert.equal(logs.filter((line) => line.includes("wake no-due streak")).length, 0, "streak stays quiet below the bound");
+    assert.equal(await quiet.tick(), "no-due");
+    assert.equal(logs.filter((line) => line.includes("wake no-due streak: 60 ticks")).length, 1, "one bounded streak line at the bound");
+
+    // Concurrent wake: the first tick is parked inside the canonical read.
+    await withRegistry(project, (registry) => {
+      const monitor = defaultMonitorRecord("M", TASK, {}, 100_000);
+      monitor.scheduler.next_run_at = 0;
+      registry.monitors.push(monitor);
+      return registry;
+    });
+    let releaseGate!: () => void;
+    const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+    const originalGetTask = board.getTask.bind(board);
+    let gated = false;
+    board.getTask = async (taskId: string) => {
+      if (!gated) {
+        gated = true;
+        await gate;
+      }
+      return originalGetTask(taskId);
+    };
+    const busy = new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => 500_000, log: (_level, message) => logs.push(message) });
+    const first = busy.tick();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(await busy.tick(), "skipped", "the concurrent call remains single-flight");
+    releaseGate();
+    assert.equal(await first, "dispatched");
+    assert.equal(logs.filter((line) => line.includes("wake tick skipped")).length, 1, "the silent concurrent-skip path is now named");
   } finally {
     await cleanup();
   }

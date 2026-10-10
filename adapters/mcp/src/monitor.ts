@@ -79,6 +79,24 @@ export type MonitorWorkerRecord = {
   lifecycle: MonitorWorkerLifecycle;
   last_synthesis_at: string | null;
   updated_at: string;
+  /**
+   * Wave A (be951293): a conservatively observed terminal failure of this
+   * worker's own dispatched turn, correlated through its dispatch receipt.
+   * Purely additive: the lifecycle enum stays unchanged, older readers ignore
+   * the field and older records simply have none. The manager wakes exactly
+   * once per distinct terminal error through the lifecycle/updated_at/
+   * result_receipt digest transition this marking accompanies.
+   */
+  last_error?: MonitorWorkerErrorMarker | null;
+};
+
+export type MonitorWorkerErrorMarker = {
+  at: string;
+  category: string;
+  fingerprint: string;
+  /** Terminal assistant message id of the correlated failed turn, null when
+   * the gateway exposed none (explicit, never inferred). */
+  receipt: string | null;
 };
 
 export type MonitorRecord = {
@@ -250,6 +268,15 @@ function workersShapeOk(monitorId: string, workers: unknown): workers is Monitor
       const value = worker[field];
       if (value !== null && typeof value !== "string") return false;
     }
+    // Additive Wave A error marker: unknown to older readers, validated only
+    // when present so a hand-corrupted marker fails closed like every other field.
+    if (worker.last_error !== undefined && worker.last_error !== null) {
+      if (!isRecord(worker.last_error)) return false;
+      if (!validIso(worker.last_error.at) ||
+        typeof worker.last_error.category !== "string" || (worker.last_error.category as string).length < 1 || (worker.last_error.category as string).length > 64 ||
+        typeof worker.last_error.fingerprint !== "string" || !/^[0-9a-f]{64}$/.test(worker.last_error.fingerprint as string)) return false;
+      if (worker.last_error.receipt !== null && typeof worker.last_error.receipt !== "string") return false;
+    }
     if (!validIso(worker.created_at) || !validIso(worker.updated_at)) return false;
     if (keys.has(worker.worker_key) || aliases.has(worker.alias)) return false;
     keys.add(worker.worker_key);
@@ -348,6 +375,41 @@ export function monitorLog(monitor: MonitorRecord, level: "info" | "warn" | "err
   monitor.logs.push({ at: new Date(now).toISOString(), level, message: redacted });
   if (monitor.logs.length > MONITOR_LOG_LIMIT)
     monitor.logs.splice(0, monitor.logs.length - MONITOR_LOG_LIMIT);
+}
+
+/**
+ * Wave A (be951293): bounded structured decision entry. Repeated occurrences
+ * of the SAME decision (same type and merge key) update the most recent entry
+ * for that key in place, keeping first/last time and count visible instead of
+ * appending per tick and evicting meaningful entries during a long quiet or
+ * held streak. A null merge key always appends. Detail values must be safe
+ * bounded tokens (codes, aliases, digests) — never raw messages, prompts or
+ * credentials.
+ */
+export function monitorDecision(
+  monitor: MonitorRecord,
+  type: string,
+  detail: Record<string, unknown>,
+  mergeKey: string | null,
+  now = Date.now(),
+): void {
+  const at = new Date(now).toISOString();
+  if (mergeKey !== null) {
+    for (let index = monitor.history.length - 1; index >= 0; index -= 1) {
+      const entry = monitor.history[index]!;
+      if (entry.type === type && isRecord(entry.detail) && entry.detail.merge === mergeKey) {
+        entry.detail = { ...entry.detail, last_at: at, count: (typeof entry.detail.count === "number" ? entry.detail.count : 1) + 1 };
+        return;
+      }
+    }
+  }
+  monitor.history.push({
+    at,
+    type,
+    detail: { ...detail, ...(mergeKey !== null ? { merge: mergeKey } : {}), first_at: at, last_at: at, count: 1 },
+  });
+  if (monitor.history.length > MONITOR_HISTORY_LIMIT)
+    monitor.history.splice(0, monitor.history.length - MONITOR_HISTORY_LIMIT);
 }
 
 export type RepairDecision =

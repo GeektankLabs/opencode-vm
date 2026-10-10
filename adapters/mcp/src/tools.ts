@@ -1121,6 +1121,14 @@ const monitorAbortOutput = z
   })
   .strict();
 const monitorWorkerLifecycleSchema = z.enum(["reserved", "active", "idle", "archived"]);
+const monitorWorkerLastErrorSchema = z
+  .object({
+    at: z.string(),
+    category: z.string(),
+    fingerprint: z.string(),
+    receipt: z.string().nullable(),
+  })
+  .strict();
 const monitorWorkerOutput = z
   .object({
     worker_key: z.string(),
@@ -1134,6 +1142,7 @@ const monitorWorkerOutput = z
     result_receipt: z.string().nullable(),
     last_synthesis_at: z.string().nullable(),
     updated_at: z.string(),
+    last_error: monitorWorkerLastErrorSchema.nullable(),
   })
   .strict();
 const createMonitorWorkerInput = z
@@ -2064,6 +2073,7 @@ export function createMcpServer(
     result_receipt: worker.result_receipt,
     last_synthesis_at: worker.last_synthesis_at,
     updated_at: worker.updated_at,
+    last_error: worker.last_error ?? null,
   });
   const appendWorkerAudit = async (
     project: string,
