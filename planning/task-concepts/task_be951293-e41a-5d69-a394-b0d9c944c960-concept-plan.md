@@ -742,3 +742,69 @@ Der Reviewbericht selbst wurde nicht verändert.
   Release-Flow gemäß RELEASING.md (Versionsschritt als eigener Auftrag) und die
   Hardware-/Session-Abnahme inkl. optionalem AITL-Livebeweis (extern, nicht durch
   lokale Tests ersetzbar).
+
+## 12 Gate-Fix-Kandidat: Noop-Gate verschluckt korrelierte Managerterminalfehler (2026-10-10, Operator-Go)
+
+Grundlage: Diagnosebericht Rev. 2
+(`task_be951293-…-aitl-standstill-diagnosis-20261010.md`, SHA256
+`d55dd001…f795fa`) mit Code- und Livebelegen (stiller `noop-unchanged`-Loop,
+`monitor-engine.ts`-Gate vor receipt-korreliertem Statusread; Livefall
+`provider_header_timeout` 12:12:33 UTC ohne Recovery/Park). Der Operator-Go für
+diesen begrenzten Kandidaten ersetzt ausdrücklich die frühere reine
+Diagnosefreigabe; keine AITL-Runtime-Berührung, kein Trigger, kein Deploy.
+
+**Umsetzung (minimal, keine neue Fallbacksemantik):**
+- `state.receipt_observation` (additiv, `{receipt, outcome: healthy|held, at}`,
+  fail-closed-Validierung nach QC-F-B2-Muster) beobachtet den aktuellen
+  admitted Dispatch-Receipt genau einmal.
+- Das Noop-Gate wird nur noch durchlaufen, wenn der Receipt kein
+  unbeobachtetes Terminaloutcome hat; sonst läuft der neue
+  `observeUnchangedReceipt`-Watch: receipt-korrelierter Statusread, SafeHold
+  bei Pending-Input, danach unverändert `classifyEvidence` →
+  `compactionContinue()`/`recover()` (W2-Budget, Admission, Abort-Verify,
+  Schema-4-Kette, WAL/Idempotenz bleiben unangetastet).
+- Konvergenz: echtes Park/ Hold settled den Watch (sichtbar, kein Loop);
+  Recovery-Dispatch verschiebt den Watch auf den neuen Receipt;
+  `update-unverified`/`send-failed` bleiben ungeasettet und lassen die
+  endliche Episode bis zur Erschöpfungsparkung fortschreiten; gesunder
+  Receipt schließt eine offene Episode exakt wie ein Healthy-Wake (§4.5 R1);
+  Active-Turn/Pending bleiben zusammengeführte Bounded-Decisions ohne
+  History-Wachstum. Bewusste Abweichung dokumentiert: Auf dem unveränderten
+  Board wiederholt der Watch keine side-effectvollen Abort-Versuche pro
+  Intervall (der geänderte Board-Pfad behält sein Retry-Verhalten).
+- Beweisgrenze: der Watch korreliert ausschließlich über den eigenen
+  Dispatch-Receipt; fremde Turns werden nie attributiert.
+
+**Skill-Nacharbeit übernommen (Herkunft dokumentiert):** Commit
+`ac772e0aeb6f7d497e292419c815c79d42b63576` (Branch
+`task/be951293-skill-reporting`, r50, 87/87 OK dort) als `ca7108d` per
+Cherry-Pick in diesen Kandidaten übernommen — instruction-only
+`monitor-reporting.md` (evidenzierte Fehlerklassen bleiben in Monitorberichten
+sichtbar, Fundstelle nennen, keine Fehlerfreiheit aus Deckungslücken).
+Keine Inkompatibilität zum Gate-Fix; Cloud/install bleibt separat.
+
+**Versionierung (Repositoryverfahren, RELEASING 1–4):** Skript 0.7.30 →
+**0.7.31**; MCP-Adapter 0.1.41 → **0.1.42** (package.json, package-lock,
+`ADAPTER_VERSION`, Dateiname/Pin). MCP-Archiv zweifach reproduktiv gebaut
+(byte-identisch, SHA256 `a15302c5…e85b72` gepinnt); OpenLive-/Hub-Archive
+inhaltlich unverändert (nur TAG-Referenzen auf v0.7.31). Kein Push/Tag/Release.
+
+**Verifikation THIS Lauf (Kandidat):** tsc clean; Adapter-Suite 253 pass /
+0 fail / 2 env-gated skips (+5 neue Gate-Fix-Regressionen: Recovery aus
+unverändertem Board, Healthy-Settlement, Erschöpfungsparkung ohne wiederholte
+Aborts, Pending-Input-merged-hold, Feldvalidierung); agent-control 14/14;
+hub_test 45 OK; agent_control_test 57 OK; ChatGPT-Skill-Test 87/87 OK. Der
+vorbestehende lastabhängige dashboard-bootstrap-Flake trat in 1 von 3 Läufen
+auf (dokumentiert, nicht neu). Zwei QC-bezogene Welle-A-Tests wurden
+minimal an die neue ehrliche Settlement-Entscheidung angepasst
+(`receipt-observed-healthy` als eigener Cause-specific-Mergekey); QC-Intention
+(kausspezifische Mergekeys) bleibt erhalten.
+
+**Offen:** unabhängige QC dieses Kandidaten (separat beauftragt, keine
+Selbstabnahme); Mainintegration/Release/Push bleiben explizite
+Operator-Schritte. Integrations-/Rollouthinweise: Kandidat via Fast-Forward
+auf main (Host), Release-Flow gemäß RELEASING.md baut/published v0.7.31 mit
+den gepinnten Archiven; laufende Sessions übernehmen 0.1.42 mit dem nächsten
+update/Sessionsync — Registry-Downgrade/Upgrade bleibt durch das rein additive
+Feld in beiden Richtungen bewahrt (altes Code ist inert gegenüber
+`receipt_observation`).
