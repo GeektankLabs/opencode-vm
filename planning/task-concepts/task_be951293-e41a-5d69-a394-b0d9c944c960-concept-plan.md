@@ -842,3 +842,81 @@ merged (count-Wachstum, kein History-Wachstum). Suite 258/256 pass/0 fail/
 Skill 87/87; tsc clean. Archiv nach Codeänderung neu gebaut (2× byte-identisch,
 neuer Pin `ebceaf75…7555d9`); Version bleibt 0.7.31/0.1.42 (unveröffentlichter
 Kandidat, kein zusätzlicher Sprung). Reviewsolation von `cab931a` unberührt.
+
+### §12.2 Unterstützter Update-/Rolloutweg für AITL nach fertig geprüftem Bundle (2026-10-10, quellenbelegt, read-only recherchiert)
+
+Alle Pfade `opencode-vm.sh` sofern nicht anders angegeben. Keine Liveaktion
+durchgeführt; AITL-Daten nicht gelesen.
+
+**VM neu? Nein — aber Session-Neustart ja.** Jeder `start` klont eine FRISCHE
+Session-VM aus `oc-base` (`limactl clone`, Z. 18660; Base davor gestoppt,
+Z. 18604). `oc-base` selbst wird nur von `init`/`provision_base` gebaut
+(Z. 10179) — dieses Bundle ändert keine Base-Provisionierung, also ist **kein
+Base-Rebuild nötig**; `update` empfiehlt `init` nur generisch (Z. 8133-8140).
+Der Adapter wird PRO SESSION in die Session-Share gestagt
+(`mcp_stage_adapter`, Z. 9038; Quelle entweder adjacent Source-Checkout —
+`mcp_adapter_source_dir`, Z. 8694-8711, Dev-rsync ohne `dist/`, Build im VM —
+oder pin-verifizierter Release-Cache), deshalb überlebt ein Wechsel den
+Base-Stand unberührt.
+
+**Was bleibt, was wird ersetzt:**
+- Erhalten (Host, projektpersistent): Repo-Dateien (Project-Mount rw);
+  Monitorregister/-Herzschlag/Diagnosefiles unter
+  `<project>/.opencode-vm/monitor/` — Registerpfad
+  `adapters/mcp/src/monitor.ts:260-265`, Herzschlagpfad
+  `opencode-vm.sh:13825-13828`; OpenCode-Projektstate in
+  `~/.opencode-vm/project-state/<hash>` (AGENTS.md „Host directories“).
+- Ersetzt: die gesamte Session-VM inkl. ALLER VM-internen Prozesse
+  (OpenCode-Runtime, Monitor-Engine als transiente systemd-Unit `ocvm-monitor`,
+  `start_monitor` Z. 13784-13816; Hub/Dashboard/Editor/Taskboard/MCP-Adapter);
+  Session-Share-Sync zurück beim Exit (`stop_monitor` im EXIT-Trap,
+  Z. 17110-17122; Finalisierung Z. 19258).
+- **Verlustgrenze bei frischem Start:** registrierte Task-Worktrees unter
+  `.opencode-vm/worktrees/` werden beim genuinely fresh Start geräumt —
+  `docs/WORKTREES.md:30-38`. VOR einem AITL-Session-Neustart Worktree-Bestand
+  prüfen und committen/retten (Branches überleben; Working-Copies nicht).
+
+**Wege im Einzelnen:**
+1. **Quellstand (unterstützt vor Release):** Kandidat im Script-Checkout
+   bereithalten (Branch/FF), laufende AITL-Session geordnet beenden, neuer
+   `opencode-vm web`-Start → Frischklone stagt 0.1.42-Source und baut im VM.
+   Attach allein genügt NICHT: Attach zu laufender VM verbindet nur neu
+   (Z. 16584 ff.) und resume einer kept VM startet dieselbe VM weiter
+   (Z. 16560-16579) — gestagte Adapterbytes/Engine-Prozess bleiben alt; die
+   Web-Reconnect-Transition restagt nur bei Runtime-Takeover
+   (Z. 16756-16764). Neue Engine-Codes landen also über den nächsten
+   Session-Start (bzw. explizite Reconnect-Transition), nicht über_attach.
+2. **Standalone (erst nach Release):** erst RELEASING.md-Ablauf (Push/Tag/
+   v0.7.31-Assets) — vorher installiert `update` (Z. 8081-8131) nur das
+   Script; der Adapter kommt aus dem Pin-verified Cache und erfordert den
+   freigegebenen Release-Stand.
+
+**Vor-/Nachprüfung (sicher, ohne Liveeingriff):** Vorher: Engine-PID/Logstand
+notieren (`<share>/monitor/server.log`, Z. 13815), Registry already
+projektpersistent (Backup-Kopie optional), Worktree-Inventar, keine laufende
+Wake/Recovery (Operator-Entscheidung). Nachher: Startbanner
+`[monitor] Engine active` + Herzschlag frisch/generation-stimmig
+(`monitor_wait_heartbeat`, Z. 13818-13821), gestagte
+`adapter/package.json`-Version = 0.1.42, danach begrenzte Beobachtung ohne
+Trigger.
+
+**Rollbackgrenzen:** Registry-Feld `receipt_observation` ist rein additiv;
+ältere Adapter sind inert gegenüber neuen Feldern, Downgrade/Retrofit beide
+Richtungen beweisen die Felder unverändert (Nachweis Integrations-Doku,
+Compact „Main-Integration" 2026-10-10: byte-identische additive Felder über
+alte/neue Writer). Rollback-Anker = Vorher-Commit (13eea50 bzw. cab931a);
+sicherer Weg ist gezielter Revert, kein Hard-Reset des Dirty-Primary
+(13eea50-Präzedenz). Nach einem Rollback gilt derselbe Session-Neustart-Pfad.
+
+**Episode2-Logger (offene Beleglage, keine unbelegte Zusage):** Im Repo gibt
+es KEINEN Episode2-Logger (grep `Episode2|support.?logger`: 0 Treffer) — die
+Aussage „projektpersistent/VM-abhängig" wird als Operator-Fakt übernommen.
+Aus Repo-Source belegbar ist nur die allgemeine Mechanik: Das Script verwaltet
+ausschließlich seine eigenen Units (Monitor/Hub/Dashboard/Editor/Taskboard/
+MCP/OpenLive); für fremde projektlokale Prozesse gibt es keinen Supervisor —
+`start`/`attach` starten sie NICHT automatisch neu (Vergleichsprecedent:
+`graphify watch` wird nur bei aktivem mcrepo vom Session-Start gespawnt,
+AGENTS.md MCPs-Abschnitt). Läuft Episode2 also innerh­alb der AITL-Session-VM,
+endet sein Prozess mit dem VM-Ersatz und braucht einen expliziten Neustart
+über seinen eigenen Startmechanismus; fehlende projektspezifische Belege
+(Startmechanismus, Logort, PID-Führung) sind hier ausdrücklich offen.
