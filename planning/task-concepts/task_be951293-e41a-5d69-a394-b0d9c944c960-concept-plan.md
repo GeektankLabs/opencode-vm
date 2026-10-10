@@ -1,7 +1,7 @@
 Task-ID: task_be951293-e41a-5d69-a394-b0d9c944c960
 Title: Work Package: Monitor-Zuverlässigkeit und Diagnose vorbereiten (Konzept, reviewbar)
-Stand: 2026-10-10 · Status: Welle A unabhängig QC_PASS (c6bd261, Bericht SHA3241dc22…); Welle B implementiert (lokaler Kandidat 38eeb80, unabhängige QC ausstehend) · Implementierungs-Go erteilt · Historie: CONCEPT_PASS (Rev. 3, unabhängig geprüft), Entscheidungsvorbereitung abgeschlossen 2026-10-09
-Last-concept-update: 2026-10-09T20:53 UTC (historisch: Abschlussmetadaten Rev3-CONCEPT_PASS; Inhaltsrevision unverändert SHA1386d074…; die damit offene Produktentscheidung 4.6/§8a ist mit dem Go vom 2026-10-10 entschieden, siehe §11) · Last-implementation-update: 2026-10-10 (Welle A commit e0c5ce3ce0c2362f253ef2a1488540227c0050e5 auf Branch task/be951293-wave-a; §11 aktueller Stand)
+Stand: 2026-10-10 · Status: Welle A QC_PASS (c6bd261); Welle B von unabhängiger QC mit F-B1/F-B2 zurückgemeldet (326d243), Korrekturen lokal committet (c2b2808), Delta-QC ausstehend · Implementierungs-Go erteilt · Historie: CONCEPT_PASS (Rev. 3, unabhängig geprüft), Entscheidungsvorbereitung abgeschlossen 2026-10-09
+Last-concept-update: 2026-10-09T20:53 UTC (historisch: Abschlussmetadaten Rev3-CONCEPT_PASS; Inhaltsrevision unverändert SHA1386d074…; die damit offene Produktentscheidung 4.6/§8a ist mit dem Go vom 2026-10-10 entschieden, siehe §11) · Last-implementation-update: 2026-10-10 (Kette auf Branch task/be951293-wave-a: Welle A e0c5ce3→738efe1→c6bd261 QC_PASS; Welle B 38eeb80→326d243, QC-F-B1/F-B2-Korrektur c2b2808; §11 aktueller Stand)
 
 ## 1 Ziel / Nichtziele
 
@@ -467,10 +467,14 @@ Der Reviewbericht selbst wurde nicht verändert.
   Delta-QC bestätigt F1/F2 behoben, Monitor 36/36 und Adapter 231 pass/0 fail/2
   skip in erfolgreichen Läufen — Welle A: QC_PASS auf `c6bd261`.
   Wahrheitstreue: der vorbestehende lastabhängige `dashboard-bootstrap`-Flake
-  (in der QC 2 von 8 Volläufen; Reviewerzählung 7/8 vs. 2/8-Fail blieb
-  inkonsistent, genaue Logs werden später geklärt) wird ausdrücklich NICHT als
-  durchgehend grün dokumentiert; er liegt außerhalb von Welle A/B und ist dem
-  Autor als späteres Cleanup vermerkt. Keine Selbstabnahme durch den Autor.
+  (in der QC 2 von 8 Volläufen) — **Zählkorrektur durch die
+  Wellen-B-QC (`waveB-qc.md`, SHA256 `effd6d1c67eb76b9c22a41774afa0e0a0882929eb87aae3e677c3895cb1d9b15`):
+  Welle A tatsächlich 6/8 grüne Läufe und 2/8 Läufe mit je einem Flake
+  (Läufe 1 und 4); die ältere Formulierung „7 von 8" war inkonsistent und ist
+  hiermit durch die belegten Runzahlen ersetzt. Welle B: 4/4 grüne Läufe, Flake
+  trat dort in keinem Lauf auf.** Er wird ausdrücklich NICHT als durchgehend
+  grün dokumentiert; er liegt außerhalb von Welle A/B und ist dem Autor als
+  späteres Cleanup vermerkt. Keine Selbstabnahme durch den Autor.
 - **Welle B — implementiert (lokal kandidatenbereit, unabhängige QC steht aus):**
   Gemeinsame Schema-4-Policy-Auflösung genau einmal in TypeScript in
   `agent-control.ts` (`resolveRecoveryChain`: Stage-Label→vollständiges Tupel
@@ -514,7 +518,39 @@ Der Reviewbericht selbst wurde nicht verändert.
   (3) uncertain admission zählt als Attempt (`dispatch_uncertain`), niemals
   Blind-Resend (WAL-Reconcile bleibt vorgelagert); (4) unbestätigter
   Variant-Switch zählt als Attempt (`update_unverified`).
-- **Offen:** unabhängige QC zu Welle B (Candidate 38eeb80); danach Welle C
+- **Unabhängige QC Welle B:** Bericht `waveB-qc.md` (SHA256
+  `effd6d1c67eb76b9c22a41774afa0e0a0882929eb87aae3e677c3895cb1d9b15`, Terminal
+  `msg_123840aa2001s83WSvBo5b7aQZ`) gegen Kandidat `326d243`: Matrix/Tests
+  unabhängig bestätigt (tsc/build grün, monitor 43/43, agent-control 13/13,
+  Suite 244 pass/0 fail/2 skip in 4/4 Läufen; Risiken R1–R8 und Scope PASS,
+  Policy-Resume-Semantik reproduktionsfest verifiziert). CHANGES_REQUIRED nur
+  für **F-B1** (sanktionierte Resumes — Policy-Resume, Operator-Neustart,
+  gesunder Episodenschluss — ließen `work=parked_input_required`/`parked_reason`
+  dauerhaft stale stehen: §4.6-Transparenz behauptete nach erfolgreicher
+  Fortsetzung weiter einen Park) und **F-B2** (`recovery_episode`/
+  `recovery_resolution` ohne fail-closed Shape-Validierung; korrupte Records
+  crashten `recover()` erst zur Laufzeit).
+- **QC-Korrektur Welle B (Autor, lokal, nur F-B1+F-B2+Tests):** Fix-Commit
+  `c2b2808fbde4507b22cbe596324ebf00c18be410` (Tree
+  `54a8db371d87586127662df33ef0e526c08acaf6`) auf `326d243`:
+  F-B1 — die drei erfolgreichen Release-Mutatoren (`recovery-continued`,
+  `dispatch-reconciled`, `dispatched`/healthy) setzen `work="active"` und
+  löschen `parked_reason` ausschließlich bei den vier eigenen Recovery-Park-
+  Gründen, mit `recovery-park-resumed`-Historieneintrag (resumed_from + via);
+  fremde bewusste Parks (`dispatch-uncertain`, `repair-budget-exhausted`,
+  grundlose manuelle Parks) und Schedulerstatus bleiben unberührt — kein
+  falsches Unpark bei unsicherem Send, keine Attempt-Resets außerhalb der
+  definierten sanktionierten Pfade. F-B2 — `shapeOk` validiert beide Felder
+  beim Vorhandensein fail-closed (ISO-Zeiten, Bounds, Fingerprints 64-hex,
+  Outcome-/Status-/Reason-Enums, Kappen 24/8/8); explizite null, Legacy-Records
+  ohne Felder und gültige Round-Trips bleiben gültig (Präzedenz `last_error`).
+  Regressionstests: Policy-Resume + Operator-Resume + healthy-close unparken
+  nur eigene Parks; uncertain bleibt geparkt; acht fehlerhafte Episoden-/
+  Resolution-Formate rejecten, null/legacy/valid akzeptiert. Verifikation THIS
+  Lauf: tsc clean; monitor 45/45; Suite 246 pass/0 fail/2 env-gated skips in
+  2/2 Läufen (Flake nicht als behoben deklariert). Delta-QC durch die
+  unabhängige QC offen — keine Selbstabnahme.
+- **Offen:** Delta-QC über `c2b2808`; danach Welle C
   (begrenzte Logread-API + Hub-Textansicht, rein lesender Hub-Konsument der
   Engine-Projektion) und Welle D (Abnahme inkl. AITL-Fixture,
   Hub-Konsistenztests, Version-Bump bei Mainintegration).
