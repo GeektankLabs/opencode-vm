@@ -53,6 +53,57 @@ export type MonitorRepairEntry = {
 };
 
 /**
+ * Welle B (be951293, concept §4.5/§4.4-R2): a finite recovery episode with
+ * persistent attempted FULL runtime identities (provider/model/variant).
+ * Purely additive behind the existing `recovery` state — survives wakes,
+ * adapter restarts and policy revisions (union carried, never forgotten for
+ * still-permitted candidates) and closes only on a successful fallback step.
+ * `recovery_resolution` is the bounded engine-canonical resolved-candidate
+ * projection (labels, identities, per-candidate skip status, policy revision)
+ * that the Hub later reads without reimplementing any filter semantics.
+ */
+export type RecoveryAttemptEntry = {
+  at: string;
+  identity: string;
+  category: string;
+  fingerprint: string;
+  outcome: "current_failure" | "update_unverified" | "dispatched" | "dispatch_uncertain" | "send_failed";
+};
+
+export type RecoveryEpisode = {
+  started_at: string;
+  policy_revision: number | null;
+  attempts: RecoveryAttemptEntry[];
+};
+
+export type RecoveryResolutionCandidate = { label: string; identity: string; status: string };
+
+export type RecoveryResolutionEntry = {
+  at: string;
+  policy_revision: number | null;
+  regime: string;
+  entry_profile: string;
+  candidates: RecoveryResolutionCandidate[];
+  selected_identity: string | null;
+  reason: string;
+};
+
+export const RECOVERY_ATTEMPT_LIMIT = 24;
+export const RECOVERY_RESOLUTION_LIMIT = 8;
+
+export function pushRecoveryAttempt(episode: RecoveryEpisode, entry: RecoveryAttemptEntry): void {
+  episode.attempts.push(entry);
+  if (episode.attempts.length > RECOVERY_ATTEMPT_LIMIT)
+    episode.attempts.splice(0, episode.attempts.length - RECOVERY_ATTEMPT_LIMIT);
+}
+
+export function appendRecoveryResolution(monitor: MonitorRecord, entry: RecoveryResolutionEntry): void {
+  monitor.recovery_resolution = [...(monitor.recovery_resolution ?? []), entry];
+  if (monitor.recovery_resolution.length > RECOVERY_RESOLUTION_LIMIT)
+    monitor.recovery_resolution.splice(0, monitor.recovery_resolution.length - RECOVERY_RESOLUTION_LIMIT);
+}
+
+/**
  * W2 cooperative worker identity. A worker record is additive metadata behind a
  * short alias; it never grants authority and is not an authenticated caller
  * guarantee. `reserved` means a non-idempotent create is about to be attempted;
@@ -130,6 +181,9 @@ export type MonitorRecord = {
   >;
   run: { active: boolean; started_at: string | null; action: string | null };
   recovery: { active: boolean; started_at: string | null; last_error_fingerprint: string | null };
+  /** Welle B additive persistence (see RecoveryEpisode docs); absent on legacy records. */
+  recovery_episode?: RecoveryEpisode | null;
+  recovery_resolution?: RecoveryResolutionEntry[] | null;
   dispatch_wal: {
     action_id: string;
     at: string;

@@ -1,16 +1,31 @@
 import { randomUUID } from "node:crypto";
 import {
+  catalogAvailable,
+  fallbackChain,
+  isRecoveryProviderAdmission,
+  resolveRecoveryChain,
+  runtimeIdentityKey,
+} from "./agent-control.js";
+import type { RecoveryPolicyView } from "./agent-control.js";
+// The shared recovery-policy resolver lives exactly once in TypeScript
+// (agent-control.ts, Welle B / concept §4.4 R2). Re-exported here for the
+// existing engine API; there is deliberately no second engine-local
+// implementation and no reimplementing filter semantics elsewhere.
+export { catalogAvailable, fallbackChain };
+import {
+  appendRecoveryResolution,
   digest,
   monitorDecision,
   monitorHistory,
   monitorLog,
+  pushRecoveryAttempt,
   readEpisode,
   readRegistrySnapshot,
   recordRepair,
   withRegistry,
   workerIndexDigest,
 } from "./monitor.js";
-import type { MonitorWorkerErrorMarker, MonitorWorkerRecord } from "./monitor.js";
+import type { MonitorWorkerErrorMarker, MonitorWorkerRecord, RecoveryEpisode } from "./monitor.js";
 import { isRecord } from "./types.js";
 import type {
   MonitorRecord,
@@ -75,10 +90,10 @@ export type MonitorGatewayLike = {
   updateSessionRuntime(sessionId: string, patch: Partial<SessionRuntime>): Promise<RuntimeUpdateResult>;
 };
 
-export type MonitorPolicyView = {
-  finalFallback: { mode: "total" | "degrading"; selection: { provider_id: string; model_id: string; variant?: string } } | null;
-  profiles: Partial<Record<string, { provider_id: string; model_id: string; variant?: string } | null>>;
-};
+/** Full Schema-4 policy view for recovery resolution (Welle B): the additive
+ * optional fields carry profileFallbacks/strategies/routing/revision. A
+ * reduced view without `routing` keeps the legacy regime unchanged. */
+export type MonitorPolicyView = RecoveryPolicyView;
 
 export type MonitorEngineDeps = {
   project: string;
@@ -119,6 +134,15 @@ export type CanonicalSummary = {
 };
 
 const READ_FINGERPRINT = "canonical-read";
+/** Welle B §4.6 (operator-approved): a restarted episode requires the EXPLICIT
+ * operator trigger on a monitor parked by chain exhaustion/unconfiguration —
+ * never a hidden automatic reset. */
+const RESTARTABLE_EXHAUSTION_REASONS = new Set([
+  "recovery-chain-exhausted",
+  "final-fallback-unconfigured",
+  "final-fallback-unavailable",
+  "profile-fallback-unconfigured",
+]);
 /** Version of the MANAGEMENT role/context contract. Bumping it re-primes once. */
 const PRIMING_CONTRACT = "mgmt-v2";
 
@@ -496,6 +520,14 @@ export class MonitorEngine {
         record.state.worker_digest = workerDigest;
         record.wake_request = null;
         if (prime) this.recordPriming(record, priming, now);
+        // Welle B §4.5 (R1 scoping): a healthy admitted wake closes a still-open
+        // recovery episode — the fallback step evidently worked, the Primary is
+        // free again on the very next normal wake, with NO cooldown and without
+        // forgetting anything mid-EPISODE (this wake observed no blocked error).
+        if (record.recovery_episode) {
+          record.recovery_episode = null;
+          monitorHistory(record, "recovery-episode-closed", { reason: "healthy-wake" }, now);
+        }
         monitorHistory(record, triggered ? "noop-trigger" : "dispatched", { message_id: result.message_id, action_id: actionId, primed: prime }, now);
         this.appendDecisionSummary(record, summary, decisionsSince, now);
       });
@@ -875,7 +907,11 @@ export class MonitorEngine {
     if (
       updated.state !== "updated" ||
       verified.provider_id !== resolved.provider_id ||
-      verified.model_id !== resolved.model_id
+      verified.model_id !== resolved.model_id ||
+      // Welle B: the variant is part of the full identity — never send under an
+      // unverified variant (concept §4.5, fails through the existing
+      // recovery-update-unverified/error path instead of a silent mismatch).
+      (resolved.variant !== undefined && verified.variant !== resolved.variant)
     ) {
       throw new Error("runtime update could not be verified");
     }
@@ -932,6 +968,26 @@ export class MonitorEngine {
       return "recovery-parked";
     }
 
+    // Recovery admission (concept §4.1 Ziffer 2, selection contract): provider
+    // routing happens ONLY for the explicit terminal provider-error set.
+    // unknown/fachlich errors and everything else stay an honest named hold —
+    // no abort side effects, no runtime routing, no dispatch. The W2 repair
+    // budget accounting above ran unchanged.
+    if (!isRecoveryProviderAdmission(evidence.category)) {
+      await this.release(id, now, null, (m) => {
+        m.recovery.active = false;
+        monitorDecision(
+          m,
+          "recovery-held",
+          { reason: "no-provider-error-admission", category: evidence.category, fingerprint: evidence.fingerprint.slice(0, 16) },
+          `recovery-held:no-provider-error-admission:${evidence.fingerprint}`,
+          now,
+        );
+      });
+      this.log("info", `recovery held: category=${evidence.category} is not provider-error admission (no routing)`);
+      return "recovery-parked";
+    }
+
     const aborted = await this.abortAndVerify(sessionId, id, now);
     if (aborted.kind !== "cleared") {
       await this.release(id, now, null, (m) => {
@@ -941,36 +997,104 @@ export class MonitorEngine {
       return "recovery-parked";
     }
 
+    // ---- Welle B shared resolution: full Schema-4 policy view, persistent
+    // finite episode attempts (provider/model/variant), Provider-Skip gate
+    // with central evidence semantics, engine-canonical resolution
+    // projection for the (later read-only) Hub. Legacy regime keeps today's
+    // fallbackChain semantics; the failed current runtime and already
+    // attempted identities are never re-jumped inside a failing episode.
     const policy = await this.readPolicy();
-    const chain = fallbackChain(policy, monitor.runtime_profile);
-    if (chain.length === 0) {
-      await this.release(id, now, "recovery-parked", (m) => {
-        m.state.work = "parked_input_required";
-        m.state.parked_reason = "final-fallback-unconfigured";
-        m.recovery.active = false;
-        monitorHistory(m, "final-fallback-unconfigured", { fingerprint: evidence.fingerprint }, now);
-      });
-      return "recovery-parked";
-    }
+    const currentDetails = await this.gateway.getSessionDetails(sessionId);
+    const currentIdentity = currentDetails.provider_id && currentDetails.model_id
+      ? runtimeIdentityKey({
+        provider_id: currentDetails.provider_id,
+        model_id: currentDetails.model_id,
+        ...(currentDetails.variant !== undefined ? { variant: currentDetails.variant } : {}),
+      })
+      : null;
+    const triggeredRestart = monitor.wake_request !== null
+      && monitor.state.work === "parked_input_required"
+      && RESTARTABLE_EXHAUSTION_REASONS.has(monitor.state.parked_reason ?? "");
     const catalog = await this.gateway.getSessionRuntimeOptions(sessionId);
-    const attempted: string[] = [];
-    let selected: { provider_id: string; model_id: string; variant?: string } | null = null;
-    for (const candidate of chain) {
-      const identity = `${candidate.provider_id}/${candidate.model_id}`;
-      if (attempted.includes(identity)) continue;
-      attempted.push(identity);
-      if (catalogAvailable(catalog, candidate)) {
-        selected = candidate;
-        break;
-      }
+    let episode: RecoveryEpisode;
+    let carriedFrom: RecoveryEpisode | null = null;
+    if (triggeredRestart && record?.recovery_episode) {
+      carriedFrom = record.recovery_episode;
+      episode = { started_at: iso(now), policy_revision: policy.revision ?? null, attempts: [] };
+    } else if (record?.recovery_episode) {
+      // Policy revision alone neither ends the failing episode nor forgets
+      // unchanged identities (§4.5 R1); the union is the persisted set itself.
+      episode = {
+        started_at: record.recovery_episode.started_at,
+        policy_revision: policy.revision ?? record.recovery_episode.policy_revision ?? null,
+        attempts: record.recovery_episode.attempts.map((entry) => ({ ...entry })),
+      };
+    } else {
+      episode = { started_at: iso(now), policy_revision: policy.revision ?? null, attempts: [] };
     }
+    const attemptedIdentities = new Set(episode.attempts.map((entry) => entry.identity));
+    if (currentIdentity && !attemptedIdentities.has(currentIdentity)) {
+      pushRecoveryAttempt(episode, { at: iso(now), identity: currentIdentity, category: evidence.category, fingerprint: evidence.fingerprint, outcome: "current_failure" });
+      attemptedIdentities.add(currentIdentity);
+    }
+    const chain = resolveRecoveryChain(policy, {
+      entryProfile: monitor.runtime_profile,
+      catalog,
+      evidenceCategory: evidence.category,
+      evidenceProviderId: currentDetails.provider_id ?? null,
+      attempted: [...attemptedIdentities],
+      currentIdentity,
+    });
+    // Persist the episode plus the engine-canonical resolution projection
+    // BEFORE any side effect (§4.4 R2): the Hub later reads this bounded
+    // projection instead of ever reimplementing filter semantics.
+    const resolutionEntry = {
+      at: iso(now),
+      policy_revision: chain.policy_revision,
+      regime: chain.regime,
+      entry_profile: chain.entry_profile,
+      candidates: chain.candidates.slice(0, 8).map((entry) => ({ label: entry.label, identity: entry.identity, status: entry.status })),
+      selected_identity: chain.selected_identity,
+      reason: chain.reason,
+    };
+    await withRegistry(
+      this.project,
+      (registry) => {
+        const m = registry.monitors.find((entry) => entry.id === id);
+        if (!m) return registry;
+        m.recovery_episode = episode;
+        appendRecoveryResolution(m, resolutionEntry);
+        if (carriedFrom) monitorHistory(m, "recovery-episode-restarted", { operator_trigger: true, previous_attempts: carriedFrom.attempts.length }, now);
+        monitorHistory(m, "recovery-resolved", {
+          revision: chain.policy_revision,
+          regime: chain.regime,
+          entry_profile: chain.entry_profile,
+          selected: chain.selected_identity,
+          candidates: chain.candidates.slice(0, 8).map((entry) => `${entry.label}=${entry.status}`),
+        }, now);
+        m.updated_at = iso(now);
+        return registry;
+      },
+      { now },
+    );
+    const selected = chain.selected;
+    const attemptedList = episode.attempts.map((entry) => entry.identity);
     if (!selected) {
+      const onlyUnavailable = chain.candidates.length > 0 && chain.candidates.every((entry) => entry.status === "skipped_unavailable");
+      const reason = chain.reason === "chain_empty"
+        ? (chain.regime === "per_profile" ? "profile-fallback-unconfigured" : "final-fallback-unconfigured")
+        : onlyUnavailable ? "final-fallback-unavailable" : "recovery-chain-exhausted";
       await this.release(id, now, "recovery-parked", (m) => {
         m.state.work = "parked_input_required";
-        m.state.parked_reason = "final-fallback-unavailable";
+        m.state.parked_reason = reason;
         m.recovery.active = false;
-        monitorHistory(m, "final-fallback-unavailable", { attempted }, now);
+        monitorHistory(m, reason, {
+          fingerprint: evidence.fingerprint.slice(0, 16),
+          attempted: attemptedList.slice(0, 24),
+          skips: resolutionEntry.candidates.filter((entry) => entry.status.startsWith("skipped_")).map((entry) => `${entry.identity}=${entry.status}`).slice(0, 8),
+        }, now);
       });
+      this.log("warn", `recovery parked with visible reason=${reason} monitor=${id} revision=${chain.policy_revision ?? "unknown"}`);
       return "recovery-parked";
     }
     const updated = await this.gateway.updateSessionRuntime(sessionId, {
@@ -982,11 +1106,17 @@ export class MonitorEngine {
     if (
       updated.state !== "updated" ||
       verified.provider_id !== selected.provider_id ||
-      verified.model_id !== selected.model_id
+      verified.model_id !== selected.model_id ||
+      (selected.variant !== undefined && verified.variant !== selected.variant)
     ) {
       await this.release(id, now, null, (m) => {
         m.recovery.active = false;
-        monitorHistory(m, "recovery-update-unverified", { attempted }, now);
+        // An unverified switch is a failed attempt of this full identity —
+        // it is never silently re-jumped inside the failing episode (§4.5).
+        if (m.recovery_episode && chain.selected_identity) {
+          pushRecoveryAttempt(m.recovery_episode, { at: iso(now), identity: chain.selected_identity, category: evidence.category, fingerprint: evidence.fingerprint, outcome: "update_unverified" });
+        }
+        monitorHistory(m, "recovery-update-unverified", { attempted: m.recovery_episode?.attempts.map((entry) => entry.identity).slice(0, 24) ?? attemptedList }, now);
       });
       return "error";
     }
@@ -1015,6 +1145,19 @@ export class MonitorEngine {
       const code = errorCode(error);
       await this.release(id, now, code === "SUBMISSION_UNCERTAIN" ? "dispatch-uncertain" : null, (m) => {
         m.recovery.active = false;
+        // The selected identity is recorded as attempted in BOTH outcomes: a
+        // possibly admitted (uncertain) send must never loop into another
+        // provider inside the same failing episode; a failed send is a real
+        // attempt. Neither is blindly resent — WAL reconciliation rules.
+        if (m.recovery_episode && chain.selected_identity) {
+          pushRecoveryAttempt(m.recovery_episode, {
+            at: iso(now),
+            identity: chain.selected_identity,
+            category: evidence.category,
+            fingerprint: evidence.fingerprint,
+            outcome: code === "SUBMISSION_UNCERTAIN" ? "dispatch_uncertain" : "send_failed",
+          });
+        }
         if (code === "SUBMISSION_UNCERTAIN") {
           m.state.work = "parked_input_required";
           m.state.parked_reason = "dispatch-uncertain";
@@ -1028,10 +1171,17 @@ export class MonitorEngine {
     await this.release(id, now, "recovery-continued", (m) => {
       if (m.dispatch_wal && m.dispatch_wal.action_id === actionId) m.dispatch_wal.message_id = result.message_id;
       m.recovery.active = false;
+      // The episode STAYS OPEN after an admitted fallback step: its attempts
+      // keep protecting against re-attempts until a healthy wake proves the
+      // recovery worked and closes it (Primary is then free again, no cooldown).
+      if (m.recovery_episode && chain.selected_identity) {
+        pushRecoveryAttempt(m.recovery_episode, { at: iso(now), identity: chain.selected_identity, category: evidence.category, fingerprint: evidence.fingerprint, outcome: "dispatched" });
+      }
       if (prime && priming) this.recordPriming(m, priming, now);
       monitorHistory(m, "recovery-continued", {
         message_id: result.message_id,
         fallback: `${selected.provider_id}/${selected.model_id}`,
+        variant: selected.variant ?? null,
         fingerprint: evidence.fingerprint,
         primed: prime,
       }, now);
@@ -1313,40 +1463,7 @@ export function classifyRepairKind(category: string): "production-code" | "exclu
   return OPERATIONAL_CATEGORIES.has(category) ? "excluded" : "production-code";
 }
 
-export function catalogAvailable(
-  catalog: RuntimeOptions,
-  selection: { provider_id: string; model_id: string; variant?: string },
-): boolean {
-  const provider = catalog.providers.find((entry) => entry.provider_id === selection.provider_id);
-  if (!provider) return false;
-  const model = catalog.models.find(
-    (entry) => entry.provider_id === selection.provider_id && entry.model_id === selection.model_id,
-  );
-  if (!model) return false;
-  if (selection.variant !== undefined) {
-    const variants = model.variants ?? [];
-    if (variants.length > 0 && !variants.includes(selection.variant)) return false;
-  }
-  return true;
-}
-
-export function fallbackChain(
-  policy: MonitorPolicyView,
-  monitorProfile: string,
-): Array<{ provider_id: string; model_id: string; variant?: string }> {
-  const order: string[] =
-    monitorProfile === "design" || monitorProfile === "review"
-      ? ["standard", "execution"]
-      : monitorProfile === "deep"
-        ? ["standard", "execution"]
-        : ["execution"];
-  const chain: Array<{ provider_id: string; model_id: string; variant?: string }> = [];
-  if (policy.finalFallback && policy.finalFallback.mode === "degrading") {
-    for (const profile of order) {
-      const entry = policy.profiles[profile];
-      if (entry) chain.push({ ...entry });
-    }
-  }
-  if (policy.finalFallback) chain.push({ ...policy.finalFallback.selection });
-  return chain;
-}
+// Welle B: catalogAvailable and fallbackChain now live exactly once in
+// agent-control.ts (shared recovery-policy resolver, re-exported at the top of
+// this file). The former engine-local duplicates were removed — behavior for
+// the legacy regime is unchanged.

@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { createOpencodeClient } from "@opencode-ai/sdk/v2";
 import { OpenCodeGateway } from "./opencode.js";
 import { ProjectBoardService } from "./taskboard.js";
-import { readPolicy } from "./agent-control.js";
+import { readPolicy, routingRegime } from "./agent-control.js";
 import { MonitorEngine } from "./monitor-engine.js";
 import type { MonitorBoardLike, MonitorPolicyView } from "./monitor-engine.js";
 import { monitorRegistryDirectory } from "./monitor.js";
@@ -79,7 +79,18 @@ async function main(): Promise<void> {
       : undefined;
   const policyView = async (): Promise<MonitorPolicyView> => {
     const policy = await readPolicy(runtime);
-    return { finalFallback: policy.finalFallback, profiles: policy.profiles };
+    // Welle B: full Schema-4 view — profileFallbacks, strategies, computed
+    // routing regime and revision reach the engine; the shared resolver in
+    // agent-control.ts is the single implementation (the Hub stays a later
+    // read-only consumer of the engine-persisted projection).
+    return {
+      finalFallback: policy.finalFallback,
+      profiles: policy.profiles,
+      profileFallbacks: policy.profileFallbacks,
+      strategies: policy.strategies,
+      routing: routingRegime(policy),
+      revision: policy.revision,
+    };
   };
 
   const engine = new MonitorEngine({

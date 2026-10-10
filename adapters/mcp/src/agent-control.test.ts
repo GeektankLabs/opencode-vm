@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, writeFile, readFile, symlink, unlink, rm } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { candidateOrder, describePolicy, profileState, readPolicy, resolveProfile, routingRegime, PROFILE_NAMES, type ProfileName } from "./agent-control.js";
+import { candidateOrder, describePolicy, isRecoveryProviderAdmission, profileState, providerFailureScope, readPolicy, resolveProfile, resolveRecoveryChain, routingRegime, PROFILE_NAMES, type ProfileName } from "./agent-control.js";
 import type { RuntimeDescriptor, RuntimeOptions } from "./types.js";
 
 const catalog: RuntimeOptions = { agents: ["build"], providers: [{ provider_id: "p", name: "P" }],
@@ -210,4 +210,133 @@ test("schema-3 final fallback is read additively, described with availability, a
       await assert.rejects(readPolicy(runtime), { code: "UNSUPPORTED_CONFIGURATION" });
     }
   } finally { await rm(project, { recursive: true, force: true }); }
+});
+
+// ---------------------------------------------------------------------------
+// Welle B (be951293): shared recovery-candidate resolution — exactly once in
+// TypeScript, used by adapter and Monitor Engine alike (concept §4.4/§4.6).
+// ---------------------------------------------------------------------------
+
+type ViewTuple = { provider_id: string; model_id: string; variant?: string };
+const fullCatalog: RuntimeOptions = {
+  agents: ["build"],
+  providers: [
+    { provider_id: "p", name: "P" },
+    { provider_id: "q", name: "Q" },
+  ],
+  models: [
+    { provider_id: "p", model_id: "m", name: "M", variants: [] },
+    { provider_id: "p", model_id: "fb", name: "FB", variants: [] },
+    { provider_id: "q", model_id: "m", name: "QM", variants: [] },
+  ],
+  truncated: false,
+};
+
+function recoveryView(profiles: Record<string, ViewTuple | null>, extras: {
+  profileFallbacks?: Record<string, ViewTuple | null>;
+  strategies?: { degrading: boolean | null; providerSkip: boolean | null };
+  finalFallback?: { mode: "total" | "degrading"; selection: ViewTuple } | null;
+  revision?: number;
+  schemaVersion?: 3 | 4;
+}) {
+  const fallbacksAll = { deep: null, standard: null, execution: null, design: null, review: null, ...(extras.profileFallbacks ?? {}) };
+  const strategies = extras.strategies ?? { degrading: null, providerSkip: null };
+  const policy = {
+    schemaVersion: extras.schemaVersion ?? 4,
+    revision: extras.revision ?? 7,
+    updatedAt: "2026-10-10T00:00:00Z",
+    profiles: { deep: null, standard: null, execution: null, design: null, review: null, ...profiles },
+    finalFallback: extras.finalFallback ?? null,
+    profileFallbacks: fallbacksAll,
+    strategies,
+  } as unknown as Parameters<typeof routingRegime>[0];
+  return { ...policy, routing: routingRegime(policy), revision: policy.revision };
+}
+
+const deepT: ViewTuple = { provider_id: "p", model_id: "m" };
+const fbT: ViewTuple = { provider_id: "p", model_id: "fb" };
+const qT: ViewTuple = { provider_id: "q", model_id: "m" };
+
+test("Welle B resolver: legacy regime keeps today's chain semantics unchanged", () => {
+  const view = recoveryView({ deep: deepT, standard: qT, execution: null }, {
+    finalFallback: { mode: "degrading", selection: fbT }, schemaVersion: 3,
+  });
+  assert.equal(view.routing.regime, "legacy_final_fallback");
+  const chain = resolveRecoveryChain(view, { entryProfile: "deep", catalog: fullCatalog, evidenceCategory: "provider_timeout", currentIdentity: "p/m" });
+  assert.deepEqual(chain.candidates.map((entry) => `${entry.label}=${entry.status}`), ["degrade.standard.main=selected", "final.main=skipped_attempted"]);
+  assert.equal(chain.selected_identity, "q/m");
+  const total = resolveRecoveryChain(recoveryView({ deep: deepT, standard: qT }, {
+    finalFallback: { mode: "total", selection: fbT }, schemaVersion: 3,
+  }), { entryProfile: "deep", catalog: fullCatalog, evidenceCategory: "provider_timeout" });
+  assert.deepEqual(total.candidates.map((entry) => entry.label), ["final.main"]);
+  const empty = resolveRecoveryChain(recoveryView({ deep: deepT }, { schemaVersion: 3 }), { entryProfile: "deep", catalog: fullCatalog, evidenceCategory: "provider_timeout" });
+  assert.equal(empty.reason, "chain_empty");
+});
+
+test("Welle B resolver: per_profile stage tuples resolve main then own fallback, degrading descends only when explicitly set", () => {
+  const view = recoveryView({ deep: deepT, standard: qT, execution: qT }, {
+    profileFallbacks: { deep: fbT, standard: null, execution: null },
+    strategies: { degrading: true, providerSkip: null },
+  });
+  assert.equal(view.routing.regime, "per_profile");
+  const chain = resolveRecoveryChain(view, { entryProfile: "deep", catalog: fullCatalog, evidenceCategory: "provider_quota", currentIdentity: "p/m" });
+  assert.deepEqual(chain.candidates.map((entry) => entry.label), ["deep.main", "deep.fallback", "standard.main", "execution.main"]);
+  assert.equal(chain.candidates[0]!.status, "skipped_current_failure");
+  assert.equal(chain.selected_identity, "p/fb");
+  const noDegrade = resolveRecoveryChain(recoveryView({ deep: deepT, standard: qT }, {
+    profileFallbacks: { deep: fbT }, strategies: { degrading: false, providerSkip: null },
+  }), { entryProfile: "deep", catalog: fullCatalog, evidenceCategory: "provider_quota", currentIdentity: "p/m" });
+  assert.deepEqual(noDegrade.candidates.map((entry) => entry.label), ["deep.main", "deep.fallback"]);
+  // The legacy global final stage is NEVER silently appended to a per-profile chain.
+  const appended = resolveRecoveryChain(recoveryView({ deep: deepT }, {
+    profileFallbacks: { deep: fbT },
+    finalFallback: { mode: "total", selection: qT },
+  }), { entryProfile: "deep", catalog: fullCatalog, evidenceCategory: "provider_quota", currentIdentity: "p/m" });
+  assert.ok(!appended.candidates.some((entry) => entry.label.startsWith("final")));
+});
+
+test("Welle B resolver: availability and catalog honesty — missing provider/model/variant skips, absent catalog skips everything", () => {
+  const view = recoveryView({ deep: deepT }, { profileFallbacks: { deep: { provider_id: "p", model_id: "ghost" } } });
+  const chain = resolveRecoveryChain(view, { entryProfile: "deep", catalog: fullCatalog, evidenceCategory: "provider_timeout", currentIdentity: "p/m" });
+  assert.equal(chain.candidates[1]!.status, "skipped_unavailable");
+  assert.equal(chain.reason, "chain_exhausted");
+  const noCatalog = resolveRecoveryChain(recoveryView({ deep: deepT }, { profileFallbacks: { deep: fbT } }), { entryProfile: "deep", evidenceCategory: "provider_timeout", currentIdentity: "p/m" });
+  assert.equal(noCatalog.candidates[1]!.status, "skipped_unavailable", "an unchecked catalog is never availability proof");
+});
+
+test("Welle B resolver: Provider-Skip needs explicit ON plus account-scope evidence — single timeouts and id-only matches never skip", () => {
+  const view = recoveryView({ deep: deepT, standard: qT }, { profileFallbacks: { deep: fbT }, strategies: { degrading: true, providerSkip: true } });
+  const quota = resolveRecoveryChain(view, { entryProfile: "deep", catalog: fullCatalog, evidenceCategory: "provider_quota", evidenceProviderId: "p", currentIdentity: "p/m" });
+  assert.deepEqual(quota.candidates.map((entry) => entry.status), ["skipped_current_failure", "skipped_provider_scope", "selected"]);
+  const timeout = resolveRecoveryChain(view, { entryProfile: "deep", catalog: fullCatalog, evidenceCategory: "provider_timeout", evidenceProviderId: "p", currentIdentity: "p/m" });
+  assert.equal(timeout.candidates[1]!.status, "selected", "a single request timeout is not provider-wide proof");
+  const unset = resolveRecoveryChain(recoveryView({ deep: deepT, standard: qT }, { profileFallbacks: { deep: fbT }, strategies: { degrading: true, providerSkip: null } }),
+    { entryProfile: "deep", catalog: fullCatalog, evidenceCategory: "provider_quota", evidenceProviderId: "p", currentIdentity: "p/m" });
+  assert.equal(unset.candidates[1]!.status, "selected", "an unset switch is never a hidden default");
+  const foreign = resolveRecoveryChain(view, { entryProfile: "deep", catalog: fullCatalog, evidenceCategory: "provider_quota", evidenceProviderId: "q", currentIdentity: "p/m" });
+  assert.equal(foreign.candidates[1]!.status, "selected", "skip applies to the matching failure scope only — foreign-provider fallback stays usable");
+});
+
+test("Welle B resolver: persistent attempted identities are filtered union-style and never re-jumped within the failing episode", () => {
+  const view = recoveryView({ deep: deepT, standard: qT }, { profileFallbacks: { deep: fbT }, strategies: { degrading: true, providerSkip: null }, revision: 9 });
+  const chain = resolveRecoveryChain(view, { entryProfile: "deep", catalog: fullCatalog, evidenceCategory: "provider_error", attempted: ["p/fb"], currentIdentity: "p/m" });
+  assert.equal(chain.candidates[1]!.status, "skipped_attempted");
+  assert.equal(chain.selected_identity, "q/m");
+  assert.equal(chain.policy_revision, 9);
+  const all = resolveRecoveryChain(view, { entryProfile: "deep", catalog: fullCatalog, evidenceCategory: "provider_error", attempted: ["p/m", "p/fb", "q/m"] });
+  assert.equal(all.reason, "chain_exhausted");
+  assert.equal(all.selected, null);
+});
+
+test("Welle B admission: exactly the six terminal provider categories route; unknown/fachlich/aborted never do", () => {
+  for (const category of ["provider_header_timeout", "provider_response_stream_error", "provider_error", "provider_timeout", "provider_quota", "provider_auth"]) {
+    assert.ok(isRecoveryProviderAdmission(category), category);
+  }
+  for (const category of ["unknown", "aborted", "context_input_length", "context_overflow", "output_length", "structured_output", "content_filter", "work_failure"]) {
+    assert.ok(!isRecoveryProviderAdmission(category), category);
+  }
+  assert.equal(providerFailureScope("provider_quota"), "account_scope");
+  assert.equal(providerFailureScope("provider_auth"), "account_scope");
+  assert.equal(providerFailureScope("provider_timeout"), "request_level");
+  assert.equal(providerFailureScope("unknown"), "request_level");
 });

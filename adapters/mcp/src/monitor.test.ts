@@ -48,10 +48,13 @@ function runtimeOptions(): RuntimeOptions {
     providers: [
       { provider_id: "deep-provider", name: "Deep" },
       { provider_id: "fallback-provider", name: "Fallback" },
+      { provider_id: "standard-provider", name: "Standard" },
     ],
     models: [
       { provider_id: "deep-provider", model_id: "deep-model", name: "deep", variants: [] },
+      { provider_id: "deep-provider", model_id: "deep-fb", name: "deepfb", variants: [] },
       { provider_id: "fallback-provider", model_id: "fallback-model", name: "fb", variants: [] },
+      { provider_id: "standard-provider", model_id: "standard-model", name: "std", variants: [] },
     ],
     truncated: false,
   };
@@ -80,7 +83,8 @@ type FakeState = {
   updates: Array<Record<string, unknown>>;
   status: SessionStatusResult;
   history: Array<{ id: string; role: string; text: string }>;
-  runtime: { provider_id: string; model_id: string };
+  runtime: { provider_id: string; model_id: string; variant?: string };
+  dropVariant: boolean;
   combinedPending: { permissions: number; questions: number } | null;
   combinedQueue: Array<{ permissions: number; questions: number } | null>;
   combinedThrows: boolean;
@@ -110,6 +114,7 @@ function fakes(state: FakeState) {
         agent: "build",
         provider_id: state.runtime.provider_id,
         model_id: state.runtime.model_id,
+        ...(state.runtime.variant !== undefined && !state.dropVariant ? { variant: state.runtime.variant } : {}),
         pending_input: { permissions: 0, questions: 0 },
       };
     },
@@ -150,7 +155,11 @@ function fakes(state: FakeState) {
     },
     async updateSessionRuntime(_sessionId: string, patch: Record<string, unknown>) {
       state.updates.push(patch);
-      state.runtime = { provider_id: String(patch.provider_id), model_id: String(patch.model_id) };
+      state.runtime = {
+        provider_id: String(patch.provider_id),
+        model_id: String(patch.model_id),
+        ...(patch.variant !== undefined ? { variant: String(patch.variant) } : {}),
+      };
       return {
         session_id: "ses_monitor",
         previous: { agent: "build", provider_id: "deep-provider", model_id: "deep-model", variant: "" },
@@ -196,6 +205,7 @@ function baseState(): FakeState {
     status: okStatus(),
     history: [],
     runtime: { provider_id: "deep-provider", model_id: "deep-model" },
+    dropVariant: false,
     combinedPending: null,
     combinedQueue: [],
     combinedThrows: false,
@@ -1625,6 +1635,296 @@ test("Welle A QC-F2: noop merge keys are cause-specific — different causes kee
     assert.equal((canonicalEntry.detail as { count?: number }).count, 3, "only same-cause repeats increment");
     assert.equal((runtimeEntry.detail as { count?: number }).count, 1, "the other cause keeps its own count and reason");
     assert.equal((canonicalEntry.detail as { first_at?: string }).first_at, new Date(200_000).toISOString(), "first_at stays per cause");
+  } finally {
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Welle B (task_be951293): shared Schema-4 policy resolution in the engine —
+// admission, persistent finite episodes, provider-skip evidence scope,
+// Primary release, exhaustion hold and variant readback.
+// ---------------------------------------------------------------------------
+
+function blockedStatus(category: string, messageId = "msg_err"): SessionStatusResult {
+  return okStatus({
+    session_id: "ses_monitor",
+    state: "failed",
+    assistant_message_ids: [messageId],
+    error_details: [failedDetail(category as CorrelatedErrorDetail["category"], messageId)],
+  });
+}
+
+function perProfileView(profiles: Record<string, { provider_id: string; model_id: string; variant?: string } | null>, extras: {
+  profileFallbacks?: Record<string, { provider_id: string; model_id: string; variant?: string } | null>;
+  strategies?: { degrading: boolean | null; providerSkip: boolean | null };
+  finalFallback?: { mode: "total" | "degrading"; selection: { provider_id: string; model_id: string; variant?: string } } | null;
+  revision?: number;
+} = {}): MonitorPolicyView {
+  const own = { deep: null, standard: null, execution: null, design: null, review: null, ...(extras.profileFallbacks ?? {}) };
+  const strategies = extras.strategies ?? { degrading: null, providerSkip: null };
+  const perProfile = Object.values(own).some((entry) => entry !== null) || strategies.degrading !== null || strategies.providerSkip !== null;
+  return {
+    finalFallback: extras.finalFallback ?? null,
+    profiles: { deep: null, standard: null, execution: null, design: null, review: null, ...profiles },
+    profileFallbacks: own,
+    strategies,
+    revision: extras.revision ?? 7,
+    routing: perProfile
+      ? { regime: "per_profile", legacy_final_stage_applies: false, strategies_effective: { degrading: strategies.degrading === true, provider_skip: strategies.providerSkip === true } }
+      : { regime: "legacy_final_fallback", legacy_final_stage_applies: true, strategies_effective: { degrading: strategies.degrading === true, provider_skip: strategies.providerSkip === true } },
+  };
+}
+
+function seededFailedMonitor(project: string, at = 100_000): Promise<string> {
+  return withRegistry(project, (registry) => {
+    const monitor = defaultMonitorRecord("M", TASK, { interval_seconds: 60 }, at);
+    monitor.scheduler.next_run_at = 0;
+    monitor.state.last_seen_digest = "different";
+    registry.monitors.push(monitor);
+    return registry;
+  }).then((registry) => registry.monitors[0]!.id);
+}
+
+test("Welle B: per_profile own fallback dispatches exactly one admitted step; second wake exhausts visibly and parks without re-attempt", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    state.status = blockedStatus("provider_timeout");
+    const { gateway, board } = fakes(state);
+    const policy = perProfileView({ deep: { provider_id: "deep-provider", model_id: "deep-model" }, standard: null }, { profileFallbacks: { deep: { provider_id: "deep-provider", model_id: "deep-fb" } } });
+    await seededFailedMonitor(project);
+    const engine = new MonitorEngine({ project, gateway, board, readPolicy: async () => policy, now: () => 200_000, log: () => undefined });
+    assert.equal(await engine.tick(), "recovery-continued");
+    assert.equal(state.updates.length, 1);
+    assert.equal(state.updates[0]!.model_id, "deep-fb");
+    assert.equal(state.sends.length, 1);
+    let record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(record.recovery_episode?.attempts.length, 2, "current failure and dispatched fallback persisted in the episode");
+    assert.deepEqual(record.recovery_episode?.attempts.map((entry) => entry.identity), ["deep-provider/deep-model", "deep-provider/deep-fb"]);
+    assert.equal(record.recovery_episode?.attempts[1]!.outcome, "dispatched");
+    const resolution = record.recovery_resolution?.at(-1)!;
+    assert.equal(resolution.regime, "per_profile");
+    assert.equal(resolution.selected_identity, "deep-provider/deep-fb");
+    assert.ok(record.history.some((entry) => entry.type === "recovery-resolved"));
+    // Still blocked next wake: the attempted fallback is NOT re-jumped; no other
+    // candidate exists -> transparent park with visible reason (approved §4.6).
+    await withRegistry(project, (registry) => { registry.monitors[0]!.scheduler.next_run_at = 0; return registry; });
+    const engine2 = new MonitorEngine({ project, gateway, board, readPolicy: async () => policy, now: () => 300_000, log: () => undefined });
+    assert.equal(await engine2.tick(), "recovery-parked");
+    record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(record.state.work, "parked_input_required");
+    assert.equal(record.state.parked_reason, "recovery-chain-exhausted");
+    assert.equal(state.sends.length, 1, "exhaustion never dispatches a second message");
+    assert.equal(state.updates.length, 1);
+    assert.ok(record.history.some((entry) => entry.type === "recovery-chain-exhausted"
+      && JSON.stringify(entry.detail).includes("deep-provider/deep-fb")));
+    assert.equal(record.scheduler.enabled, true, "parking keeps the schedule");
+    // Explicit operator trigger on the exhausted park restarts the episode (§4.6):
+    // the parked state itself is the precondition, never an automatic reset.
+    await withRegistry(project, (registry) => {
+      const monitor = registry.monitors[0]!;
+      monitor.wake_request = { requested_at: new Date(350_000).toISOString(), reason: "operator" };
+      monitor.scheduler.next_run_at = 0;
+      return registry;
+    });
+    const engine3 = new MonitorEngine({ project, gateway, board, readPolicy: async () => policy, now: () => 400_000, log: () => undefined });
+    assert.equal(await engine3.tick(), "recovery-continued", "operator trigger is the one sanctioned episode restart");
+    record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.ok(record.history.some((entry) => entry.type === "recovery-episode-restarted"
+      && (entry.detail as { operator_trigger?: boolean }).operator_trigger === true));
+    assert.equal(state.updates.length, 2);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("Welle B: episodes survive a restart; a policy revision keeps failed identities and adds only new candidates", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    state.status = blockedStatus("provider_error");
+    const { gateway, board } = fakes(state);
+    const policyA = perProfileView({ deep: { provider_id: "deep-provider", model_id: "deep-model" }, standard: null }, { profileFallbacks: { deep: { provider_id: "deep-provider", model_id: "deep-fb" } } });
+    await seededFailedMonitor(project);
+    assert.equal(await new MonitorEngine({ project, gateway, board, readPolicy: async () => policyA, now: () => 200_000 }).tick(), "recovery-continued");
+    // "Adapter restart": a fresh engine instance reading only the registry.
+    const policyB = perProfileView({ deep: { provider_id: "deep-provider", model_id: "deep-model" }, standard: { provider_id: "standard-provider", model_id: "standard-model" } }, {
+      profileFallbacks: { deep: { provider_id: "deep-provider", model_id: "deep-fb" } }, strategies: { degrading: true, providerSkip: null }, revision: 8,
+    });
+    await withRegistry(project, (registry) => { registry.monitors[0]!.scheduler.next_run_at = 0; return registry; });
+    const engine2 = new MonitorEngine({ project, gateway, board, readPolicy: async () => policyB, now: () => 300_000 });
+    assert.equal(await engine2.tick(), "recovery-continued", "the new permitted candidate is chosen");
+    assert.equal(state.updates.at(-1)!.provider_id, "standard-provider");
+    const record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    const identities = record.recovery_episode!.attempts.map((entry) => entry.identity);
+    assert.ok(identities.includes("deep-provider/deep-fb"), "the old failed identity was NOT forgotten by the revision");
+    assert.equal(record.recovery_episode!.started_at, new Date(200_000).toISOString(), "same episode continues across the revision");
+    assert.equal(record.recovery_episode!.policy_revision, 8);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("Welle B: a healthy wake closes the episode, the Primary is automatically retried without cooldown, and a later failure may start a fresh episode", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    state.status = blockedStatus("provider_timeout");
+    const { gateway, board } = fakes(state);
+    const policy = perProfileView({ deep: { provider_id: "deep-provider", model_id: "deep-model" } }, { profileFallbacks: { deep: { provider_id: "fallback-provider", model_id: "fallback-model" } } });
+    await seededFailedMonitor(project);
+    assert.equal(await new MonitorEngine({ project, gateway, board, readPolicy: async () => policy, now: () => 200_000 }).tick(), "recovery-continued");
+    // Fallback turn completes healthy; canonical change lets a normal wake run.
+    state.status = okStatus();
+    state.taskUpdated = "2026-10-10T00:00:00.000Z";
+    await withRegistry(project, (registry) => { registry.monitors[0]!.scheduler.next_run_at = 0; return registry; });
+    assert.equal(await new MonitorEngine({ project, gateway, board, readPolicy: async () => policy, now: () => 300_000 }).tick(), "dispatched");
+    let record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(record.recovery_episode, null, "success closes the episode");
+    assert.ok(record.history.some((entry) => entry.type === "recovery-episode-closed" && (entry.detail as { reason?: string }).reason === "healthy-wake"));
+    // The same healthy wake re-tried the current Primary automatically: NO cooldown,
+    // no attempted filter on resolveRuntime (R1 scoping) — it switched back.
+    assert.equal(state.runtime.provider_id, "deep-provider", "Primary return without cooldown on the first normal healthy wake");
+    assert.equal(state.updates.at(-1)!.provider_id, "deep-provider");
+    // A later normal wake on unchanged runtime performs no extra switch.
+    state.taskUpdated = "2026-10-11T00:00:00.000Z";
+    await withRegistry(project, (registry) => { registry.monitors[0]!.scheduler.next_run_at = 0; return registry; });
+    assert.equal(await new MonitorEngine({ project, gateway, board, readPolicy: async () => policy, now: () => 400_000 }).tick(), "dispatched");
+    assert.equal(state.runtime.provider_id, "deep-provider");
+    // Primary fails again: a NEW episode may legitimately re-attempt the old fallback.
+    state.status = blockedStatus("provider_quota");
+    state.taskUpdated = "2026-10-12T00:00:00.000Z";
+    await withRegistry(project, (registry) => { registry.monitors[0]!.scheduler.next_run_at = 0; return registry; });
+    assert.equal(await new MonitorEngine({ project, gateway, board, readPolicy: async () => policy, now: () => 500_000 }).tick(), "recovery-continued");
+    record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(record.recovery_episode!.started_at, new Date(500_000).toISOString());
+    assert.equal(state.updates.filter((entry) => entry.provider_id === "fallback-provider").length, 2, "permitted cycle re-tries after a proven success closed the old episode");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("Welle B: unknown and fachlich errors are honest named holds — no abort, no runtime update, no dispatch; the W2 budget keeps counting product failures", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    state.status = blockedStatus("unknown");
+    const { gateway, board } = fakes(state);
+    const policy = perProfileView({ deep: { provider_id: "deep-provider", model_id: "deep-model" } }, { profileFallbacks: { deep: { provider_id: "fallback-provider", model_id: "fallback-model" } } });
+    await seededFailedMonitor(project);
+    assert.equal(await new MonitorEngine({ project, gateway, board, readPolicy: async () => policy, now: () => 200_000 }).tick(), "recovery-parked");
+    assert.equal(state.abortResults.length, 0, "a held non-admitted error is not aborted");
+    assert.equal(state.updates.length, 0, "never provider routing without admission");
+    assert.equal(state.sends.length, 0);
+    const held = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.ok(held.history.some((entry) => entry.type === "recovery-held"
+      && (entry.detail as { reason?: string }).reason === "no-provider-error-admission"
+      && (entry.detail as { category?: string }).category === "unknown"));
+    assert.equal(held.state.work, "active", "a hold does not park work");
+    assert.equal(held.recovery_episode ?? null, null, "no episode opens without admission");
+    // Fachlicher (production-code) failure: W2 budget accounting unchanged, still no routing.
+    state.status = blockedStatus("work_failure");
+    await withRegistry(project, (registry) => { registry.monitors[0]!.scheduler.next_run_at = 0; return registry; });
+    assert.equal(await new MonitorEngine({ project, gateway, board, readPolicy: async () => policy, now: () => 300_000 }).tick(), "recovery-parked");
+    await withRegistry(project, (registry) => { registry.monitors[0]!.scheduler.next_run_at = 0; return registry; });
+    assert.equal(await new MonitorEngine({ project, gateway, board, readPolicy: async () => policy, now: () => 400_000 }).tick(), "recovery-parked");
+    await withRegistry(project, (registry) => { registry.monitors[0]!.scheduler.next_run_at = 0; return registry; });
+    assert.equal(await new MonitorEngine({ project, gateway, board, readPolicy: async () => policy, now: () => 500_000 }).tick(), "recovery-parked");
+    const budgeted = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(budgeted.state.work, "parked_input_required");
+    assert.equal(budgeted.state.parked_reason, "repair-budget-exhausted", "budget limits preserved (matrix J)");
+    assert.equal(state.updates.length, 0, "still zero provider routing");
+    assert.equal(state.sends.length, 0);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("Welle B: variant readback fails closed and the unverified full identity is never re-jumped inside the episode", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    state.status = blockedStatus("provider_timeout");
+    state.dropVariant = true;
+    const { gateway, board } = fakes(state);
+    const policy = perProfileView({ deep: { provider_id: "deep-provider", model_id: "deep-model" } }, { profileFallbacks: { deep: { provider_id: "fallback-provider", model_id: "fallback-model", variant: "high" } } });
+    await seededFailedMonitor(project);
+    const engine = new MonitorEngine({ project, gateway, board, readPolicy: async () => policy, now: () => 200_000 });
+    assert.equal(await engine.tick(), "error");
+    assert.equal(state.sends.length, 0, "never send under an unverified runtime");
+    let record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.ok(record.history.some((entry) => entry.type === "recovery-update-unverified"));
+    assert.equal(record.recovery_episode!.attempts.at(-1)!.identity, "fallback-provider/fallback-model/high");
+    assert.equal(record.recovery_episode!.attempts.at(-1)!.outcome, "update_unverified");
+    await withRegistry(project, (registry) => { registry.monitors[0]!.scheduler.next_run_at = 0; return registry; });
+    assert.equal(await new MonitorEngine({ project, gateway, board, readPolicy: async () => policy, now: () => 300_000 }).tick(), "recovery-parked");
+    record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(record.state.parked_reason, "recovery-chain-exhausted", "the same provider/model/variant is not tried twice");
+    assert.equal(state.updates.length, 1);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("Welle B: an uncertain recovery send is recorded, never blind-resent, and old records without episode fields load and gain them additively", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    state.status = blockedStatus("provider_auth");
+    state.sendsFail = "SUBMISSION_UNCERTAIN";
+    const { gateway, board } = fakes(state);
+    const policy = perProfileView({ deep: { provider_id: "deep-provider", model_id: "deep-model" } }, { profileFallbacks: { deep: { provider_id: "fallback-provider", model_id: "fallback-model" } } });
+    const monitorId = await seededFailedMonitor(project);
+    // Legacy check: the record was created WITHOUT recovery_episode/recovery_resolution fields.
+    const raw = JSON.parse(await readFile(monitorRegistryPath(project), "utf8"));
+    assert.equal("recovery_episode" in raw.monitors[0], false);
+    assert.equal(await new MonitorEngine({ project, gateway, board, readPolicy: async () => policy, now: () => 200_000 }).tick(), "dispatch-uncertain");
+    const after = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(after.state.work, "parked_input_required");
+    assert.equal(after.state.parked_reason, "dispatch-uncertain");
+    assert.equal(after.recovery_episode!.attempts.at(-1)!.outcome, "dispatch_uncertain", "uncertain admission is a recorded attempt");
+    assert.equal(state.sends.length, 0);
+    // Second wake reconciles the WAL FIRST — no second send of the recovery.
+    await withRegistry(project, (registry) => { registry.monitors[0]!.scheduler.next_run_at = 0; return registry; });
+    assert.equal(await new MonitorEngine({ project, gateway, board, readPolicy: async () => policy, now: () => 300_000 }).tick(), "dispatch-uncertain");
+    assert.equal(state.sends.length, 0, "never blindly resent");
+    assert.ok(monitorId);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("Welle B: quota evidence with Provider-Skip ON bypasses the failing provider but keeps foreign-provider fallback usable", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    state.status = blockedStatus("provider_quota");
+    const { gateway, board } = fakes(state);
+    const policy = perProfileView(
+      { deep: { provider_id: "deep-provider", model_id: "deep-model" }, standard: { provider_id: "fallback-provider", model_id: "fallback-model" } },
+      {
+        profileFallbacks: { deep: { provider_id: "deep-provider", model_id: "deep-fb" } },
+        strategies: { degrading: true, providerSkip: true },
+      },
+    );
+    await seededFailedMonitor(project);
+    assert.equal(await new MonitorEngine({ project, gateway, board, readPolicy: async () => policy, now: () => 200_000 }).tick(), "recovery-continued");
+    assert.equal(state.updates.at(-1)!.provider_id, "fallback-provider", "same-provider own fallback skipped on account-scope quota evidence");
+    const record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    const resolution = record.recovery_resolution!.at(-1)!;
+    assert.deepEqual(resolution.candidates.map((entry) => entry.status), ["skipped_current_failure", "skipped_provider_scope", "selected"]);
+    // Same configuration but a request-level timeout: no provider-wide skip.
+    state.status = blockedStatus("provider_timeout");
+    state.runtime = { provider_id: "deep-provider", model_id: "deep-model" };
+    await withRegistry(project, (registry) => {
+      const monitor = registry.monitors[0]!;
+      monitor.recovery_episode = null;
+      monitor.scheduler.next_run_at = 0;
+      return registry;
+    });
+    assert.equal(await new MonitorEngine({ project, gateway, board, readPolicy: async () => policy, now: () => 300_000 }).tick(), "recovery-continued");
+    assert.equal(state.updates.at(-1)!.model_id, "deep-fb", "a single timeout never proves provider-wide failure");
   } finally {
     await cleanup();
   }

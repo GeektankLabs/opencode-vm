@@ -225,3 +225,211 @@ export function resolveProfile(policy: Policy, profile: ProfileName, catalog?: R
   }
   return { profile, policy_revision: policy.revision, status: "unconfigured" as const, resolution_path };
 }
+
+// ---------------------------------------------------------------------------
+// Welle B (be951293): shared recovery-policy resolution — exactly once in
+// TypeScript, used by the adapter and the Monitor Engine alike (concept §4.4,
+// R2 engine-canonical contract). Pure functions over the policy view: no
+// second implementation may appear in monitor-engine.ts or the Hub; the Hub
+// later only reads the engine-persisted projection.
+// ---------------------------------------------------------------------------
+
+export type RecoveryRuntimeTuple = { provider_id: string; model_id: string; variant?: string };
+
+/** The full Schema-4 policy view as transported to the engine. Optional
+ * additive fields keep reduced/legacy views valid: an absent `routing`
+ * means the legacy regime (today's chain semantics unchanged). */
+export type RecoveryPolicyView = {
+  finalFallback: { mode: (typeof FINAL_FALLBACK_MODES)[number]; selection: RecoveryRuntimeTuple } | null;
+  profiles: Partial<Record<string, RecoveryRuntimeTuple | null>>;
+  profileFallbacks?: Partial<Record<string, RecoveryRuntimeTuple | null>>;
+  strategies?: Strategies;
+  routing?: { regime: RoutingRegime; legacy_final_stage_applies: boolean; strategies_effective: { degrading: boolean; provider_skip: boolean } };
+  revision?: number | null;
+};
+
+/** Selection contract (task_ad26435f, concept §4.1 Ziffer 2): recovery
+ * admission is exactly this explicit terminal provider-error set. Everything
+ * else — `unknown`, fachliche Fehler, pending permissions/questions,
+ * INPUT_REQUIRED, aborted — is never provider routing. */
+export const PROVIDER_ERROR_ADMISSION = [
+  "provider_header_timeout",
+  "provider_response_stream_error",
+  "provider_error",
+  "provider_timeout",
+  "provider_quota",
+  "provider_auth",
+] as const;
+
+export function isRecoveryProviderAdmission(category: string): boolean {
+  return (PROVIDER_ERROR_ADMISSION as readonly string[]).includes(category);
+}
+
+/** Central evidence semantics for the Provider-Skip gate: only quota and auth
+ * are account/provider-wide failure proof. A single request timeout or stream
+ * error is not, and the same provider_id alone is never an area conclusion. */
+export function providerFailureScope(category: string): "account_scope" | "request_level" {
+  return category === "provider_quota" || category === "provider_auth" ? "account_scope" : "request_level";
+}
+
+/** Full runtime identity provider/model/variant — persistent attempted keys. */
+export function runtimeIdentityKey(selection: RecoveryRuntimeTuple): string {
+  return `${selection.provider_id}/${selection.model_id}${selection.variant !== undefined ? `/${selection.variant}` : ""}`;
+}
+
+export function catalogAvailable(
+  catalog: RuntimeOptions,
+  selection: RecoveryRuntimeTuple,
+): boolean {
+  const provider = catalog.providers.find((entry) => entry.provider_id === selection.provider_id);
+  if (!provider) return false;
+  const model = catalog.models.find(
+    (entry) => entry.provider_id === selection.provider_id && entry.model_id === selection.model_id,
+  );
+  if (!model) return false;
+  if (selection.variant !== undefined) {
+    const variants = model.variants ?? [];
+    if (variants.length > 0 && !variants.includes(selection.variant)) return false;
+  }
+  return true;
+}
+
+/**
+ * Legacy regime chain — today's semantics preserved unchanged (monitor-engine
+ * fallbackChain moved here as the single canonical implementation): only a
+ * `degrading` finalFallback mode descends, the global final stage always
+ * applies when configured, Schema-4 fields are never reinterpreted.
+ */
+export function fallbackChain(
+  policy: RecoveryPolicyView,
+  monitorProfile: string,
+): RecoveryRuntimeTuple[] {
+  const order: string[] =
+    monitorProfile === "design" || monitorProfile === "review"
+      ? ["standard", "execution"]
+      : monitorProfile === "deep"
+        ? ["standard", "execution"]
+        : ["execution"];
+  const chain: RecoveryRuntimeTuple[] = [];
+  if (policy.finalFallback && policy.finalFallback.mode === "degrading") {
+    for (const profile of order) {
+      const entry = policy.profiles[profile];
+      if (entry) chain.push({ ...entry });
+    }
+  }
+  if (policy.finalFallback) chain.push({ ...policy.finalFallback.selection });
+  return chain;
+}
+
+export type RecoveryCandidateStatus =
+  | "selected"
+  | "skipped_current_failure"
+  | "skipped_attempted"
+  | "skipped_provider_scope"
+  | "skipped_unavailable";
+
+export type RecoveryChainCandidate = { label: string; identity: string; tuple: RecoveryRuntimeTuple; status: RecoveryCandidateStatus };
+
+export type RecoveryChain = {
+  regime: RoutingRegime;
+  policy_revision: number | null;
+  entry_profile: string;
+  candidates: RecoveryChainCandidate[];
+  selected: RecoveryRuntimeTuple | null;
+  selected_identity: string | null;
+  reason: "selected" | "chain_empty" | "chain_exhausted";
+};
+
+/**
+ * The one shared candidate resolution (concept §4.4): stage label → full
+ * tuple (provider/model/variant), catalog availability (existing
+ * catalogAvailable semantics), persistent attempted filter, and the
+ * Provider-Skip gate with central evidence semantics. The legacy regime keeps
+ * `fallbackChain` semantics unchanged; per_profile chains never silently
+ * append the legacy global final stage (routingRegime contract).
+ * Without a fetched catalog every candidate is honestly `skipped_unavailable`
+ * — an unchecked catalog is never treated as availability proof.
+ */
+export function resolveRecoveryChain(
+  policy: RecoveryPolicyView,
+  params: {
+    entryProfile: string;
+    catalog?: RuntimeOptions;
+    evidenceCategory: string;
+    evidenceProviderId?: string | null;
+    attempted?: string[];
+    currentIdentity?: string | null;
+  },
+): RecoveryChain {
+  const regime: RoutingRegime = policy.routing?.regime ?? "legacy_final_fallback";
+  const raw: Array<{ label: string; tuple: RecoveryRuntimeTuple }> = [];
+  if (regime === "per_profile") {
+    const effective = policy.routing?.strategies_effective ?? { degrading: false, provider_skip: false };
+    const stages: string[] = effective.degrading && (STAGE_ORDER as Record<string, string[]>)[params.entryProfile]
+      ? (STAGE_ORDER as Record<string, string[]>)[params.entryProfile]!
+      : [params.entryProfile];
+    for (const stage of stages) {
+      const main = policy.profiles[stage];
+      if (main) raw.push({ label: `${stage}.main`, tuple: main });
+      const own = policy.profileFallbacks?.[stage];
+      if (own) raw.push({ label: `${stage}.fallback`, tuple: own });
+    }
+  } else {
+    const order: string[] =
+      params.entryProfile === "design" || params.entryProfile === "review"
+        ? ["standard", "execution"]
+        : params.entryProfile === "deep"
+          ? ["standard", "execution"]
+          : ["execution"];
+    if (policy.finalFallback && policy.finalFallback.mode === "degrading") {
+      for (const profile of order) {
+        const entry = policy.profiles[profile];
+        if (entry) raw.push({ label: `degrade.${profile}.main`, tuple: entry });
+      }
+    }
+    if (policy.finalFallback) raw.push({ label: "final.main", tuple: policy.finalFallback.selection });
+  }
+  const attempted = new Set(params.attempted ?? []);
+  const providerSkip = policy.routing?.strategies_effective.provider_skip === true;
+  const accountScope = providerFailureScope(params.evidenceCategory) === "account_scope";
+  const candidates: RecoveryChainCandidate[] = raw.map((entry) => ({
+    label: entry.label,
+    identity: runtimeIdentityKey(entry.tuple),
+    tuple: entry.tuple,
+    status: "selected" as RecoveryCandidateStatus,
+  }));
+  let selectedIdentity: string | null = null;
+  for (const candidate of candidates) {
+    if (selectedIdentity !== null) {
+      candidate.status = "skipped_attempted";
+      continue;
+    }
+    if (params.currentIdentity && candidate.identity === params.currentIdentity) {
+      candidate.status = "skipped_current_failure";
+      continue;
+    }
+    if (attempted.has(candidate.identity)) {
+      candidate.status = "skipped_attempted";
+      continue;
+    }
+    if (!params.catalog || !catalogAvailable(params.catalog, candidate.tuple)) {
+      candidate.status = "skipped_unavailable";
+      continue;
+    }
+    if (providerSkip && accountScope && params.evidenceProviderId && candidate.tuple.provider_id === params.evidenceProviderId) {
+      candidate.status = "skipped_provider_scope";
+      continue;
+    }
+    selectedIdentity = candidate.identity;
+  }
+  const selected = selectedIdentity === null ? null : candidates.find((entry) => entry.identity === selectedIdentity)!.tuple;
+  return {
+    regime,
+    policy_revision: policy.revision ?? null,
+    entry_profile: params.entryProfile,
+    candidates,
+    selected,
+    selected_identity: selectedIdentity,
+    reason: candidates.length === 0 ? "chain_empty" : selectedIdentity === null ? "chain_exhausted" : "selected",
+  };
+}
