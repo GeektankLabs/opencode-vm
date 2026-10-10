@@ -426,17 +426,16 @@ def is_provider_attributed(fields):
     return any(key == "providerID" or key.startswith("provider.") for key in fields)
 
 
-def request_id_candidate(value, explicit_provider_label=False):
-    """A provider request ID candidate. With an explicit provider-scoped label
-    on a provider-attributed line, the provider source plus the label IS the
-    evidence — any non-empty format is kept (F-D2b: no format suppression
-    there, so provider.requestID="req_real_openai_9f3a" and a plain UUID both
-    persist). Without that explicit provider label, bare UUIDs, unlabeled
-    internal req_* strings and internal receipts stay rejected."""
+def request_id_candidate(value, in_provider_gate=False):
+    """A provider request ID candidate. Inside the provider gate (a unique
+    provider-attributed source line AND an explicitly labeled request-id key,
+    F-D2c) the source plus the label IS the evidence — any non-empty format
+    is kept, including req_* and UUID forms. Outside that gate, bare UUIDs,
+    unlabeled internal req_* strings and internal receipts stay rejected."""
     text = str(value).strip()[:REQUEST_ID_MAX]
     if not text:
         return None
-    if explicit_provider_label:
+    if in_provider_gate:
         return text
     if UUID_RE.match(text):
         return None
@@ -467,19 +466,21 @@ def build_event(fields, source_name, offset):
                 event["http_status"] = int(str(fields[key])[:3])
                 event["http_status_key"] = key[:64]
                 break
-        # F-D2/F-D2b: request IDs share the SAME provider-attribution gate as
-        # the HTTP status — a labeled request id from a non-provider context
-        # (e.g. an internal trace) is NOT a provider request ID. Within the
-        # gate, an explicit provider-scoped label (provider.requestID /
-        # providerRequestID) makes the provider source plus the label the
-        # evidence: any non-empty format is kept. Without that explicit
-        # provider label, format suppression still rejects bare UUIDs,
-        # unlabeled req_* strings and internal receipts. The field is never
-        # guessed from other keys.
+        # F-D2/F-D2b/F-D2c: request IDs share the SAME provider-attribution
+        # gate as the HTTP status — a labeled request id from a non-provider
+        # context (e.g. an internal trace) is NOT a provider request ID. Inside
+        # the gate (provider-attributed source line + recognized request-id
+        # label), the source plus the label is the evidence: EVERY recognized
+        # label accepts any non-empty format (req_*, UUID, provider-scoped
+        # forms) — label normalization strips dots, dashes AND underscores, so
+        # provider.requestID, providerRequestID, provider-request-id,
+        # provider_request_id, x-request-id, x_request_id, requestID and
+        # request-id are all recognized. Outside the gate nothing is read and
+        # nothing is guessed from other keys; secrets stay scrubbed.
         for key in sorted(fields):
-            normalized = key.lower().replace(".", "").replace("-", "")
+            normalized = key.lower().replace(".", "").replace("-", "").replace("_", "")
             if normalized in REQUEST_ID_KEYS:
-                request_id = request_id_candidate(fields[key], normalized == "providerrequestid")
+                request_id = request_id_candidate(fields[key], True)
                 if request_id:
                     event["request_id"] = request_id
                     event["request_id_key"] = key[:64]
@@ -905,14 +906,35 @@ def mode_status(state_dir, as_json):
 
 
 def mode_selftest():
+    # F-D2c positive matrix: 8 recognized request-id labels x 2 formats
+    # (req_* and UUID) on a uniquely provider-attributed source line = 16/16.
+    # Inside the gate the source plus the label is the evidence — the format
+    # is not an additional exclusion rule.
+    labels = ["provider.requestID", "providerRequestID", "provider-request-id",
+              "provider_request_id", "x-request-id", "x_request_id",
+              "requestID", "request-id"]
+    matrix = 0
+    for label in labels:
+        for value in ["req_real_openai_9f3a", "0f4e2c5a-1111-4111-8111-111111111111"]:
+            mfields = parse_logfmt("timestamp=2026-10-10T00:00:10.000Z level=INFO "
+                                   "message=\"provider call\" providerID=zai modelID=glm "
+                                   "session.id=ses_m status=200 %s=\"%s\"" % (label, value))
+            mevent = build_event(mfields, "opencode", 0)
+            assert mevent.get("request_id") == value, (label, value, mevent)
+            assert mevent.get("request_id_key") == label, (label, mevent)
+            matrix += 1
+    assert matrix == 16, matrix
+
     fields = parse_logfmt('\''timestamp=2026-10-10T00:00:00.000Z level=ERROR run=abc message="stream error" '\''
-                          '\''providerID=opencode modelID=m session.id=ses_x status=429 requestID="req_abc"'\'')
+                          '\''providerID=opencode modelID=m session.id=ses_x status=429 requestID="req_abc" '\''
+                          '\''anotherkey=req_test_sentinel'\'')
     assert fields is not None
     event = build_event(fields, "opencode", 12)
     assert event["http_status"] == 429 and event["http_status_key"] == "status"
-    # provider-attributed line, but the label is NOT provider-scoped: format
-    # suppression still rejects an unlabeled req_* string (F-D2b boundary)
-    assert "request_id" not in event, "req_* without a provider-scoped label must be rejected"
+    # F-D2c: inside the provider gate the label is the evidence — req_* formats
+    # persist on recognized request-id labels regardless of provider scope.
+    assert event["request_id"] == "req_abc" and event["request_id_key"] == "requestID"
+    assert "anotherkey" not in event and "req_test_sentinel" not in json.dumps(event)
 
     fields1b = parse_logfmt('\''timestamp=2026-10-10T00:00:00.500Z level=ERROR run=abc message="provider call" '\''
                             '\''providerID=zai provider.requestID="req_real_openai_9f3a" status=429 '\''

@@ -1048,3 +1048,21 @@ Reviewer-Isolation,SHA e35c81ef…565be861, hier nicht vorhanden/nicht
   Stopp kein Weiterwachsen.
 - Testbestand diaglog nun 12/12; Skill r51 unberührt; Adapter/Pin unberührt;
   Versionen weiter 0.7.31/0.1.42.
+
+### §13.3 Parserabschluss F-D2c (2026-10-10; geprüft af94d45 → Korrekturcommit)
+
+- **Unterstrich-Normalisierung:** Labelnormalisierung entfernt jetzt Punkte,
+  Bindestriche UND Unterstriche — `provider_request_id` und `x_request_id`
+  wurden zuvor gar nicht als Request-ID-Keys erkannt.
+- **Formatfreiheit im Gate:** Innerhalb des Provider-Gates (eindeutig
+  providerattributierte Zeile + erkanntes Request-ID-Label) ist Quelle+Label
+  der Beleg — ALLE erkannten Labels akzeptieren jedes nichtleere Format
+  (req_*, UUID, providerscope-Formen). Die Providerbelegklasse über
+  explizit providerscope-gelabelte Keys folgt dem bestehenden Vertrag
+  (`provider.*`-Keys zählen zur Attribution), kein neuer Vertrag.
+- **Negative Grenzen unverändert:** außerhalb des Gates wird nichts gelesen
+  (nackte UUIDs/`req_*`/interne Receipts/`internal-trace-42` bleiben
+  draußen); Secret-Scrubbing/Privacy-Gates unangetastet.
+- **Dauerhafte Matrix:** Selftest 16/16 (8 Labels × req_*/UUID) plus e2e-
+  Matrix im Suite-Test (alle 8 Labels, beide Formate, Werte und
+  Labelkeys asserted; Negative asserted). diaglog 13/13.

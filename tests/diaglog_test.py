@@ -253,6 +253,35 @@ class DiagLoggerTest(unittest.TestCase):
             if admin.exists():
                 self.assertLess(admin.stat().st_size, 64 * 1024, name)
 
+    def test_f_d2c_label_matrix_16_of_16_end_to_end(self):
+        xdg, share = seed_env(self.base)
+        episode = claim(self.base, xdg, share)
+        labels = ["provider.requestID", "providerRequestID", "provider-request-id",
+                  "provider_request_id", "x-request-id", "x_request_id",
+                  "requestID", "request-id"]
+        with open(xdg / "opencode" / "log" / "opencode.log", "a") as handle:
+            for index, label in enumerate(labels):
+                for value in ("req_matrix_openai_%d" % index, "0f4e2c5a-1111-4111-8111-%012d" % index):
+                    handle.write('timestamp=2026-10-10T13:%02d:00.000Z level=INFO run=r1 message="matrix" '
+                                 'providerID=zai modelID=glm session.id=ses_m status=200 %s="%s"\n'
+                                 % (index, label, value))
+        proc = subprocess.Popen([sys.executable, str(WORKER), "run", str(self.base / "state")],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(1.2)
+        run_worker(["stop", self.base / "state"])
+        proc.wait(timeout=10)
+        events_text = "".join(p.read_text() for p in sorted(episode.glob("events*.jsonl")))
+        persisted = [json.loads(line) for line in events_text.splitlines()]
+        ids = {event["request_id"] for event in persisted if "request_id" in event}
+        for index, label in enumerate(labels):
+            self.assertIn("req_matrix_openai_%d" % index, ids, label)
+            self.assertIn("0f4e2c5a-1111-4111-8111-%012d" % index, ids, label)
+        # negatives: non-provider context keeps IDs out entirely
+        self.assertNotIn("internal-trace-42", ids)
+        keys = {event.get("request_id_key") for event in persisted if "request_id" in event}
+        for label in labels:
+            self.assertIn(label, keys)
+
     def test_persistent_io_stop_path_no_false_final(self):
         xdg, share = seed_env(self.base)
         episode = claim(self.base, xdg, share)
