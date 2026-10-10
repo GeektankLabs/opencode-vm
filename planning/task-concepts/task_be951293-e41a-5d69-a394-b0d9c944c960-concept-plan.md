@@ -1,6 +1,6 @@
 Task-ID: task_be951293-e41a-5d69-a394-b0d9c944c960
 Title: Work Package: Monitor-Zuverlässigkeit und Diagnose vorbereiten (Konzept, reviewbar)
-Stand: 2026-10-10 · Status: Welle A implementiert (lokal, isolierter Worktree, kandidatenbereit zur unabhängigen QC) · Implementierungs-Go erteilt · Historie: CONCEPT_PASS (Rev. 3, unabhängig geprüft), Entscheidungsvorbereitung abgeschlossen 2026-10-09
+Stand: 2026-10-10 · Status: Welle A implementiert, QC-Befunde F1/F2 korrigiert (lokal, isolierter Worktree; Delta-QC ausstehend) · Implementierungs-Go erteilt · Historie: CONCEPT_PASS (Rev. 3, unabhängig geprüft), Entscheidungsvorbereitung abgeschlossen 2026-10-09
 Last-concept-update: 2026-10-09T20:53 UTC (historisch: Abschlussmetadaten Rev3-CONCEPT_PASS; Inhaltsrevision unverändert SHA1386d074…; die damit offene Produktentscheidung 4.6/§8a ist mit dem Go vom 2026-10-10 entschieden, siehe §11) · Last-implementation-update: 2026-10-10 (Welle A commit e0c5ce3ce0c2362f253ef2a1488540227c0050e5 auf Branch task/be951293-wave-a; §11 aktueller Stand)
 
 ## 1 Ziel / Nichtziele
@@ -414,7 +414,8 @@ Der Reviewbericht selbst wurde nicht verändert.
   oder Policyänderung mit neuen zulässigen Kandidaten (Attempted-Übernahme nach 4.5).
   Die alten „kein Go"-Metadaten von 2026-10-09 sind hierdurch überholt; historisch
   bleiben sie in §2/§9/§10 unverändert erhalten.
-- **Welle A — implementiert (lokal kandidatenbereit, nicht QC-abgenommen):**
+- **Welle A — implementiert und QC-Korrektur ausgeführt (lokal kandidatenbereit,
+  Delta-QC steht aus):**
   failed-Worker-Beobachtung receipt-korreliert über das eigene `dispatch_receipt`
   (Turn-Attribution B4), konservative Markierung `lifecycle="idle"` plus additiver
   Fehlermarker `last_error` (Kategorie/Fingerprint/Zeit/Receipt oder explizit null,
@@ -440,7 +441,28 @@ Der Reviewbericht selbst wurde nicht verändert.
   skips (vorbestehend); 6 neue Welle-A-Tests belegen Receipt-Attribution,
   Idempotenz, failed→Digest→genau ein Managerwake, fehlende Evidenz, additive
   Alt-/Zukunfts-Records (korrupte Marker fail-closed) und Logbounds.
-- **Offen:** Welle B (gemeinsame Schema-4-Policy/Recovery, Episodenpersistenz,
-  Variant-Readback), Welle C (Logread-API + Hub-Textansicht), Welle D
-  (Abnahmetests inkl. AITL-Fixture, Hub-Konsistenz, Version-Bump); unabhängige QC
-  zu Welle A wird separat beauftragt — dieser Eintrag ist keine Selbstabnahme.
+- **QC (unabhängig):** Bericht
+  `planning/task-concepts/task_be951293-e41a-5d69-a394-b0d9c944c960-waveA-qc.md`
+  (SHA256 `765c4f03f6eb40825ae0654ccbddc8ebce166068ead1e64c71577122d443e401`,
+  Reviewerterminal `msg_12353dffb001pL58w1P874LY94`): Scope/Privacy/Receipt/Wake
+  sowie tsc/build, 229 pass/0 fail/2 skip und 34/34 bestätigt; CHANGES_REQUIRED
+  nur für F1 (Stale-`last_error` über reuse/rebind) und F2 (Merge-Key-Konflation
+  der beiden noop-Ursachen). Beide Befunde reproduktionsfest bestätigt.
+- **QC-Korrektur (Autor, lokal, nur F1+F2+Tests):** Fix-Commit
+  `738efe1b26aed500024dd49c742f16794f4951aa` (Tree `5a211208e0a3ecbf8c5dff17af1421056084723a`)
+  auf `fdc8ad5adfabe0a509b46a2bcd37bc041707f4d3`: F1 — `reuseWorker`/`rebindWorker`
+  (gemeinsames `rebindOwnWorker`) setzen `last_error = null` beim Reaktivieren;
+  die lebende Record-Zeige beschreibt nur die aktuelle Episode, die Beobachtung
+  bleibt in der Registry-History auditierbar, das Wake-Prompt rendert einen
+  frischen active-Dispatch nie mit alter Kategorie. F2 — noop-Merge-Keys sind
+  ursachenspezifisch (`noop-unchanged:<reason>`), Ursachen zählen und erscheinen
+  getrennt mit eigenem first/last/count. Regressionstests ergänzt (reuse+rebind
+  inkl. Promptdarstellung; Cause-Splitting mit Counts), bisherige Hold-Erwartungen
+  auf die Clear-Semantik aktualisiert. Neu verifiziert: tsc clean; Monitor-Suite
+  **36/36**; Adapter-Gesamtsuite **231 pass / 0 fail / 2 env-gated skips**.
+  Keine anderen Stellen angefasst; keine Mainintegration/kein Release/Push/Live.
+  Delta-Nachprüfung durch die unabhängige QC steht aus — dieser Eintrag ist
+  keine Selbstabnahme.
+- **Offen:** Delta-QC zu F1/F2; danach Welle B (gemeinsame Schema-4-Policy/Recovery,
+  Episodenpersistenz, Variant-Readback), Welle C (Logread-API + Hub-Textansicht),
+  Welle D (Abnahme inkl. AITL-Fixture, Hub-Konsistenz, Version-Bump).
