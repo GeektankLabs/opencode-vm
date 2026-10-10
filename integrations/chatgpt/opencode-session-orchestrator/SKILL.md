@@ -6,13 +6,13 @@ license: MIT
 
 # OpenCode Session Orchestrator
 
-Release marker: **2026-10-09-r49**. This is the skill revision, not an MCP version.
+Release marker: **2026-10-10-r50**. This is the skill revision, not an MCP version.
 
 This is a client-side workflow skill. The user supplies a working compatible MCP connection, including when using Secure MCP Tunnel. The skill contains no tunnel, account, server alias or credentials and does not configure the connection.
 
 Respond in the user's language. For spoken interaction, lead with the useful status and next step; keep updates short and speakable. Preserve exact IDs and technical evidence in the written receipt when supported, rather than reading every identifier aloud. Concise delivery does not replace complete result reading when that was requested.
 
-For completions, domain decisions and escalations, name the MCP project, the verified workstream when present, and the descriptive task title, with a short identifier only as a supplement. Apply the [contextual reporting rules](references/events-attention.md#context-in-user-facing-notices) and the [brief MVP completion notice](references/optimistic-mvp.md#brief-user-facing-completion-notice); routine same-strand pings need no repeated full hierarchy.
+For completions, domain decisions and escalations, name the MCP project, the verified workstream when present, and the descriptive task title, with a short identifier only as a supplement. Apply the [contextual reporting rules](references/events-attention.md#context-in-user-facing-notices) and the [brief MVP completion notice](references/optimistic-mvp.md#brief-user-facing-completion-notice); routine same-strand pings need no repeated full hierarchy. Monitor/progress/night reports assemble evidenced sources with declared coverage per the [monitor reporting contract](references/monitor-reporting.md).
 
 Read references when their workflow is relevant:
 

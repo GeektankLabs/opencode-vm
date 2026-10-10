@@ -16,6 +16,7 @@ native history or the separate Task Management Journal.
 - **Has this exact task finished?** Use correlated task status/result search with the submitted user ID.
 - **What is newly ready for the operator across sessions?** Prefer `get_project_attention` and its prepared queue when exposed; use the activity journal for raw event history/reconciliation.
 - **What did the completed task conclude?** Read the original report through the [content protocol](content-protocol.md).
+- **Report the whole run so far (monitor/night report)?** Assemble task/C/P documents, journals, native monitor history, exact receipts and terminal originals with declared coverage per [Monitor reporting](monitor-reporting.md).
 
 These are different observations; do not substitute one for another.
 

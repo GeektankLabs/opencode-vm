@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-10-r50
+
+- Add the bounded monitor/progress/night reporting contract (new `opencode-session-orchestrator/references/monitor-reporting.md`, task_be951293 addendum): assemble available task/C/P documents, Task Management Journal, native monitor history (engine decision entries including recovery/fallback/park outcomes), exact manager/worker receipts and terminal originals with declared coverage; brief one-line mention of each evidenced error class even after later PASS (example wording included, only when evidenced), counts only with complete evidence, no "error-free" claim from gaps, journal-disabled fallback respected, and MCP request/message IDs never presented as provider request IDs. Instruction-only: no runtime, scheduler or notification channel.
+- Remove a leftover unresolved-merge marker line (`>>>>>>> 96631b5…`) that had been committed at the end of regression-scenarios.md during the r49 integration; content was already coherent, the stray terminator line is gone.
+
 ## 2026-10-09-r49
 
 - Integrate the management-priming / worker-tools skill line (previously task-branch-local revisions r46/r47: the monitor-manager mission and two audiences, serial root-only delegation with creation-receipt ownership, the cooperative action matrix without enforcement guarantees, the eight-step wake duty loop and G3 input_required handling, persistent worker context/lifecycle, the locked worker-tool linkage `create_monitor_worker`/`list_monitor_workers`/`update_monitor_worker` with reserve-before-create and reconcile-not-retry, and the engine-observed finished-dispatched-worker `result_receipt` wake signal) into the Main bundle alongside the r47 journal-free and r48 cleanup lines. The management-priming content now ships under r49; the branch-local duplicate r46/r47 entries are subsumed here so no revision number is double-assigned.

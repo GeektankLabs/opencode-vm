@@ -660,4 +660,11 @@ Instruction/source-bound synthetic traces must use the shipped dispatch preceden
 | Temptation to claim the skill "blocked" a rule violation | Cooperative rules are not technical enforcement: report a model violation as a violation with evidence, no invented `BLOCKED` event, caller-identity proof or attack-detection guarantee; existing authentication and tool guards stay as-is. |
 | Board task seems needed to carry worker context or record a proposal | Never create internal board tasks or task floods; keep the worker context in its persistent project-state file and the proposal in journal/attention; external board privileges remain untouched. |
 | Worker teardown with unfinished or uncertain dispatch state | No cleanup: secure handover first (synthesize/open items/belege verified and read back), then idle/no-pending/no-uncertain, reversible archive, then exact own context file removal only; never stop live work to tidy up, never delete permanent evidence. |
->>>>>>> 96631b5ee3dbe4e4242767bb905d861419ee4b1b
+
+## Monitor report requests (r50)
+
+| Scenario | Required behavior |
+|---|---|
+| Night report after a run that hit provider timeouts but later reached PASS | Assemble task/C/P, journals, native monitor history, exact receipts and terminal originals per [Monitor reporting](monitor-reporting.md); PASS is stated with its coverage, and each evidenced error class keeps its one short sentence — e.g. "The run hit provider timeouts; the configured automatic fallbacks continued the work. Details on request / in monitor history [exact reference]." Recovery context is not a reason to reopen the run, and no separate error chapter or log dump is produced. |
+| Report requested while history/coverage is incomplete | Sections name source and coverage (`complete`/`partial`/`not read` + reason); counts appear only when coverage supports them; an unread window or `search_complete=false` blocks any "error-free" claim — the report says what was not read instead of inferring health, and follows the [content protocol](content-protocol.md) for omissions. |
+| Journal disabled (`activity_journal.state:disabled`) on a fresh opencode-vm session | No Activity/Attention reads are attempted; the report assembles from bounded exact-receipt status/result reads, native monitor history, the Task Management Journal and C/P, and names the disabled journal; `state:unavailable` stays a named fault, never a silent gap. MCP request/message IDs are reported as connector correlation handles, never as provider request IDs. |
