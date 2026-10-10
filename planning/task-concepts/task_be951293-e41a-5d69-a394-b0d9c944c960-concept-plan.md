@@ -1,6 +1,6 @@
 Task-ID: task_be951293-e41a-5d69-a394-b0d9c944c960
 Title: Work Package: Monitor-Zuverlässigkeit und Diagnose vorbereiten (Konzept, reviewbar)
-Stand: 2026-10-10 · Status: Welle A/B/C QC_PASS (C auf 00523c2, Bericht SHA b2f4dec4…); Welle-D-Gesamtabnahme mit Zusatztests/Doku lokal committet (Head des Branches task/be951293-wave-a, siehe git log) — unabhängige Gesamt-QC ausstehend · Implementierungs-Go erteilt · Historie: CONCEPT_PASS (Rev. 3, unabhängig geprüft), Entscheidungsvorbereitung abgeschlossen 2026-10-09
+Stand: 2026-10-10 · Status: LOKALE MAIN-INTEGRATION DURCHGEFÜHRT — main FF 8936f621→65e73c6040be5a7b148f02b7ea9bcee2ceaf26f2 (GESAMT-QC_PASS, Bericht SHA51c9c00e…, D1/D2 eingearbeitet); unabhängige Integrations-QC ausstehend · Implementierungs-Go erteilt · Historie: CONCEPT_PASS (Rev. 3), Welle A/B/C jeweils QC_PASS
 Last-concept-update: 2026-10-09T20:53 UTC (historisch: Abschlussmetadaten Rev3-CONCEPT_PASS; Inhaltsrevision unverändert SHA1386d074…; die damit offene Produktentscheidung 4.6/§8a ist mit dem Go vom 2026-10-10 entschieden, siehe §11) · Last-implementation-update: 2026-10-10 (Kette auf Branch task/be951293-wave-a: Welle A e0c5ce3→738efe1→c6bd261 QC_PASS; Welle B 38eeb80→c2b2808→28ff295 QC_PASS; Welle C 8e9650b→bf1939b, Delta-Fix 5bf4408, Doku 00523c2 QC_PASS; Welle D: Abnahmezusatz (AITL-Ketten-Fixture, Matrix-A-Identität, Dupletten-/Cross-Writer-Tests, README-Bedienhinweise) als Folcommit(s); §11 aktueller Stand)
 
 ## 1 Ziel / Nichtziele
@@ -692,6 +692,53 @@ Der Reviewbericht selbst wurde nicht verändert.
   behalten ihr Label bewusst (Scope-Entscheidung F-B1, Cleanup vermerkt);
   Bedienung: Monitor-Details öffnen → Diagnose-Textfeld, Kopier-Button,
   beide Aktualisieren-Pfade; API nur Hub, nicht MCP (§8 e).
-- **Offen:** unabhängige GesamtQC über diesem Kandidaten; danach erst
-  Mainintegration/Release ( separat beauftragt) und eine Welle-D-Abnahme an
-  echter Session-Hardware (extern, nicht durch lokale Tests ersetzbar).
+- **Welle-D-Zahlen (D1-Nachtrag, verbindlich THIS Durchgang, von der Gesamt-QC
+  unabhängig reproduziert):** Adapter-Suite 248 pass / 0 fail / 2 env-gated skips in
+  3/3 Läufen; monitor 46/46; agent-control 14/14; hub_test 45 OK;
+  agent_control_test.py 57 OK; Browser-Fixture 19/19; monitor_service_test.sh 5× ok.
+  D2: die §11-Zeilenreferenzen waren ±1 gedriftet; korrekt
+  1692/1752/1779/1818/1854/1880/1915 (Testnamen eindeutig).
+- **Lokale Main-Integration (autorisiert, ohne Veröffentlichung):** Christian
+  erteilte die Freigabe der Main-Integration. Vorher: main bei
+  8936f621f86e4ff96b69bcc8c849a996d8ba26c0 (origin/main 33528bb, lokal drei Commits
+  voraus; ein veraltetes 978f5f9-Lesen zu Sitzungsbeginn wurde durch das Reflog
+  widerlegt — dieser Commit existiert nicht). Aktion: Fast-forward des Kandidaten
+  65e73c6040be5a7b148f02b7ea9bcee2ceaf26f2 auf main im Primary-Checkout — main
+  steht exakt auf dem gesamt-QC_PASS-Kandidaten; dieser Doku-Commit ist der reine
+  Integrationsnachweis. Einzige Überlappung: zwei ungetrackte Predecessor-Kopien
+  der Paket-Dokumente (Pre-Go-Stand, sha256 25f9a381…/94ea1da0…), byte-treu
+  gesichert unter .opencode-vm/integration-backups/be951293-mainintegration-20261010/
+  (inkl. BACKUP-SHA256.txt); ihr Inhalt ist vollständig in die offizielle Version
+  aufgegangen. Fremderhalt: 90 fremde Dirty-Einträge unberührt; die Schnittmenge
+  der Kandidatenpfade mit den verbleibenden Dirties ist leer (92 vorher = 90 plus
+  die zwei gesicherten). Versionierung: kein Bump — EFBE-Präzedenz (3844f2e hielt
+  0.7.30/0.1.41 bei lokaler Integration); die RELEASING-Schritte 1–4 (Version,
+  Pins, package.json/types.ts, Tag/Assets) bleiben ein separater, ausdrücklich zu
+  beauftragender Veröffentlichungsschritt; diese Integration impliziert weder
+  Release noch Push noch Tag.
+  Integrationstests auf dem exakten Maincommit im eigenen sauberen Test-Worktree
+  (/tmp/opencode/be951293-inttest, da der Primary fremde Dirty-Tracked-Dateien
+  trägt): tsc/build ok; monitor 46/46; agent-control 14/14; Suite 248/0/2;
+  hub_test 45 OK; agent_control_test 57 OK; Browser-Fixture 19/19;
+  monitor_service 5× ok — deckungsgleich mit der Gesamt-QC.
+  Persistenz-Downgrade real geprüft: der gebaute Alt-Adapter von 8936f621 liest
+  eine Registry mit recovery_episode/recovery_resolution/Worker-last_error;
+  altseitige Schreiboperationen (Synthesis-Set, Titel-Reset über die
+  Registry-Mutation) werden angewendet und alle additiven Felder bleiben
+  byte-identisch erhalten (Neulesung durch die neue Version verifiziert); der
+  alte hub/monitor.py von 8936f621 validiert und mutiert dieselbe Datei, das neue
+  Hub bestätigt danach Episode/Projektion/Marker intakt. Semantische Grenzen bei
+  Rückstufung: alter Code ignoriert die neuen Felder (Legacy-Routing ohne
+  Episoden-/Admissionsfilter, Beobachtung ohne Receipt-Korrelation, alter Rebind
+  räumt last_error nicht — unter neuem Code erledigt der nächste reuse/rebind das
+  wieder); alte UI/Server haben keine Logread-Route und zeigen die Projektion
+  nicht. Die Felder sind für alte Leser inert und nach einem Vor-Restore nahtlos
+  weiter nutzbar. Rückkehrmöglichkeit: Anker ist der Vorher-Stand 8936f621;
+  sicherer Weg ist ein gezieltes Revert des Integrationsbereichs — ein hartes
+  Zurücksetzen des Primary-Worktrees scheitert am Schutz der fremden geänderten
+  Dateien; Registry-Daten überleben beide Richtungen (belegt), Dokument-Backups
+  liegen am obigen Pfad.
+- **Offen:** unabhängige GesamtQC über dem main-Endstand (Code 65e73c6 + Doku-Commit); danach separat:
+  Release-Flow gemäß RELEASING.md (Versionsschritt als eigener Auftrag) und die
+  Hardware-/Session-Abnahme inkl. optionalem AITL-Livebeweis (extern, nicht durch
+  lokale Tests ersetzbar).
