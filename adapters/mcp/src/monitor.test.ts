@@ -39,6 +39,7 @@ import {
   classifyRepairKind,
   fallbackChain,
 } from "./monitor-engine.js";
+import { resolveRecoveryChain } from "./agent-control.js";
 import type { MonitorBoardLike, MonitorGatewayLike, MonitorPolicyView } from "./monitor-engine.js";
 import type { AbortSessionTurnResult, CorrelatedErrorDetail, RuntimeOptions, SessionStatusResult } from "./types.js";
 
@@ -2044,6 +2045,119 @@ test("Welle B QC-F-B2: malformed recovery fields fail closed on read; null, lega
     });
     const legacy = await readRegistrySnapshot(project);
     assert.equal(legacy.registry.monitors[0]!.recovery_episode, undefined);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("Welle D AITL-Fixture (isoliert, §7): worker terminal failure -> ONE correlated synthesis wake; manager-only provider chain; exhaustion park; healthy release — every step left a truthful log trail", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    const { gateway, board } = fakes(state);
+    const seed = await seedMonitorWithDispatchedWorker(project, gateway, board, 100_000);
+    const workerReceipt = `msg_${"299062e8349b46bb9c700b4bbe034f40"}`;
+    const policy = perProfileView(
+      { deep: { provider_id: "deep-provider", model_id: "deep-model" }, standard: { provider_id: "standard-provider", model_id: "standard-model" } },
+      { profileFallbacks: { deep: { provider_id: "deep-provider", model_id: "deep-fb" } }, strategies: { degrading: true, providerSkip: true }, revision: 12 },
+    );
+    const engineFor = (now: number) =>
+      new MonitorEngine({ project, gateway, board, readPolicy: async () => policy, now: () => now, log: (_level, message) => seed.logs.push(message) });
+    // (1) the dedicated worker's OWN dispatched turn ends terminally failed
+    state.statusFor = (sessionId, messageId) =>
+      sessionId === "ses_worker" && messageId === "msg_dispatch"
+        ? okStatus({ session_id: "ses_worker", state: "failed", assistant_message_ids: [workerReceipt],
+            error_details: [failedDetail("provider_header_timeout", workerReceipt)] })
+        : okStatus({ session_id: sessionId, state: "unknown" });
+    await advanceDue(project, 110_000);
+    assert.equal(await engineFor(110_000).tick(), "dispatched");
+    assert.equal(state.sends.length, 2, "exactly one synthesis wake for the worker failure");
+    assert.equal(state.updates.length, 0, "a worker failure NEVER starts manager provider routing");
+    assert.ok(state.statusCalls.some((call) => call.session_id === "ses_worker" && call.message_id === "msg_dispatch"));
+    let record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    const worker = record.workers!.find((entry) => entry.worker_key === seed.workerKey)!;
+    assert.equal(worker.lifecycle, "idle");
+    assert.equal(worker.result_receipt, workerReceipt, "exact receipt of the terminal failed turn persisted");
+    assert.equal(worker.last_error?.receipt, workerReceipt);
+    assert.equal(worker.last_error?.category, "provider_header_timeout");
+    const observed = record.history.find((entry) => entry.type === "worker-observed-failed")!;
+    assert.equal((observed.detail as { dispatch_receipt?: string }).dispatch_receipt, "msg_dispatch");
+    assert.equal((observed.detail as { result_receipt?: string }).result_receipt, workerReceipt);
+    assert.match(state.sends[1]!, /M1-A:idle!provider_header_timeout@ses_worker/);
+    assert.ok(seed.logs.some((line) => line.includes("worker terminal failure observed") && line.includes(workerReceipt.slice(0, 20))));
+    // (2) repeated observation never re-wakes
+    await advanceDue(project, 120_000);
+    assert.equal(await engineFor(120_000).tick(), "noop-unchanged");
+    assert.equal(state.sends.length, 2);
+
+    // (3) the MANAGER's own dispatched turn fails with quota — admitted provider routing
+    state.status = blockedStatus("provider_quota", "msg_mgr_err");
+    state.taskUpdated = "2026-10-10T10:00:00.000Z";
+    await advanceDue(project, 130_000);
+    assert.equal(await engineFor(130_000).tick(), "recovery-continued");
+    assert.equal(state.updates.length, 1);
+    assert.equal(state.updates[0]!.provider_id, "standard-provider", "Provider-Skip bypassed the account-scope failing provider's own fallback");
+    record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    const resolution = record.recovery_resolution!.at(-1)!;
+    // Matrix A: engine-persisted resolution == what the shared resolver returns for identical inputs
+    const direct = resolveRecoveryChain(policy, {
+      entryProfile: "deep", catalog: runtimeOptions(), evidenceCategory: "provider_quota",
+      evidenceProviderId: "deep-provider", attempted: ["deep-provider/deep-model"], currentIdentity: "deep-provider/deep-model",
+    });
+    assert.deepEqual(resolution.candidates.map((entry) => `${entry.label}=${entry.identity}=${entry.status}`),
+      direct.candidates.map((entry) => `${entry.label}=${entry.identity}=${entry.status}`));
+    assert.equal(resolution.selected_identity, direct.selected_identity);
+    assert.equal(resolution.policy_revision, 12);
+    // the manager status was correlated with its OWN dispatch receipt (WAL message id)
+    const walMessage = record.dispatch_wal?.message_id;
+    assert.ok(walMessage);
+    assert.ok(state.statusCalls.some((call) => call.session_id === "ses_monitor" && call.message_id === walMessage));
+
+    // (4) the fallback also fails with quota: the account-scope evidence now names
+    //     standard-provider, so the wake first legitimately continues onto the
+    //     remaining foreign-provider candidate (deep-fb) — no re-jump of attempted ids
+    state.taskUpdated = "2026-10-10T11:00:00.000Z";
+    await advanceDue(project, 140_000);
+    assert.equal(await engineFor(140_000).tick(), "recovery-continued");
+    assert.equal(state.updates.length, 2);
+    assert.equal(state.updates[1]!.model_id, "deep-fb");
+    record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.deepEqual(record.recovery_episode!.attempts.map((entry) => entry.identity),
+      ["deep-provider/deep-model", "standard-provider/standard-model", "deep-provider/deep-fb"]);
+    // (5) still failing with deep-fb now current: every candidate is attempted,
+    //     current or provider-scope — the finite chain exhausts visibly and parks
+    state.taskUpdated = "2026-10-10T11:30:00.000Z";
+    await advanceDue(project, 150_000);
+    assert.equal(await engineFor(150_000).tick(), "recovery-parked");
+    record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(record.state.work, "parked_input_required");
+    assert.equal(record.state.parked_reason, "recovery-chain-exhausted");
+    assert.equal(state.sends.length, 4, "exhaustion adds no second dispatch");
+    assert.equal(state.updates.length, 2);
+    assert.ok(record.history.some((entry) => entry.type === "recovery-chain-exhausted"
+      && JSON.stringify(entry.detail).includes("standard-provider/standard-model")));
+
+    // (6) healthy recovery of the manager session: episode closes, own park lifts,
+    //     the next normal wake re-tries the Primary
+    state.status = okStatus();
+    state.taskUpdated = "2026-10-10T12:00:00.000Z";
+    await advanceDue(project, 160_000);
+    assert.equal(await engineFor(160_000).tick(), "dispatched");
+    record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(record.recovery_episode, null);
+    assert.equal(record.state.work, "active");
+    assert.equal(record.state.parked_reason, undefined);
+    assert.equal(state.runtime.provider_id, "deep-provider", "Primary automatically re-tried without cooldown");
+    assert.ok(record.history.some((entry) => entry.type === "recovery-episode-closed"));
+    assert.ok(record.history.some((entry) => entry.type === "recovery-park-resumed"
+      && (entry.detail as { resumed_from?: string }).resumed_from === "recovery-chain-exhausted"));
+    // AITL symptom reversal: the once-empty trail is now complete and truthful
+    for (const type of ["worker-observed-failed", "recovery-resolved", "recovery-chain-exhausted",
+                        "recovery-park-resumed", "recovery-episode-closed"]) {
+      assert.ok(record.history.some((entry) => entry.type === type), `missing decision entry ${type}`);
+    }
+    assert.ok(seed.logs.some((line) => line.includes("recovery park resumed")));
+    assert.ok(seed.logs.some((line) => line.includes("recovery parked with visible reason=recovery-chain-exhausted")));
   } finally {
     await cleanup();
   }

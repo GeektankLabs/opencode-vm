@@ -814,5 +814,46 @@ class HubMonitorLogTest(HubMonitorTest):
             self.assertIn("ohne nicht-leere Inhaltzeile", body["text"])
         finally:
             http.shutdown(); thread.join(timeout=5)
+    def test_hub_writer_preserves_engine_additive_recovery_fields(self):
+        # Welle D (§8 risk 6 rollback-safety, both-writer round-trip): a Hub
+        # mutation (PUT via the CAS writer) must not lose the additive engine
+        # fields recovery_episode / recovery_resolution / worker last_error.
+        http, thread, base = self.start()
+        import hub.monitor as store
+        try:
+            monitor_id = self.seed_monitor(base)
+            episode = {"started_at": "2026-10-10T00:00:00.000Z", "policy_revision": 12,
+                       "attempts": [{"at": "2026-10-10T00:00:00.000Z", "identity": "p/m",
+                                     "category": "provider_quota", "fingerprint": "a" * 64,
+                                     "outcome": "dispatched"}]}
+            resolution = {"at": "2026-10-10T00:00:00.000Z", "policy_revision": 12, "regime": "per_profile",
+                          "entry_profile": "deep", "selected_identity": "p/m", "reason": "selected",
+                          "candidates": [{"label": "deep.main", "identity": "p/m", "status": "selected"}]}
+            def build(registry):
+                monitor = registry["monitors"][0]
+                monitor["recovery_episode"] = episode
+                monitor["recovery_resolution"] = [resolution]
+                monitor["workers"] = [{
+                    "worker_key": "worker_" + "a" * 32, "alias": "M1-A", "monitor_id": monitor["id"],
+                    "manager_alias": "M1", "creator_manager_session_id": None, "created_at": "2026-10-10T00:00:00.000Z",
+                    "runtime_session_id": "ses_w", "creation_receipt": "msg_c", "dispatch_receipt": "msg_d",
+                    "result_receipt": "msg_r", "scope": None, "worktree": None, "task_id": None,
+                    "context_path": "/tmp/x.md", "lifecycle": "idle", "last_synthesis_at": None,
+                    "updated_at": "2026-10-10T00:00:00.000Z",
+                    "last_error": {"at": "2026-10-10T00:00:00.000Z", "category": "provider_timeout",
+                                   "fingerprint": "b" * 64, "receipt": "msg_r"},
+                }]
+            store.mutate(self.project, build)
+            before = store.snapshot(self.project)["monitors"][0]
+            _, updated = self.request(base, f"/api/monitor/{monitor_id[8:]}", "PUT",
+                                      {"generation": store.snapshot(self.project)["generation"], "interval_seconds": 90}, lan=True)
+            self.assertEqual(updated["monitor"]["scheduler"]["interval_seconds"], 90)
+            after = store.snapshot(self.project)["monitors"][0]
+            self.assertEqual(after["recovery_episode"], before["recovery_episode"], "hub writer preserves the episode")
+            self.assertEqual(after["recovery_resolution"], before["recovery_resolution"], "hub writer preserves the resolution projection")
+            self.assertEqual(after["workers"][0]["last_error"], before["workers"][0]["last_error"], "hub writer preserves the worker marker")
+        finally:
+            http.shutdown(); thread.join(timeout=5)
+
 if __name__ == "__main__":
     unittest.main()

@@ -340,3 +340,17 @@ test("Welle B admission: exactly the six terminal provider categories route; unk
   assert.equal(providerFailureScope("provider_timeout"), "request_level");
   assert.equal(providerFailureScope("unknown"), "request_level");
 });
+
+test("Welle B matrix F (doppelte Runtimes): identical full tuples anywhere in the chain are attempted at most once per episode", () => {
+  const view = recoveryView({ deep: deepT, standard: fbT }, {
+    profileFallbacks: { deep: fbT }, strategies: { degrading: true, providerSkip: null },
+  });
+  const first = resolveRecoveryChain(view, { entryProfile: "deep", catalog: fullCatalog, evidenceCategory: "provider_error", currentIdentity: "p/m" });
+  assert.deepEqual(first.candidates.map((entry) => `${entry.label}=${entry.status}`),
+    ["deep.main=skipped_current_failure", "deep.fallback=selected", "standard.main=skipped_attempted"]);
+  const after = resolveRecoveryChain(view, { entryProfile: "deep", catalog: fullCatalog, evidenceCategory: "provider_error", attempted: ["p/m", "p/fb"] });
+  assert.deepEqual(after.candidates.map((entry) => entry.status),
+    ["skipped_attempted", "skipped_attempted", "skipped_attempted"]);
+  assert.equal(after.reason, "chain_exhausted");
+  assert.equal(after.selected, null);
+});
