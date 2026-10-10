@@ -409,8 +409,14 @@ export class MonitorEngine {
 
     // Cheap unchanged path: no model call, no note growth. A pending trigger or
     // a changed worker index (creation/receipt/lifecycle/synthesis) is not a
-    // no-op and proceeds to a bounded wake.
-    if (summary.digest === previously && workerDigest === previousWorkerDigest && !triggered) {
+    // no-op and proceeds to a bounded wake. be951293 gate fix: an unchanged
+    // board may only be a no-op when the current admitted dispatch receipt has
+    // no unobserved terminal outcome — otherwise the watch below runs first,
+    // so a turn that failed AFTER admission still reaches evidence/recovery.
+    const unchangedBoard = summary.digest === previously && workerDigest === previousWorkerDigest && !triggered;
+    const dispatchedReceipt = monitor.dispatch_wal?.message_id ?? null;
+    const observedReceipt = monitor.state.receipt_observation?.receipt ?? null;
+    if (unchangedBoard && (dispatchedReceipt === null || observedReceipt === dispatchedReceipt)) {
       await this.release(id, now, null, (record) => {
         // QC-F2 (waveA-qc SHA765c4f03): cause-specific merge keys — never mix
         // different noop causes into one count that only names the first reason.
@@ -423,6 +429,9 @@ export class MonitorEngine {
         );
       });
       return "noop-unchanged";
+    }
+    if (unchangedBoard && dispatchedReceipt !== null) {
+      return await this.observeUnchangedReceipt(id, now, monitor, summary, dispatchedReceipt);
     }
 
     // ---- technical state gate (busy alone never aborts) ----
@@ -709,6 +718,135 @@ export class MonitorEngine {
       { now },
     );
     return changed;
+  }
+
+  /**
+   * be951293 gate fix (2026-10-10): unchanged-board receipt watch.
+   *
+   * The unchanged/no-op shortcut never re-read the manager session, so an
+   * admitted dispatch whose turn later ended terminally failed stayed
+   * invisible forever (live AITL case 2026-10-10: provider_header_timeout
+   * swallowed in a silent noop-unchanged loop — no recovery, no park). This
+   * watch runs at most once per DISTINCT receipt (state.receipt_observation),
+   * correlates the status read through the dispatch receipt exactly like the
+   * normal flow, and reuses the existing machinery unchanged: pending-input
+   * SafeHold, W2 budget, provider admission, native abort verification, the
+   * shared Schema-4 chain resolution, WAL handling. No new fallback semantics.
+   *
+   * Convergence rules (bounded, no loops on a quiet board):
+   * - terminal, not blocked → the watch settles (`receipt_observation`), a
+   *   healthy receipt closes an open episode exactly like a healthy wake
+   *   (§4.5 R1); anything terminal without provider evidence is a
+   *   conservative held settlement;
+   * - blocked → the existing recover()/compactionContinue() path runs; a real
+   *   park settles the watch (park state stays transparently visible), a
+   *   dispatched recovery/continuation moves the watch to the new receipt;
+   * - held aborts and holds without provider admission settle the watch
+   *   instead of retrying side-effectful aborts every interval (deliberate
+   *   divergence from the changed-board retry loop, which keeps its existing
+   *   behavior); chain-advancing errors (update-unverified, send-failed) do
+   *   NOT settle — the finite episode advances until it parks;
+   * - pending input or an active turn stays a merged bounded decision, never
+   *   per-tick history growth.
+   */
+  private async observeUnchangedReceipt(
+    id: string,
+    now: number,
+    monitor: MonitorRecord,
+    summary: CanonicalSummary,
+    dispatchedReceipt: string,
+  ): Promise<WakeOutcome> {
+    const session = await this.ensureSession(monitor, now);
+    if (session.kind === "session-error") {
+      await this.release(id, now, null, (record) => {
+        monitorHistory(record, "session-unavailable", { reason: session.reason }, now);
+      });
+      return "error";
+    }
+    if (monitor.session.session_id !== session.sessionId || (monitor.session.priming_digest ?? null) !== session.primingDigest) {
+      monitor.session = { ...monitor.session, session_id: session.sessionId, priming_digest: session.primingDigest };
+    }
+    const status = await this.gateway.getSessionStatus(session.sessionId, dispatchedReceipt);
+    const pending = await this.combinedPending(session.sessionId);
+    if (!pending || pending.permissions + pending.questions > 0) {
+      const reason = !pending ? "pending-coverage-unavailable" : "pending-input";
+      await this.release(id, now, null, (record) => {
+        monitorDecision(
+          record,
+          "receipt-watch",
+          { reason, receipt: dispatchedReceipt },
+          `receipt-watch:${dispatchedReceipt}:${reason}`,
+          now,
+        );
+      });
+      return "busy-held";
+    }
+    const evidenced = classifyEvidence(status);
+    if (evidenced.kind === "blocked") {
+      if (evidenced.category === "context_input_length") {
+        // A still-active continuation turn must not settle the watch; retries
+        // stay bounded by the same convergence as the changed-board flow.
+        return await this.compactionContinue(id, now, monitor, session.sessionId, summary);
+      }
+      const outcome = await this.recover(id, now, monitor, session.sessionId, evidenced, summary, session.primingDigest);
+      if (outcome === "recovery-parked") {
+        // A real park is terminal and transparently visible; a hold (no
+        // provider admission, held abort) settles without a park. Either way
+        // the quiet board must not retry side-effectful recovery each tick —
+        // the operator trigger stays the sanctioned restart.
+        await this.settleReceiptWatch(id, dispatchedReceipt, now);
+      }
+      return outcome;
+    }
+    if (status.backend_activity !== "idle" || status.state === "running") {
+      await this.release(id, now, null, (record) => {
+        monitorDecision(
+          record,
+          "receipt-watch",
+          { reason: "turn-active", receipt: dispatchedReceipt },
+          `receipt-watch:${dispatchedReceipt}:turn-active`,
+          now,
+        );
+      });
+      return "busy-held";
+    }
+    const healthy = status.state === "completed";
+    await this.release(id, now, null, (record) => {
+      record.state.receipt_observation = { receipt: dispatchedReceipt, outcome: healthy ? "healthy" : "held", at: iso(now) };
+      if (healthy && record.recovery_episode) {
+        record.recovery_episode = null;
+        monitorHistory(record, "recovery-episode-closed", { reason: "receipt-observed-healthy" }, now);
+      }
+      monitorDecision(
+        record,
+        "noop-unchanged",
+        { reason: healthy ? "receipt-observed-healthy" : "receipt-observed-held" },
+        `noop-unchanged:receipt-observed-${healthy ? "healthy" : "held"}`,
+        now,
+      );
+    });
+    return "noop-unchanged";
+  }
+
+  /** Settles the unchanged-board receipt watch for one distinct receipt. */
+  private async settleReceiptWatch(id: string, receipt: string, now: number): Promise<void> {
+    await withRegistry(
+      this.project,
+      (registry) => {
+        const record = registry.monitors.find((entry) => entry.id === id);
+        if (!record) return registry;
+        record.state.receipt_observation = { receipt, outcome: "held", at: iso(now) };
+        monitorDecision(
+          record,
+          "receipt-watch",
+          { reason: "settled-held", receipt },
+          `receipt-watch:${receipt}:settled-held`,
+          now,
+        );
+        return registry;
+      },
+      { now },
+    );
   }
 
   private appendDecisionSummary(

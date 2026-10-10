@@ -199,6 +199,22 @@ export type MonitorWorkerErrorMarker = {
   receipt: string | null;
 };
 
+/**
+ * be951293 gate fix (2026-10-10): settled terminal observation of the CURRENT
+ * admitted dispatch receipt on an unchanged board. The unchanged/no-op
+ * shortcut never re-read the manager session, so a dispatch that was admitted
+ * and THEN ended terminally failed stayed invisible (live: silent
+ * noop-unchanged loop, no recovery, no park). The engine watches each
+ * distinct receipt exactly once, records the settled outcome here and then
+ * goes quiet again. Purely additive: absent on legacy records, validated
+ * fail-closed when present, bounded to one entry.
+ */
+export type MonitorReceiptObservation = {
+  receipt: string;
+  outcome: "healthy" | "held";
+  at: string;
+};
+
 export type MonitorRecord = {
   id: string;
   title: string;
@@ -219,6 +235,8 @@ export type MonitorRecord = {
     watermark: string | null;
     /** Bounded digest of the worker index observed at the last admitted wake. */
     worker_digest?: string | null;
+    /** be951293 gate fix: settled terminal observation of the current dispatch receipt. */
+    receipt_observation?: MonitorReceiptObservation | null;
   };
   cursors: Record<string, string>;
   budget: Record<string, { no_progress: number; entries: MonitorRepairEntry[] }>;
@@ -344,6 +362,15 @@ function shapeOk(registry: unknown): registry is MonitorRegistry {
     if (!(["deep", "standard", "execution", "design", "review"] as const).includes(monitor.runtime_profile as never)) return false;
     if (!isRecord(monitor.state) ||
       !(["active", "parked_input_required", "complete_pass", "stopped"] as const).includes(monitor.state.work as never)) return false;
+    // be951293 gate fix: additive receipt observation fails closed like every
+    // other optional field (QC F-B2 pattern).
+    const observation = monitor.state.receipt_observation;
+    if (observation !== undefined && observation !== null) {
+      if (!isRecord(observation) ||
+        typeof observation.receipt !== "string" || (observation.receipt as string).length < 1 || (observation.receipt as string).length > 256 ||
+        !(["healthy", "held"] as const).includes(observation.outcome as never) ||
+        !validIso(observation.at)) return false;
+    }
     if (!Array.isArray(monitor.history) || !Array.isArray(monitor.logs)) return false;
     if (!validIso(monitor.created_at) || !validIso(monitor.updated_at)) return false;
     if (monitor.alias !== undefined &&

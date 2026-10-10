@@ -7,6 +7,7 @@ import {
   assignMonitorAlias,
   confirmWorkerCreation,
   defaultMonitorRecord,
+  digest,
   getWorker,
   listWorkers,
   managerAliasFor,
@@ -1298,9 +1299,13 @@ test("Welle A: a correlated terminal failure marks idle+last_error, moves the di
     const again = (await readRegistrySnapshot(project)).registry.monitors[0]!;
     const sameWorker = again.workers!.find((entry) => entry.worker_key === seed.workerKey)!;
     assert.equal(sameWorker.updated_at, worker.updated_at, "repeated observation does not rewrite the marker");
-    const noopEntries = again.history.filter((entry) => entry.type === "noop-unchanged");
-    assert.equal(noopEntries.length, 1, "the formerly silent no-op is now explainable");
-    assert.equal((noopEntries[0]!.detail as { reason?: string }).reason, "canonical-and-worker-index-unchanged");
+    // be951293 gate fix: the first unchanged tick after the wake settles the
+    // wake's own dispatch receipt (one healthy receipt observation) before the
+    // canonical no-op merge takes over on the following tick.
+    const settleEntries = again.history.filter((entry) => entry.type === "noop-unchanged"
+      && (entry.detail as { reason?: string }).reason === "receipt-observed-healthy");
+    assert.equal(settleEntries.length, 1, "the settled receipt names its own cause");
+    assert.equal(again.state.receipt_observation?.receipt, "msg_" + "a".repeat(32));
   } finally {
     await cleanup();
   }
@@ -1612,18 +1617,24 @@ test("Welle A QC-F2: noop merge keys are cause-specific — different causes kee
       registry.monitors.push(monitor);
       return registry;
     });
-    // Prime once (real digest stored), then two consecutive digest-gate no-ops
-    // merge into ONE cause-specific entry.
+    // Prime once (real digest stored), then the receipt settles on the first
+    // unchanged tick (be951293 gate fix, own cause-specific entry) and the two
+    // following digest-gate no-ops merge into ONE canonical cause entry.
     assert.equal(await engineFactory(100_000).tick(), "dispatched");
     await withRegistry(project, (registry) => { registry.monitors[0]!.scheduler.next_run_at = 0; return registry; });
     assert.equal(await engineFactory(200_000).tick(), "noop-unchanged");
     await withRegistry(project, (registry) => { registry.monitors[0]!.scheduler.next_run_at = 0; return registry; });
     assert.equal(await engineFactory(300_000).tick(), "noop-unchanged");
+    await withRegistry(project, (registry) => { registry.monitors[0]!.scheduler.next_run_at = 0; return registry; });
+    assert.equal(await engineFactory(400_000).tick(), "noop-unchanged");
     const merged = await readRegistrySnapshot(project);
     const noopEntries = merged.registry.monitors[0]!.history.filter((entry) => entry.type === "noop-unchanged");
-    assert.equal(noopEntries.length, 1);
-    assert.equal((noopEntries[0]!.detail as { count?: number }).count, 2);
-    assert.equal((noopEntries[0]!.detail as { merge?: string }).merge, "noop-unchanged:canonical-and-worker-index-unchanged",
+    assert.equal(noopEntries.length, 2, "the receipt settlement and the canonical cause stay separate entries");
+    const settleEntry = noopEntries.find((entry) => (entry.detail as { reason?: string }).reason === "receipt-observed-healthy")!;
+    assert.ok(settleEntry, "the settlement names its receipt cause");
+    const canonicalEntry0 = noopEntries.find((entry) => (entry.detail as { reason?: string }).reason === "canonical-and-worker-index-unchanged")!;
+    assert.equal((canonicalEntry0.detail as { count?: number }).count, 2);
+    assert.equal((canonicalEntry0.detail as { merge?: string }).merge, "noop-unchanged:canonical-and-worker-index-unchanged",
       "the recorded merge key names its cause");
 
     // A different cause must land in a SEPARATE entry and must not inflate or
@@ -1632,12 +1643,12 @@ test("Welle A QC-F2: noop merge keys are cause-specific — different causes kee
     monitorDecision(record, "noop-unchanged", { reason: "runtime-resolved-without-dispatch" }, "noop-unchanged:runtime-resolved-without-dispatch", 400_000);
     monitorDecision(record, "noop-unchanged", { reason: "canonical-and-worker-index-unchanged" }, "noop-unchanged:canonical-and-worker-index-unchanged", 500_000);
     const byCause = record.history.filter((entry) => entry.type === "noop-unchanged");
-    assert.equal(byCause.length, 2, "causes never conflate into one mixed entry");
+    assert.equal(byCause.length, 3, "causes never conflate into one mixed entry (settlement, canonical, runtime)");
     const canonicalEntry = byCause.find((entry) => (entry.detail as { reason?: string }).reason === "canonical-and-worker-index-unchanged")!;
     const runtimeEntry = byCause.find((entry) => (entry.detail as { reason?: string }).reason === "runtime-resolved-without-dispatch")!;
     assert.equal((canonicalEntry.detail as { count?: number }).count, 3, "only same-cause repeats increment");
     assert.equal((runtimeEntry.detail as { count?: number }).count, 1, "the other cause keeps its own count and reason");
-    assert.equal((canonicalEntry.detail as { first_at?: string }).first_at, new Date(200_000).toISOString(), "first_at stays per cause");
+    assert.equal((canonicalEntry.detail as { first_at?: string }).first_at, new Date(300_000).toISOString(), "first_at stays per cause");
   } finally {
     await cleanup();
   }
@@ -2158,6 +2169,248 @@ test("Welle D AITL-Fixture (isoliert, §7): worker terminal failure -> ONE corre
     }
     assert.ok(seed.logs.some((line) => line.includes("recovery park resumed")));
     assert.ok(seed.logs.some((line) => line.includes("recovery parked with visible reason=recovery-chain-exhausted")));
+  } finally {
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// be951293 gate fix (2026-10-10): unchanged-board dispatch-receipt watch.
+// The unchanged/no-op shortcut never re-read the manager session, so an
+// admitted dispatch whose turn failed AFTER admission stayed invisible in a
+// silent noop-unchanged loop (live AITL case). The watch observes each
+// distinct receipt exactly once and reuses the existing evidence/recovery
+// machinery; the tests below pin the fixed behavior and its convergence.
+
+type GateSeed = {
+  logs: string[];
+  engineFactory: (now: number) => MonitorEngine;
+  receipt: string;
+};
+
+/** Seeds a monitor whose board digest/worker digest are current (an admitted
+ * wake dispatched `receipt` and nothing else happened since). */
+async function seedMonitorWithAdmittedDispatch(
+  project: string,
+  gateway: MonitorGatewayLike,
+  board: MonitorBoardLike,
+  state: { taskStatus: string; taskUpdated: string },
+  at: number,
+): Promise<GateSeed> {
+  const logs: string[] = [];
+  const engineFactory = (now: number) =>
+    new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => now, log: (_level, message) => logs.push(message) });
+  const digestNow = digest({
+    task: { id: TASK, status: state.taskStatus, updated: state.taskUpdated },
+    checkpoint: "e1",
+    newest: "e1",
+    documents: [],
+  });
+  const receipt = "msg_" + "e".repeat(32);
+  await withRegistry(project, (registry) => {
+    const monitor = defaultMonitorRecord("M", TASK, { interval_seconds: 60 }, at);
+    monitor.scheduler.next_run_at = 0;
+    monitor.state.worker_digest = workerIndexDigest(monitor);
+    monitor.state.last_seen_digest = digestNow;
+    monitor.session = { session_id: "ses_monitor", title: "Monitor M", primed_at: new Date(at).toISOString(), priming_digest: "d".repeat(64) };
+    monitor.dispatch_wal = { action_id: "wake_seed", at: new Date(at).toISOString(), prompt_digest: "p".repeat(64), message_id: receipt };
+    registry.monitors.push(monitor);
+    return registry;
+  });
+  return { logs, engineFactory, receipt };
+}
+
+test("gate fix: unchanged board plus correlated terminal manager provider failure recovers, follows the recovery receipt and settles healthy without a duplicate", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    const { gateway, board } = fakes(state);
+    state.abortState = "no_active_turn";
+    const seed = await seedMonitorWithAdmittedDispatch(project, gateway, board, state, 100_000);
+    state.status = okStatus({
+      state: "failed",
+      assistant_message_ids: ["msg_fail"],
+      error_details: [failedDetail("provider_header_timeout", "msg_fail")],
+    });
+
+    // (1) the swallowed case now recovers through the existing chain machinery
+    await advanceDue(project, 200_000);
+    assert.equal(await seed.engineFactory(200_000).tick(), "recovery-continued");
+    let record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(state.sends.length, 1, "exactly one recovery continuation");
+    assert.deepEqual(state.statusCalls.map((call) => call.message_id), [seed.receipt], "the watch correlates the failed dispatch receipt");
+    assert.equal(state.runtime.provider_id, "fallback-provider", "chain switched to the configured fallback");
+    assert.deepEqual(
+      record.recovery_episode?.attempts.map((entry) => entry.identity),
+      ["deep-provider/deep-model", "fallback-provider/fallback-model"],
+    );
+    assert.equal(record.state.receipt_observation, undefined, "an open recovery keeps the watch on the new receipt");
+    assert.equal(record.dispatch_wal?.message_id, "msg_" + "a".repeat(32));
+
+    // (2) recovery turn still running: bounded merged decision, no new dispatch
+    state.status = okStatus({ backend_activity: "busy", state: "running" });
+    await advanceDue(project, 300_000);
+    assert.equal(await seed.engineFactory(300_000).tick(), "busy-held");
+    assert.equal(state.sends.length, 1, "a running recovery is never re-sent");
+    record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    const watch = record.history.filter((entry) => entry.type === "receipt-watch");
+    assert.equal(watch.length, 1, "turn-active watch stays one merged decision entry");
+    assert.equal((watch[0]!.detail as { count?: number }).count, 1);
+
+    // (3) recovery receipt completed healthy: watch settles, episode closes
+    state.status = okStatus();
+    await advanceDue(project, 400_000);
+    assert.equal(await seed.engineFactory(400_000).tick(), "noop-unchanged");
+    record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.deepEqual(record.state.receipt_observation, {
+      receipt: "msg_" + "a".repeat(32),
+      outcome: "healthy",
+      at: new Date(400_000).toISOString(),
+    });
+    assert.equal(record.recovery_episode, null, "a healthy receipt closes the episode like a healthy wake");
+    assert.ok(record.history.some((entry) => entry.type === "recovery-episode-closed"
+      && (entry.detail as { reason?: string }).reason === "receipt-observed-healthy"));
+    assert.equal(state.sends.length, 1);
+    const statusCallsAfterSettle = state.statusCalls.length;
+
+    // (4) settled watch: the board digest never changed, so later ticks stay
+    //     quiet no-ops with no further status reads and no second recovery
+    state.status = okStatus({
+      state: "failed",
+      assistant_message_ids: ["msg_late"],
+      error_details: [failedDetail("provider_header_timeout", "msg_late")],
+    });
+    await advanceDue(project, 500_000);
+    assert.equal(await seed.engineFactory(500_000).tick(), "noop-unchanged");
+    await advanceDue(project, 600_000);
+    assert.equal(await seed.engineFactory(600_000).tick(), "noop-unchanged");
+    assert.equal(state.sends.length, 1, "the settled watch never re-dispatches");
+    assert.equal(state.statusCalls.length, statusCallsAfterSettle, "a settled watch performs no further status reads");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("gate fix: healthy terminal receipt on an unchanged board settles once and stays a cheap no-op", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    const { gateway, board } = fakes(state);
+    const seed = await seedMonitorWithAdmittedDispatch(project, gateway, board, state, 100_000);
+    state.status = okStatus();
+
+    await advanceDue(project, 200_000);
+    assert.equal(await seed.engineFactory(200_000).tick(), "noop-unchanged");
+    let record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(state.sends.length, 0, "healthy unchanged board stays dispatch-free");
+    assert.equal(record.state.receipt_observation?.outcome, "healthy");
+    assert.equal(record.state.receipt_observation?.receipt, seed.receipt);
+    const decision = record.history.find((entry) => entry.type === "noop-unchanged"
+      && (entry.detail as { reason?: string }).reason === "receipt-observed-healthy");
+    assert.ok(decision, "the settlement names its own cause-specific merge key");
+
+    const statusCallsAfterSettle = state.statusCalls.length;
+    await advanceDue(project, 300_000);
+    assert.equal(await seed.engineFactory(300_000).tick(), "noop-unchanged");
+    assert.equal(state.statusCalls.length, statusCallsAfterSettle, "no repeated receipt reads after settlement");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("gate fix: chain exhaustion on an unchanged board parks transparently once and later ticks stay quiet without repeated aborts", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    const { gateway, board } = fakes(state);
+    state.abortState = "no_active_turn";
+    const seed = await seedMonitorWithAdmittedDispatch(project, gateway, board, state, 100_000);
+    state.status = okStatus({
+      state: "failed",
+      assistant_message_ids: ["msg_fail"],
+      error_details: [failedDetail("provider_header_timeout", "msg_fail")],
+    });
+    const unconfigured = new MonitorEngine({
+      project, gateway, board,
+      readPolicy: async () => policyUnconfigured,
+      now: () => 200_000,
+    });
+    await advanceDue(project, 200_000);
+    assert.equal(await unconfigured.tick(), "recovery-parked");
+    let record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(record.state.work, "parked_input_required");
+    assert.equal(record.state.parked_reason, "final-fallback-unconfigured");
+    assert.equal(record.state.receipt_observation?.outcome, "held", "a park settles the watch");
+    assert.equal(state.sends.length, 0);
+    assert.equal(state.abortResults.length, 1);
+
+    const statusCallsAfterPark = state.statusCalls.length;
+    await advanceDue(project, 300_000);
+    assert.equal(await seed.engineFactory(300_000).tick(), "noop-unchanged");
+    record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(record.state.work, "parked_input_required", "the park stays");
+    assert.equal(state.sends.length, 0, "no repeated recovery attempts after the park");
+    assert.equal(state.abortResults.length, 1, "no repeated aborts on a quiet board");
+    assert.equal(state.statusCalls.length, statusCallsAfterPark);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("gate fix: pending input during the watch stays a bounded merged busy hold without dispatches or history growth", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    const { gateway, board } = fakes(state);
+    const seed = await seedMonitorWithAdmittedDispatch(project, gateway, board, state, 100_000);
+    state.status = okStatus({
+      state: "failed",
+      assistant_message_ids: ["msg_fail"],
+      error_details: [failedDetail("provider_header_timeout", "msg_fail")],
+    });
+    state.combinedPending = { permissions: 1, questions: 0 };
+
+    await advanceDue(project, 200_000);
+    assert.equal(await seed.engineFactory(200_000).tick(), "busy-held");
+    await advanceDue(project, 300_000);
+    assert.equal(await seed.engineFactory(300_000).tick(), "busy-held");
+    assert.equal(state.sends.length, 0, "pending input never dispatches");
+    const record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    const watch = record.history.filter((entry) => entry.type === "receipt-watch"
+      && (entry.detail as { reason?: string }).reason === "pending-input");
+    assert.equal(watch.length, 1, "repeated holds merge into one decision entry");
+    assert.equal((watch[0]!.detail as { count?: number }).count, 2);
+    assert.equal(record.state.receipt_observation, undefined, "an unresolved hold keeps the watch open");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("gate fix: receipt_observation is additive, validates fail-closed and round-trips", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    await withRegistry(project, (registry) => {
+      const monitor = defaultMonitorRecord("M", TASK, {}, 1000);
+      monitor.state.receipt_observation = { receipt: "msg_" + "a".repeat(32), outcome: "healthy", at: new Date(1000).toISOString() };
+      registry.monitors.push(monitor);
+      return registry;
+    });
+    const ok = await readRegistrySnapshot(project);
+    assert.equal(ok.registry.monitors[0]!.state.receipt_observation?.outcome, "healthy");
+    const validMonitor = JSON.parse(JSON.stringify(ok.registry.monitors[0]));
+
+    for (const corrupt of [
+      { receipt: "msg_x", outcome: "magic", at: new Date(1000).toISOString() },
+      { receipt: "", outcome: "healthy", at: new Date(1000).toISOString() },
+      { receipt: "msg_x", outcome: "held", at: "yesterday" },
+    ]) {
+      await writeFile(monitorRegistryPath(project), JSON.stringify({
+        schema: 1,
+        generation: 1,
+        monitors: [{ ...validMonitor, state: { ...validMonitor.state, receipt_observation: corrupt } }],
+      }));
+      await assert.rejects(readRegistrySnapshot(project), /invalid monitor registry/);
+    }
   } finally {
     await cleanup();
   }
