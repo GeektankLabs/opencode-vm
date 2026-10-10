@@ -253,10 +253,18 @@ def read_server_log_tail(share_root: Path) -> dict[str, Any]:
         first_newline = text.find("\n")
         text = text[first_newline + 1:] if first_newline >= 0 else ""
     lines = [line for line in text.splitlines() if line.strip()]
+    if not lines:
+        # QC F-C3 (waveC-qc SHA6040ddf0): a non-empty file whose byte window
+        # contained no COMPLETE line (one oversized line > bound, with or
+        # without trailing newline) must never be reported as "empty" — the
+        # content exists beyond the readable window: honest truncated_only.
+        result["state"] = "truncated_only" if result["truncated_bytes"] else "empty"
+        return result
     if len(lines) > SERVER_LOG_MAX_LINES:
         result["truncated_lines"] = True
         lines = lines[-SERVER_LOG_MAX_LINES:]
     result["lines"] = lines
+    result["state"] = "ok"
     return result
 
 

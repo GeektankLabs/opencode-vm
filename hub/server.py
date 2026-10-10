@@ -166,6 +166,22 @@ def redact(text: str) -> str:
     return text[:1000]
 
 
+def redact_structure(value: Any) -> Any:
+    """QC F-C1 (waveC-qc SHA6040ddf0): every string key/leaf of a structured
+    response copy passes the same server-side allowlist redaction as the text
+    view before any byte leaves the Hub. Legitimate engine tokens (labels,
+    provider/model[/variant] identities, 64-hex fingerprints, enums, ISO times)
+    match no secret pattern and therefore pass through unchanged — the Hub
+    still performs NO resolution, recomputation or filtering of its own."""
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, dict):
+        return {(redact(key) if isinstance(key, str) else key): redact_structure(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [redact_structure(item) for item in value]
+    return value
+
+
 def event(severity: str, source: str, message: str, timestamp: str | None = None) -> dict[str, str]:
     return {"severity": severity, "source": source, "message": redact(message), "timestamp": timestamp or now()}
 
@@ -754,7 +770,7 @@ class Handler(BaseHTTPRequestHandler):
              "from": None, "to": None},
         ]
         error_states = {"unsafe", "corrupt", "unavailable"}
-        partial_states = {"not_configured", "absent", "mismatch"}
+        partial_states = {"not_configured", "absent", "mismatch", "truncated_only"}
         completeness = ("unavailable" if any(source["state"] in error_states for source in sources)
                         else "partial" if any(source["state"] in partial_states for source in sources)
                         else "complete")
@@ -837,7 +853,15 @@ class Handler(BaseHTTPRequestHandler):
             if tail.get("truncated_bytes") or tail.get("truncated_lines"):
                 emit("[GEKÜRZT: Byte-/Zeilengrenze erreicht — ältere Inhalte nur am Log selbst]")
         elif tail_state == "empty":
-            emit("Datei vorhanden, aber leer.")
+            emit("Datei vorhanden, ohne nicht-leere Inhaltzeile im lesbaren Fenster.")
+        elif tail_state == "truncated_only":
+            # QC F-C3: the file has content, but the bound byte window held no
+            # complete line (single oversized line, with or without trailing
+            # newline). Honest truncation state — never "empty", never fresh.
+            emit("[TRUNKIERT: Die Datei enthält Inhalt, aber das begrenzte Bytefenster ("
+                 f"{monitor_store.SERVER_LOG_MAX_BYTES // 1024} KiB) traf keine vollständige Zeile "
+                 "(Einzelzeile über der Tail-Grenze) — kein leerer Log, kein frischer Vollstand; "
+                 "Inhalt nur am Log selbst]")
         elif tail_state == "not_configured":
             emit("Kein Service-Log in diesem Session-Share (Monitor-Unit schrieb nichts oder ist nicht gestartet).")
         else:
@@ -860,12 +884,13 @@ class Handler(BaseHTTPRequestHandler):
                        "response_max_bytes": max_total},
             "source_context": {"share_root": str(SESSION_ROOT), "generation": RUNTIME["generation"],
                                "project_hash": project_hash()},
-            "sources": sources,
+            "sources": redact_structure(sources),
             "completeness": completeness,
             "truncated": truncated_text,
             "redacted_lines": redacted_lines,
-            "recovery_projection": {"episode": monitor.get("recovery_episode"),
-                                    "resolutions": monitor.get("recovery_resolution") or []},
+            "recovery_projection": redact_structure(
+                {"episode": monitor.get("recovery_episode"),
+                 "resolutions": monitor.get("recovery_resolution") or []}),
             "text": text,
         })
 

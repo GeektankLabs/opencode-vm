@@ -723,5 +723,96 @@ class HubMonitorLogTest(HubMonitorTest):
             http.shutdown(); thread.join(timeout=5)
 
 
+    def test_log_api_structured_response_contains_no_secrets_but_keeps_benign_projection(self):
+        # QC F-C1: redaction must cover the STRUCTURED copy of the safe answer,
+        # not only the text view; legitimate engine data stays byte-identical.
+        http, thread, base = self.start()
+        import hub.monitor as store
+        try:
+            monitor_id = self.seed_monitor(base)
+            self.write_server_log(["[monitor] ready"])
+            leak_label = "deep.ghp_QCLEAKGGHU1234567890abcdefghijk"
+            leak_identity = "prov/sk-proj-QCLEAK1234567890abcdefghij"
+            benign = {"policy_revision": 8, "regime": "per_profile", "entry_profile": "deep",
+                      "selected_identity": None, "reason": "chain_exhausted",
+                      "candidates": [{"label": "deep.main", "identity": "prov/skipped_model", "status": "skipped_current_failure"}]}
+            def build(registry):
+                registry["monitors"][0]["recovery_resolution"] = [{
+                    "at": "2026-10-10T00:00:00.000Z", "policy_revision": 8, "regime": "per_profile",
+                    "entry_profile": "deep", "selected_identity": leak_identity, "reason": "selected",
+                    "candidates": [{"label": leak_label, "identity": leak_identity, "status": "selected"}],
+                }]
+                registry["monitors"][0]["recovery_episode"] = {
+                    "started_at": "2026-10-10T00:00:00.000Z", "policy_revision": 8,
+                    "attempts": [{"at": "2026-10-10T00:00:00.000Z", "identity": leak_identity,
+                                  "category": "provider_quota", "fingerprint": "f" * 64, "outcome": "dispatched"}],
+                }
+                registry["monitors"][0]["history"] = [
+                    {"at": "2026-10-10T00:00:00.000Z", "type": "recovery-resolved",
+                     "detail": {"selected": leak_identity, "note": "ghp_QCLEAKSECONDARY0123456789abcdefgh"}},
+                ]
+            store.mutate(self.project, build)
+            status, body = self.request(base, f"/api/monitor/{monitor_id[8:]}/log")
+            self.assertEqual(status, 200)
+            serialised = json.dumps(body)
+            self.assertNotIn("QCLEAK", serialised, "full JSON response must not carry synthetic secrets")
+            self.assertNotIn("ghp_", serialised)
+            self.assertNotIn("sk-proj-", serialised)
+            self.assertIn("[REDACTED]", body["text"])
+            structured = json.dumps(body["recovery_projection"])
+            self.assertIn("[REDACTED]", structured)
+            # Benign engine projection passes through byte-identical (no recomputation).
+            def benign_build(registry):
+                registry["monitors"][0]["recovery_resolution"] = [benign]
+                registry["monitors"][0]["recovery_episode"] = None
+                registry["monitors"][0]["history"] = []
+            store.mutate(self.project, benign_build)
+            status, clean = self.request(base, f"/api/monitor/{monitor_id[8:]}/log")
+            self.assertEqual(clean["recovery_projection"]["resolutions"], [benign])
+            self.assertIn("prov/skipped_model=skipped_current_failure", clean["text"])
+            self.assertIn("prov/skipped_model", json.dumps(clean["recovery_projection"]))
+        finally:
+            http.shutdown(); thread.join(timeout=5)
+
+    def test_log_api_oversized_single_line_is_truncated_never_empty(self):
+        # QC F-C3: >bound single line (with and without trailing newline) must be
+        # an honest truncated_only/partial state; an empty file stays "empty".
+        http, thread, base = self.start()
+        try:
+            monitor_id = self.seed_monitor(base)
+            directory = self.share / "monitor"
+            directory.mkdir(parents=True, exist_ok=True)
+            directory.chmod(0o700)
+            path = directory / "server.log"
+            huge = "x" * (400 * 1024)
+            for case, content in (("no-newline", huge), ("with-newline", huge + "\n")):
+                path.write_text(content, encoding="utf-8")
+                path.chmod(0o600)
+                status, body = self.request(base, f"/api/monitor/{monitor_id[8:]}/log")
+                self.assertEqual(status, 200, case)
+                tail = next(source for source in body["sources"] if source["kind"] == "server_log_tail")
+                self.assertEqual(tail["state"], "truncated_only", case)
+                self.assertTrue(tail["truncated"], case)
+                self.assertNotEqual(body["completeness"], "complete", case)
+                self.assertIn("TRUNKIERT", body["text"], case)
+                self.assertNotIn("Datei vorhanden, ohne nicht-leere Inhaltzeile", body["text"], case)
+                self.assertNotIn(huge[:100], body["text"], case)
+            # Control: a big but in-bounds single line (100 KiB) stays readable.
+            path.write_text("y" * (100 * 1024) + "\n", encoding="utf-8")
+            path.chmod(0o600)
+            status, body = self.request(base, f"/api/monitor/{monitor_id[8:]}/log")
+            tail = next(source for source in body["sources"] if source["kind"] == "server_log_tail")
+            self.assertEqual(tail["state"], "ok")
+            self.assertFalse(tail["truncated"], "in-bounds byte window is not truncated")
+            marker_line = next(line for line in body["text"].splitlines() if line.startswith("yyy"))
+            self.assertLess(len(marker_line), 1500, "single oversized line stays display-bounded")
+            # Control: genuinely empty file remains honest "empty" (complete-neutral).
+            path.write_text("", encoding="utf-8")
+            status, body = self.request(base, f"/api/monitor/{monitor_id[8:]}/log")
+            tail = next(source for source in body["sources"] if source["kind"] == "server_log_tail")
+            self.assertEqual(tail["state"], "empty")
+            self.assertIn("ohne nicht-leere Inhaltzeile", body["text"])
+        finally:
+            http.shutdown(); thread.join(timeout=5)
 if __name__ == "__main__":
     unittest.main()
