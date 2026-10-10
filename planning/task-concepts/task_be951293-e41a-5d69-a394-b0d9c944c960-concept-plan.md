@@ -1,7 +1,7 @@
 Task-ID: task_be951293-e41a-5d69-a394-b0d9c944c960
 Title: Work Package: Monitor-Zuverlässigkeit und Diagnose vorbereiten (Konzept, reviewbar)
-Stand: 2026-10-10 · Status: Welle A/B QC_PASS; Welle C von unabhängiger QC mit F-C1/F-C3 zurückgemeldet (bf1939b), Delta-Fix lokal committet (5bf4408), Delta-QC ausstehend · Implementierungs-Go erteilt · Historie: CONCEPT_PASS (Rev. 3, unabhängig geprüft), Entscheidungsvorbereitung abgeschlossen 2026-10-09
-Last-concept-update: 2026-10-09T20:53 UTC (historisch: Abschlussmetadaten Rev3-CONCEPT_PASS; Inhaltsrevision unverändert SHA1386d074…; die damit offene Produktentscheidung 4.6/§8a ist mit dem Go vom 2026-10-10 entschieden, siehe §11) · Last-implementation-update: 2026-10-10 (Kette auf Branch task/be951293-wave-a: Welle A e0c5ce3→738efe1→c6bd261 QC_PASS; Welle B 38eeb80→c2b2808→28ff295 QC_PASS; Welle C 8e9650b→bf1939b, QC-F-C1/F-C3-Delta-Fix 5bf4408; §11 aktueller Stand)
+Stand: 2026-10-10 · Status: Welle A/B/C QC_PASS (C auf 00523c2, Bericht SHA b2f4dec4…); Welle-D-Gesamtabnahme mit Zusatztests/Doku lokal committet (Head des Branches task/be951293-wave-a, siehe git log) — unabhängige Gesamt-QC ausstehend · Implementierungs-Go erteilt · Historie: CONCEPT_PASS (Rev. 3, unabhängig geprüft), Entscheidungsvorbereitung abgeschlossen 2026-10-09
+Last-concept-update: 2026-10-09T20:53 UTC (historisch: Abschlussmetadaten Rev3-CONCEPT_PASS; Inhaltsrevision unverändert SHA1386d074…; die damit offene Produktentscheidung 4.6/§8a ist mit dem Go vom 2026-10-10 entschieden, siehe §11) · Last-implementation-update: 2026-10-10 (Kette auf Branch task/be951293-wave-a: Welle A e0c5ce3→738efe1→c6bd261 QC_PASS; Welle B 38eeb80→c2b2808→28ff295 QC_PASS; Welle C 8e9650b→bf1939b, Delta-Fix 5bf4408, Doku 00523c2 QC_PASS; Welle D: Abnahmezusatz (AITL-Ketten-Fixture, Matrix-A-Identität, Dupletten-/Cross-Writer-Tests, README-Bedienhinweise) als Folcommit(s); §11 aktueller Stand)
 
 ## 1 Ziel / Nichtziele
 
@@ -639,6 +639,59 @@ Der Reviewbericht selbst wurde nicht verändert.
   Browser-Fixture 19/19, Adapter tsc clean, monitor 45/45, Suite 246/0/2
   (env-gated). Die unabhängige Delta-QC zu `5bf4408` steht aus — keine
   Selbstabnahme; Welle D wird nicht vor der Delta-QC gestartet.
-- **Offen:** Delta-QC zu Welle C (`5bf4408`); danach Welle D
-  (Abnahme inkl. AITL-Fixture, Hub-Konsistenztests gegen persistierte
-  Projektion, Version-Bump bei Mainintegration).
+- **Welle C: Delta-QC QC_PASS** auf `00523c2` (Original `msg_123ce6010001WYsCyj4P2SHv25`
+  zur Kenntnis genommen; Bericht final SHA256
+  `b2f4dec47bee98bfaa524a2750c8db95b4b0b87290bb94332fc3399853683841`):
+  F-C1/F-C3 Repro-kehrend bestätigt, legitime Projektion byte-identisch,
+  Runzahlen hub 44 OK / Browser 19/19 / Adapter 246/0/2 / monitor 45/45.
+- **Welle D — Gesamtabnahme (isoliert, ohne Mainintegration):** Kumulativer
+  Diff `8936f621..HEAD` ausschließlich autorisierte Flächen (A/B/C + Tests/Doku).
+  Abnahmematrix §6 mit Belegen (Testnamen; alle Läufe THIS Durchgang, exakte
+  Zahlen unten):
+  task_ad26435f A–J: (A) Resolver≡Monitor-Identität — „Welle D AITL-Fixture“
+  assertiert persistierte `recovery_resolution` == `resolveRecoveryChain`
+  gleicher Revision/Evidenz Eintrag-für-Eintrag; (B) alle
+  degrading×providerSkip-Kombinationen inkl. null/unset — resolver-Matrix-Units
+  260–315 + Engine-Tests 1691/1914; (C) beide aus → nur eigener Fallback —
+  noDegrade-Fall; (D) Quota-Skip gezielt, Fremdprovider bleibt — Resolver-Test
+  307 + Engine 1914 + Kette (4); (E) Primary↔Fallback ohne Cooldown —
+  1778 + Kette (6); (F) kein Doppelversuch über Restart/doppelte Runtimes —
+  1751 (Restart) + Dedupletten-Unit „matrix F doppelte Runtimes“;
+  (G) Erschöpfung transparent + Park-Anhebung — 1691/1949 + Kette (5);
+  (H) busy/unknown/aborted/pending/fachlich ohne Provider-Routing —
+  Admission-Unit + 1817 + Kette (1) updates=0 bei Workerfehler;
+  (I) Policywechsel + WAL + Variant-Readback inkl. Mismatch — 1751/1853/1879;
+  (J) Compaction-/Budgetgrenzen unverändert — bestehende Compaction-Tests +
+  1817-Budgetpfad. task_6679fb88 A–E: (A) Fixture-Workerdispatch →
+  terminaler Fehler → Wake zeigt Zustand/Receipt/Digest/Grund — Welle-A-Tests
+  + AITL-Kette (exakter Receipt `msg_2990…`, Marker, ein Wake); (B) stille
+  Pfade einzeln erklärbar ohne Extradispatch — Streak-/noop-/error-Tests
+  1413/1509 + Kette-Historie; (C) Refresh zeigt tatsächlich neue Zeilen,
+  Fehler/stale/teilweise trennbar — Hub-Log-Tests + Browser 19 (beide
+  Refresh-Pfade, 503-Fall); (D) Bounds/Truncierung sichtbar scroll-/
+  kopierbar — Bounds-/Truncation-/Riesenzeilen-Tests + Browser
+  overflow-Assertion; (E) Secret-/Prompt-Redaktion, Projektgrenze,
+  History/Logs/Heartbeat getrennt — Voll-JSON-Secret-Scan, Symlink/
+  Share-Wechsel-Tests, Kettentrennung im Text. Anker-spezifisch: der
+  AITL-Fall §7 ist als isolierte Fixture-Kette reproduziert und erklärt —
+  beobachtete Zustände, korrelierte Receipts, exakte Entscheidung,
+  zulässige Fortsetzung/Hold; der Livebeweis an der alten Instanz bleibt
+  bewusst ausstehend (kein Liveeingriff, §4.7). Cross-Writer-Rollback-
+  sicherheit: neuer Test „hub writer preserves engine additive recovery
+  fields“ (PUT-Reset verliert Episode/Projektion/Workermarker nicht).
+  Versionierung: KEIN Bump in dieser Delegation — Mainintegration ist nicht
+  freigegeben; Skript bleibt 0.7.30, Adapter 0.1.41, Tags v0.7.30. Der
+  reguläre Release-Flow (RELEASING.md 1./2./4.: OCVM_VERSION, Adapter-
+  package.json/types.ts `ADAPTER_VERSION`, Pin-Update im Skript) ist Teil
+  des späteren, separat zu beauftragenden Mainintegrations-/Release-
+  schritts; dieser Kandidat ist ausdrücklich keine Veröffentlichung.
+  Limitierungen/Bedienhinweise: diagnostische Tail-/Fenster-Grenzen sind
+  Initialwerte (256 KiB/2000 Zeilen/24 h), Antwort-Deckel 512 KiB,
+  Heartbeat-Streaks prozesslokal; `server.log`-Rotation bleibt unbegrenzt
+  (Konzept-Risiko 4, Cleanup vermerkt); `runtime-unavailable`-Parks
+  behalten ihr Label bewusst (Scope-Entscheidung F-B1, Cleanup vermerkt);
+  Bedienung: Monitor-Details öffnen → Diagnose-Textfeld, Kopier-Button,
+  beide Aktualisieren-Pfade; API nur Hub, nicht MCP (§8 e).
+- **Offen:** unabhängige GesamtQC über diesem Kandidaten; danach erst
+  Mainintegration/Release ( separat beauftragt) und eine Welle-D-Abnahme an
+  echter Session-Hardware (extern, nicht durch lokale Tests ersetzbar).
