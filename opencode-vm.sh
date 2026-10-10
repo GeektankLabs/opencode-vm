@@ -490,7 +490,7 @@ parse_web_flags() {
   SESSION_TASKBOARD_MODE=""
   SESSION_EDITOR_MODE=""
   SESSION_LAUNCHER_ENABLED=1
-  local _saw_password="" _saw_no_auth="" _saw_mcp="" _saw_no_mcp="" _saw_mcp_port="" _saw_hub="" _saw_no_hub="" _saw_taskboard="" _saw_no_taskboard=""
+  local _saw_password="" _saw_no_auth="" _saw_mcp="" _saw_no_mcp="" _saw_mcp_port="" _saw_hub="" _saw_no_hub="" _saw_taskboard="" _saw_no_taskboard="" _saw_journal="" _saw_no_journal=""
   OC_WEB_TUI=false
   # HTTPS by default: opencode hashes attachments via crypto.subtle, which
   # browsers expose only to secure origins, so plain HTTP over a LAN address
@@ -508,7 +508,8 @@ parse_web_flags() {
       --require-a2a) SESSION_REQUIRE_A2A=1 ;;
       --no-a2a) SESSION_A2A=0 ;;
       --mcp) SESSION_MCP_MODE="enable"; _saw_mcp=1 ;;
-      --journal) SESSION_JOURNAL_MODE="enable" ;;
+      --journal) SESSION_JOURNAL_MODE="enable"; _saw_journal=1 ;;
+      --no-journal) SESSION_JOURNAL_MODE="disable"; _saw_no_journal=1 ;;
       --mcp-port) shift; SESSION_MCP_PORT="${1:?Missing MCP port value}"; _saw_mcp_port=1 ;;
       --mcp-port=*) SESSION_MCP_PORT="${1#*=}"; _saw_mcp_port=1 ;;
       --no-mcp) SESSION_MCP_MODE="disable"; _saw_no_mcp=1 ;;
@@ -560,8 +561,12 @@ parse_web_flags() {
     echo "--taskboard and --no-taskboard are mutually exclusive." >&2
     exit 2
   fi
+  if [[ -n "${_saw_journal:-}" && -n "${_saw_no_journal:-}" ]]; then
+    echo "--journal and --no-journal are mutually exclusive." >&2
+    exit 2
+  fi
   [[ -z "${_saw_mcp_port:-}" ]] || SESSION_MCP_MODE="enable"
-  if [[ "$SESSION_JOURNAL_MODE" == enable && "$SESSION_MCP_MODE" == disable ]]; then
+  if [[ "$SESSION_JOURNAL_MODE" == "enable" && "$SESSION_MCP_MODE" == "disable" ]]; then
     echo "--journal requires MCP; it cannot be combined with --no-mcp." >&2
     exit 2
   fi
@@ -586,6 +591,7 @@ parse_attach_flags() {
   SESSION_HUB_MODE=""
   SESSION_TASKBOARD_MODE=""
   local _saw_hub="" _saw_no_hub="" _saw_taskboard="" _saw_no_taskboard=""
+  local _saw_journal="" _saw_no_journal=""
   while [[ "$#" -gt 0 ]]; do
     case "$1" in
       --launcher) SESSION_LAUNCHER_ENABLED=1 ;;
@@ -594,6 +600,8 @@ parse_attach_flags() {
       --no-hub) SESSION_HUB_MODE="disable"; _saw_no_hub=1 ;;
       --taskboard) SESSION_TASKBOARD_MODE="enable"; _saw_taskboard=1 ;;
       --no-taskboard) SESSION_TASKBOARD_MODE="disable"; _saw_no_taskboard=1 ;;
+      --journal) SESSION_JOURNAL_MODE="enable"; _saw_journal=1 ;;
+      --no-journal) SESSION_JOURNAL_MODE="disable"; _saw_no_journal=1 ;;
       *) echo "Unknown option: $1" >&2; return 2 ;;
     esac
     shift
@@ -606,6 +614,10 @@ parse_attach_flags() {
     echo "--taskboard and --no-taskboard are mutually exclusive." >&2
     return 2
   fi
+  if [[ -n "$_saw_journal" && -n "$_saw_no_journal" ]]; then
+    echo "--journal and --no-journal are mutually exclusive." >&2
+    return 2
+  fi
 }
 
 parse_start_flags() {
@@ -613,6 +625,7 @@ parse_start_flags() {
   ON_EXISTING=""   # "", "reconnect", "fresh", "cancel"
   SESSION_MCP_MODE=""
   SESSION_JOURNAL_MODE=""
+  local _saw_journal="" _saw_no_journal=""
   while [[ "$#" -gt 0 ]]; do
     case "$1" in
       --keep-history) KEEP_HISTORY=1 ;;
@@ -620,23 +633,31 @@ parse_start_flags() {
       --fresh) ON_EXISTING="fresh" ;;
       --cancel-if-exists) ON_EXISTING="cancel" ;;
       --no-mcp) SESSION_MCP_MODE="disable" ;;
-      --journal) SESSION_JOURNAL_MODE="enable" ;;
+      --journal) SESSION_JOURNAL_MODE="enable"; _saw_journal=1 ;;
+      --no-journal) SESSION_JOURNAL_MODE="disable"; _saw_no_journal=1 ;;
       *) echo "Unknown option: $1" >&2; exit 2 ;;
     esac
     shift
   done
+  if [[ -n "$_saw_journal" && -n "$_saw_no_journal" ]]; then
+    echo "--journal and --no-journal are mutually exclusive." >&2
+    exit 2
+  fi
   if [[ "$SESSION_JOURNAL_MODE" == enable && "$SESSION_MCP_MODE" == disable ]]; then
     echo "--journal requires MCP; it cannot be combined with --no-mcp." >&2
     exit 2
   fi
 }
 
-# Fresh sessions opt in explicitly; attach retains even legacy enabled sessions.
-# A request to change an existing mode is rejected before lifecycle takeover.
+# Since 0.7.31 fresh sessions default the Activity Journal ON; --no-journal is
+# the explicit opt-out, --journal the explicit opt-in. Attach retains the
+# stored mode in BOTH directions (a stored off-session is never silently
+# switched on, an on-session never silently off); a requested change to an
+# existing mode is rejected before lifecycle takeover.
 session_journal_enabled() {
   local operation="$1" stored="${2:-}" requested="${SESSION_JOURNAL_MODE:-}"
   if [[ "$operation" == fresh ]]; then
-    if [[ "$requested" == enable ]]; then printf '1\n'; else printf '0\n'; fi
+    if [[ "$requested" == disable ]]; then printf '0\n'; else printf '1\n'; fi
     return 0
   fi
   [[ "$operation" == attach ]] || return 1
@@ -646,7 +667,26 @@ session_journal_enabled() {
     echo "[journal] This session is journal-free. Use --journal on a separately authorized fresh start; attach retains its mode." >&2
     return 1
   fi
+  if [[ "$requested" == disable && "$stored" != 0 ]]; then
+    echo "[journal] This session runs with the Activity Journal enabled. Attach retains its mode; use --no-journal on a fresh start." >&2
+    return 1
+  fi
   printf '%s\n' "$stored"
+}
+
+# Resolve the EFFECTIVE fresh-session journal mode against the session's MCP
+# capability. Explicit --journal without capability fails hard (exit 2); the
+# default-on journal downgrades transparently to 0 for a journal-incapable
+# fresh session (never a silent switch of a RUNNING session — the attach rules
+# above still bind). Prints the effective mode.
+session_journal_effective() {
+  local effective_journal="$1" effective_mcp="$2" requested="${SESSION_JOURNAL_MODE:-}"
+  if [[ "$effective_journal" == 1 && "$effective_mcp" != 1 ]]; then
+    if [[ "$requested" == enable ]]; then return 2; fi
+    printf '0\n'
+    return 0
+  fi
+  printf '%s\n' "$effective_journal"
 }
 
 get_host_ip() {
@@ -18297,9 +18337,12 @@ start_session() {
     echo "[mcp] End state: disabled — no server-backed MCP mode or OpenAI assignment for this session."
   fi
 
-  if [[ "$effective_journal_enabled" == 1 && "$effective_mcp_enabled" != 1 ]]; then
+  if ! effective_journal_enabled="$(session_journal_effective "$effective_journal_enabled" "$effective_mcp_enabled")"; then
     echo "[journal] --journal requires web MCP or a configured terminal MCP connection." >&2
     return 1
+  fi
+  if [[ "$effective_journal_enabled" != 1 && "${SESSION_JOURNAL_MODE:-}" != enable ]]; then
+    echo "[journal] Default-on journal skipped: requires web MCP or a configured terminal MCP connection; this session runs journal-free (--no-journal not needed)."
   fi
 
   if ! base_exists; then
@@ -19775,7 +19818,7 @@ opencode-vm v$OCVM_VERSION
 Usage:
   opencode-vm --version                    # print the current version
   opencode-vm install                      # install script to ~/bin and configure PATH
-  opencode-vm start [--no-mcp|--journal] [--keep-history] [--reconnect|--fresh|--cancel-if-exists]
+  opencode-vm start [--no-mcp|--journal|--no-journal] [--keep-history] [--reconnect|--fresh|--cancel-if-exists]
                                            # start a session VM in current directory
                                            # ('run' is an alias for 'start')
                                            # Configured OpenAI MCP starts automatically;
@@ -19793,7 +19836,7 @@ Usage:
                                            # --reconnect/--fresh/--cancel-if-exists:
                                            #   non-interactive override of the prompt
    opencode-vm web [--port PORT] [--password PW|--no-auth] [--no-tls] [--tui]
-                     [--no-a2a|--require-a2a] [--mcp-port PORT|--no-mcp] [--journal]
+                     [--no-a2a|--require-a2a] [--mcp-port PORT|--no-mcp] [--journal|--no-journal]
                     [--no-hub] [--no-taskboard]
                    [--no-editor|--editor] [--no-launcher|--launcher]
                   [--keep-history] [--reconnect|--fresh|--cancel-if-exists]
@@ -19837,7 +19880,9 @@ Usage:
                                             #   only after authenticated host readiness passes.
                                              # --no-mcp: suppress the connector and OpenAI tunnel
                                              #   for this run only; the next normal start resumes them.
-                                             # --journal: opt in to Activity/Attention/Events (fresh sessions default off)
+                                             # --journal / --no-journal: Activity/Attention/Events (fresh sessions default on since 0.7.31;
+                                             #   requires web MCP or a configured terminal MCP connection, otherwise the fresh session
+                                             #   downgrades transparently; attach retains the stored mode in both directions)
                                             # This differs from 'opencode-vm mcps', which manages
                                             #   tool servers consumed by OpenCode itself.
                                            # Session prompt/exit behavior matches 'start'.
