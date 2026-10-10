@@ -314,6 +314,712 @@ need() {
   }
 }
 
+# ============================================================================
+# Opt-in OCVM diagnostic logger (be951293 scope extension, 2026-10-10).
+# DEFAULT OFF: nothing runs unless the operator explicitly starts it for a
+# running session via `opencode-vm diaglog start`. Episodes persist
+# project-side under <project>/.opencode-vm/diag-logger/ (outside the
+# worktree-sweep boundary); the PROCESS does not survive VM replacement and
+# is never auto-restarted — documented behavior, not a guarantee. The worker
+# never persists raw log lines: a fail-closed structured metadata allowlist
+# produces bounded, scrubbed events; unknown lines are counted and discarded.
+# Provider HTTP status/request IDs are captured only from explicit
+# provider-attributed source fields with their source citation; internal MCP
+# UUIDs and unlabeled req_* strings are rejected as provider IDs.
+# ============================================================================
+OCVM_DIAGLOG_PY='#!/usr/bin/env python3
+"""ocvm diag logger worker (be951293). stdlib only, no network.
+
+Modes:
+  claim <state-dir> --xdg DIR --share DIR   reserve an episode (flock, identity-checked)
+  run <state-dir>                           foreground tick loop (systemd unit target)
+  stop <state-dir>                          identity-verified SIGTERM + honest report
+  status <state-dir> [--json]               process/heartbeat/growth reported separately
+  release <state-dir>                       undo a claim after a failed unit start
+  selftest                                  offline parser/redaction assertions
+
+Exit codes: 0 ok, 2 usage/config error, 3 persistent I/O without final,
+4 stopped without a clean final, 5 claim conflict, 6 identity mismatch,
+7 stop timeout. A ValueError (corrupt JSON/config) aborts hard and is never
+converted into a clean-looking state.
+"""
+import errno
+import fcntl
+import json
+import os
+import re
+import signal
+import sys
+import time
+
+SCHEMA = 1
+STOP_GRACE_SECONDS = 10.0
+TRANSIENT_RETRIES = 2
+TRANSIENT_SLEEP = 0.5
+# Only these low-level conditions are treated as possibly transient; anything
+# else (read-only filesystem, ENOSPC, EMFILE, ...) fails closed immediately
+# instead of looping (AITL errno-23 defect class is deliberately NOT retried).
+TRANSIENT_ERRNOS = {errno.EAGAIN, errno.EWOULDBLOCK, errno.EINTR}
+
+SECRET_PATTERNS = [
+    re.compile(r"(?i)bearer\s+[A-Za-z0-9._~+/-]+=*"),
+    re.compile(r"(?i)api[-_]?key\s*[:=]\s*\S+"),
+    re.compile(r"\bsk-[A-Za-z0-9]{8,}\b"),
+    re.compile(r"(?i)(password|passwd|secret|token|authorization|cookie)\s*[:=]\s*\S+"),
+]
+REDACTED = "[REDACTED]"
+EXCERPT_MAX = 160
+VALUE_MAX = 256
+REQUEST_ID_MAX = 128
+UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+REQUEST_ID_KEYS = {"providerrequestid", "requestid", "xrequestid"}
+
+LOGFMT_TOKEN = re.compile(r'\''([A-Za-z_][A-Za-z0-9_.-]*)=("([^"\\]|\\.)*"|\S+)'\'')
+STATUS_VALUE_RE = re.compile(r"^[1-5][0-9]{2}\b")
+
+DEFAULT_LIMITS = {
+    "tick_seconds": 5,
+    "max_file_bytes": 10_000_000,      # rotate the events file after 10 MB
+    "max_total_bytes": 100_000_000,    # hard episode cap: stop honestly, never delete
+    "max_bytes_per_tick": 8_000_000,   # lagging source: bounded read, gap is recorded
+    "max_sources": 8,
+}
+
+
+def fail(code, message):
+    sys.stderr.write("[diaglog] %s\n" % message)
+    raise SystemExit(code)
+
+
+def scrub(value):
+    text = str(value)[:VALUE_MAX]
+    for pattern in SECRET_PATTERNS:
+        text = pattern.sub(REDACTED, text)
+    return text
+
+
+def parse_logfmt(line):
+    """Dict for a logfmt line carrying timestamp/level/message, else None.
+    Unknown or unparsable lines only increment a counter; nothing from them is
+    ever persisted."""
+    if not line.startswith("timestamp="):
+        return None
+    fields = {}
+    for match in LOGFMT_TOKEN.finditer(line):
+        raw = match.group(2)
+        if raw.startswith('\''"'\''):
+            raw = raw[1:-1]
+        fields[match.group(1)] = raw
+    if "timestamp" not in fields or "level" not in fields or "message" not in fields:
+        return None
+    return fields
+
+
+def is_provider_attributed(fields):
+    return any(key == "providerID" or key.startswith("provider.") for key in fields)
+
+
+def request_id_candidate(value):
+    """A provider request ID only from an explicitly labeled field with a
+    usable unique value. Bare UUIDs, unlabeled internal req_* strings and
+    internal receipts are NOT provider IDs."""
+    text = str(value).strip()[:REQUEST_ID_MAX]
+    if not text or UUID_RE.match(text):
+        return None
+    if text.startswith(("req_", "msg_", "ses_")):
+        return None
+    return text
+
+
+def build_event(fields, source_name, offset):
+    """Allowlist-only projection. Fields the source does not expose stay
+    absent — never guessed from model names or configured policy."""
+    event = {
+        "ts": fields.get("timestamp", "")[:64],
+        "level": fields.get("level", "")[:16],
+        "msg": scrub(fields.get("message", ""))[:EXCERPT_MAX],
+        "src": source_name,
+        "off": offset,
+    }
+    for src_key, out_key in (("run", "run"), ("providerID", "provider"), ("modelID", "model"),
+                             ("session.id", "session_id"), ("messageID", "message_id")):
+        value = fields.get(src_key)
+        if value:
+            event[out_key] = scrub(value)[:VALUE_MAX]
+    if is_provider_attributed(fields):
+        for key in sorted(fields):
+            if (key == "status" or key.endswith(".status") or key.startswith("http.status")) \
+                    and STATUS_VALUE_RE.match(str(fields[key])):
+                event["http_status"] = int(str(fields[key])[:3])
+                event["http_status_key"] = key[:64]
+                break
+    for key in sorted(fields):
+        if key.lower().replace(".", "").replace("-", "") in REQUEST_ID_KEYS:
+            request_id = request_id_candidate(fields[key])
+            if request_id:
+                event["request_id"] = request_id
+                event["request_id_key"] = key[:64]
+            break
+    return event
+
+
+def write_json_atomic(path, payload):
+    """Atomic write with a bounded transient-OSError guard. A persistent
+    OSError propagates — the caller fails closed without a clean final."""
+    tmp = "%s.tmp.%d" % (path, os.getpid())
+    for attempt in range(TRANSIENT_RETRIES + 1):
+        try:
+            handle = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(handle, "w", encoding="utf-8") as writer:
+                json.dump(payload, writer)
+            os.replace(tmp, path)
+            return
+        except OSError as error:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            if error.errno in TRANSIENT_ERRNOS and attempt < TRANSIENT_RETRIES:
+                time.sleep(TRANSIENT_SLEEP)
+                continue
+            raise
+
+
+def read_json(path):
+    with open(path, encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def proc_starttime(pid):
+    """(starttime, alive) for a PID. A zombie still owns /proc/<pid> but is
+    dead for our purposes: the parent may not have reaped it yet (the stop
+    probe is usually a different process than the worker parent)."""
+    try:
+        with open("/proc/%d/stat" % pid, encoding="utf-8") as handle:
+            data = handle.read()
+        tail = data[data.rindex(")") + 2:].split()
+        return int(tail[19]), tail[0] != "Z"
+    except (OSError, ValueError, IndexError):
+        return None, False
+
+
+def identity_alive(state):
+    pid = state.get("pid") or 0
+    if pid <= 0:
+        return False
+    starttime, alive = proc_starttime(pid)
+    return alive and starttime is not None and starttime == state.get("pid_starttime")
+
+
+def resolve_sources(xdg_dir, share, limits):
+    """Native dynamic source discovery from the evidenced OCVM session
+    context — never hardcoded project paths. Missing candidates stay absent;
+    at most max_sources existing files are followed."""
+    candidates = []
+    if xdg_dir:
+        candidates.append(("opencode", os.path.join(xdg_dir, "opencode", "log", "opencode.log")))
+    for name in ("monitor", "mcp", "dashboard", "hub", "editor", "taskboard"):
+        directory = os.path.join(share, name)
+        try:
+            for entry in sorted(os.listdir(directory)):
+                if entry.endswith(".log"):
+                    candidates.append((name, os.path.join(directory, entry)))
+                    break
+        except OSError:
+            continue
+    return [{"name": name, "path": path, "offset": 0, "gaps": 0, "lines": 0,
+             "unknown": 0, "events": 0, "missing_ticks": 0, "inode": None}
+            for name, path in candidates[:limits["max_sources"]]]
+
+
+class Episode:
+    def __init__(self, state_dir):
+        self.state_dir = state_dir
+        self.state = read_json(os.path.join(state_dir, "state.json"))
+        self.episode_dir = os.path.join(state_dir, self.state["episode"])
+        self.config = read_json(os.path.join(self.episode_dir, "config.json"))
+        self.limits = self.config["limits"]
+        self.sources = self.config["sources"]
+        self.meta_path = os.path.join(self.episode_dir, "meta.json")
+        self.heartbeat_path = os.path.join(self.episode_dir, "heartbeat.json")
+        self.meta = read_json(self.meta_path) if os.path.exists(self.meta_path) else None
+
+    def source_state(self, source):
+        for entry in self.meta["sources"]:
+            if entry["name"] == source["name"]:
+                return entry
+        fail(2, "config/meta source mismatch")
+
+    def events_path(self, index):
+        return os.path.join(self.episode_dir, "events.jsonl" if index == 0 else "events-%d.jsonl" % index)
+
+    def total_bytes(self):
+        total = 0
+        try:
+            names = os.listdir(self.episode_dir)
+        except OSError:
+            return 0
+        for name in names:
+            if name.startswith("events"):
+                try:
+                    total += os.path.getsize(os.path.join(self.episode_dir, name))
+                except OSError:
+                    pass
+        return total
+
+    def append_events(self, events):
+        if not events:
+            return
+        view = "".join(json.dumps(event, separators=(",", ":")) + "\n" for event in events)
+        while view:
+            index = self.meta.get("events_file_index", 0)
+            path = self.events_path(index)
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                size = 0
+            space = self.limits["max_file_bytes"] - size
+            if space <= 0:
+                self.meta["events_file_index"] = index + 1
+                self.meta["rotations"] = self.meta.get("rotations", 0) + 1
+                continue
+            chunk, view = view[:space], view[space:]
+            if view:
+                cut = chunk.rfind("\n") + 1
+                if cut == 0:
+                    # single line larger than the file cap: write it whole into
+                    # the fresh file (bounded overflow, never a torn line)
+                    chunk = chunk + view
+                    view = ""
+                else:
+                    chunk, view = chunk[:cut], chunk[cut:] + view
+            handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            with os.fdopen(handle, "a", encoding="utf-8") as writer:
+                writer.write(chunk)
+            if view:
+                self.meta["events_file_index"] = index + 1
+                self.meta["rotations"] = self.meta.get("rotations", 0) + 1
+
+    def tick(self):
+        meta = self.meta
+        if self.total_bytes() >= self.limits["max_total_bytes"]:
+            # Honest stop at the hard cap — even a quiet tick must not keep
+            # the loop alive once the episode budget is exhausted.
+            raise OSError(errno.ENOSPC, "episode hard size cap reached; stopping honestly, no files deleted")
+        pending = []
+        now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        for source in self.sources:
+            state = self.source_state(source)
+            try:
+                stat = os.stat(source["path"])
+            except OSError:
+                state["missing_ticks"] = state.get("missing_ticks", 0) + 1
+                continue
+            if state.get("inode") is not None and stat.st_ino != state["inode"]:
+                state["gaps"] += 1  # rotated/replaced source: old tail is an explicit gap
+                state["offset"] = 0
+            state["inode"] = stat.st_ino
+            size = stat.st_size
+            if size < state["offset"]:
+                state["gaps"] += 1  # truncated
+                state["offset"] = 0
+            if size == state["offset"]:
+                continue
+            with open(source["path"], "rb") as handle:
+                handle.seek(state["offset"])
+                chunk = handle.read(min(size - state["offset"], self.limits["max_bytes_per_tick"]))
+            text = chunk.decode("utf-8", "replace")
+            lines = text.split("\n")
+            if not chunk.endswith(b"\n") and state["offset"] + len(chunk) < size:
+                lines = lines[:-1]  # partial tail line stays for the next tick
+                consumed = (len("\n".join(lines)) + 1) * (1 if lines else 0)
+            else:
+                if lines and lines[-1] == "":
+                    lines = lines[:-1]
+                consumed = len(chunk)
+            consumed = len(("\n".join(lines) + "\n").encode("utf-8")) if lines else 0
+            for line in lines:
+                state["lines"] += 1
+                fields = parse_logfmt(line)
+                if fields is None:
+                    state["unknown"] += 1
+                    continue
+                state["events"] += 1
+                pending.append(build_event(fields, source["name"], state["offset"]))
+            state["offset"] += consumed
+        meta["last_tick_at"] = now_iso
+        self.append_events(pending)
+        meta["totals"] = {
+            "lines": sum(entry["lines"] for entry in meta["sources"]),
+            "unknown": sum(entry["unknown"] for entry in meta["sources"]),
+            "events": sum(entry["events"] for entry in meta["sources"]),
+        }
+        coverage = meta.setdefault("coverage", {"provider_status_events": 0, "request_id_events": 0})
+        coverage["provider_status_events"] += sum(1 for event in pending if "http_status" in event)
+        coverage["request_id_events"] += sum(1 for event in pending if "request_id" in event)
+        coverage["gaps"] = sum(entry["gaps"] for entry in meta["sources"])
+        coverage["rotations"] = meta.get("rotations", 0)
+        coverage["note"] = "provider status/request IDs only when the native source exposes provider-attributed fields"
+        write_json_atomic(self.heartbeat_path, {
+            "at": now_iso,
+            "offsets": {entry["name"]: entry["offset"] for entry in meta["sources"]},
+            "totals": meta["totals"],
+        })
+        write_json_atomic(self.meta_path, meta)
+
+    def run_loop(self):
+        stop = {"now": False}
+
+        def handle_signal(signum, _frame):
+            stop["now"] = True
+            stop["signal"] = signum
+
+        signal.signal(signal.SIGTERM, handle_signal)
+        signal.signal(signal.SIGINT, handle_signal)
+        state = read_json(os.path.join(self.state_dir, "state.json"))
+        state["pid"] = os.getpid()
+        state["pid_starttime"] = proc_starttime(os.getpid())[0]
+        write_json_atomic(os.path.join(self.state_dir, "state.json"), state)
+        try:
+            while not stop["now"]:
+                self.tick()
+                deadline = time.monotonic() + self.limits["tick_seconds"]
+                while not stop["now"] and time.monotonic() < deadline:
+                    time.sleep(0.2)
+            self.finish("signal", True)
+        except OSError as error:
+            reason = "io_error:%s" % (error.strerror or ("errno %s" % error.errno))
+            try:
+                self.finish(reason, False)
+            except OSError:
+                sys.stderr.write("[diaglog] final write impossible; exiting WITHOUT final (no clean claim)\n")
+                raise SystemExit(3)
+            raise SystemExit(4)
+
+    def finish(self, reason, clean):
+        self.meta["final"] = {"reason": reason[:128],
+                              "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                              "clean": bool(clean)}
+        write_json_atomic(self.meta_path, self.meta)
+
+
+def load_episode(state_dir):
+    episode = Episode(state_dir)
+    if episode.meta is None:
+        fail(2, "episode metadata missing")
+    return episode
+
+
+def mode_claim(state_dir, args):
+    xdg = args[args.index("--xdg") + 1] if "--xdg" in args else ""
+    share = args[args.index("--share") + 1] if "--share" in args else ""
+    os.makedirs(state_dir, exist_ok=True)
+    with open(os.path.join(state_dir, ".claim.lock"), "a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        state_path = os.path.join(state_dir, "state.json")
+        if os.path.exists(state_path):
+            state = read_json(state_path)
+            if identity_alive(state):
+                fail(5, "a live diag logger already holds this project state (pid %s)" % state.get("pid"))
+            # Stale state: preserve it as evidence, never overwrite silently.
+            os.replace(state_path, os.path.join(
+                state_dir, "state-stale-%s.json" % time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())))
+        episode = "episode-%s-%s" % (time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()), os.urandom(3).hex())
+        episode_dir = os.path.join(state_dir, episode)
+        os.makedirs(episode_dir, exist_ok=False)
+        limits = dict(DEFAULT_LIMITS)
+        sources = resolve_sources(xdg, share, limits)
+        config = {"schema": SCHEMA, "xdg": xdg, "share": share, "limits": limits, "sources": sources}
+        write_json_atomic(os.path.join(episode_dir, "config.json"), config)
+        write_json_atomic(os.path.join(episode_dir, "meta.json"), {
+            "schema": SCHEMA, "episode": episode,
+            "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "final": None, "sources": sources,
+            "totals": {"lines": 0, "unknown": 0, "events": 0},
+            "events_file_index": 0, "rotations": 0,
+        })
+        write_json_atomic(state_path, {"schema": SCHEMA, "episode": episode, "pid": 0, "pid_starttime": 0,
+                                       "claimed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
+        print(episode)
+
+
+def mode_release(state_dir):
+    state_path = os.path.join(state_dir, "state.json")
+    try:
+        state = read_json(state_path)
+    except OSError:
+        return
+    if not state.get("pid"):
+        os.unlink(state_path)
+
+
+def mode_run(state_dir):
+    load_episode(state_dir).run_loop()
+
+
+def mode_stop(state_dir):
+    episode = load_episode(state_dir)
+    state = episode.state
+    if not state.get("pid"):
+        fail(4, "claimed but never started (no running identity)")
+    if not identity_alive(state):
+        final = (episode.meta or {}).get("final")
+        if final and final.get("clean"):
+            print("stopped_clean: %s" % final["reason"])
+            return
+        print("stopped_unclean: process gone without a clean final (crash, kill or I/O failure); final=%s"
+              % json.dumps(final))
+        raise SystemExit(4)
+    pid = state["pid"]
+    os.kill(pid, signal.SIGTERM)
+    deadline = time.monotonic() + STOP_GRACE_SECONDS
+    while time.monotonic() < deadline:
+        if not identity_alive(state):
+            final = read_json(episode.meta_path).get("final")
+            if final and final.get("clean"):
+                print("stopped_clean: %s" % final["reason"])
+                return
+            print("stopped_unclean: process exited without a clean final; final=%s" % json.dumps(final))
+            raise SystemExit(4)
+        time.sleep(0.2)
+    print("stop_timeout: identity-verified pid %s still running after %.0fs; NOT force-killed"
+          % (pid, STOP_GRACE_SECONDS))
+    raise SystemExit(7)
+
+
+def mode_status(state_dir, as_json):
+    state_path = os.path.join(state_dir, "state.json")
+    if not os.path.exists(state_path):
+        result = {"state": "unclaimed"}
+    else:
+        state = read_json(state_path)
+        alive = identity_alive(state)
+        result = {"state": "running" if alive else "not_running", "pid": state.get("pid"),
+                  "identity_verified": bool(alive), "episode": state.get("episode")}
+        meta_path = os.path.join(state_dir, state.get("episode", ""), "meta.json")
+        if os.path.exists(meta_path):
+            meta = read_json(meta_path)
+            result["final"] = meta.get("final")
+            result["totals"] = meta.get("totals")
+            result["coverage"] = meta.get("coverage")
+            result["sources"] = [{"name": entry["name"], "offset": entry["offset"],
+                                  "gaps": entry["gaps"], "missing_ticks": entry.get("missing_ticks", 0)}
+                                 for entry in meta.get("sources", [])]
+            result["rotations"] = meta.get("rotations", 0)
+            heartbeat_path = os.path.join(state_dir, state["episode"], "heartbeat.json")
+            if os.path.exists(heartbeat_path):
+                heartbeat = read_json(heartbeat_path)
+                result["heartbeat"] = {
+                    "at": heartbeat.get("at"),
+                    "age_seconds": round(time.time() - time.mktime(time.strptime(heartbeat["at"], "%Y-%m-%dT%H:%M:%SZ")), 1),
+                }
+                growth = {}
+                for entry in meta.get("sources", []):
+                    try:
+                        size_now = os.path.getsize(entry["path"])
+                    except OSError:
+                        size_now = None
+                    heartbeat_offset = heartbeat["offsets"].get(entry["name"])
+                    growth[entry["name"]] = {
+                        "heartbeat_offset": heartbeat_offset,
+                        "file_size_now": size_now,
+                        "grew_since_heartbeat": size_now is not None and heartbeat_offset is not None
+                                                and size_now > heartbeat_offset,
+                    }
+                result["growth"] = growth
+    if as_json:
+        print(json.dumps(result, indent=2))
+    else:
+        print("state=%s pid=%s identity_verified=%s" % (result["state"], result.get("pid"),
+                                                        result.get("identity_verified")))
+        if "heartbeat" in result:
+            print("heartbeat=%s age=%ss" % (result["heartbeat"]["at"], result["heartbeat"]["age_seconds"]))
+        print("totals=%s" % json.dumps(result.get("totals", {})))
+        print("coverage=%s" % json.dumps(result.get("coverage", {})))
+        print("growth=%s" % json.dumps(result.get("growth", {})))
+        print("final=%s" % json.dumps(result.get("final")))
+    final = result.get("final")
+    if result["state"] == "not_running" and not (isinstance(final, dict) and final.get("clean")):
+        raise SystemExit(4)
+
+
+def mode_selftest():
+    fields = parse_logfmt('\''timestamp=2026-10-10T00:00:00.000Z level=ERROR run=abc message="stream error" '\''
+                          '\''providerID=opencode modelID=m session.id=ses_x status=429 providerRequestID="req_abc"'\'')
+    assert fields is not None
+    event = build_event(fields, "opencode", 12)
+    assert event["http_status"] == 429 and event["http_status_key"] == "status"
+    assert "request_id" not in event, "unlabeled req_* must be rejected as provider ID"
+
+    fields2 = parse_logfmt('\''timestamp=2026-10-10T00:00:01.000Z level=INFO message="llm request completed" '\''
+                           '\''providerID=p provider.requestID="abc-123-XYZ" status=200'\'')
+    event2 = build_event(fields2, "opencode", 40)
+    assert event2["request_id"] == "abc-123-XYZ" and event2["http_status"] == 200
+
+    fields3 = parse_logfmt('\''timestamp=2026-10-10T00:00:02.000Z level=INFO message="mcp internal" '\''
+                           '\''status=202 requestId=0f4e2c5a-1111-4111-8111-111111111111'\'')
+    event3 = build_event(fields3, "opencode", 90)
+    assert "http_status" not in event3, "no provider attribution: internal 202 is not a provider status"
+    assert "request_id" not in event3, "bare UUID is not a provider ID"
+
+    assert "abc.def.ghi" not in scrub("authorization=Bearer abc.def.ghi")
+    assert "supersecret" not in scrub("api_key=supersecret")
+    assert parse_logfmt("random noise line without logfmt") is None
+    assert parse_logfmt("timestamp=2026-10-10T00:00:00Z level=INFO") is None  # no message
+    print("selftest ok")
+
+
+def main():
+    args = sys.argv[1:]
+    if not args:
+        fail(2, "usage: ocvm-diag-logger {claim|run|stop|status|release|selftest} ...")
+    mode, rest = args[0], args[1:]
+    if mode == "selftest":
+        mode_selftest()
+        return
+    if mode == "claim":
+        if not rest:
+            fail(2, "state directory required")
+        mode_claim(rest[0], rest[1:])
+        return
+    if not rest:
+        fail(2, "state directory required")
+    state_dir = rest[0]
+    if mode == "run":
+        mode_run(state_dir)
+    elif mode == "stop":
+        mode_stop(state_dir)
+    elif mode == "status":
+        mode_status(state_dir, "--json" in rest)
+    elif mode == "release":
+        mode_release(state_dir)
+    else:
+        fail(2, "unknown mode %s" % mode)
+
+
+if __name__ == "__main__":
+    main()
+'
+
+# --- Opt-in diagnostic logger CLI (host-side; worker runs in the session VM).
+# DEFAULT OFF. `diaglog start` is an explicit per-session operator action;
+# episodes persist under <project>/.opencode-vm/diag-logger/ (outside the
+# worktree sweep). The process does NOT survive VM replacement.
+diaglog_worker_install() {
+  local share="$1"
+  [[ -d "$share" && -O "$share" && ! -L "$share" ]] || { echo "[diaglog] Unsafe session share." >&2; return 1; }
+  local dir="$share/diaglog"
+  ( umask 077; mkdir -p "$dir" ) || return 1
+  [[ -O "$dir" && ! -L "$dir" ]] || { echo "[diaglog] Unsafe diaglog staging directory." >&2; return 1; }
+  printf '%s' "$OCVM_DIAGLOG_PY" > "$dir/ocvm-diag-logger.py" || return 1
+  chmod 700 "$dir/ocvm-diag-logger.py"
+}
+
+diaglog_resolve_session() {
+  local proj senv
+  proj="$(pwd)"
+  senv="$(session_env "$proj")"
+  [[ -f "$senv" ]] || { echo "[diaglog] No session for this project directory. Start one first." >&2; return 1; }
+  # shellcheck disable=SC1090
+  source "$senv"
+  is_vm_running "$SESS_NAME" || { echo "[diaglog] The session VM is not running; start/attach the session first." >&2; return 1; }
+  printf '%s\n' "$proj|$SESS_NAME|$(session_share_dir "$proj")"
+}
+
+diaglog_start_cmd() {
+  local resolved vm proj share
+  resolved="$(diaglog_resolve_session)" || return 1
+  IFS='|' read -r proj vm share <<<"$resolved"
+  diaglog_worker_install "$share" || return 1
+  if ! vm_exec "$vm" '
+      set -eu
+      proj="$1"; share="$2"; unit="$3"
+      export XDG_DATA_HOME="${XDG_DATA_HOME:-/tmp/oc-xdg-data}"
+      worker="$share/diaglog/ocvm-diag-logger.py"
+      state="$proj/.opencode-vm/diag-logger"
+      mkdir -p "$state"
+      python3 "$worker" claim "$state" --xdg "$XDG_DATA_HOME" --share "$share" >/dev/null
+      if ! sudo -n systemd-run --quiet --collect --unit="$unit" --service-type=exec \
+          --property="User=$(id -un)" --property="Group=$(id -gn)" \
+          --property="WorkingDirectory=$proj" --property=UMask=0077 \
+          --property=KillMode=control-group --property=TimeoutStopSec=15 --property=Restart=no \
+          --setenv="XDG_DATA_HOME=$XDG_DATA_HOME" \
+          -- python3 "$worker" run "$state"; then
+        python3 "$worker" release "$state" || true
+        echo "[diaglog] Unit start failed; claim released (no half-started state)." >&2
+        exit 1
+      fi
+    ' "$proj" "$share" "ocvm-diaglog-$(printf '%s' "$proj" | sha256sum | cut -c1-8)"; then
+    echo "[diaglog] Start failed." >&2
+    return 1
+  fi
+  sleep 2
+  echo "[diaglog] Started (transient unit; episode under $proj/.opencode-vm/diag-logger)."
+  echo "[diaglog] The logger process lives inside THIS session VM; replacing the VM stops it (episodes persist)."
+  echo "[diaglog] Stop: opencode-vm diaglog stop — Status: opencode-vm diaglog status [--json]"
+}
+
+diaglog_stop_cmd() {
+  local resolved vm proj share
+  resolved="$(diaglog_resolve_session)" || return 1
+  IFS='|' read -r proj vm share <<<"$resolved"
+  vm_exec "$vm" '
+      set -eu
+      proj="$1"; share="$2"
+      python3 "$share/diaglog/ocvm-diag-logger.py" stop "$proj/.opencode-vm/diag-logger"
+    ' "$proj" "$share"
+}
+
+diaglog_status_cmd() {
+  local resolved vm proj share json_flag=""
+  [[ "${1:-}" == "--json" ]] && json_flag="--json"
+  resolved="$(diaglog_resolve_session)" || return 1
+  IFS='|' read -r proj vm share <<<"$resolved"
+  vm_exec "$vm" '
+      set -eu
+      proj="$1"; share="$2"; flag="${3:-}"
+      # shellcheck disable=SC2086
+      python3 "$share/diaglog/ocvm-diag-logger.py" status "$proj/.opencode-vm/diag-logger" $flag
+    ' "$proj" "$share" "$json_flag"
+}
+
+diaglog_script_cmd() {
+  printf '%s\n' "$OCVM_DIAGLOG_PY"
+}
+
+diaglog_cmd() {
+  local op="${1:-help}"
+  case "$op" in
+    start) shift || true; [[ "${1:-}" == "" ]] || { echo "Usage: opencode-vm diaglog start" >&2; exit 2; }; diaglog_start_cmd ;;
+    stop)  shift || true; [[ "${1:-}" == "" ]] || { echo "Usage: opencode-vm diaglog stop" >&2; exit 2; }; diaglog_stop_cmd ;;
+    status) shift || true; diaglog_status_cmd "$@" ;;
+    script) diaglog_script_cmd ;;
+    help|*) cat >&2 <<'DIAGLOGHELP'
+opencode-vm diaglog — opt-in OCVM diagnostic logger (DEFAULT OFF)
+
+Usage:
+  opencode-vm diaglog start          start one logger episode for THIS project's running session
+  opencode-vm diaglog stop           identity-verified stop; never force-kills other processes
+  opencode-vm diaglog status [--json] process identity, heartbeat and source growth, separately
+  opencode-vm diaglog script         print the embedded worker (for offline tests)
+
+Behavior:
+- Structured metadata only: raw log lines/prompts/auth/cookies/tokens are
+  never persisted; unknown lines are counted and discarded.
+- Provider HTTP status/request IDs only from explicit provider-attributed
+  source fields (source cited per event); internal MCP UUIDs and unlabeled
+  req_* strings are not provider IDs.
+- Episodes: <project>/.opencode-vm/diag-logger/episode-*/ — events rotated at
+  10 MB per file, hard stop at 100 MB per episode (nothing is deleted);
+  meta.json/heartbeat.json atomic; a crash or impossible final write is
+  reported honestly (status exit 4), never as a clean stop.
+- The process lives inside the session VM and does not survive VM
+  replacement; start again after a fresh session if wanted (default stays off).
+DIAGLOGHELP
+    [[ "$op" == "help" ]] ;;
+  esac
+}
+
 # Run a script inside a VM via a login shell (profile PATH available).
 # Usage: vm_exec <vm> <script> [args...]
 # Host values must be passed as positional args — never interpolated into the
@@ -19784,6 +20490,10 @@ case "$cmd" in
 
   screenshot)
     screenshot_cmd
+    ;;
+
+  diaglog)
+    diaglog_cmd "$@"
     ;;
 
   prune)
