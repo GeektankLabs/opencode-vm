@@ -1,6 +1,6 @@
 Task-ID: task_be951293-e41a-5d69-a394-b0d9c944c960
 Title: Work Package: Monitor-Zuverlässigkeit und Diagnose vorbereiten (Konzept, reviewbar)
-Stand: 2026-10-10 · Status: Welle A implementiert, QC-Befunde F1/F2 korrigiert (lokal, isolierter Worktree; Delta-QC ausstehend) · Implementierungs-Go erteilt · Historie: CONCEPT_PASS (Rev. 3, unabhängig geprüft), Entscheidungsvorbereitung abgeschlossen 2026-10-09
+Stand: 2026-10-10 · Status: Welle A unabhängig QC_PASS (c6bd261, Bericht SHA3241dc22…); Welle B implementiert (lokaler Kandidat 38eeb80, unabhängige QC ausstehend) · Implementierungs-Go erteilt · Historie: CONCEPT_PASS (Rev. 3, unabhängig geprüft), Entscheidungsvorbereitung abgeschlossen 2026-10-09
 Last-concept-update: 2026-10-09T20:53 UTC (historisch: Abschlussmetadaten Rev3-CONCEPT_PASS; Inhaltsrevision unverändert SHA1386d074…; die damit offene Produktentscheidung 4.6/§8a ist mit dem Go vom 2026-10-10 entschieden, siehe §11) · Last-implementation-update: 2026-10-10 (Welle A commit e0c5ce3ce0c2362f253ef2a1488540227c0050e5 auf Branch task/be951293-wave-a; §11 aktueller Stand)
 
 ## 1 Ziel / Nichtziele
@@ -461,8 +461,60 @@ Der Reviewbericht selbst wurde nicht verändert.
   auf die Clear-Semantik aktualisiert. Neu verifiziert: tsc clean; Monitor-Suite
   **36/36**; Adapter-Gesamtsuite **231 pass / 0 fail / 2 env-gated skips**.
   Keine anderen Stellen angefasst; keine Mainintegration/kein Release/Push/Live.
-  Delta-Nachprüfung durch die unabhängige QC steht aus — dieser Eintrag ist
-  keine Selbstabnahme.
-- **Offen:** Delta-QC zu F1/F2; danach Welle B (gemeinsame Schema-4-Policy/Recovery,
-  Episodenpersistenz, Variant-Readback), Welle C (Logread-API + Hub-Textansicht),
-  Welle D (Abnahme inkl. AITL-Fixture, Hub-Konsistenz, Version-Bump).
+  **Abschluss (unabhängige QC, Original `msg_12360c71a001Qw9PTBuUeAc0TT`
+  vollständig gelesen, Bericht aktuell SHA256
+  `3241dc22f77db3f988fcf7328223038367d692a7052a35e294f8a645132b34f3`):
+  Delta-QC bestätigt F1/F2 behoben, Monitor 36/36 und Adapter 231 pass/0 fail/2
+  skip in erfolgreichen Läufen — Welle A: QC_PASS auf `c6bd261`.
+  Wahrheitstreue: der vorbestehende lastabhängige `dashboard-bootstrap`-Flake
+  (in der QC 2 von 8 Volläufen; Reviewerzählung 7/8 vs. 2/8-Fail blieb
+  inkonsistent, genaue Logs werden später geklärt) wird ausdrücklich NICHT als
+  durchgehend grün dokumentiert; er liegt außerhalb von Welle A/B und ist dem
+  Autor als späteres Cleanup vermerkt. Keine Selbstabnahme durch den Autor.
+- **Welle B — implementiert (lokal kandidatenbereit, unabhängige QC steht aus):**
+  Gemeinsame Schema-4-Policy-Auflösung genau einmal in TypeScript in
+  `agent-control.ts` (`resolveRecoveryChain`: Stage-Label→vollständiges Tupel
+  provider/model/variant, `catalogAvailable`-Semantik, persistenter
+  Attempted-Filter, zentrales Provider-Skip-Gate; `fallbackChain` dorthin
+  verschoben, Engine re-exportiert nur — keine zweite Implementierung, kein
+  neuer Python-Resolver; Hub bleibt später rein lesender Konsument der
+  persistierten Projektion). `monitor-main` liefert die volle Policy-Sicht
+  (profileFallbacks/strategies/routing/revision). Recovery-Admission exakt auf
+  die sechs terminalen Providerfehlerkategorien beschränkt;
+  unknown/fachlich/aborted/pending bleiben ehrliche benannte Holds ohne Abort,
+  Switch oder Dispatch; W2-Budgetzählung für production-code unverändert
+  (Matrix J). Provider-Skip nur bei explizit ON plus account-Scope-Beweis
+  (quota/auth) — Einzel-Timeout oder provider_id-Alleintreffer skippt nie,
+  Fremdprovider-Fallback bleibt nutzbar. Persistente endliche Episode im
+  Monitorrecord (additiv, bounded): Attempted-Vollidentitäten überleben Wakes,
+  Restart und Policyrevisionen (Vereinigung, nicht vergessen); Revision allein
+  beendet die Episode nicht; ein gesunder admitted Wake schließt die Episode,
+  das nächste Normalwake probiert das aktuelle Primary automatisch ohne
+  Cooldown (§4.5 R1; resolveRuntime bleibt attempted-frei). Variant-Readback
+  fail-closed in primary UND recovery; unbestätigte Switches sind
+  Recorded-Attempts, nie stille Wiederholung. Erschöpfung = beschlossenem §4.6
+  transparentem Park mit präzisen sichtbaren Gründen (profile-fallback-
+  unconfigured / final-fallback-unconfigured / final-fallback-unavailable /
+  recovery-chain-exhausted) plus begrenztem Entscheidungseintrag;
+  Episode-Neustart nur per explizitem Operator-Trigger auf solch einen Park.
+  Legacy-Regime (routing absent/legacy) verhält sich exakt wie bisher;
+  Welle-A-Schutzinvarianten unverändert.
+  Candidate: `38eeb809c42f8d70bd592fa736694502c305728d` (Tree
+  `b0e5d00899891bd702c35027a7929d0c37a281ce`) auf `c6bd261` (Welle-A-QC_PASS).
+  Dateien: agent-control.ts (+test), monitor.ts, monitor-engine.ts,
+  monitor.test.ts, monitor-main.ts (+891/−72). Verifikation im THIS Lauf: tsc
+  clean; monitor 43/43; agent-control 13/13; Adapter-Suite 244 pass / 0 fail /
+  2 env-gated skips — der vorbestehende lastabhängige
+  `dashboard-bootstrap`-Flake (QC-Beobachtung 2/8 unter Last) gilt ausdrücklich
+  NICHT als behoben und wird nicht als durchgehend grün dokumentiert.
+  Reversible MVP-Kleinentscheidungen (begründet): (1) Episode-Close nur bei
+  admittedem healthy Dispatch, nicht bei Compaction (fehlerbehaftete Session
+  bleibt episode-offen); (2) Operator-Restart nur auf Park mit
+  Erschöpfungsgrund — wake_request ohne solchen Park vergisst nichts;
+  (3) uncertain admission zählt als Attempt (`dispatch_uncertain`), niemals
+  Blind-Resend (WAL-Reconcile bleibt vorgelagert); (4) unbestätigter
+  Variant-Switch zählt als Attempt (`update_unverified`).
+- **Offen:** unabhängige QC zu Welle B (Candidate 38eeb80); danach Welle C
+  (begrenzte Logread-API + Hub-Textansicht, rein lesender Hub-Konsument der
+  Engine-Projektion) und Welle D (Abnahme inkl. AITL-Fixture,
+  Hub-Konsistenztests, Version-Bump bei Mainintegration).
