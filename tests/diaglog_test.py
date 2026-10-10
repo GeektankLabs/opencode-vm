@@ -74,10 +74,46 @@ class DiagLoggerTest(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertIn("selftest ok", out.stdout)
 
+    def test_time_limit_ends_a_quiet_episode_honestly(self):
+        xdg, share = seed_env(self.base)
+        episode = claim(self.base, xdg, share)
+        config = read_json(episode / "config.json")
+        config["limits"]["max_episode_seconds"] = 1  # controlled time, no real 24 h wait
+        config["limits"]["tick_seconds"] = 0.2
+        write(episode / "config.json", json.dumps(config))
+        log = open(episode / "run.log", "w")
+        self.addCleanup(log.close)
+        proc = subprocess.Popen([sys.executable, str(WORKER), "run", str(self.base / "state")],
+                                stdout=log, stderr=subprocess.STDOUT)
+        # no signal, no restart loop: the worker ends itself at the limit
+        self.assertEqual(proc.wait(timeout=10), 0)
+        meta = read_json(episode / "meta.json")
+        self.assertTrue(meta["final"]["clean"], meta["final"])
+        self.assertEqual(meta["final"]["reason"], "time-limit")
+        status = json.loads(run_worker(["status", self.base / "state", "--json"]).stdout)
+        self.assertEqual(status["state"], "not_running")
+        self.assertTrue(status["final"]["clean"])
+        stop = run_worker(["stop", self.base / "state"])
+        self.assertEqual(stop.returncode, 0, stop.stderr)
+        self.assertIn("stopped_clean: time-limit", stop.stdout)
+
+    def test_invalid_time_limit_is_a_config_error(self):
+        xdg, share = seed_env(self.base)
+        episode = claim(self.base, xdg, share)
+        config = read_json(episode / "config.json")
+        config["limits"]["max_episode_seconds"] = -5
+        write(episode / "config.json", json.dumps(config))
+        out = run_worker(["run", self.base / "state"], timeout=20)
+        self.assertEqual(out.returncode, 2, out.stderr)
+        self.assertIn("max_episode_seconds", out.stderr)
+        meta = read_json(episode / "meta.json")
+        self.assertIsNone(meta["final"])
+
     def test_claim_run_stop_clean_and_redaction(self):
         xdg, share = seed_env(self.base)
         episode = claim(self.base, xdg, share)
         log = open(episode / "run.log", "w")
+        self.addCleanup(log.close)
         proc = subprocess.Popen([sys.executable, str(WORKER), "run", str(self.base / "state")],
                                 stdout=log, stderr=subprocess.STDOUT)
         time.sleep(1.2)
@@ -120,6 +156,7 @@ class DiagLoggerTest(unittest.TestCase):
         xdg, share = seed_env(self.base)
         claim(self.base, xdg, share)
         log = open(self.base / "run.log", "w")
+        self.addCleanup(log.close)
         proc = subprocess.Popen([sys.executable, str(WORKER), "run", str(self.base / "state")],
                                 stdout=log, stderr=subprocess.STDOUT)
         time.sleep(0.8)

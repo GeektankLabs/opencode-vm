@@ -39,8 +39,10 @@ both directions). Separately, `opencode-vm diaglog {start|stop|status|script}`
 adds a strictly opt-in (DEFAULT OFF) diagnostic logger for a running session:
 single embedded stdlib-only Python worker executed in the session VM,
 project-persistent episodes under `<project>/.opencode-vm/diag-logger/`
-(outside the worktree sweep) with bounded rotation (10 MB/file, 100 MB/episode
-hard stop, nothing deleted), fail-closed structured metadata allowlist (raw
+(outside the worktree sweep) with bounded rotation (10 MB/file, 24 h episode
+wall-clock limit with an honest "time-limit" final, 100 MB/episode budget
+checked at each tick — the proven worst case is the budget plus one bounded
+tick read, nothing deleted), fail-closed structured metadata allowlist (raw
 log lines/prompts/auth/cookies/tokens are never persisted; unknown lines are
 counted and discarded), provider HTTP status/request IDs only from explicit
 provider-attributed source fields with source citation (internal MCP UUIDs and

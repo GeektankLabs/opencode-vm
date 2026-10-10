@@ -339,8 +339,8 @@ Modes:
   selftest                                  offline parser/redaction assertions
 
 Exit codes: 0 ok, 2 usage/config error, 3 persistent I/O without final,
-4 stopped without a clean final, 5 claim conflict, 6 identity mismatch,
-7 stop timeout. A ValueError (corrupt JSON/config) aborts hard and is never
+4 stopped without a clean final, 5 claim conflict, 7 stop timeout.
+(A planned time-limit end reports final reason "time-limit", clean.) A ValueError (corrupt JSON/config) aborts hard and is never
 converted into a clean-looking state.
 """
 import errno
@@ -379,8 +379,15 @@ STATUS_VALUE_RE = re.compile(r"^[1-5][0-9]{2}\b")
 
 DEFAULT_LIMITS = {
     "tick_seconds": 5,
+    "max_episode_seconds": 86_400,     # hard wall-clock end (24 h): even a
+                                       # quiet episode stops itself honestly;
+                                       # ends within ~one tick after the limit,
+                                       # never extended or auto-restarted
     "max_file_bytes": 10_000_000,      # rotate the events file after 10 MB
-    "max_total_bytes": 100_000_000,    # hard episode cap: stop honestly, never delete
+    "max_total_bytes": 100_000_000,    # checked at tick start; a single tick
+                                       # reads at most max_bytes_per_tick, so
+                                       # the proven worst case is cap plus
+                                       # one bounded read, never unbounded
     "max_bytes_per_tick": 8_000_000,   # lagging source: bounded read, gap is recorded
     "max_sources": 8,
 }
@@ -453,13 +460,17 @@ def build_event(fields, source_name, offset):
                 event["http_status"] = int(str(fields[key])[:3])
                 event["http_status_key"] = key[:64]
                 break
-    for key in sorted(fields):
-        if key.lower().replace(".", "").replace("-", "") in REQUEST_ID_KEYS:
-            request_id = request_id_candidate(fields[key])
-            if request_id:
-                event["request_id"] = request_id
-                event["request_id_key"] = key[:64]
-            break
+        # F-D2: request IDs share the SAME provider-attribution gate as the
+        # HTTP status — a labeled request id from a non-provider context
+        # (e.g. an internal trace) is NOT a provider request ID. Without the
+        # gate the field stays absent; it is never guessed from other keys.
+        for key in sorted(fields):
+            if key.lower().replace(".", "").replace("-", "") in REQUEST_ID_KEYS:
+                request_id = request_id_candidate(fields[key])
+                if request_id:
+                    event["request_id"] = request_id
+                    event["request_id_key"] = key[:64]
+                break
     return event
 
 
@@ -676,17 +687,27 @@ class Episode:
 
         signal.signal(signal.SIGTERM, handle_signal)
         signal.signal(signal.SIGINT, handle_signal)
+        limit = self.limits.get("max_episode_seconds")
+        if not isinstance(limit, (int, float)) or isinstance(limit, bool) or limit <= 0:
+            fail(2, "max_episode_seconds must be a positive number")
+        started = time.monotonic()
         state = read_json(os.path.join(self.state_dir, "state.json"))
         state["pid"] = os.getpid()
         state["pid_starttime"] = proc_starttime(os.getpid())[0]
         write_json_atomic(os.path.join(self.state_dir, "state.json"), state)
         try:
-            while not stop["now"]:
+            # F-D1: the wall-clock limit ends even a long-quiet episode — the
+            # check runs every tick/sleep boundary, the end lands within about
+            # one tick after the limit, and it is never extended or restarted.
+            while not stop["now"] and time.monotonic() - started < limit:
                 self.tick()
                 deadline = time.monotonic() + self.limits["tick_seconds"]
                 while not stop["now"] and time.monotonic() < deadline:
                     time.sleep(0.2)
-            self.finish("signal", True)
+            if stop["now"]:
+                self.finish("signal", True)
+            else:
+                self.finish("time-limit", True)
         except OSError as error:
             reason = "io_error:%s" % (error.strerror or ("errno %s" % error.errno))
             try:
@@ -862,6 +883,16 @@ def mode_selftest():
     assert "http_status" not in event3, "no provider attribution: internal 202 is not a provider status"
     assert "request_id" not in event3, "bare UUID is not a provider ID"
 
+    fields4 = parse_logfmt('\''timestamp=2026-10-10T00:00:03.000Z level=INFO message="internal trace" '\''
+                           '\''x-request-id="internal-trace-42"'\'')
+    event4 = build_event(fields4, "opencode", 130)
+    assert "request_id" not in event4, "F-D2: labeled request id without provider attribution is not a provider ID"
+
+    fields5 = parse_logfmt('\''timestamp=2026-10-10T00:00:04.000Z level=INFO message="provider call" '\''
+                           '\''providerID=p provider.requestID="any-format-42" x-request-id="internal-trace-42"'\'')
+    event5 = build_event(fields5, "opencode", 170)
+    assert event5["request_id"] == "any-format-42" and event5["request_id_key"] == "provider.requestID"
+
     assert "abc.def.ghi" not in scrub("authorization=Bearer abc.def.ghi")
     assert "supersecret" not in scrub("api_key=supersecret")
     assert parse_logfmt("random noise line without logfmt") is None
@@ -1010,9 +1041,11 @@ Behavior:
   source fields (source cited per event); internal MCP UUIDs and unlabeled
   req_* strings are not provider IDs.
 - Episodes: <project>/.opencode-vm/diag-logger/episode-*/ — events rotated at
-  10 MB per file, hard stop at 100 MB per episode (nothing is deleted);
-  meta.json/heartbeat.json atomic; a crash or impossible final write is
-  reported honestly (status exit 4), never as a clean stop.
+  10 MB per file, 24 h wall-clock limit (honest "time-limit" final), episode
+  budget 100 MB checked at each tick (proven worst case: budget plus one
+  bounded tick read; nothing is deleted); meta.json/heartbeat.json atomic;
+  a crash or impossible final write is reported honestly (status exit 4),
+  never as a clean stop.
 - The process lives inside the session VM and does not survive VM
   replacement; start again after a fresh session if wanted (default stays off).
 DIAGLOGHELP

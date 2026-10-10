@@ -990,3 +990,37 @@ nur konventionelle SC2016 (intentionale vm_exec-Quoting), Archiv-Pin
 reproduktiv bestätigt. **Grenzen:** kein Live-/Runtime-Test der Logger-Starts
 (kein produktiver Start autorisiert), echte Providerrequests nie ausgeführt;
 unabhängige Gesamt-QC folgt separat.
+
+### §13.1 Bundle-QC-Deltakorrektur (2026-10-10, F-D1/F-D2; Kandidat ee25999 → Korrekturcommit)
+
+Unabhängige Bundle-QC (CHANGES_REQUIRED, genau F-D1/F-D2; Reviewerbericht in
+Reviewer-Isolation,SHA e35c81ef…565be861, hier nicht vorhanden/nicht
+überschrieben):
+
+- **F-D1 (Episoden-Zeitlimit):** `DEFAULT_LIMITS.max_episode_seconds` = 86400 s
+  (24 h, passend zum übergebenen Safetyvertrag; keine Repo-Konvention
+  dagegen). Validierung: nicht positive Zahl → Konfigurationsfehler exit 2
+  (hart, kein Final). Durchsetzung in der Run-Loop an jeder Tick-/Sleep-
+  Grenze: auch ein lang stillstehender Logger endet selbst, innerhalb ~eines
+  Ticks nach Limit, mit ehrlichem `final {reason: "time-limit", clean: true}`
+  — keine automatische Verlängerung, keine Neustartschleife. Offline mit
+  kontrollierter Zeit geprüft (Limit 1 s, kein reales Warten).
+- **F-D2 (request_id providergebunden):** Request-IDs teilen jetzt dieselbe
+  `is_provider_attributed`-Sperre wie der HTTP-Status. Repro abgedeckt:
+  `x-request-id="internal-trace-42"` ohne Providerkontext wird nicht
+  persistiert; explizit providerattribuierte, gelabelte IDs beliebigen
+  Formats (z. B. `provider.requestID="any-format-42"`) funktionieren
+  weiterhin; interne UUIDs/unbeschriftete `req_*` bleiben abgewiesen.
+  Fehlende Providerquelle = Feld fehlt (Missing-Reason in Coverage-Notiz).
+- **Nebenbeobachtungen ehrlich gestellt, ohne Ausbau:** unerreichbarer
+  dokumentierter Exitcode 6 aus der Worker-Doku entfernt (tatsächliche Codes
+  0/2/3/4/5/7); Größen-Cap wird am Tickanfang geprüft — belegte Obergrenze
+  ist Budget + eine begrenzte Ticklesung (≤ max_bytes_per_tick, Default
+  8 MB); Doku (Worker-Kommentar, CLI-Help, AGENTS.md) nennt diese Grenze
+  statt einer falschen harten 100-MB-Garantie. Testharness: offene
+  Dateihandles geschlossen (ResourceWarnings unter `-W error::ResourceWarning`
+  frei).
+- **Tests:** diaglog 11/11 (neu: Zeitlimit-Ende mit kontrollierter Zeit,
+  invalides Limit = Konfigurationsfehler; Selftest erweitert um F-D2-
+  Positiv/Negativ); keine Skill-/Bundle-Inhalte berührt → r51-Marker
+  unverändert konsistent; Adapter/Pin unberührt.
