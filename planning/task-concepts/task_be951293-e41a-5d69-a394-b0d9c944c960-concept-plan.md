@@ -808,3 +808,37 @@ den gepinnten Archiven; laufende Sessions übernehmen 0.1.42 mit dem nächsten
 update/Sessionsync — Registry-Downgrade/Upgrade bleibt durch das rein additive
 Feld in beiden Richtungen bewahrt (altes Code ist inert gegenüber
 `receipt_observation`).
+
+### §12.1 QC-G1-Korrektur auf dem Kandidaten (2026-10-10, begrenzte Zustandssemantik)
+
+Unabhängige QC gegen `cab931a` reproduzierte BLOCKER G1: der Terminal-Zweig
+des Watchs settlete jeden nicht-blockierten Idle-Ausgang — inklusive
+`unknown`/`submitted`/`aborted`/bare-`failed` — als `held`. Ein VERSPÄTETER
+terminaler Fehler desselben Receipts (z. B. unknown → `provider_header_timeout`
+ohne Board-/Workeränderung) wäre danach komplett verschluckt gewesen (0 Reads,
+keine Recovery) — Kriterium 1 verletzt.
+
+**Korrektur (Zustandssemantik, eng begrenzt):**
+- Settlement als `healthy` NUR bei verlässlicher Terminalgesundheit: idle,
+  kein Pending-Input, State `completed`, keine Provider-Evidence.
+- `unknown`/`submitted`/`input_required`/`aborted`/bare-`failed` settlen
+  NICHT: der Watch bleibt offen, jeder Tick liest einmal und benennt den
+  beobachteten State in einer zusammengeführten Bounded-Decision
+  (`receipt-watch`, `receipt-not-confirmed-terminal`, State-Token). `aborted`
+  ist damit semantisch korrekt sichtbar, nie „healthy“.
+- Outcome-`held` dokumentiert als ENGINE-entschiedene Konvergenz
+  (echter Recovery-Park/Hold) — nie eine Aussage über die Terminalität des
+  Receipts selbst. Wiederholte echte Terminalbeobachtung bleibt idempotent;
+  Budgets/Policy/WAL/Abort-Verify unverändert; KEINE neue Retry-/Fallback-
+  semantik (die Offenhaltung kosteter ausschließlich lokale Reads, keine
+  Modellaufrufe).
+
+**Regressionen (THIS Lauf):** unknown→HeaderTimeout-Repro (Tick 2 erlaubt
+Recovery, genau ein Continuation-Send, korrelierte Reads nur auf den eigenen
+Receipt); aborted transparent + spätere Recovery; submitted/running/retry/
+busy/bare-failed offen ohne Sends/Settlement; wiederholte Nonterminal-Reads
+merged (count-Wachstum, kein History-Wachstum). Suite 258/256 pass/0 fail/
+2 env-gated skips; agent-control 14/14; hub_test OK; agent_control_test OK;
+Skill 87/87; tsc clean. Archiv nach Codeänderung neu gebaut (2× byte-identisch,
+neuer Pin `ebceaf75…7555d9`); Version bleibt 0.7.31/0.1.42 (unveröffentlichter
+Kandidat, kein zusätzlicher Sprung). Reviewsolation von `cab931a` unberührt.

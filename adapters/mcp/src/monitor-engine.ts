@@ -734,10 +734,12 @@ export class MonitorEngine {
    * shared Schema-4 chain resolution, WAL handling. No new fallback semantics.
    *
    * Convergence rules (bounded, no loops on a quiet board):
-   * - terminal, not blocked → the watch settles (`receipt_observation`), a
-   *   healthy receipt closes an open episode exactly like a healthy wake
-   *   (§4.5 R1); anything terminal without provider evidence is a
-   *   conservative held settlement;
+   * - verified terminal health ONLY (idle, no pending, `completed`, no
+   *   provider evidence) settles the watch as healthy and closes an open
+   *   episode exactly like a healthy wake (§4.5 R1) — QC G1: unknown/
+   *   submitted/aborted/bare-failed are NOT reliable terminal evidence,
+   *   never settle, and stay open as one transparent merged decision so a
+   *   later terminal outcome of the same receipt is still observed;
    * - blocked → the existing recover()/compactionContinue() path runs; a real
    *   park settles the watch (park state stays transparently visible), a
    *   dispatched recovery/continuation moves the watch to the new receipt;
@@ -746,8 +748,8 @@ export class MonitorEngine {
    *   divergence from the changed-board retry loop, which keeps its existing
    *   behavior); chain-advancing errors (update-unverified, send-failed) do
    *   NOT settle — the finite episode advances until it parks;
-   * - pending input or an active turn stays a merged bounded decision, never
-   *   per-tick history growth.
+   * - pending input, an active turn or an unconfirmed state stays a merged
+   *   bounded decision, never per-tick history growth.
    */
   private async observeUnchangedReceipt(
     id: string,
@@ -810,18 +812,41 @@ export class MonitorEngine {
       });
       return "busy-held";
     }
-    const healthy = status.state === "completed";
+    if (status.state !== "completed") {
+      // QC G1 fix: unknown/submitted/input_required/aborted (and any failed
+      // state without provider evidence, already classified `none` above) is
+      // NOT reliable terminal evidence. Settling here would swallow a later
+      // terminal outcome of the SAME receipt (0 reads, no recovery). The
+      // watch stays open: each tick re-reads once and names the observed
+      // state in one transparent merged decision until verified terminal
+      // health or a recovery decision exists. Aborted is therefore named and
+      // visible, never reinterpreted as healthy.
+      await this.release(id, now, null, (record) => {
+        monitorDecision(
+          record,
+          "receipt-watch",
+          { reason: "receipt-not-confirmed-terminal", receipt: dispatchedReceipt, state: status.state },
+          `receipt-watch:${dispatchedReceipt}:not-confirmed-terminal`,
+          now,
+        );
+      });
+      return "busy-held";
+    }
+    // Verified terminal health: idle, no pending input, `completed`, no
+    // provider evidence. Only THIS settles the watch as healthy; a healthy
+    // receipt closes an open recovery episode exactly like a healthy wake
+    // (§4.5 R1).
     await this.release(id, now, null, (record) => {
-      record.state.receipt_observation = { receipt: dispatchedReceipt, outcome: healthy ? "healthy" : "held", at: iso(now) };
-      if (healthy && record.recovery_episode) {
+      record.state.receipt_observation = { receipt: dispatchedReceipt, outcome: "healthy", at: iso(now) };
+      if (record.recovery_episode) {
         record.recovery_episode = null;
         monitorHistory(record, "recovery-episode-closed", { reason: "receipt-observed-healthy" }, now);
       }
       monitorDecision(
         record,
         "noop-unchanged",
-        { reason: healthy ? "receipt-observed-healthy" : "receipt-observed-held" },
-        `noop-unchanged:receipt-observed-${healthy ? "healthy" : "held"}`,
+        { reason: "receipt-observed-healthy" },
+        "noop-unchanged:receipt-observed-healthy",
         now,
       );
     });

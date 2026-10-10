@@ -2415,3 +2415,123 @@ test("gate fix: receipt_observation is additive, validates fail-closed and round
     await cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// QC G1 fix (be951293): unknown/submitted/aborted/bare-failed are NOT reliable
+// terminal evidence and must never settle the receipt watch — a later terminal
+// outcome of the SAME receipt must still reach evidence/recovery.
+
+test("gate fix QC-G1: unknown on an unchanged board does not settle; a later terminal header-timeout of the same receipt recovers on the next tick", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    const { gateway, board } = fakes(state);
+    state.abortState = "no_active_turn";
+    const seed = await seedMonitorWithAdmittedDispatch(project, gateway, board, state, 100_000);
+
+    // (1) delayed/nonterminal observation: idle + unknown — never a settlement
+    state.status = okStatus({ state: "unknown" });
+    await advanceDue(project, 200_000);
+    assert.equal(await seed.engineFactory(200_000).tick(), "busy-held");
+    let record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(record.state.receipt_observation, undefined, "unknown must not settle the watch");
+    assert.equal(state.sends.length, 0);
+    const watch = record.history.filter((entry) => entry.type === "receipt-watch"
+      && (entry.detail as { reason?: string }).reason === "receipt-not-confirmed-terminal");
+    assert.equal(watch.length, 1, "one transparent merged decision names the unconfirmed state");
+    assert.equal((watch[0]!.detail as { state?: string }).state, "unknown");
+
+    // (2) repeated identical nonterminal observation stays merged and idempotent
+    await advanceDue(project, 300_000);
+    assert.equal(await seed.engineFactory(300_000).tick(), "busy-held");
+    record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    const watchAfterRepeat = record.history.filter((entry) => entry.type === "receipt-watch"
+      && (entry.detail as { reason?: string }).reason === "receipt-not-confirmed-terminal");
+    assert.equal(watchAfterRepeat.length, 1, "no history growth for repeated nonterminal reads");
+    assert.equal((watchAfterRepeat[0]!.detail as { count?: number }).count, 2);
+    assert.equal(state.sends.length, 0);
+
+    // (3) the delayed terminal failure of the SAME receipt recovers — the
+    //     exact G1 repro (unknown -> provider_header_timeout, no board/worker
+    //     change, second tick must allow the needed recovery)
+    state.status = okStatus({
+      state: "failed",
+      assistant_message_ids: ["msg_fail"],
+      error_details: [failedDetail("provider_header_timeout", "msg_fail")],
+    });
+    await advanceDue(project, 400_000);
+    assert.equal(await seed.engineFactory(400_000).tick(), "recovery-continued");
+    record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(state.sends.length, 1, "exactly one recovery continuation for the late failure");
+    assert.deepEqual(state.statusCalls.map((call) => call.message_id),
+      [seed.receipt, seed.receipt, seed.receipt], "every watch read correlates the same dispatch receipt");
+    assert.ok(record.recovery_episode?.attempts.some((entry) => entry.identity === "deep-provider/deep-model"));
+  } finally {
+    await cleanup();
+  }
+});
+
+test("gate fix QC-G1: aborted is transparent, never healthy, keeps the watch open and a later terminal failure still recovers", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    const { gateway, board } = fakes(state);
+    state.abortState = "no_active_turn";
+    const seed = await seedMonitorWithAdmittedDispatch(project, gateway, board, state, 100_000);
+
+    state.status = okStatus({ state: "aborted" });
+    await advanceDue(project, 200_000);
+    assert.equal(await seed.engineFactory(200_000).tick(), "busy-held");
+    let record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(record.state.receipt_observation, undefined, "aborted never settles as healthy");
+    const watch = record.history.filter((entry) => entry.type === "receipt-watch"
+      && (entry.detail as { reason?: string }).reason === "receipt-not-confirmed-terminal");
+    assert.equal(watch.length, 1);
+    assert.equal((watch[0]!.detail as { state?: string }).state, "aborted", "the aborted state is named transparently");
+    assert.ok(!record.history.some((entry) => entry.type === "noop-unchanged"
+      && (entry.detail as { reason?: string }).reason === "receipt-observed-healthy"));
+
+    state.status = okStatus({
+      state: "failed",
+      assistant_message_ids: ["msg_fail"],
+      error_details: [failedDetail("provider_header_timeout", "msg_fail")],
+    });
+    await advanceDue(project, 300_000);
+    assert.equal(await seed.engineFactory(300_000).tick(), "recovery-continued");
+    record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(state.sends.length, 1);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("gate fix QC-G1: submitted/running/retry/busy activity and bare-failed states keep the watch open without sends or settlements", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    const { gateway, board } = fakes(state);
+    const seed = await seedMonitorWithAdmittedDispatch(project, gateway, board, state, 100_000);
+
+    for (const [index, status] of [
+      okStatus({ state: "submitted" }),
+      okStatus({ backend_activity: "busy", state: "running" }),
+      okStatus({ backend_activity: "retry", state: "running" }),
+      okStatus({ state: "failed", error_details: [] }),
+    ].entries()) {
+      state.status = status;
+      const now = 200_000 + index * 100_000;
+      await advanceDue(project, now);
+      assert.equal(await seed.engineFactory(now).tick(), "busy-held", `nonterminal state ${JSON.stringify(status.state ?? status.backend_activity)} stays held`);
+    }
+    const record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(record.state.receipt_observation, undefined, "no nonterminal read settles the watch");
+    assert.equal(state.sends.length, 0, "no dispatch or recovery without terminal evidence");
+    assert.equal(record.state.work, "active", "holds never park the work state");
+    const watchEntries = record.history.filter((entry) => entry.type === "receipt-watch");
+    assert.ok(watchEntries.length >= 1, "the holds are visible as merged decisions");
+    assert.ok(record.history.filter((entry) => entry.type === "receipt-watch").every((entry) =>
+      (entry.detail as { reason?: string }).reason !== undefined));
+  } finally {
+    await cleanup();
+  }
+});

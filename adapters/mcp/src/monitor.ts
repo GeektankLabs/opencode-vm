@@ -200,14 +200,18 @@ export type MonitorWorkerErrorMarker = {
 };
 
 /**
- * be951293 gate fix (2026-10-10): settled terminal observation of the CURRENT
- * admitted dispatch receipt on an unchanged board. The unchanged/no-op
- * shortcut never re-read the manager session, so a dispatch that was admitted
- * and THEN ended terminally failed stayed invisible (live: silent
- * noop-unchanged loop, no recovery, no park). The engine watches each
- * distinct receipt exactly once, records the settled outcome here and then
- * goes quiet again. Purely additive: absent on legacy records, validated
- * fail-closed when present, bounded to one entry.
+ * be951293 gate fix (2026-10-10): settled observation of the CURRENT admitted
+ * dispatch receipt on an unchanged board. The unchanged/no-op shortcut never
+ * re-read the manager session, so a dispatch that was admitted and THEN ended
+ * terminally failed stayed invisible (live: silent noop-unchanged loop, no
+ * recovery, no park). The engine watches each distinct receipt exactly once
+ * and records the settled outcome here. Outcome semantics (QC G1): `healthy`
+ * is written ONLY for verified terminal health (idle, no pending input,
+ * `completed`, no provider evidence); `held` records an ENGINE-DECIDED
+ * convergence (real recovery park or hold) and never claims anything about
+ * the receipt's own terminality — unconfirmed states keep the watch open.
+ * Purely additive: absent on legacy records, validated fail-closed when
+ * present, bounded to one entry.
  */
 export type MonitorReceiptObservation = {
   receipt: string;
