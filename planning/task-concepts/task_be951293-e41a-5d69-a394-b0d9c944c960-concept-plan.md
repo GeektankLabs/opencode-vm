@@ -1,7 +1,7 @@
 Task-ID: task_be951293-e41a-5d69-a394-b0d9c944c960
 Title: Work Package: Monitor-Zuverlässigkeit und Diagnose vorbereiten (Konzept, reviewbar)
-Stand: 2026-10-10 · Status: Welle A QC_PASS (c6bd261); Welle B QC_PASS (28ff295, Delta-QC waveB-qc SHAa509e19d…); Welle C implementiert (lokaler Kandidat 8e9650b, unabhängige QC ausstehend) · Implementierungs-Go erteilt · Historie: CONCEPT_PASS (Rev. 3, unabhängig geprüft), Entscheidungsvorbereitung abgeschlossen 2026-10-09
-Last-concept-update: 2026-10-09T20:53 UTC (historisch: Abschlussmetadaten Rev3-CONCEPT_PASS; Inhaltsrevision unverändert SHA1386d074…; die damit offene Produktentscheidung 4.6/§8a ist mit dem Go vom 2026-10-10 entschieden, siehe §11) · Last-implementation-update: 2026-10-10 (Kette auf Branch task/be951293-wave-a: Welle A e0c5ce3→738efe1→c6bd261 QC_PASS; Welle B 38eeb80→326d243, QC-F-B1/F-B2-Korrektur c2b2808; §11 aktueller Stand)
+Stand: 2026-10-10 · Status: Welle A/B QC_PASS; Welle C von unabhängiger QC mit F-C1/F-C3 zurückgemeldet (bf1939b), Delta-Fix lokal committet (5bf4408), Delta-QC ausstehend · Implementierungs-Go erteilt · Historie: CONCEPT_PASS (Rev. 3, unabhängig geprüft), Entscheidungsvorbereitung abgeschlossen 2026-10-09
+Last-concept-update: 2026-10-09T20:53 UTC (historisch: Abschlussmetadaten Rev3-CONCEPT_PASS; Inhaltsrevision unverändert SHA1386d074…; die damit offene Produktentscheidung 4.6/§8a ist mit dem Go vom 2026-10-10 entschieden, siehe §11) · Last-implementation-update: 2026-10-10 (Kette auf Branch task/be951293-wave-a: Welle A e0c5ce3→738efe1→c6bd261 QC_PASS; Welle B 38eeb80→c2b2808→28ff295 QC_PASS; Welle C 8e9650b→bf1939b, QC-F-C1/F-C3-Delta-Fix 5bf4408; §11 aktueller Stand)
 
 ## 1 Ziel / Nichtziele
 
@@ -610,6 +610,35 @@ Der Reviewbericht selbst wurde nicht verändert.
   rein mengenbegrenzt, im Kopf der Ansicht benannt); Kopieren nutzt Clipboard
   mit Auswahl-Fallback (http-Origin ohne Clipboard-Berechtigung); keine
   Client-seitige Retention über den Request hinaus.
-- **Offen:** unabhängige QC zu Welle C (Candidate `8e9650b`); danach Welle D
+- **QC Welle C (CHANGES_REQUIRED) und Delta-Fix (Autor, lokal):** Bericht
+  `waveC-qc.md` (SHA256
+  `6040ddf04c14805db65be0780ecc8ef285bddfb82b43fb3e0471b6b17642bae6`, Terminal
+  `msg_123bf4442001bv8O8INW8JCkcF`) gegen `bf1939b`: Autorenzahlen bestätigt
+  (hub 42 OK, Browser 19/19, Adapter 246/0/2, monitor 45/45, tsc grün);
+  SECRET_PATTERNS-Präzisierung ausdrücklich ohne Befund (15 eigene Fälle,
+  dokumentierte Altformat-Grenze akzeptiert); Auth/Symlink/Owner/Share/
+  Refresh-Pfade PASS. Zwei Befunde: **F-C1** — die strukturierte
+  `recovery_projection` wurde unredigiert serialisiert, synthetische
+  ghp_/sk-proj-Werte in Label/Identity leaken im JSON, obwohl der Text
+  redigiert war; **F-C3** — eine Einzelzeile über der Tail-Grenze (400 KiB,
+  mit/ohne Abschlussnewline) erzeugte fälschlich „Datei vorhanden, aber leer"
+  und ggf. `complete`. **Delta-Fix `5bf4408f71196e9e232cc35bd004c526f64b4c2e`**
+  (Tree `ef57bc4969e56fc9f9617c7755ba7d96f2ce15c1` auf `bf1939b`):
+  F-C1 — `redact_structure()` redigiert jeden String-Schlüssel/-Zweig der
+  sicheren Antwort-Kopie (`recovery_projection`, `sources`) mit derselben
+  Allowlist; legitime Engine-Tokens matchen keine Patterns und bleiben
+  byte-identisch; keine Resolver-Neuberechnung, persistierte Engine-Daten
+  unverändert. F-C3 — neuer Tail-Zustand `truncated_only` (Datei nicht leer,
+  Bytefenster ohne vollständige Zeile) mit TRUNKIERT-Marker und
+  `partial`-Einordnung; „empty" nur bei 0 Byte; in-Bounds-100-KiB-Zeile
+  bleibt lesbar `ok`. Negative Regressionstests für beide: komplettes
+  JSON ohne synthetische Secrets bei byte-exakter Bypass-Kopie harmloser
+  Projektion; Riesenzeile mit und ohne Newline (truncated_only, nie
+  „complete", kein Content-Leak) plus Empty-/In-Bounds-Kontrollen.
+  THIS-Lauf-Verifikation: hub_test 44 OK (davon 21 Log-Tests, +2 neu),
+  Browser-Fixture 19/19, Adapter tsc clean, monitor 45/45, Suite 246/0/2
+  (env-gated). Die unabhängige Delta-QC zu `5bf4408` steht aus — keine
+  Selbstabnahme; Welle D wird nicht vor der Delta-QC gestartet.
+- **Offen:** Delta-QC zu Welle C (`5bf4408`); danach Welle D
   (Abnahme inkl. AITL-Fixture, Hub-Konsistenztests gegen persistierte
   Projektion, Version-Bump bei Mainintegration).
