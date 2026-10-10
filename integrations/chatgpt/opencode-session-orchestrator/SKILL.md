@@ -6,7 +6,7 @@ license: MIT
 
 # OpenCode Session Orchestrator
 
-Release marker: **2026-10-10-r50**. This is the skill revision, not an MCP version.
+Release marker: **2026-10-10-r51**. This is the skill revision, not an MCP version.
 
 This is a client-side workflow skill. The user supplies a working compatible MCP connection, including when using Secure MCP Tunnel. The skill contains no tunnel, account, server alias or credentials and does not configure the connection.
 
@@ -45,10 +45,13 @@ Read references when their workflow is relevant:
 ### Journal mode before queue/event workflows
 
 Discover the current tool catalog and read `activity_journal` from a normal
-`list_sessions` or `get_session` response when that field exists. In opencode-vm,
-fresh sessions default journal-free; `--journal` opts in and attach retains the
-existing mode. This is an operator startup choice, not permission for the skill
-to change mode, restart or reinstall a connector.
+`list_sessions` or `get_session` response when that field exists. In opencode-vm
+(since 0.7.31), fresh sessions default the journal ON when the session mode is
+journal-capable; `--journal` forces it on, `--no-journal` opts out, attach
+retains the existing mode in both directions, and a journal-incapable fresh
+session downgrades transparently to the journal-free branch below. This is an
+operator startup choice, not permission for the skill to change mode, restart
+or reinstall a connector.
 
 - `enabled:false, state:disabled`: intentional journal-free operation. Do not
   call Activity/Attention/ACK/override tools or subscribe to Events, even from a

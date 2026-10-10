@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-10-r51
+
+- Align the two journal-default references with the opencode-vm 0.7.31 contract change (Activity Journal defaults ON for journal-capable fresh sessions, `--no-journal` opts out, attach retains the stored mode in both directions, journal-incapable fresh sessions downgrade transparently): SKILL.md journal-mode branch and monitor-reporting.md's disabled-state note now describe the new default without rewriting the r47 history; the journal-free fallback branch itself is unchanged and remains the operative contract whenever `activity_journal.enabled:false`.
+
 ## 2026-10-10-r50
 
 - Add the bounded monitor/progress/night reporting contract (new `opencode-session-orchestrator/references/monitor-reporting.md`, task_be951293 addendum): assemble available task/C/P documents, Task Management Journal, native monitor history (engine decision entries including recovery/fallback/park outcomes), exact manager/worker receipts and terminal originals with declared coverage; brief one-line mention of each evidenced error class even after later PASS (example wording included, only when evidenced), counts only with complete evidence, no "error-free" claim from gaps, journal-disabled fallback respected, and MCP request/message IDs never presented as provider request IDs. Instruction-only: no runtime, scheduler or notification channel.

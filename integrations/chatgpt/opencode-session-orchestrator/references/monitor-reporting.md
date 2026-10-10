@@ -28,7 +28,7 @@ Example wording — only when the evidence actually shows it:
 
 > The run hit provider timeouts; the configured automatic fallbacks continued the work. Details on request / in monitor history [exact reference].
 
-With `activity_journal.state:disabled` (fresh opencode-vm default) there are no Activity/Attention events: assemble from bounded exact-receipt status/result reads, native monitor history, the Task Management Journal and C/P instead, and say so. `state:unavailable` on an enabled journal is a named fault, not a silent gap.
+With `activity_journal.state:disabled` (an opencode-vm startup choice: journal-capable fresh sessions default enabled since 0.7.31, `--no-journal` opts out) there are no Activity/Attention events: assemble from bounded exact-receipt status/result reads, native monitor history, the Task Management Journal and C/P instead, and say so. `state:unavailable` on an enabled journal is a named fault, not a silent gap.
 
 ## Shape
 

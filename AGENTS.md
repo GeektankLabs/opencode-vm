@@ -29,6 +29,28 @@ Integrators must close with a cleanup decision and commit/save work needed
 beyond the next fresh VM; worktree locks do not exempt that boundary. Manual steps:
 [`docs/WORKTREES.md`](docs/WORKTREES.md).
 
+**Activity Journal default-on + opt-in diagnostic logger (script 0.7.31):**
+fresh sessions now default the Activity Journal ON when the session mode is
+journal-capable (web MCP or configured terminal MCP); `--no-journal` opts out
+for the fresh session, `--journal` without capability still fails hard, and a
+journal-incapable fresh session downgrades transparently with a visible notice
+(never a silent switch of a running session — attach retains the stored mode in
+both directions). Separately, `opencode-vm diaglog {start|stop|status|script}`
+adds a strictly opt-in (DEFAULT OFF) diagnostic logger for a running session:
+single embedded stdlib-only Python worker executed in the session VM,
+project-persistent episodes under `<project>/.opencode-vm/diag-logger/`
+(outside the worktree sweep) with bounded rotation (10 MB/file, 100 MB/episode
+hard stop, nothing deleted), fail-closed structured metadata allowlist (raw
+log lines/prompts/auth/cookies/tokens are never persisted; unknown lines are
+counted and discarded), provider HTTP status/request IDs only from explicit
+provider-attributed source fields with source citation (internal MCP UUIDs and
+unlabeled req_* strings rejected), identity-verified stop (never force-kills
+foreign PIDs; PID-reuse/stale state handled honestly), and honest failure
+states (an impossible FINAL write is never reported as a clean stop; status
+reports process identity, heartbeat and source growth separately). The logger
+process lives inside the session VM, does not survive VM replacement and is
+never auto-restarted; episodes persist.
+
 **Activity Journal opt-in hotfix (script 0.7.23 / adapter 0.1.35 / skill r47):**
 fresh sessions default journal-free; `web --journal` / configured MCP terminal
 `start --journal` opt in. Attach retains `SESS_JOURNAL_ENABLED`; absent legacy

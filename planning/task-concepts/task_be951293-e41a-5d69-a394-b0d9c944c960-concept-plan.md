@@ -920,3 +920,73 @@ AGENTS.md MCPs-Abschnitt). Läuft Episode2 also innerh­alb der AITL-Session-VM,
 endet sein Prozess mit dem VM-Ersatz und braucht einen expliziten Neustart
 über seinen eigenen Startmechanismus; fehlende projektspezifische Belege
 (Startmechanismus, Logort, PID-Führung) sind hier ausdrücklich offen.
+
+## 13 Scope-Erweiterung: Journal default ON + opt-in Diag-Logger (2026-10-10, Operator-Go msg_e22478f9…; Fortsetzung nach Tunnelabbruch)
+
+Ausdrückliche Operator-Scopeerweiterung im selben WP (keine neue Doppelaufgabe)
+auf dem Kandidatenzweig `task/be951293-gatefix`; Basis = unabhängig QC_PASS
+Gatefix `b62d8ef`. Zwei klar getrennte Featurecommits plus dieser
+Abschlusscommit; Versionen bleiben **0.7.31 / 0.1.42** (ein unveröffentlichtes
+Kandidatenpaket), MCP-Archiv-Pin `ebceaf75…` unverändert gültig (Adapter-Code
+dieser Erweiterung unberührt).
+
+**A) Activity Journal DEFAULT AN (Commit `54707c1`):** Frische Sessions
+defaulten ON bei journal-fähigem Modus (web MCP / konfigurierter Terminal-MCP);
+`--no-journal` opt-out, `--journal` ohne Capability weiterhin harter Fehler vor
+Lifecycle-Arbeit, `--journal --no-journal` exclusiv, `--no-journal --no-mcp`
+gültig. Journal-unfähige frische Session: transparenter Downgrade mit sichtbarem
+Hinweis (`session_journal_effective`) — nie ein stiller Moduswechsel einer
+laufenden Session: Attach bewahrt den gespeicherten Modus in BEIDEN Richtungen
+und verweigert implizite Änderungen; Legacy-Feld leer = enabled; `write_senv`
+Legacy-Default nun 1. Kein Journal-/Attention-Runtime-Code geändert — nur
+Startupdefault, Opt-out-Flag, capability-gebundene Auflösung. Bekannte
+Deaktivierungsgründe laut Reviewkontext (vermutete Dateiprobleme, nicht
+bewiesen, Worktree-Verdacht) werden NICHT forensisch nachgestellt; aktuelle
+Regressionen decken Start/Resume/Off-Persistenz/Serialisierung ab.
+
+**B) Diag-Logger DEFAULT AUS (Commit `6a96250`):** `opencode-vm diaglog
+{start|stop|status [--json]|script}` — genau ein eingebetteter
+stdlib-only-Python-Worker (`OCVM_DIAGLOG_PY`), im Session-VM ausgeführt.
+Episoden projektpersistent unter `<project>/.opencode-vm/diag-logger/`
+(außerhalb Worktree-Sweep); der PROZESS überlebt VM-Ersatz nicht und wird nie
+automatisch neu gestartet (dokumentiert, nicht behauptet). Limits: 10 MB/Datei
+Rotation (an Zeilengrenzen, keine zerrissenen JSONL; Einzelüberlängzeile
+bounded Overflow), 100 MB/Episode harter Stop (nichts gelöscht), 8 MB/Tick
+Lesebudget (Rückstand = dokumentierte Lücke), max. 8 Quellen, dynamische
+native Quellenwahl aus belegtem Sessionkontext (XDG-Opencodelog +
+vorhandene Share-Service-Logs — keine hartcodierten AITL-Pfade, keine
+Modellprobe, kein Secret-Tracing). Privacy: Fail-closed strukturierte
+Metadataallowlist — Rohzeilen/Prompts/Auth/Cookies/Tokens werden nie
+persistiert; unbekannte Zeilen nur gezählt; Werte hart begrenzt + gegen
+Sentinelmuster geschrubbt. Provider-HTTPstatus/Request-ID ausschließlich aus
+explizit providerattributierten Quellfeldern mit Fundstelle (Key + Offset);
+nackte UUIDs, unbeschriftete `req_*` und interne `msg_`/`ses_`-Receipts sind
+KEINE Provider-IDs; nicht exponierte Felder fehlen mit Grund (Coverage zählt
+kumulativ, Lücken/Rotationen sichtbar) — keine End-to-End-Headerabdeckung
+behauptet. Lifecycle-Ehrlichkeit: Start = flock + Identitätsclaim
+(PID + /proc-Startzeit; PID-Reuse/Stale rotieren als Evidence-Dateien,
+Doppelstart exit 5), systemd-Transienteinheit (Restart=no, Control-Group-Kill),
+fehlgeschlagener Unitstart released den Claim; Status meldet Prozessidentität,
+Herzschlagalter und Quellenwachstum GETRENNT (stille Quelle ≠ kaputt, lebender
+Prozess allein ≠ schreibt); Stop = identitätsverifiziertes SIGTERM mit
+begrenzter Grace, nie Force-Kill, nie fremde PIDs, Zombies gelten als tot;
+I/O: atomare tmp+rename-Schreibvorgänge mit begrenztem transientem EINTR/EAGAIN
+-Retry (2×), persistenter OSError (inkl. AITL-Errno-23-Klasse) scheitert
+closed — ein unmöglicher FINAL-Write endet exit 3 OHNE Final (nie ein
+erfundenes sauberes Ende); Size-Cap stoppt ehrlich; ValueError (korrupte
+Config) bricht hart ab. Offlinesuite `tests/diaglog_test.py` 9/9.
+
+**C) Skill r51 + Abschluss (dieser Commit):** SKILL.md-Journalzweig und
+monitor-reporting.md-Disabled-Notiz an den neuen 0.7.31-Vertrag angepasst
+(Historie r47/r50 unverändert, journal-freier Fallbackzweig operativ
+erhalten); bundle.json/CHANGELOG/latest.json/zip+sha256 → 2026-10-10-r51;
+Testpins gezogen (87/87 OK). AGENTS.md + docs/MCP-INTERFACE.md erhalten datierte
+Addenda (0.7.23-Vertrag als Historie erhalten). Konzept-/Compact-Updates hier.
+
+**Verifikation (finaler Baum):** tsc n/a (Adaptercode unverändert), Adapter
+258/256/0/2, hub_test OK, agent_control_test OK, Skill 87/87,
+activity_journal_test grün, diaglog 9/9, `bash -n` OK, Shellcheck-Neubereich
+nur konventionelle SC2016 (intentionale vm_exec-Quoting), Archiv-Pin
+reproduktiv bestätigt. **Grenzen:** kein Live-/Runtime-Test der Logger-Starts
+(kein produktiver Start autorisiert), echte Providerrequests nie ausgeführt;
+unabhängige Gesamt-QC folgt separat.

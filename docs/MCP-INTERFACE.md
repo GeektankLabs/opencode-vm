@@ -22,16 +22,27 @@ The adapter does not start a second OpenCode process, create an MCP manager sess
 
 When opted in with `--journal`, Activity and prepared attention share one project-persistent private journal at `.opencode-vm/mcp/activity.json`, migrated once from the previous session-share journal when no project journal exists. The attention projection stores compact result summaries and revision/ID evidence, not full conversation history. See [MCP Events and prepared attention](#mcp-events-and-prepared-attention).
 
-### Activity Journal: default off, explicit session opt-in
+### Activity Journal: default on since 0.7.31, explicit `--no-journal` opt-out
 
-Since script 0.7.23 / adapter 0.1.35, **fresh sessions default journal-free**.
-`opencode-vm web --journal` or `opencode-vm start --journal` (with the project's
-configured terminal MCP connection) opts in for this session. A fresh session
-without the flag defaults off again; attach retains the recorded mode.
-`web --journal --reconnect` refuses a mode change before lifecycle takeover.
-Legacy records/descriptors with no mode field retain their former enabled
-behavior. Existing sessions are not automatically changed, and no base rebuild
-or additional VM package is required. `--journal` conflicts with `--no-mcp`.
+Since script 0.7.31, **fresh sessions default the Activity Journal ON** when the
+session mode is journal-capable (web MCP or the project's configured terminal
+MCP connection). `--no-journal` opts out for the fresh session; `--journal`
+still forces it on and, without a journal-capable mode, still fails hard. A
+journal-incapable fresh session downgrades transparently to journal-free with a
+visible notice (never a silent switch of a RUNNING session). Attach retains the
+recorded mode in both directions; a requested change (`--journal` on a stored
+off-session or `--no-journal` on a stored on-session) is refused before
+lifecycle takeover. Legacy records/descriptors with no mode field retain their
+former enabled behavior. Existing sessions are not automatically changed, and
+no base rebuild or additional VM package is required. `--journal` conflicts
+with `--no-mcp`. (Historical contract of 0.7.23–0.7.30 — fresh default off
+with explicit `--journal` opt-in — is preserved below as history.)
+
+### Activity Journal history: 0.7.23 opt-in contract
+
+Since script 0.7.23 / adapter 0.1.35, fresh sessions defaulted journal-free
+with `--journal` opt-in; that section's remaining mechanics are unchanged and
+still apply.
 
 The schema-1 runtime descriptor adds optional boolean `activityJournalEnabled`;
 omission means legacy enabled, never a guessed new-session default. New session
