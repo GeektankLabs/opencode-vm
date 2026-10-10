@@ -1,6 +1,6 @@
 Task-ID: task_be951293-e41a-5d69-a394-b0d9c944c960
 Title: Work Package: Monitor-Zuverlässigkeit und Diagnose vorbereiten (Konzept, reviewbar)
-Stand: 2026-10-10 · Status: Welle A QC_PASS (c6bd261); Welle B von unabhängiger QC mit F-B1/F-B2 zurückgemeldet (326d243), Korrekturen lokal committet (c2b2808), Delta-QC ausstehend · Implementierungs-Go erteilt · Historie: CONCEPT_PASS (Rev. 3, unabhängig geprüft), Entscheidungsvorbereitung abgeschlossen 2026-10-09
+Stand: 2026-10-10 · Status: Welle A QC_PASS (c6bd261); Welle B QC_PASS (28ff295, Delta-QC waveB-qc SHAa509e19d…); Welle C implementiert (lokaler Kandidat 8e9650b, unabhängige QC ausstehend) · Implementierungs-Go erteilt · Historie: CONCEPT_PASS (Rev. 3, unabhängig geprüft), Entscheidungsvorbereitung abgeschlossen 2026-10-09
 Last-concept-update: 2026-10-09T20:53 UTC (historisch: Abschlussmetadaten Rev3-CONCEPT_PASS; Inhaltsrevision unverändert SHA1386d074…; die damit offene Produktentscheidung 4.6/§8a ist mit dem Go vom 2026-10-10 entschieden, siehe §11) · Last-implementation-update: 2026-10-10 (Kette auf Branch task/be951293-wave-a: Welle A e0c5ce3→738efe1→c6bd261 QC_PASS; Welle B 38eeb80→326d243, QC-F-B1/F-B2-Korrektur c2b2808; §11 aktueller Stand)
 
 ## 1 Ziel / Nichtziele
@@ -548,9 +548,68 @@ Der Reviewbericht selbst wurde nicht verändert.
   nur eigene Parks; uncertain bleibt geparkt; acht fehlerhafte Episoden-/
   Resolution-Formate rejecten, null/legacy/valid akzeptiert. Verifikation THIS
   Lauf: tsc clean; monitor 45/45; Suite 246 pass/0 fail/2 env-gated skips in
-  2/2 Läufen (Flake nicht als behoben deklariert). Delta-QC durch die
-  unabhängige QC offen — keine Selbstabnahme.
-- **Offen:** Delta-QC über `c2b2808`; danach Welle C
-  (begrenzte Logread-API + Hub-Textansicht, rein lesender Hub-Konsument der
-  Engine-Projektion) und Welle D (Abnahme inkl. AITL-Fixture,
-  Hub-Konsistenztests, Version-Bump bei Mainintegration).
+  2/2 Läufen (Flake nicht als behoben deklariert).
+- **Delta-QC Welle B: QC_PASS** auf `28ff295e5c33bb60dd060f0fcafe7fd394b3dfc3`
+  (Originalterminal `msg_12391d0960011RouFULEGqdF09`, vollständig gelesen;
+  Bericht `waveB-qc.md` final SHA256
+  `a509e19da6ae4104ac7b2cd624cf24791a8adcddd1f5c45ef0418dd00d96cf53`): F-B1/F-B2
+  unabhängig bestätigt und kehrt Repro-verifiziert; Runzahlen belegt (tsc/build
+  1/1, monitor 45/45, agent-control 13/13, Suite 246/0/2 in 2/2);
+  `runtime-unavailable`-Parks bleiben als bewusst gescopete Beobachtung für
+  späteres Cleanup dokumentiert, kein Befund.
+- **Welle C — implementiert (lokal kandidatenbereit, unabhängige QC ausstehend):**
+  Sicher begrenzte Logread-API `GET /api/monitor/<id>/log` hinter dem
+  bestehenden Peer-/Basic-Auth-Gate (keine MCP-Erweiterung, keine
+  Auth-/Security-Abschwächung): klar getrennte Quellen in einer kopierbaren
+  Monospace-Textansicht — Registry-Entscheidungslauf (Fenster default 24 h),
+  Operational Logs, Engine-Recovery-Projektion WÖRTLICH durchgereicht (keine
+  Python-Auflösung im Hub, §4.4-R2), Heartbeat als getrennte Liveness-Quelle
+  mit Generation-Identitätscheck, sowie der Tail von
+  `<session-share>/monitor/server.log`, bei jedem Request neu aus dem
+  AKTUELLEN SESSION-ROOT bestimmt (Reconnect/Share-Wechsel; fremde
+  Projekt-Logs strukturell unerreichbar). Sichtbar immer: Abrufzeitpunkt UTC,
+  Datenzeitraum, Quellenstand (Share/Generation/Projekt-Hash), je Quelle
+  ok/empty/not_configured/absent/mismatch/unsafe/corrupt, truncated/omitted,
+  Gesamtabdeckung complete/partial/unavailable — Fehler oder Stale werden
+  nie als frisch ausgewiesen. Serverseitige Bounds: Tail ≤256 KiB / ≤2000
+  Zeilen (führende abgeschnittene Zeile verworfen), Fenster clamp 1..24 h,
+  Antwort ≤512 KiB, sichtbare Kürzungsmarker verweisen auf die Quelldateien;
+  Browser lädt nicht unbeschränkt (scrollbares `pre`, max-height).
+  Fail-closed Pfadsicherheit: regular-file-/owner-/symlink-/mode-Checks;
+  Symlink-Targets werden nie gelesen. Redaktion serverseitig mit der
+  bestehenden SECRET_PATTERNS-Allowlist vor jeder Antwort; ein Pattern wurde
+  präzisiert (`sk[-_]…`/`gh[pousr]_…` erzwingen Separator), echte
+  Key-Formate redigieren weiterhin (bestehende Tunnel-Log-Tests grün),
+  Engine-Tokens wie `skipped_attempted` werden nicht mehr verschluckt.
+  UI: bestehende Grundstatusanzeige unverändert; große kopierbare Textbox im
+  Detailbereich statt Kartenflut; obere Aktualisieren- UND
+  Detail-/Status-Refresh-Pfade laden die Ansicht nachweislich frisch;
+  Kopier-Interaktion mit ehrlichem Fallback. Keine Filter, kein Dashboard,
+  kein Autofollow, kein MCP-Ausbau.
+  Candidate: `8e9650bb634d61892c9452ab1fe9e9b3c32a2c1f` (Tree
+  `bf52b8cb0da5c7ad7fb1a480418c7ce32d10a595`) auf `28ff295` — Dateien:
+  `hub/monitor.py`, `hub/server.py`, `hub/monitor.js`, `hub/styles.css`,
+  `tests/hub_test.py`, `tests/hub_monitor_fixture.py`,
+  `tests/hub_monitor_browser_test.mjs` (+656/−6).
+  Verifikation THIS Stand: hub_test 42 OK (inkl. 5 neuer
+  Logread-/Privacy-/Auth-/Truncation-Tests); reale Browser-Suite gegen
+  isolierte Fixture 19/19 (inkl. neuer Welle-C-Tests: frische Einträge nach
+  beiden Refresh-Pfaden, Fehler-/Stale-Ehrlichkeit, Copy-Reaktion,
+  scrollbare Begrenzung, Verbatim-Projektion); Adapter-Regression
+  unberührt: tsc clean, monitor 45/45, Suite 246 pass/0 fail/2 env-gated
+  skips. Welle-A/B-Schutzinvarianten unverändert; kein Main-Merge, kein
+  Push/Release/Deploy/Restart, kein Live-/Produkteingriff (eigene isolierte
+  Fixture). Der lastabhängige `dashboard-bootstrap`-Flake bleibt als
+  vorbestehend vermerkt, nicht als behoben deklariert.
+  Reversible MVP-Kleinentscheidungen (belegt): Fenster-Default 24 h +
+  byte/line-Caps wie im Konzept vorgeschlagen, als starting values über die
+  API `limits` sichtbar; Heartbeat `absent` → partial, `mismatch` → partial
+  mit namentlicher Warnung, `unsafe/corrupt` → unavailable; leere, aber
+  vorhandene Datei zählt als vollständig (ok, kein Inhalt); Tail zeigt keine
+  Zeitfenster-Filterung (systemd-append-Zeilen tragen keine Zeitstempel —
+  rein mengenbegrenzt, im Kopf der Ansicht benannt); Kopieren nutzt Clipboard
+  mit Auswahl-Fallback (http-Origin ohne Clipboard-Berechtigung); keine
+  Client-seitige Retention über den Request hinaus.
+- **Offen:** unabhängige QC zu Welle C (Candidate `8e9650b`); danach Welle D
+  (Abnahme inkl. AITL-Fixture, Hub-Konsistenztests gegen persistierte
+  Projektion, Version-Bump bei Mainintegration).
