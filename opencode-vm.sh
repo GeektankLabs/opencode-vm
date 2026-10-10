@@ -426,12 +426,19 @@ def is_provider_attributed(fields):
     return any(key == "providerID" or key.startswith("provider.") for key in fields)
 
 
-def request_id_candidate(value):
-    """A provider request ID only from an explicitly labeled field with a
-    usable unique value. Bare UUIDs, unlabeled internal req_* strings and
-    internal receipts are NOT provider IDs."""
+def request_id_candidate(value, explicit_provider_label=False):
+    """A provider request ID candidate. With an explicit provider-scoped label
+    on a provider-attributed line, the provider source plus the label IS the
+    evidence — any non-empty format is kept (F-D2b: no format suppression
+    there, so provider.requestID="req_real_openai_9f3a" and a plain UUID both
+    persist). Without that explicit provider label, bare UUIDs, unlabeled
+    internal req_* strings and internal receipts stay rejected."""
     text = str(value).strip()[:REQUEST_ID_MAX]
-    if not text or UUID_RE.match(text):
+    if not text:
+        return None
+    if explicit_provider_label:
+        return text
+    if UUID_RE.match(text):
         return None
     if text.startswith(("req_", "msg_", "ses_")):
         return None
@@ -460,13 +467,19 @@ def build_event(fields, source_name, offset):
                 event["http_status"] = int(str(fields[key])[:3])
                 event["http_status_key"] = key[:64]
                 break
-        # F-D2: request IDs share the SAME provider-attribution gate as the
-        # HTTP status — a labeled request id from a non-provider context
-        # (e.g. an internal trace) is NOT a provider request ID. Without the
-        # gate the field stays absent; it is never guessed from other keys.
+        # F-D2/F-D2b: request IDs share the SAME provider-attribution gate as
+        # the HTTP status — a labeled request id from a non-provider context
+        # (e.g. an internal trace) is NOT a provider request ID. Within the
+        # gate, an explicit provider-scoped label (provider.requestID /
+        # providerRequestID) makes the provider source plus the label the
+        # evidence: any non-empty format is kept. Without that explicit
+        # provider label, format suppression still rejects bare UUIDs,
+        # unlabeled req_* strings and internal receipts. The field is never
+        # guessed from other keys.
         for key in sorted(fields):
-            if key.lower().replace(".", "").replace("-", "") in REQUEST_ID_KEYS:
-                request_id = request_id_candidate(fields[key])
+            normalized = key.lower().replace(".", "").replace("-", "")
+            if normalized in REQUEST_ID_KEYS:
+                request_id = request_id_candidate(fields[key], normalized == "providerrequestid")
                 if request_id:
                     event["request_id"] = request_id
                     event["request_id_key"] = key[:64]
@@ -582,6 +595,31 @@ class Episode:
         if not events:
             return
         view = "".join(json.dumps(event, separators=(",", ":")) + "\n" for event in events)
+        # F-D3 write admission on the SERIALIZED bytes: the episode events
+        # budget is enforced against what is actually written (JSON can
+        # expand versus raw input, so input-byte accounting would lie). A
+        # batch that does not fully fit is admitted only up to the last
+        # complete line; the dropped remainder is counted in meta and the
+        # episode then stops honestly. True bound: sum(events*.jsonl) never
+        # exceeds max_total_bytes; administrative state (meta/heartbeat/
+        # config, a few KiB each) is additional, bounded and named.
+        budget_left = self.limits["max_total_bytes"] - self.total_bytes()
+        budget_exhausted = False
+        if budget_left <= 0:
+            raise OSError(errno.ENOSPC, "episode events budget reached (write admission); stopping honestly, no files deleted")
+        if len(view) > budget_left:
+            admitted = view[:budget_left]
+            cut = admitted.rfind("\n") + 1
+            dropped_region = view[cut:]
+            if cut == 0:
+                self.meta["dropped_events_bytes"] = self.meta.get("dropped_events_bytes", 0) + len(view)
+                self.meta["dropped_events"] = self.meta.get("dropped_events", 0) + len(events)
+                raise OSError(errno.ENOSPC, "episode events budget reached (write admission); stopping honestly, no files deleted")
+            self.meta["dropped_events_bytes"] = self.meta.get("dropped_events_bytes", 0) + len(dropped_region)
+            self.meta["dropped_events"] = self.meta.get("dropped_events", 0) + dropped_region.count("\n") \
+                + (1 if dropped_region and not dropped_region.endswith("\n") else 0)
+            view = admitted[:cut]  # admitted up to the last complete line only
+            budget_exhausted = True
         while view:
             index = self.meta.get("events_file_index", 0)
             path = self.events_path(index)
@@ -610,13 +648,15 @@ class Episode:
             if view:
                 self.meta["events_file_index"] = index + 1
                 self.meta["rotations"] = self.meta.get("rotations", 0) + 1
+        if budget_exhausted:
+            raise OSError(errno.ENOSPC, "episode events budget reached (write admission); stopping honestly, no files deleted")
 
     def tick(self):
         meta = self.meta
         if self.total_bytes() >= self.limits["max_total_bytes"]:
             # Honest stop at the hard cap — even a quiet tick must not keep
             # the loop alive once the episode budget is exhausted.
-            raise OSError(errno.ENOSPC, "episode hard size cap reached; stopping honestly, no files deleted")
+            raise OSError(errno.ENOSPC, "episode events budget reached (write admission); stopping honestly, no files deleted")
         pending = []
         now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         for source in self.sources:
@@ -866,16 +906,26 @@ def mode_status(state_dir, as_json):
 
 def mode_selftest():
     fields = parse_logfmt('\''timestamp=2026-10-10T00:00:00.000Z level=ERROR run=abc message="stream error" '\''
-                          '\''providerID=opencode modelID=m session.id=ses_x status=429 providerRequestID="req_abc"'\'')
+                          '\''providerID=opencode modelID=m session.id=ses_x status=429 requestID="req_abc"'\'')
     assert fields is not None
     event = build_event(fields, "opencode", 12)
     assert event["http_status"] == 429 and event["http_status_key"] == "status"
-    assert "request_id" not in event, "unlabeled req_* must be rejected as provider ID"
+    # provider-attributed line, but the label is NOT provider-scoped: format
+    # suppression still rejects an unlabeled req_* string (F-D2b boundary)
+    assert "request_id" not in event, "req_* without a provider-scoped label must be rejected"
+
+    fields1b = parse_logfmt('\''timestamp=2026-10-10T00:00:00.500Z level=ERROR run=abc message="provider call" '\''
+                            '\''providerID=zai provider.requestID="req_real_openai_9f3a" status=429 '\''
+                            '\''provider.requestID2="0f4e2c5a-1111-4111-8111-111111111111"'\'')
+    # F-D2b: provider source plus the explicit provider label is the evidence —
+    # req_* and UUID formats both persist (only the FIRST label key is read).
+    event1b = build_event(fields1b, "opencode", 20)
+    assert event1b["request_id"] == "req_real_openai_9f3a"
 
     fields2 = parse_logfmt('\''timestamp=2026-10-10T00:00:01.000Z level=INFO message="llm request completed" '\''
-                           '\''providerID=p provider.requestID="abc-123-XYZ" status=200'\'')
+                           '\''providerID=p provider.requestID="0f4e2c5a-1111-4111-8111-111111111111" status=200'\'')
     event2 = build_event(fields2, "opencode", 40)
-    assert event2["request_id"] == "abc-123-XYZ" and event2["http_status"] == 200
+    assert event2["request_id"] == "0f4e2c5a-1111-4111-8111-111111111111" and event2["http_status"] == 200
 
     fields3 = parse_logfmt('\''timestamp=2026-10-10T00:00:02.000Z level=INFO message="mcp internal" '\''
                            '\''status=202 requestId=0f4e2c5a-1111-4111-8111-111111111111'\'')
@@ -1041,11 +1091,14 @@ Behavior:
   source fields (source cited per event); internal MCP UUIDs and unlabeled
   req_* strings are not provider IDs.
 - Episodes: <project>/.opencode-vm/diag-logger/episode-*/ — events rotated at
-  10 MB per file, 24 h wall-clock limit (honest "time-limit" final), episode
-  budget 100 MB checked at each tick (proven worst case: budget plus one
-  bounded tick read; nothing is deleted); meta.json/heartbeat.json atomic;
-  a crash or impossible final write is reported honestly (status exit 4),
-  never as a clean stop.
+  10 MB per file, 24 h wall-clock limit (honest "time-limit" final), events
+  budget 100 MB enforced by write admission on the SERIALIZED event bytes
+  (no expansion overshoot; a non-fitting batch is admitted only up to the
+  last complete line, the dropped remainder is counted in meta.json);
+  bounded administrative state (meta/heartbeat/config, a few KiB) is
+  additional; nothing is deleted; meta.json/heartbeat.json atomic; a crash
+  or impossible final write is reported honestly (status exit 4), never as a
+  clean stop.
 - The process lives inside the session VM and does not survive VM
   replacement; start again after a fresh session if wanted (default stays off).
 DIAGLOGHELP

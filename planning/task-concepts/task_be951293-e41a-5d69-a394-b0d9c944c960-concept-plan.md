@@ -1024,3 +1024,27 @@ Reviewer-Isolation,SHA e35c81ef…565be861, hier nicht vorhanden/nicht
   invalides Limit = Konfigurationsfehler; Selftest erweitert um F-D2-
   Positiv/Negativ); keine Skill-/Bundle-Inhalte berührt → r51-Marker
   unverändert konsistent; Adapter/Pin unberührt.
+
+### §13.2 Delta-QC-Restpunkte F-D2b/F-D3 (2026-10-10; geprüft 8378e86 → Korrekturcommit)
+
+- **F-D2b:** Formatunterdrückung nur noch außerhalb des eindeutig
+  providerattribuierten UND explizit providerscope-gelabelten Zweigs
+  (`provider.requestID`/`providerRequestID`): dort ist Providerquelle + Label
+  der Beleg — `provider.requestID="req_real_openai_9f3a"` und eine nackte
+  UUID persistieren beide (Selftest + e2e-Positivfälle). `requestID`/
+  `x-request-id` ohne Providerkontext: UUID/`req_*`/interne Receipts bleiben
+  verworfen (F-D2-Repro weiterhin abgedeckt). Tokens/Secrets weiter scrubbed.
+- **F-D3:** Write-Admission auf den SERIALIZED Bytes in `append_events`: das
+  Batch wird nur bis zur letzten vollständigen Zeile innerhalb des
+  Episoden-Eventsbudgets geschrieben; der Rest wird in `meta.json`
+  gezählt (`dropped_events`/`dropped_events_bytes`) und die Episode endet
+  ehrlich (`final {reason: "…budget reached (write admission)…", clean:
+  false}`). **Tatsächliche Grenze:** Summe aller `events*.jsonl` ≤
+  `max_total_bytes` genau (kein Expansionsovershoot mehr); zusätzlich
+  begrenzte Verwaltungsdateien (meta/heartbeat/config, jeweils < 64 KiB,
+  typischerweise wenige KiB) — als benannte Reserve dokumentiert statt
+  100 MB als Gesamthardcap zu behaupten. Test: 60 kurze, stark expandierende
+  Zeilen, Budget 700 B → alle Dateien gezählt, keine zerrissene Zeile, nach
+  Stopp kein Weiterwachsen.
+- Testbestand diaglog nun 12/12; Skill r51 unberührt; Adapter/Pin unberührt;
+  Versionen weiter 0.7.31/0.1.42.

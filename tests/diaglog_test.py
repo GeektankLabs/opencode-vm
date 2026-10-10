@@ -127,10 +127,19 @@ class DiagLoggerTest(unittest.TestCase):
         with open(xdg / "opencode" / "log" / "opencode.log", "a") as handle:
             handle.write('timestamp=2026-10-10T10:05:00.000Z level=INFO run=r1 message="later line" '
                          'providerID=zai modelID=glm session.id=ses_m status=202 provider.requestID="pr-778"\n')
+            handle.write('timestamp=2026-10-10T10:05:01.000Z level=INFO run=r1 message="retry ok" '
+                         'providerID=zai modelID=glm session.id=ses_m status=200 provider.requestID="req_real_openai_9f3a"\n')
+            handle.write('timestamp=2026-10-10T10:05:02.000Z level=INFO run=r1 message="uuid id" '
+                         'providerID=zai modelID=glm session.id=ses_m status=200 provider.requestID="0f4e2c5a-1111-4111-8111-111111111111"\n')
         time.sleep(1.0)
         status2 = json.loads(run_worker(["status", self.base / "state", "--json"]).stdout)
         self.assertGreater(status2["totals"]["events"], events_before, "appended source lines are observed")
         self.assertIn("growth", status2)
+        # F-D2b: provider source + explicit provider label = evidence, any format
+        events_text = "".join(p.read_text() for p in sorted(episode.glob("events*.jsonl")))
+        self.assertIn('"request_id":"req_real_openai_9f3a"', events_text)
+        self.assertIn('"request_id":"0f4e2c5a-1111-4111-8111-111111111111"', events_text)
+        self.assertNotIn("internal-trace-42", events_text)
         self.assertFalse(status2["growth"]["monitor"]["grew_since_heartbeat"], "static source is not growth")
         # stop writes a clean final and the process exits
         stop = run_worker(["stop", self.base / "state"])
@@ -202,12 +211,47 @@ class DiagLoggerTest(unittest.TestCase):
         meta = read_json(episode / "meta.json")
         self.assertIsNotNone(meta["final"])
         self.assertFalse(meta["final"]["clean"])
-        self.assertIn("size cap", meta["final"]["reason"])
+        self.assertIn("budget", meta["final"]["reason"])
         files = sorted(episode.glob("events*.jsonl"))
         self.assertGreater(len(files), 1, "rotation produced multiple files")
         self.assertGreaterEqual(meta["rotations"], 1)
         total_lines = sum(len(f.read_text().splitlines()) for f in files)
         self.assertGreater(total_lines, 0, "no event files were deleted")
+
+    def test_events_budget_enforced_on_serialized_bytes(self):
+        xdg, share = seed_env(self.base)
+        episode = claim(self.base, xdg, share, extra=700)
+        src = xdg / "opencode" / "log" / "opencode.log"
+        # many short raw lines whose JSON events EXPAND versus the input
+        with open(src, "a") as handle:
+            for index in range(60):
+                handle.write('timestamp=2026-10-10T12:%02d:00.000Z level=INFO run=r message="x" '
+                             'providerID=zai modelID=glm session.id=ses_m status=200\n' % (index % 60))
+        out = run_worker(["run", self.base / "state"], timeout=20)
+        self.assertEqual(out.returncode, 4, out.stdout + out.stderr)
+        meta = read_json(episode / "meta.json")
+        self.assertIsNotNone(meta["final"])
+        self.assertFalse(meta["final"]["clean"])
+        self.assertIn("budget", meta["final"]["reason"])
+        # the TRUE bound: serialized event bytes never exceed the configured budget
+        event_files = sorted(episode.glob("events*.jsonl"))
+        total = sum(f.stat().st_size for f in event_files)
+        self.assertLessEqual(total, 700)
+        # dropped remainder counted honestly; admitted lines are never torn
+        self.assertGreaterEqual(meta.get("dropped_events", 0), 1)
+        for f in event_files:
+            for line in f.read_text().splitlines():
+                json.loads(line)
+        # after the honest stop nothing grows further
+        sizes = {f.name: f.stat().st_size for f in event_files}
+        time.sleep(0.5)
+        for f in event_files:
+            self.assertEqual(f.stat().st_size, sizes[f.name])
+        # bounded, named administrative state
+        for name in ("meta.json", "heartbeat.json", "config.json"):
+            admin = episode / name
+            if admin.exists():
+                self.assertLess(admin.stat().st_size, 64 * 1024, name)
 
     def test_persistent_io_stop_path_no_false_final(self):
         xdg, share = seed_env(self.base)
