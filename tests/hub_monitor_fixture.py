@@ -108,6 +108,17 @@ if __name__ == "__main__":
         server.read_catalog = lambda *args, **kwargs: {"providers": [], "models": [], "truncated": False}
         server.read_capabilities = lambda *args: True
         server.read_board_tasks = fixture_tasks
+        # Deterministic session-share service log for the Welle C diagnosis view:
+        # exactly the path the real ocvm-monitor unit appends to (<share>/monitor/server.log).
+        monitor_share = server.SESSION_ROOT / "monitor"
+        monitor_share.mkdir(mode=0o700)
+        server_log = monitor_share / "server.log"
+        server_log.write_text(
+            "[monitor] FIXTURE-TAIL ready generation=w5-monitor-fixture\n"
+            "[monitor] FIXTURE-TAIL info: wake no-due streak keeps bounded\n",
+            encoding="utf-8",
+        )
+        server_log.chmod(0o600)
         seed(server.PROJECT)
         http = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
         print(json.dumps({"port": http.server_port, "project": str(server.PROJECT)}), flush=True)

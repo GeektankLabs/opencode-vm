@@ -24,7 +24,8 @@
 
   function newState(id) {
     return { monitor_id: id, draft: null, pending: new Set(), conflict: false, saving: false,
-      editorOpen: false, detailsOpen: false, touched: false, feedback: "", historyEntries: [], historyStatus: "" };
+      editorOpen: false, detailsOpen: false, touched: false, feedback: "", historyEntries: [], historyStatus: "",
+      diagnosisStatus: "", diagnosisText: null, diagnosisCopy: null };
   }
 
   function focusTarget() {
@@ -158,17 +159,28 @@
     details.addEventListener("toggle", () => {
       if (details.open === state.detailsOpen) return;
       state.detailsOpen = details.open;
-      if (details.open) void loadHistory(state);
+      if (details.open) { void loadHistory(state); void loadDiagnosis(state); }
     });
     details.append(node("summary", "Details"));
     const detailsHead = node("div", "", "monitor-details-head");
     const historyStatus = node("span", state.historyStatus || "Verlauf wird beim Aufklappen geladen.", "muted monitor-history-status");
     const historyRefresh = node("button", "Aktualisieren", "button secondary monitor-details-refresh"); historyRefresh.type = "button";
-    historyRefresh.addEventListener("click", () => void loadHistory(state));
+    historyRefresh.addEventListener("click", () => { void loadHistory(state); void loadDiagnosis(state); });
     detailsHead.append(historyStatus, historyRefresh);
     const historyList = node("div", "", "events monitor-history");
     renderHistory(state, historyList);
-    details.append(detailsHead, historyList);
+    const diagnosisHead = node("div", "", "monitor-details-head");
+    const diagnosisStatus = node("span", state.diagnosisStatus || "Diagnose wird beim Aufklappen geladen.", "muted monitor-diagnosis-status");
+    const diagnosisCopy = node("button", "Text kopieren", "button secondary monitor-diagnosis-copy"); diagnosisCopy.type = "button";
+    diagnosisCopy.addEventListener("click", () => void copyDiagnosis(card, diagnosisStatus));
+    diagnosisHead.append(diagnosisStatus, diagnosisCopy);
+    const diagnosisBox = node("pre", "", "monitor-diagnosis-text");
+    diagnosisBox.tabIndex = 0;
+    diagnosisBox.setAttribute("role", "textbox");
+    diagnosisBox.setAttribute("aria-multiline", "true");
+    diagnosisBox.setAttribute("aria-label", "Monitor-Diagnose als kopierbarer Text");
+    diagnosisBox.textContent = state.diagnosisText ?? "Noch nicht geladen.";
+    details.append(detailsHead, historyList, diagnosisHead, diagnosisBox);
     card.append(details);
 
     const editor = node("details", "", "monitor-editor");
@@ -309,6 +321,64 @@
     } finally { button.disabled = false; }
   }
 
+  async function loadDiagnosis(state) {
+    const card = document.getElementById(`monitor-${state.monitor_id}`);
+    const status = card?.querySelector(".monitor-diagnosis-status");
+    const box = card?.querySelector(".monitor-diagnosis-text");
+    const copy = card?.querySelector(".monitor-diagnosis-copy");
+    if (!card || !box || !status || !copy || copy.disabled) return false;
+    copy.disabled = true;
+    try {
+      const { ok, status: code, body } = await api(`/api/monitor/${state.monitor_id.slice(8)}/log`);
+      if (!ok || !body || typeof body.text !== "string") throw new Error(body?.error || body?.code || `HTTP ${code}` || "nicht lesbar");
+      const sourceLines = (body.sources || []).map(source => `${source.kind}:${source.state}${source.truncated ? " (gekürzt)" : ""}`).join(" · ");
+      if (body.completeness === "complete") {
+        state.diagnosisStatus = `Abruf ${body.observed_at} UTC · Zeitraum bis ${body.as_of} · Quelle: Share …${String(body.source_context?.generation || "")} · Abdeckung vollständig${body.truncated ? " · Text gekürzt" : ""}`;
+      } else if (body.completeness === "partial") {
+        state.diagnosisStatus = `Abruf ${body.observed_at} UTC · TEILABDECKUNG (Quellen: ${sourceLines}) · kein frischer Vollstand`;
+      } else {
+        state.diagnosisStatus = `Abruf ${body.observed_at} UTC · Quellen NICHT VERFÜGBAR (${sourceLines}) · kein Frische-Anspruch`;
+      }
+      state.diagnosisText = body.text;
+      state.diagnosisCopy = body.text;
+      box.textContent = body.text;
+      return true;
+    } catch (error) {
+      state.diagnosisStatus = `Diagnose nicht lesbar: ${error.message} — bewusst kein „frisch“.`;
+      state.diagnosisText = null;
+      state.diagnosisCopy = null;
+      box.textContent = `Diagnose nicht lesbar: ${error.message}`;
+      return false;
+    } finally {
+      if (status) status.textContent = state.diagnosisStatus;
+      copy.disabled = false;
+    }
+  }
+
+  async function copyDiagnosis(card, statusElement) {
+    const state = cards.get(card.id.slice("monitor-".length));
+    const box = card?.querySelector(".monitor-diagnosis-text");
+    if (!state?.diagnosisCopy || !box) {
+      statusElement.textContent = `${state?.diagnosisStatus || ""} Kein Diagnosetext — zuerst neu laden.`.trimStart();
+      return;
+    }
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(state.diagnosisCopy);
+        statusElement.textContent = `${state.diagnosisStatus} · kopiert.`;
+      } else {
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(box);
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+        statusElement.textContent = `${state.diagnosisStatus} · Text markiert — mit Strg+C kopieren.`;
+      }
+    } catch {
+      statusElement.textContent = `${state.diagnosisStatus} · Kopieren nicht möglich — Text im Feld manuell auswählen.`;
+    }
+  }
+
   async function load(force, internal) {
     if (loading || (writing && !internal)) return false;
     if (force) { expired = false; }
@@ -444,6 +514,9 @@
       const monitorsOk = await load(true);
       const candidatesOk = await loadCandidates();
       if (monitorsOk) {
+        // The top refresh reloads the diagnosis text for every open detail
+        // view (§4.9: upper refresh must show genuinely new lines).
+        await Promise.all([...cards.values()].filter(state => state.detailsOpen).map(state => loadDiagnosis(state)));
         const stamp = new Date().toLocaleTimeString("de-DE");
         $("monitor-status").textContent = `${summaryText()} · Zuletzt erfolgreich aktualisiert ${stamp}${candidatesOk ? "" : " · Mastertask-Liste nicht aktuell"}`;
       }

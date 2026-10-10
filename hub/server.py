@@ -47,7 +47,7 @@ MAX_EVENTS = 12
 SECRET_PATTERNS = [
     (re.compile(r"(?i)(bearer\s+)[^\s,;]+"), r"\1[REDACTED]"),
     (re.compile(r"(?i)((?:api[-_ ]?key|token|secret|password)[=: ]+)[^\s,;]+"), r"\1[REDACTED]"),
-    (re.compile(r"\b(?:sk|gh[pousr])[-_A-Za-z0-9]{16,}\b"), "[REDACTED]"),
+    (re.compile(r"\bsk[-_][A-Za-z0-9_-]{10,}\b|\bgh[pousr]_[A-Za-z0-9_]{10,}\b"), "[REDACTED]"),
     (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----"), "[REDACTED PRIVATE KEY]"),
 ]
 
@@ -325,6 +325,8 @@ class Handler(BaseHTTPRequestHandler):
             self.handle_monitor_candidates()
         elif re.fullmatch(r"/api/monitor/[0-9a-f]{32}/history", path):
             self.handle_monitor_history()
+        elif re.fullmatch(r"/api/monitor/[0-9a-f]{32}/log", path):
+            self.handle_monitor_log()
         elif re.fullmatch(r"/api/monitor/[0-9a-f]{32}", path):
             self.handle_monitor_get()
         elif path == "/favicon.ico":
@@ -672,6 +674,200 @@ class Handler(BaseHTTPRequestHandler):
         if include_logs:
             payload["logs"] = monitor.get("logs", [])[-limit:]
         self.send_json(200, payload)
+
+    # -----------------------------------------------------------------
+    # Welle C (be951293 §4.8/§4.9): bounded read-only diagnosis source.
+    # Registry decision history, registry operational logs, engine heartbeat
+    # and the current share's monitor/server.log tail stay clearly separated;
+    # the engine's recovery projection (Welle B R2) is passed through
+    # verbatim — the Hub performs NO candidate resolution of its own.
+    # All text is redacted server-side with the existing allowlist before it
+    # reaches the response; failures and partial coverage are never shown
+    # as a fresh complete read.
+    # -----------------------------------------------------------------
+    def _entry_epoch(self, value: Any) -> float | None:
+        import calendar
+        if not isinstance(value, str):
+            return None
+        cleaned = re.sub(r"\.\d{3}Z$", "Z", value)
+        try:
+            return float(calendar.timegm(time.strptime(cleaned, "%Y-%m-%dT%H:%M:%SZ")))
+        except ValueError:
+            return None
+
+    def handle_monitor_log(self) -> None:
+        monitor_id = self.path.split("?", 1)[0].split("/")[3]
+        query = self.path.split("?", 1)[1] if "?" in self.path else ""
+        window_hours = monitor_store.DISPLAY_WINDOW_HOURS
+        for part in query.split("&"):
+            key, _, value = part.partition("=")
+            if key == "window_hours" and value.isdecimal():
+                window_hours = min(24, max(1, int(value)))
+        try:
+            monitor = self.find_monitor(f"monitor_{monitor_id}")
+        except monitor_store.MonitorError:
+            self.send_json(503, {"code": "MONITOR_UNAVAILABLE", "error": "Monitor registry is unavailable."})
+            return
+        if monitor is None:
+            self.monitor_error("MONITOR_NOT_FOUND", "Monitor does not exist in this project registry.")
+            return
+        observed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        cutoff = int(time.time()) - window_hours * 3600
+        history = monitor.get("history", [])
+        logs = monitor.get("logs", [])
+        decisions = [entry for entry in history if (self._entry_epoch(entry.get("at")) or 0) >= cutoff]
+        operational = [entry for entry in logs if (self._entry_epoch(entry.get("at")) or 0) >= cutoff]
+        decisions_omitted = len(history) - len(decisions)
+        operational_omitted = len(logs) - len(operational)
+        tail = monitor_store.read_server_log_tail(SESSION_ROOT)
+        heartbeat = monitor_store.read_heartbeat(PROJECT)
+        heartbeat_value = heartbeat.get("value") or {}
+        if heartbeat["state"] == "ok":
+            same_identity = (heartbeat_value.get("projectHash") == project_hash()
+                             and heartbeat_value.get("generation") == RUNTIME["generation"])
+            heartbeat["state"] = "matching" if same_identity else "mismatch"
+        tail_state = tail["state"]
+        if tail_state == "ok" and not tail["lines"]:
+            tail_state = "empty"
+        tail["state"] = tail_state
+        sources = [
+            {"kind": "registry_history", "label": "Entscheidungslauf (Registry-History, projektlokal)",
+             "state": "ok", "count": len(decisions), "omitted": decisions_omitted,
+             "truncated": False, "from": decisions[0]["at"] if decisions else None,
+             "to": decisions[-1]["at"] if decisions else None},
+            {"kind": "registry_logs", "label": "Operational Logs (Registry, projektlokal)",
+             "state": "ok", "count": len(operational), "omitted": operational_omitted,
+             "truncated": False, "from": operational[0]["at"] if operational else None,
+             "to": operational[-1]["at"] if operational else None},
+            {"kind": "recovery_projection", "label": "Recovery-Projektion (Engine, nur lesend)",
+             "state": "ok",
+             "count": len(monitor.get("recovery_resolution") or []),
+             "truncated": False,
+             "from": None, "to": None},
+            {"kind": "heartbeat", "label": "Engine-Heartbeat (Liveness, projektlokal, getrennt)",
+             "state": heartbeat["state"], "count": 1 if heartbeat["state"] == "matching" else 0,
+             "truncated": False,
+             "from": None, "to": heartbeat_value.get("at") if heartbeat["state"] in ("matching", "mismatch") else None},
+            {"kind": "server_log_tail", "label": f"Service-Log-Tail ({SESSION_ROOT}/monitor/server.log)",
+             "state": tail_state, "count": len(tail.get("lines", [])),
+             "truncated": bool(tail.get("truncated_bytes") or tail.get("truncated_lines")),
+             "from": None, "to": None},
+        ]
+        error_states = {"unsafe", "corrupt", "unavailable"}
+        partial_states = {"not_configured", "absent", "mismatch"}
+        completeness = ("unavailable" if any(source["state"] in error_states for source in sources)
+                        else "partial" if any(source["state"] in partial_states for source in sources)
+                        else "complete")
+
+        lines: list[str] = []
+        redacted_lines = 0
+
+        def emit(text_line: str) -> None:
+            nonlocal redacted_lines
+            safe = redact(text_line)
+            if safe != text_line:
+                redacted_lines += 1
+            lines.append(safe)
+
+        emit(f"=== Monitor-Diagnose · {monitor['id']} ===")
+        emit(f"Abrufzeitpunkt (UTC): {observed_at}")
+        try:
+            registry_generation = monitor_store.snapshot(PROJECT)["generation"]
+        except monitor_store.MonitorError:
+            registry_generation = "unbekannt"
+        emit(f"Monitor: „{monitor['title']}“ · Registry-Generation {registry_generation}")
+        emit(f"Quellenstand: Share {SESSION_ROOT} · Generation {RUNTIME['generation']} · Projekt-Hash {project_hash()}")
+        emit(f"Datenzeitraum: letzte {window_hours} h (strukturierte Einträge) · Service-Log-Tail: letzte ≤{monitor_store.SERVER_LOG_MAX_BYTES // 1024} KiB / ≤{monitor_store.SERVER_LOG_MAX_LINES} Zeilen (zeitunbegrenzte, rein mengenbegrenzte Ansicht)")
+        emit(f"Abdeckung: {completeness}"
+             + (f" · {redacted_lines} Zeilen serverseitig redigiert" if redacted_lines else ""))
+        emit("")
+        emit("--- Entscheidungslauf (Registry-History, projektlokal) ---")
+        if decisions:
+            for entry in decisions:
+                detail = f" · {json.dumps(entry['detail'], ensure_ascii=False, sort_keys=True)}" if entry.get("detail") else ""
+                emit(f"{entry.get('at')} · {entry.get('type')}{detail}")
+            if decisions_omitted > 0:
+                emit(f"[GEKÜRZT/ÄLTER: {decisions_omitted} Einträge außerhalb des Fensters oder vor dem History-Fenster — ältere Inhalte nur in der Registry selbst]")
+        else:
+            emit("Keine Einträge im Fenster." + (f" {decisions_omitted} ältere Einträge vorhanden (außerhalb {window_hours} h)." if decisions_omitted else ""))
+        emit("")
+        emit("--- Operational Logs (Registry, projektlokal) ---")
+        if operational:
+            for entry in operational:
+                emit(f"{entry.get('at')} · {entry.get('level')} · {entry.get('message')}")
+            if operational_omitted > 0:
+                emit(f"[GEKÜRZT/ÄLTER: {operational_omitted} Logeinträge außerhalb des Fensters]")
+        else:
+            emit("Keine Einträge im Fenster." + (f" {operational_omitted} ältere Einträge vorhanden (außerhalb {window_hours} h)." if operational_omitted else ""))
+        emit("")
+        emit("--- Recovery-Projektion (Engine persistiert; Hub nur lesend, keine eigene Auflösung) ---")
+        episode = monitor.get("recovery_episode")
+        resolutions = monitor.get("recovery_resolution") or []
+        if isinstance(episode, dict):
+            emit(f"Episode: started_at={episode.get('started_at')} revision={episode.get('policy_revision')} attempts={len(episode.get('attempts', []))}")
+            for attempt in episode.get("attempts", [])[-24:]:
+                emit(f"  attempt {attempt.get('at')} · {attempt.get('identity')} · {attempt.get('category')} · {attempt.get('fingerprint')} · {attempt.get('outcome')}")
+        else:
+            emit("Episode: keine (keine offene Recovery-Episode im Registryrecord)")
+        if resolutions:
+            for entry in resolutions[-8:]:
+                candidates = "; ".join(f"{candidate.get('label')}={candidate.get('identity')}={candidate.get('status')}"
+                                       for candidate in entry.get("candidates", []))
+                emit(f"resolution {entry.get('at')} · rev={entry.get('policy_revision')} · regime={entry.get('regime')} "
+                     f"· profil={entry.get('entry_profile')} · gewählt={entry.get('selected_identity')} · grund={entry.get('reason')}")
+                if candidates:
+                    emit(f"  kandidaten: {candidates}")
+        else:
+            emit("resolution: keine persistierten Auflösungsprojektion(en) im Record")
+        emit("")
+        emit("--- Engine-Heartbeat (Liveness, getrennt von Logs) ---")
+        if heartbeat["state"] == "matching":
+            emit(f"heartbeat: ok · pid={heartbeat_value.get('pid')} · at={heartbeat_value.get('at')} · generation={heartbeat_value.get('generation')}")
+        elif heartbeat["state"] == "mismatch":
+            emit(f"heartbeat: NICHT PASSEND zu dieser Laufzeitumgebung! at={heartbeat_value.get('at')} generation={heartbeat_value.get('generation')} (diese Session: {RUNTIME['generation']})")
+        elif heartbeat["state"] == "absent":
+            emit("heartbeat: nicht vorhanden (Engine schreibt noch keinen Herzschlag)")
+        else:
+            emit(f"heartbeat: nicht lesbar ({heartbeat['state']})")
+        emit("")
+        emit(f"--- Service-Log-Tail ({SESSION_ROOT}/monitor/server.log) ---")
+        if tail_state == "ok":
+            for raw_line in tail.get("lines", []):
+                emit(raw_line)
+            if tail.get("truncated_bytes") or tail.get("truncated_lines"):
+                emit("[GEKÜRZT: Byte-/Zeilengrenze erreicht — ältere Inhalte nur am Log selbst]")
+        elif tail_state == "empty":
+            emit("Datei vorhanden, aber leer.")
+        elif tail_state == "not_configured":
+            emit("Kein Service-Log in diesem Session-Share (Monitor-Unit schrieb nichts oder ist nicht gestartet).")
+        else:
+            emit(f"Tail-Quelle nicht lesbar ({tail_state}) — kein frischer Stand, ältere Inhalte nur an der Logdatei selbst.")
+        text = "\n".join(lines) + "\n"
+        text_bytes = text.encode("utf-8")
+        max_total = 512 * 1024
+        truncated_text = len(text_bytes) > max_total
+        if truncated_text:
+            text = text_bytes[:max_total].decode("utf-8", errors="ignore") + "\n[GEKÜRZT: Antwortgrenze erreicht]\n"
+        as_of = max((str(source["to"]) for source in sources if source.get("to")), default=observed_at)
+        self.send_json(200, {
+            "schema": 1,
+            "monitor_id": monitor["id"],
+            "observed_at": observed_at,
+            "as_of": as_of,
+            "window_hours": window_hours,
+            "limits": {"window_hours_max": 24, "server_log_max_bytes": monitor_store.SERVER_LOG_MAX_BYTES,
+                       "server_log_max_lines": monitor_store.SERVER_LOG_MAX_LINES,
+                       "response_max_bytes": max_total},
+            "source_context": {"share_root": str(SESSION_ROOT), "generation": RUNTIME["generation"],
+                               "project_hash": project_hash()},
+            "sources": sources,
+            "completeness": completeness,
+            "truncated": truncated_text,
+            "redacted_lines": redacted_lines,
+            "recovery_projection": {"episode": monitor.get("recovery_episode"),
+                                    "resolutions": monitor.get("recovery_resolution") or []},
+            "text": text,
+        })
 
     def read_json_body(self, maximum: int = 8192) -> dict[str, Any] | None:
         length = self.headers.get("Content-Length", "")

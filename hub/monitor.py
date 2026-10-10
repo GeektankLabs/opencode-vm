@@ -184,6 +184,107 @@ def valid_monitor_id(value: str) -> bool:
     return bool(re.fullmatch(r"monitor_[0-9a-f]{32}", value))
 
 
+# ---------------------------------------------------------------------------
+# Welle C (be951293 §4.8/§4.9): safe bounded diagnosis reads. The Hub is a
+# purely READ-ONLY consumer here: registry history/logs and heartbeat come
+# from the project-persistent store, the service tail comes from THIS
+# session share's monitor directory only (never a foreign project log), and
+# the recovery projection is surfaced exactly as the engine persisted it —
+# no Python-side resolution, filtering or reinterpretation.
+# ---------------------------------------------------------------------------
+
+SERVER_LOG_MAX_BYTES = 262_144
+SERVER_LOG_MAX_LINES = 2_000
+DISPLAY_WINDOW_HOURS = 24
+MAX_HEARTBEAT_BYTES = 4_096
+
+
+def server_log_path(share_root: Path) -> Path:
+    return share_root / "monitor" / "server.log"
+
+
+def read_server_log_tail(share_root: Path) -> dict[str, Any]:
+    """Bounded, ownership-checked tail of <session-share>/monitor/server.log.
+
+    The path is fixed to the current session share, so a foreign project log
+    is structurally unreachable; symlinks, non-regular files, group/other
+    writable directories and foreign-owned files fail closed as `unsafe`
+    without reading them. Byte and line limits are enforced server-side.
+    """
+    directory = share_root / "monitor"
+    result: dict[str, Any] = {"state": "ok", "source": "monitor/server.log", "lines": [],
+                              "bytes": 0, "truncated_bytes": False, "truncated_lines": False}
+    try:
+        info = directory.lstat()
+    except OSError:
+        result["state"] = "not_configured"
+        return result
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+            or info.st_mode & 0o077 or directory.is_symlink()):
+        result["state"] = "unsafe"
+        return result
+    path = directory / "server.log"
+    try:
+        info = path.lstat()
+    except OSError:
+        result["state"] = "not_configured"
+        return result
+    if (not stat.S_ISREG(info.st_mode) or path.is_symlink() or info.st_uid != os.getuid()
+            or info.st_mode & 0o077):
+        result["state"] = "unsafe"
+        return result
+    size = info.st_size
+    if size == 0:
+        result["state"] = "empty"
+        return result
+    start = max(0, size - SERVER_LOG_MAX_BYTES)
+    try:
+        with path.open("rb") as handle:
+            handle.seek(start)
+            raw = handle.read()
+    except OSError:
+        result["state"] = "unavailable"
+        return result
+    result["bytes"] = len(raw)
+    result["truncated_bytes"] = start > 0
+    text = raw.decode("utf-8", errors="replace")
+    if result["truncated_bytes"]:
+        # Drop the leading partial line produced by the byte-window cut.
+        first_newline = text.find("\n")
+        text = text[first_newline + 1:] if first_newline >= 0 else ""
+    lines = [line for line in text.splitlines() if line.strip()]
+    if len(lines) > SERVER_LOG_MAX_LINES:
+        result["truncated_lines"] = True
+        lines = lines[-SERVER_LOG_MAX_LINES:]
+    result["lines"] = lines
+    return result
+
+
+def read_heartbeat(project: Path) -> dict[str, Any]:
+    """Project-local engine heartbeat, read strictly (regular, private, small)."""
+    path = project / ".opencode-vm" / "monitor" / "heartbeat.json"
+    result: dict[str, Any] = {"state": "absent", "source": ".opencode-vm/monitor/heartbeat.json", "value": None}
+    try:
+        info = path.lstat()
+    except OSError:
+        return result
+    if (not stat.S_ISREG(info.st_mode) or path.is_symlink() or info.st_uid != os.getuid()
+            or info.st_size > MAX_HEARTBEAT_BYTES):
+        result["state"] = "unsafe"
+        return result
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        result["state"] = "corrupt"
+        return result
+    if not isinstance(value, dict):
+        result["state"] = "corrupt"
+        return result
+    result["state"] = "ok"
+    result["value"] = value
+    return result
+
+
 def timestamp() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 

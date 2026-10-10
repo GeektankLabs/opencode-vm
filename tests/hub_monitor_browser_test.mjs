@@ -424,3 +424,59 @@ test("refresh reacts visibly, monitors use the full content width and narrow vie
   }
   assert.deepEqual(pageErrors, []);
 });
+test("Welle C diagnosis: bounded copyable text, both refresh paths reload freshly, failures never claim freshness", async () => {
+  await refresh();
+  const id = idByTitle("Alpha Monitor");
+  const logUrl = url => url.includes(`/api/monitor/${id.slice(8)}/log`);
+  const box = card("Alpha Monitor").locator(".monitor-diagnosis-text");
+  const status = card("Alpha Monitor").locator(".monitor-diagnosis-status");
+  // Open the details (or reload if an earlier test already opened them).
+  const alreadyOpen = await card("Alpha Monitor").locator("details.monitor-details").evaluate(element => element.open);
+  const firstLoad = page.waitForResponse(r => logUrl(r.url()) && r.request().method() === "GET");
+  if (alreadyOpen) await card("Alpha Monitor").locator(".monitor-details-refresh").click();
+  else await openDetails("Alpha Monitor");
+  await firstLoad;
+  await card("Alpha Monitor").locator(".monitor-diagnosis-text", { hasText: "Monitor-Diagnose" }).waitFor();
+  const text = await box.innerText();
+  // Clearly separated sources, with time/period/source context visible.
+  for (const marker of ["Monitor-Diagnose", "Abrufzeitpunkt (UTC)", "Quellenstand",
+                        "Entscheidungslauf (Registry-History", "Operational Logs (Registry",
+                        "Recovery-Projektion (Engine persistiert; Hub nur lesend",
+                        "Engine-Heartbeat (Liveness", "Service-Log-Tail"]) {
+    assert.ok(text.includes(marker), `diagnosis text missing marker: ${marker}`);
+  }
+  assert.match(text, /FIXTURE-TAIL ready/, "the share service tail must reach the copyable text");
+  // Fixture has no heartbeat: the view must say TEILABDECKUNG, never a fresh-complete claim.
+  await card("Alpha Monitor").locator(".monitor-diagnosis-status", { hasText: /TEILABDECKUNG|Abdeckung vollständig/ }).waitFor();
+  assert.match(await status.innerText(), /TEILABDECKUNG/);
+  assert.ok(!(await status.innerText()).includes("Abdeckung vollständig"));
+  // A new canonical decision entry shows up after the details refresh — same copyable box.
+  const atIso = () => new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+  const marker = `diagnose-marker-${Date.now()}`;
+  storeCli("setstate", id, JSON.stringify({ history: [...registryMonitors()[id].history, { at: atIso(), type: "dispatched", detail: { note: marker } }] }));
+  const reload = page.waitForResponse(r => logUrl(r.url()));
+  await card("Alpha Monitor").locator(".monitor-details-refresh").click();
+  await reload;
+  await card("Alpha Monitor").locator(".monitor-diagnosis-text", { hasText: marker }).waitFor();
+  // The TOP refresh reloads the open diagnosis view too.
+  const marker2 = `diagnose-marker-${Date.now()}-top`;
+  storeCli("setstate", id, JSON.stringify({ history: [...registryMonitors()[id].history, { at: atIso(), type: "recovery-continued", detail: { note: marker2 } }] }));
+  await refresh();
+  await card("Alpha Monitor").locator(".monitor-diagnosis-text", { hasText: marker2 }).waitFor();
+  // Failure honesty: a refused log read names itself and never claims freshness.
+  await page.route(`**/api/monitor/${id.slice(8)}/log`, route => route.fulfill({ status: 503, body: "offline" }));
+  await card("Alpha Monitor").locator(".monitor-details-refresh").click();
+  await card("Alpha Monitor").locator(".monitor-diagnosis-status", { hasText: "Diagnose nicht lesbar" }).waitFor();
+  assert.ok(!(await status.innerText()).includes("Abdeckung vollständig"));
+  await page.unroute(`**/api/monitor/${id.slice(8)}/log`);
+  const recover = page.waitForResponse(r => logUrl(r.url()));
+  await card("Alpha Monitor").locator(".monitor-details-refresh").click();
+  await recover;
+  await card("Alpha Monitor").locator(".monitor-diagnosis-text", { hasText: "Monitor-Diagnose" }).waitFor();
+  // Copy interaction answers honestly (clipboard may be unavailable in an http test origin).
+  await card("Alpha Monitor").locator(".monitor-diagnosis-copy").click();
+  await card("Alpha Monitor").locator(".monitor-diagnosis-status", { hasText: /kopiert|markiert|Kopieren nicht möglich/ }).waitFor();
+  assert.match(await status.innerText(), /kopiert|markiert|Kopieren nicht möglich/);
+  // Browser-side boundedness: the pre scrolls instead of growing unbounded.
+  assert.equal(await box.evaluate(element => getComputedStyle(element).overflowY), "auto");
+});

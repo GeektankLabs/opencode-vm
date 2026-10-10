@@ -511,5 +511,217 @@ class HubMonitorTest(HubReadModelTest):
         finally:
             catalog._request = original
 
+
+class HubMonitorLogTest(HubMonitorTest):
+    """Welle C (be951293 §4.8/§4.9): bounded, safe, redacted diagnosis reads."""
+
+    import hub.monitor as _store
+
+    def seed_monitor(self, base):
+        task = "task_11111111-1111-4111-8111-111111111111"
+        status, created = self.request(base, "/api/monitor", "POST",
+                                       {"title": "Log Monitor", "task_id": task}, lan=True)
+        self.assertEqual(status, 201)
+        return created["monitor"]["monitor_id"]
+
+    def write_server_log(self, lines, share=None):
+        import hub.monitor as store
+        root = share or self.share
+        directory = root / "monitor"
+        directory.mkdir(parents=True, exist_ok=True)
+        directory.chmod(0o700)
+        path = directory / "server.log"
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        path.chmod(0o600)
+        return store
+
+    def start(self):
+        self.write_runtime(authEnabled=False, auth=None)
+        server.configure_runtime(self.runtime_path, self.project, self.project_id)
+        http, thread = self.serve()
+        return http, thread, f"http://127.0.0.1:{http.server_port}"
+
+    def test_log_api_separates_sources_redacts_and_passes_projection_through(self):
+        http, thread, base = self.start()
+        import hub.monitor as store
+        try:
+            monitor_id = self.seed_monitor(base)
+            self.write_server_log([
+                "[monitor] ready project=x generation=fixture",
+                "[monitor] error: Authorization: Bearer topsecretvalue123 api_key=sk-thismaynotleakhere",
+            ])
+            heartbeat = self.project / ".opencode-vm" / "monitor" / "heartbeat.json"
+            heartbeat.write_text(json.dumps({"schema": 1, "projectHash": self.project_id,
+                                             "generation": "fixture-generation", "pid": 4242,
+                                             "at": "2026-10-10T00:00:00.000Z"}) + "\n", encoding="utf-8")
+            projection = {"policy_revision": 8, "regime": "per_profile", "entry_profile": "deep",
+                          "selected_identity": None, "reason": "chain_exhausted",
+                          "candidates": [{"label": "deep.main", "identity": "p/m", "status": "skipped_current_failure"}]}
+            def build(registry):
+                monitor = registry["monitors"][0]
+                monitor["recovery_resolution"] = [projection]
+                monitor["recovery_episode"] = {"started_at": "2026-10-10T00:00:00.000Z",
+                                               "policy_revision": 8, "attempts": []}
+            store.mutate(self.project, build)
+            status, body = self.request(base, f"/api/monitor/{monitor_id[8:]}/log")
+            self.assertEqual(status, 200)
+            self.assertEqual(body["completeness"], "complete")
+            self.assertTrue(body["observed_at"].endswith("Z"))
+            kinds = {source["kind"]: source for source in body["sources"]}
+            self.assertEqual(kinds["server_log_tail"]["state"], "ok")
+            self.assertEqual(kinds["heartbeat"]["state"], "matching")
+            self.assertEqual(kinds["recovery_projection"]["count"], 1)
+            text = body["text"]
+            for marker in ("Entscheidungslauf", "Operational Logs", "Recovery-Projektion",
+                           "Engine-Heartbeat", "Service-Log-Tail"):
+                self.assertIn(marker, text)
+            self.assertNotIn("topsecretvalue123", json.dumps(body))
+            self.assertNotIn("sk-thismaynotleakhere", json.dumps(body))
+            self.assertGreaterEqual(body["redacted_lines"], 1)
+            # Verbatim engine projection: no Python-side resolution or filtering.
+            self.assertEqual(body["recovery_projection"]["resolutions"], [projection])
+            self.assertIn("p/m=skipped_current_failure", text)
+            self.assertIn("grund=chain_exhausted", text)
+        finally:
+            http.shutdown(); thread.join(timeout=5)
+
+    def test_log_api_bounds_and_truncation(self):
+        http, thread, base = self.start()
+        try:
+            monitor_id = self.seed_monitor(base)
+            lines = [f"line-{index:04d} filler filler filler filler filler" for index in range(1, 3001)]
+            self.write_server_log(lines)
+            status, body = self.request(base, f"/api/monitor/{monitor_id[8:]}/log")
+            self.assertEqual(status, 200)
+            tail = next(source for source in body["sources"] if source["kind"] == "server_log_tail")
+            self.assertEqual(tail["count"], 2000)
+            self.assertTrue(tail["truncated"])
+            self.assertIn("[GEKÜRZT", body["text"])
+            self.assertNotIn("line-0001 ", body["text"])
+            self.assertIn("line-3000", body["text"])
+            self.assertEqual(body["limits"]["server_log_max_lines"], 2000)
+            self.assertEqual(body["limits"]["server_log_max_bytes"], 262144)
+            # window_hours is clamped, never unbounded.
+            status, wide = self.request(base, f"/api/monitor/{monitor_id[8:]}/log?window_hours=999")
+            self.assertEqual(wide["window_hours"], 24)
+        finally:
+            http.shutdown(); thread.join(timeout=5)
+
+    def test_log_api_window_omits_old_entries_and_reports_partial(self):
+        http, thread, base = self.start()
+        import hub.monitor as store
+        try:
+            monitor_id = self.seed_monitor(base)
+            def build(registry):
+                monitor = registry["monitors"][0]
+                monitor["history"] = [{"at": "2026-09-01T00:00:00.000Z", "type": "created"}]
+                store.history_entry(monitor, "dispatched", {"action_id": "wake_recent"})
+            store.mutate(self.project, build)
+            # No server.log at all: honest partial, never "fresh complete".
+            status, body = self.request(base, f"/api/monitor/{monitor_id[8:]}/log")
+            self.assertEqual(status, 200)
+            self.assertEqual(body["completeness"], "partial")
+            tail = next(source for source in body["sources"] if source["kind"] == "server_log_tail")
+            self.assertEqual(tail["state"], "not_configured")
+            decisions = next(source for source in body["sources"] if source["kind"] == "registry_history")
+            self.assertEqual(decisions["count"], 1)
+            self.assertGreaterEqual(decisions["omitted"], 1)
+            self.assertIn("wake_recent", body["text"])
+            self.assertNotIn('"type": "created"', body["text"])
+        finally:
+            http.shutdown(); thread.join(timeout=5)
+
+    def test_log_api_unsafe_and_foreign_sources_never_leak(self):
+        http, thread, base = self.start()
+        import hub.monitor as store
+        try:
+            monitor_id = self.seed_monitor(base)
+            other = Path(self.temp.name) / "foreign-share"
+            foreign_directory = other / "monitor"
+            foreign_directory.mkdir(parents=True, exist_ok=True)
+            foreign_directory.chmod(0o700)
+            other.chmod(0o700)
+            foreign_log = foreign_directory / "server.log"
+            foreign_log.write_text("NEW-SHARE probe line after reconnect\n", encoding="utf-8")
+            foreign_log.chmod(0o600)
+            # Symlinked tail target fails closed and is never read.
+            target = Path(self.temp.name) / "elsewhere.log"
+            target.write_text("SYMLINKED secret-token-xyz\n", encoding="utf-8")
+            directory = self.share / "monitor"
+            directory.mkdir(parents=True, exist_ok=True)
+            directory.chmod(0o700)
+            link = directory / "server.log"
+            link.symlink_to(target)
+            status, body = self.request(base, f"/api/monitor/{monitor_id[8:]}/log")
+            self.assertEqual(status, 200)
+            tail = next(source for source in body["sources"] if source["kind"] == "server_log_tail")
+            self.assertEqual(tail["state"], "unsafe")
+            self.assertEqual(body["completeness"], "unavailable")
+            self.assertNotIn("SYMLINKED", body["text"])
+            self.assertNotIn("secret-token-xyz", json.dumps(body))
+            # Share switch (reconnect simulation): the tail source is freshly
+            # determined from the CURRENT session share every time — there is
+            # no parameter that could point the reader at a foreign project.
+            prior_share = server.SESSION_ROOT
+            server.SESSION_ROOT = other
+            try:
+                status, body = self.request(base, f"/api/monitor/{monitor_id[8:]}/log")
+                tail = next(source for source in body["sources"] if source["kind"] == "server_log_tail")
+                self.assertEqual(tail["state"], "ok")
+                self.assertIn("NEW-SHARE", body["text"])
+                self.assertEqual(body["source_context"]["share_root"], str(other))
+            finally:
+                server.SESSION_ROOT = prior_share
+            # A heartbeat from a different generation is an honest mismatch.
+            heartbeat = self.project / ".opencode-vm" / "monitor" / "heartbeat.json"
+            heartbeat.write_text(json.dumps({"schema": 1, "projectHash": "0" * 32,
+                                             "generation": "other-generation", "pid": 1,
+                                             "at": "2026-10-10T00:00:00Z"}) + "\n", encoding="utf-8")
+            (self.share / "monitor" / "server.log").unlink()
+            self.write_server_log(["[monitor] ok"])
+            status, body = self.request(base, f"/api/monitor/{monitor_id[8:]}/log")
+            kinds = {source["kind"]: source for source in body["sources"]}
+            self.assertEqual(kinds["heartbeat"]["state"], "mismatch")
+            self.assertEqual(body["completeness"], "partial")
+            self.assertIn("NICHT PASSEND", body["text"])
+        finally:
+            http.shutdown(); thread.join(timeout=5)
+
+    def test_log_api_honours_auth_and_registry_errors(self):
+        password = "hub-log-pass"
+        self.write_runtime(authEnabled=True, auth={"username": "opencode", "password": password})
+        server.configure_runtime(self.runtime_path, self.project, self.project_id)
+        import hub.monitor as store
+        http, thread = self.serve()
+        base = f"http://127.0.0.1:{http.server_port}"
+        try:
+            self.write_server_log(["[monitor] ready"])
+            # Unauthenticated reads are refused exactly like every other API path.
+            try:
+                with urlopen(base + "/api/monitor/0000000000000000000000000000abcd/log", timeout=5) as response:
+                    self.fail(f"expected 401, got {response.status}")
+            except HTTPError as refused:
+                self.assertEqual(refused.code, 401)
+            token = base64.b64encode(f"opencode:{password}".encode()).decode()
+            request = Request(base + "/api/monitor/0000000000000000000000000000abcd/log",
+                              headers={"Authorization": "Basic " + token})
+            try:
+                with urlopen(request, timeout=5):
+                    self.fail("expected 404 for an unknown monitor")
+            except HTTPError as missing:
+                self.assertEqual(missing.code, 404)
+            # A corrupt registry is an honest 503, never a stale success.
+            registry_dir = self.project / ".opencode-vm" / "monitor"
+            registry_dir.mkdir(parents=True, exist_ok=True)
+            (registry_dir / "registry.json").write_text("{broken", encoding="utf-8")
+            try:
+                with urlopen(request, timeout=5):
+                    self.fail("expected 503 for an unreadable registry")
+            except HTTPError as unavailable:
+                self.assertEqual(unavailable.code, 503)
+        finally:
+            http.shutdown(); thread.join(timeout=5)
+
+
 if __name__ == "__main__":
     unittest.main()
