@@ -90,6 +90,53 @@ export type RecoveryResolutionEntry = {
 
 export const RECOVERY_ATTEMPT_LIMIT = 24;
 export const RECOVERY_RESOLUTION_LIMIT = 8;
+const RECOVERY_ATTEMPT_OUTCOMES: readonly string[] = ["current_failure", "update_unverified", "dispatched", "dispatch_uncertain", "send_failed"];
+const RECOVERY_CANDIDATE_STATUSES: readonly string[] = ["selected", "skipped_current_failure", "skipped_attempted", "skipped_provider_scope", "skipped_unavailable"];
+const RECOVERY_CHAIN_REASONS: readonly string[] = ["selected", "chain_empty", "chain_exhausted"];
+
+function boundedToken(value: unknown, max: number): value is string {
+  return typeof value === "string" && value.length >= 1 && value.length <= max && !/[\s\x00-\x1f\x7f]/u.test(value);
+}
+
+/**
+ * QC F-B2 (waveB-qc SHAeffd6d1c6): additive Welle-B fields are validated when
+ * present and fail closed like every other registry shape (a hand-corrupted
+ * episode must not crash recover() at runtime), while old records without the
+ * fields and explicit nulls stay valid (pure round-trip compatibility).
+ */
+function recoveryAttemptShapeOk(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return validIso(value.at) && boundedToken(value.identity, 256) && boundedToken(value.category, 64) &&
+    typeof value.fingerprint === "string" && /^[0-9a-f]{64}$/.test(value.fingerprint) &&
+    RECOVERY_ATTEMPT_OUTCOMES.includes(value.outcome as string);
+}
+
+function recoveryEpisodeShapeOk(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (!validIso(value.started_at)) return false;
+  const revision = value.policy_revision;
+  if (revision !== null && revision !== undefined && !(Number.isSafeInteger(revision) && (revision as number) >= 0)) return false;
+  if (!Array.isArray(value.attempts) || value.attempts.length > RECOVERY_ATTEMPT_LIMIT) return false;
+  return value.attempts.every(recoveryAttemptShapeOk);
+}
+
+function recoveryResolutionShapeOk(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length > RECOVERY_RESOLUTION_LIMIT) return false;
+  for (const entry of value) {
+    if (!isRecord(entry) || !validIso(entry.at)) return false;
+    const revision = entry.policy_revision;
+    if (revision !== null && revision !== undefined && !(Number.isSafeInteger(revision) && (revision as number) >= 0)) return false;
+    if (!boundedToken(entry.regime, 32) || !boundedToken(entry.entry_profile, 32)) return false;
+    if (!Array.isArray(entry.candidates) || entry.candidates.length > 8) return false;
+    for (const candidate of entry.candidates) {
+      if (!isRecord(candidate) || !boundedToken(candidate.label, 96) || !boundedToken(candidate.identity, 256)) return false;
+      if (typeof candidate.status !== "string" || !RECOVERY_CANDIDATE_STATUSES.includes(candidate.status)) return false;
+    }
+    if (entry.selected_identity !== null && !boundedToken(entry.selected_identity, 256)) return false;
+    if (typeof entry.reason !== "string" || !RECOVERY_CHAIN_REASONS.includes(entry.reason)) return false;
+  }
+  return true;
+}
 
 export function pushRecoveryAttempt(episode: RecoveryEpisode, entry: RecoveryAttemptEntry): void {
   episode.attempts.push(entry);
@@ -304,6 +351,9 @@ function shapeOk(registry: unknown): registry is MonitorRegistry {
     if (monitor.worker_high_water !== undefined &&
       (!Number.isSafeInteger(monitor.worker_high_water) || (monitor.worker_high_water as number) < 0)) return false;
     if (monitor.workers !== undefined && !workersShapeOk(monitor.id as string, monitor.workers)) return false;
+    // QC F-B2: additive Welle-B recovery fields fail closed when present.
+    if (monitor.recovery_episode !== undefined && monitor.recovery_episode !== null && !recoveryEpisodeShapeOk(monitor.recovery_episode)) return false;
+    if (monitor.recovery_resolution !== undefined && monitor.recovery_resolution !== null && !recoveryResolutionShapeOk(monitor.recovery_resolution)) return false;
   }
   return true;
 }

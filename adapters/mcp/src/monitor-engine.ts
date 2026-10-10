@@ -195,6 +195,24 @@ export class MonitorEngine {
     this.streaks.delete(key);
   }
 
+  /**
+   * QC F-B1 (waveB-qc SHAeffd6d1c6): a sanctioned resume must leave the visible
+   * park state behind, otherwise the §4.6 transparency itself lies after a
+   * successful continuation. The reset is scoped EXCLUSIVELY to this engine's
+   * own recovery-park reasons (the RESTARTABLE_EXHAUSTION_REASONS set):
+   * deliberate foreign parks (dispatch-uncertain, repair-budget-exhausted or
+   * any other reason) and the scheduler state stay untouched, and no
+   * successful mutation ever unparks an uncertain send.
+   */
+  private resumeRecoveryPark(record: MonitorRecord, via: "recovery-continued" | "dispatch-reconciled" | "healthy-dispatch", now: number): void {
+    const reason = record.state.parked_reason;
+    if (reason === undefined || !RESTARTABLE_EXHAUSTION_REASONS.has(reason)) return;
+    record.state.work = "active";
+    record.state.parked_reason = undefined;
+    monitorHistory(record, "recovery-park-resumed", { resumed_from: reason, via }, now);
+    this.log("info", `recovery park resumed monitor=${record.id} from=${reason} via=${via}`);
+  }
+
   constructor(deps: MonitorEngineDeps) {
     this.project = deps.project;
     this.gateway = deps.gateway;
@@ -375,6 +393,7 @@ export class MonitorEngine {
           record.state.last_seen_digest = summary.digest;
           record.state.worker_digest = workerDigest;
           record.wake_request = null;
+          this.resumeRecoveryPark(record, "dispatch-reconciled", now);
           this.appendDecisionSummary(record, summary, decisionsSince, now);
         });
         return "dispatch-reconciled";
@@ -528,6 +547,7 @@ export class MonitorEngine {
           record.recovery_episode = null;
           monitorHistory(record, "recovery-episode-closed", { reason: "healthy-wake" }, now);
         }
+        this.resumeRecoveryPark(record, "healthy-dispatch", now);
         monitorHistory(record, triggered ? "noop-trigger" : "dispatched", { message_id: result.message_id, action_id: actionId, primed: prime }, now);
         this.appendDecisionSummary(record, summary, decisionsSince, now);
       });
@@ -1177,6 +1197,7 @@ export class MonitorEngine {
       if (m.recovery_episode && chain.selected_identity) {
         pushRecoveryAttempt(m.recovery_episode, { at: iso(now), identity: chain.selected_identity, category: evidence.category, fingerprint: evidence.fingerprint, outcome: "dispatched" });
       }
+      this.resumeRecoveryPark(m, "recovery-continued", now);
       if (prime && priming) this.recordPriming(m, priming, now);
       monitorHistory(m, "recovery-continued", {
         message_id: result.message_id,

@@ -11,6 +11,8 @@ import {
   listWorkers,
   managerAliasFor,
   MONITOR_HISTORY_LIMIT,
+  RECOVERY_ATTEMPT_LIMIT,
+  RECOVERY_RESOLUTION_LIMIT,
   monitorDecision,
   monitorHistory,
   monitorManagerContextPath,
@@ -1734,6 +1736,13 @@ test("Welle B: per_profile own fallback dispatches exactly one admitted step; se
     assert.ok(record.history.some((entry) => entry.type === "recovery-episode-restarted"
       && (entry.detail as { operator_trigger?: boolean }).operator_trigger === true));
     assert.equal(state.updates.length, 2);
+    // QC F-B1: the sanctioned resume must also lift its OWN recovery park.
+    assert.equal(record.state.work, "active", "recovery-continued resumes the recovery park");
+    assert.equal(record.state.parked_reason, undefined, "no stale park reason survives the resume");
+    assert.ok(record.history.some((entry) => entry.type === "recovery-park-resumed"
+      && (entry.detail as { resumed_from?: string }).resumed_from === "recovery-chain-exhausted"
+      && (entry.detail as { via?: string }).via === "recovery-continued"));
+    assert.equal(record.scheduler.enabled, true, "resume never touches the scheduler");
   } finally {
     await cleanup();
   }
@@ -1889,6 +1898,13 @@ test("Welle B: an uncertain recovery send is recorded, never blind-resent, and o
     await withRegistry(project, (registry) => { registry.monitors[0]!.scheduler.next_run_at = 0; return registry; });
     assert.equal(await new MonitorEngine({ project, gateway, board, readPolicy: async () => policy, now: () => 300_000 }).tick(), "dispatch-uncertain");
     assert.equal(state.sends.length, 0, "never blindly resent");
+    // QC F-B1: an uncertain park is NOT a sanctioned resume — the deliberate
+    // dispatch-uncertain park must survive untouched.
+    const still = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(still.state.work, "parked_input_required", "no false unpark on uncertain send");
+    assert.equal(still.state.parked_reason, "dispatch-uncertain");
+    assert.ok(still.recovery_episode, "the episode stays open across uncertainty");
+    assert.ok(!still.history.some((entry) => entry.type === "recovery-park-resumed"), "foreign deliberate parks are never resumed by the hook");
     assert.ok(monitorId);
   } finally {
     await cleanup();
@@ -1925,6 +1941,109 @@ test("Welle B: quota evidence with Provider-Skip ON bypasses the failing provide
     });
     assert.equal(await new MonitorEngine({ project, gateway, board, readPolicy: async () => policy, now: () => 300_000 }).tick(), "recovery-continued");
     assert.equal(state.updates.at(-1)!.model_id, "deep-fb", "a single timeout never proves provider-wide failure");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("Welle B QC-F-B1: a policy-added candidate and a healthy close both lift only the engine's OWN recovery park, never the scheduler", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    state.status = blockedStatus("provider_timeout");
+    const { gateway, board } = fakes(state);
+    const policyOne = perProfileView({ deep: { provider_id: "deep-provider", model_id: "deep-model" } }, {
+      profileFallbacks: { deep: { provider_id: "fallback-provider", model_id: "fallback-model" } },
+    });
+    await seededFailedMonitor(project);
+    assert.equal(await new MonitorEngine({ project, gateway, board, readPolicy: async () => policyOne, now: () => 200_000 }).tick(), "recovery-continued");
+    await withRegistry(project, (registry) => { registry.monitors[0]!.scheduler.next_run_at = 0; return registry; });
+    assert.equal(await new MonitorEngine({ project, gateway, board, readPolicy: async () => policyOne, now: () => 300_000 }).tick(), "recovery-parked");
+    let record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(record.state.work, "parked_input_required");
+    assert.equal(record.state.parked_reason, "recovery-chain-exhausted");
+    // Policy change with a NEW permitted candidate resumes without any operator trigger.
+    const policyTwo = perProfileView(
+      { deep: { provider_id: "deep-provider", model_id: "deep-model" }, standard: { provider_id: "standard-provider", model_id: "standard-model" } },
+      { profileFallbacks: { deep: { provider_id: "fallback-provider", model_id: "fallback-model" } }, strategies: { degrading: true, providerSkip: null }, revision: 8 },
+    );
+    await withRegistry(project, (registry) => { registry.monitors[0]!.scheduler.next_run_at = 0; return registry; });
+    assert.equal(await new MonitorEngine({ project, gateway, board, readPolicy: async () => policyTwo, now: () => 400_000 }).tick(), "recovery-continued");
+    record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(record.state.work, "active", "the sanctioned policy resume lifts its own recovery park");
+    assert.equal(record.state.parked_reason, undefined, "the stale exhaustion label is gone");
+    assert.ok(record.history.some((entry) => entry.type === "recovery-park-resumed"
+      && (entry.detail as { resumed_from?: string }).resumed_from === "recovery-chain-exhausted"
+      && (entry.detail as { via?: string }).via === "recovery-continued"));
+    assert.equal(record.recovery_episode!.started_at, new Date(200_000).toISOString(), "the continuing episode never ended");
+    assert.ok(record.recovery_episode!.attempts.some((entry) => entry.identity === "deep-provider/deep-model"), "old failed identity retained");
+    assert.ok(record.recovery_episode!.attempts.some((entry) => entry.identity === "fallback-provider/fallback-model"), "old failed identity retained");
+    assert.equal(record.recovery_episode!.policy_revision, 8);
+    // Healthy admitted normal dispatch closes the episode; no stale park remains.
+    state.status = okStatus();
+    state.taskUpdated = "2026-10-10T00:00:00.000Z";
+    await withRegistry(project, (registry) => { registry.monitors[0]!.scheduler.next_run_at = 0; return registry; });
+    assert.equal(await new MonitorEngine({ project, gateway, board, readPolicy: async () => policyTwo, now: () => 500_000 }).tick(), "dispatched");
+    record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(record.recovery_episode, null);
+    assert.equal(record.state.work, "active");
+    assert.equal(record.state.parked_reason, undefined);
+    assert.equal(record.scheduler.enabled, true, "resume never touches the scheduler");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("Welle B QC-F-B2: malformed recovery fields fail closed on read; null, legacy and valid records round-trip", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    await seededFailedMonitor(project);
+    const path = monitorRegistryPath(project);
+    const writeRaw = async (mutate: (raw: Record<string, unknown>) => void): Promise<void> => {
+      const raw = JSON.parse(await readFile(path, "utf8"));
+      mutate(raw);
+      await writeFile(path, JSON.stringify(raw, null, 2) + "\n", { mode: 0o600 });
+    };
+    const validAttempt = { at: "2026-10-10T00:00:00.000Z", identity: "p/m", category: "provider_timeout", fingerprint: "f".repeat(64), outcome: "dispatched" };
+    const validEntry = { at: "2026-10-10T00:00:00.000Z", policy_revision: 3, regime: "per_profile", entry_profile: "deep", candidates: [{ label: "deep.main", identity: "p/m", status: "selected" }], selected_identity: "p/m", reason: "selected" };
+    // A valid additive record loads and survives a serialized mutation round-trip.
+    await writeRaw((raw) => {
+      (raw.monitors as Record<string, unknown>[])[0]!.recovery_episode = { started_at: "2026-10-10T00:00:00.000Z", policy_revision: 3, attempts: [validAttempt] };
+      (raw.monitors as Record<string, unknown>[])[0]!.recovery_resolution = [validEntry];
+    });
+    const ok = await readRegistrySnapshot(project);
+    assert.equal(ok.registry.monitors[0]!.recovery_episode?.attempts[0]!.identity, "p/m");
+    await withRegistry(project, (registry) => { registry.monitors[0]!.title = "M2"; return registry; });
+    const roundTrip = await readRegistrySnapshot(project);
+    assert.equal(roundTrip.registry.monitors[0]!.recovery_episode?.attempts.length, 1, "valid additive fields survive");
+    // Explicit nulls (closed/absent semantics) stay valid.
+    await writeRaw((raw) => {
+      (raw.monitors as Record<string, unknown>[])[0]!.recovery_episode = null;
+      (raw.monitors as Record<string, unknown>[])[0]!.recovery_resolution = null;
+    });
+    await readRegistrySnapshot(project);
+    // Hand-corrupted shapes fail closed at read time, exactly like every other field.
+    const malformed: Array<[string, (monitor: Record<string, unknown>) => void]> = [
+      ["episode with bad started_at", (m) => { m.recovery_episode = { started_at: "yesterday", policy_revision: 1, attempts: [] }; }],
+      ["episode attempts not an array", (m) => { m.recovery_episode = { started_at: "2026-10-10T00:00:00.000Z", policy_revision: 1, attempts: "nope" }; }],
+      ["unknown attempt outcome", (m) => { m.recovery_episode = { started_at: "2026-10-10T00:00:00.000Z", policy_revision: 1, attempts: [{ ...validAttempt, outcome: "magic" }] }; }],
+      ["short fingerprint", (m) => { m.recovery_episode = { started_at: "2026-10-10T00:00:00.000Z", policy_revision: 1, attempts: [{ ...validAttempt, fingerprint: "abc" }] }; }],
+      ["attempts above the bound", (m) => { m.recovery_episode = { started_at: "2026-10-10T00:00:00.000Z", policy_revision: 1, attempts: Array.from({ length: RECOVERY_ATTEMPT_LIMIT + 1 }, () => ({ ...validAttempt })) }; }],
+      ["resolution above the bound", (m) => { m.recovery_resolution = Array.from({ length: RECOVERY_RESOLUTION_LIMIT + 1 }, () => ({ ...validEntry })); }],
+      ["unknown candidate status", (m) => { m.recovery_resolution = [{ ...validEntry, candidates: [{ label: "deep.main", identity: "p/m", status: "bogus" }] }]; }],
+      ["unknown chain reason", (m) => { m.recovery_resolution = [{ ...validEntry, reason: "whatever" }]; }],
+    ];
+    for (const [label, mutate] of malformed) {
+      await writeRaw((raw) => { mutate((raw.monitors as Record<string, unknown>[])[0]!); });
+      await assert.rejects(readRegistrySnapshot(project), /invalid monitor registry/, label);
+    }
+    // Legacy records without the fields remain valid (pure additive compatibility).
+    await writeRaw((raw) => {
+      delete (raw.monitors as Record<string, unknown>[])[0]!.recovery_episode;
+      delete (raw.monitors as Record<string, unknown>[])[0]!.recovery_resolution;
+    });
+    const legacy = await readRegistrySnapshot(project);
+    assert.equal(legacy.registry.monitors[0]!.recovery_episode, undefined);
   } finally {
     await cleanup();
   }
