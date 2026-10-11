@@ -287,7 +287,7 @@ TASKBOARD_ARM64_SHA256="3749fb985f544fdb6788ba1dff69761e599ff82b3fe86d39ca54307c
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.7.31"
+OCVM_VERSION="0.7.32"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -19126,7 +19126,10 @@ start_session() {
   cleanup_project_worktrees "$proj"
 
   sess="oc-$(date +%Y%m%d-%H%M%S)"
-  local controller_id="${sess}-controller-$$"
+  # Deliberately NOT local: the EXIT-trap cleanup below runs after start_session
+  # has returned, when bash has already discarded function locals — same class
+  # as the v0.5.64 host-shell lock fix (see docs/MCP-TUNNEL.md).
+  controller_id="${sess}-controller-$$"
   local effective_mcp_enabled=0 effective_mcp_port=""
   local effective_journal_enabled
   effective_journal_enabled="$(session_journal_enabled fresh)" || return 1

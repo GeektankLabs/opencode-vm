@@ -341,6 +341,57 @@ for exit_action in keep delete; do
 done
 pass 'actual normal keep and delete paths preserve the synchronous final auth'
 
+# Regression: the host cleanup runs from the EXIT trap AFTER start_session has
+# returned, so bash has already discarded the function's locals. Mirror the
+# production controller_id declaration verbatim from the script and drive the
+# real cleanup through a post-return EXIT trap. Neither a successful nor a
+# failed session end may hit "controller_id: unbound variable", the real
+# cleanup must reach auth finalization, and a superseding controller must
+# still be honored after the return.
+controller_decl="$(grep -m1 -E '^  (local )?controller_id=' "$ROOT/opencode-vm.sh")" \
+  || fail 'controller_id declaration not found in start_session'
+controller_decl="${controller_decl#  }"
+run_session_end() {
+  eval "$controller_decl"
+  write_senv "$senv" oc-test /project hash tui '' 0 0 oc-test "$controller_id" 0 '' 0 0 0
+  trap cleanup EXIT HUP TERM
+  return "$session_end_rc"
+}
+for session_end_rc in 0 1; do
+  out="$(
+    (
+      unset controller_id
+      reset_case
+      auth_sync_begin /project oc-test "$share/xdg-data/opencode/auth.json"
+      sess=oc-test sess_share="$share" proj_state="$TMP/state" cfg_hash=hash
+      SESSION_MODE=tui clean_link='' KEEP_HISTORY=0 OC_SHELL_OK=1 capture_fails=0 exit_action=keep
+      run_session_end
+    ) 2>&1
+  )" || true
+  [[ "$out" != *'unbound variable'* ]] || fail "post-return cleanup hit an unbound variable (rc=$session_end_rc): $out"
+  [[ "$out" == *'[cleanup] Persisting session data...'* ]] || fail "post-return cleanup did not reach auth finalization (rc=$session_end_rc): $out"
+  [[ -f "$senv" && -d "$share" ]] || fail "post-return keep path lost tracker/share (rc=$session_end_rc)"
+  [[ "$(jq -r '.test.key' "$HOST_DATA_DIR/auth.json")" == final ]] || fail "post-return cleanup did not finalize auth (rc=$session_end_rc)"
+  pass "post-return EXIT-trap cleanup survives function scope (session end rc=$session_end_rc)"
+done
+
+out="$(
+  (
+    unset controller_id
+    reset_case
+    auth_sync_begin /project oc-test "$share/xdg-data/opencode/auth.json"
+    sess=oc-test sess_share="$share" proj_state="$TMP/state" cfg_hash=hash
+    SESSION_MODE=tui clean_link='' KEEP_HISTORY=0 OC_SHELL_OK=1 capture_fails=0 exit_action=keep
+    run_session_end
+    write_senv "$senv" oc-test /project hash tui '' 0 0 oc-test superseded-controller 0 '' 0 0 0
+  ) 2>&1
+)" || true
+[[ "$out" != *'unbound variable'* ]] || fail "superseded post-return cleanup hit an unbound variable: $out"
+[[ "$out" == *'Controller was superseded'* ]] || fail "superseding controller not honored after return: $out"
+[[ "$out" != *'[cleanup] Persisting session data...'* ]] || fail 'superseding controller reached auth finalization'
+assert_preserved
+pass 'post-return EXIT-trap cleanup honors a superseding controller'
+
 reset_case
 running=0
 vscode_trust_preflight() { return 0; }
