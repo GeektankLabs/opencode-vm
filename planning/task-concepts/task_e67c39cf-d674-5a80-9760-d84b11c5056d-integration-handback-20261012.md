@@ -10,11 +10,10 @@ Kein Push/Tag/Release/Publish/Deploy/Neustart/Live-Monitor-Eingriff.
 
 ## 0 Abschluss (finale Korrektur dieses Receipts)
 
-- **Finaler Main-Tip ist `c426e287d9f020c0bfa1aa8787abd166399800e6`**
-  (Tree `6431bb2039e55e8c9fae36602d9c88583e2d6754`) — dieses Receipt wurde
-  zunächst bei `93a7c18` geschrieben und mit dem Docs-Commit `c426e28`
-  (dieses Receipt selbst) auf Main übernommen; die ursprüngliche „Nachher"-
-  Angabe in §1 bezog sich auf diesen Zwischenstand und ist hiermit korrigiert.
+- **Unabhängig geprüfte Integrationsbaseline ist `c426e287d9f020c0bfa1aa8787abd166399800e6`**
+  (Tree `6431bb2039e55e8c9fae36602d9c88583e2d6754`) — nicht der spätere
+  Dokument-Tip: diesem Receipt folgten ausschließlich task-eigene docs-only
+  Sicherungscommits (zuletzt `78ef744` vor dieser Korrektur).
 - **Unabhängige Integrationsprüfung:** LOCAL_MAIN_INTEGRATION_PASS —
   verifiziert exakt Main `c426e28`/Tree `6431bb20`, nur Mode-Restore `93a7c18`
   + Docs `c426e28` gegenüber `d7765e8`, Pin `c211da15…`, 14 isolierte Läufe
@@ -37,12 +36,12 @@ Kein Push/Tag/Release/Publish/Deploy/Neustart/Live-Monitor-Eingriff.
 
 | Feld | Vorher | Nachher |
 |---|---|---|
-| Main-HEAD | `b7aa2640aa328ee5705ffb51de2cbac10db0705a` | **`c426e287d9f020c0bfa1aa8787abd166399800e6`** (final; Zwischenstand `93a7c18` — siehe §0) |
+| Main-HEAD | `b7aa2640aa328ee5705ffb51de2cbac10db0705a` | **Integrationsbaseline `c426e287d9f020c0bfa1aa8787abd166399800e6`** (geprüft); danach ausschließlich task-eigene docs-only Commits (siehe §0) |
 | Main-Tree | `9e69a…` (Base-Baum) | direkt nach FF verifiziert (= `ba0e6ea8…`); RestORE-Chore/Docs-Commits ändern danach bewusst Mode/Docs |
 | Integrationsart | — | **Fast-forward** `b7aa264..d7765e8` (`--ff-only`, kein Merge-Commit), danach 1 Restore-Chore-Commit + 1 Docs-Commit |
 | Kandidat | `d7765e8e7303d7bb8cb45abb64e06fc64abd3169`, Tree `ba0e6ea83009e032e9a2d001f28f3dca33a0bc33` | exakt integriert (Tree des FF = Kandidaten-Baum; danach nur Mode-Restore + Docs) |
 | Gate | QC_PASS laut registriertem `…-candidate-qc-20261012.md` (Addendum 2, Delta-QC d7765e8; unabhängiges Original `ses_ed04c2e41ffe6196JY82WyZd2q` / `msg_1302a767700155lZCPzbZmrxBv` — überlieferte Quelle, frisch gegen die registrierte Datei abgeglichen) | unverändert übernommen |
-| Commits neu auf Main | — | `cb28047`, `9ed3411`, `960cb41`, `8fca026`, `d7765e8` (Kandidat), **`93a7c18`** (Exec-Bit-Restore), **`c426e28`** (dieses Receipt) — finaler Tip `c426e28` |
+| Commits neu auf Main | — | `cb28047`, `9ed3411`, `960cb41`, `8fca026`, `d7765e8` (Kandidat), **`93a7c18`** (Exec-Bit-Restore), **`c426e28`** (dieses Receipt) = geprüfte Integrationsbaseline; danach task-eigene docs-only Commits |
 
 Erhaltene Versionen/Pins: `OCVM_VERSION 0.7.35` (`opencode-vm.sh:290`),
 MCP-Adapter **0.1.44** (`opencode-vm.sh:47-50`, `package.json`/lock,
