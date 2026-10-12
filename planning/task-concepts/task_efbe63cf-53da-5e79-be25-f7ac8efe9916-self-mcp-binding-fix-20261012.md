@@ -1,7 +1,9 @@
 Task-ID: task_efbe63cf-53da-5e79-be25-f7ac8efe9916 (Folge-/Reparaturbeleg; kein neuer Task erfunden)
 Datum: 2026-10-12 (Fix-Freigabe 03:36 Europe/Berlin, Nutzer: "Der Fix ist freigegeben")
-Status: RELEASE_PREP_READY_FOR_INDEPENDENT_QC (Kandidatenbranch, keine Main-Integration,
-kein Tag/Push/Release)
+Status: LOCAL_MAIN_INTEGRATED (FF `0320c8d` → `d98cd54`, Main-Tree `c884d72f91f9b05580b47e688d0b8e21c901131a`,
+04:07 Europe/Berlin nutzerautorisiert; QC-Verzicht gemäß Auftrag nur für Release-Metadaten/Doku —
+funktionaler Fix `0e205dc` trägt unabhängiges QC_PASS). Push/Tag/Release/Host-Installation/
+VM-Reconnect: offen, Operator-Gates. Kein LIVE-PASS-Claim.
 
 # Self-MCP-Bindung folgt dem MCP-Connector statt dem Orchestrator-Skill-Opt-in (U1-Fix)
 
@@ -77,3 +79,19 @@ kein Tag/Push/Release)
 ## Offen / Folge
 - Unabhängige QC + Main-Integration/Release (Operator-Gates; RELEASING.md).
 - Keine Enforcement-Erfindung (Self-Steering-Guard bleibt separater Folgeticket, s. Priming).
+
+## Lokale Main-Integration (04:07 Europe/Berlin, nutzerautorisiert)
+- Vorab verifiziert: Kandidat `d98cd54`/Tree `c884d72f…` auf Base `0320c8d`; Diff
+  `0e205dc..d98cd54` = ausschließlich 3 Release-Tag-Zeilen + dieser Beleg (keine
+  Funktionaländerung seit QC_PASS → kein Blocker); Main = merge-base, keine Pfad-
+  Überlappung mit 90 fremden Dirty-Einträgen (diese unverändert erhalten).
+- Ausgeführt: `git merge --ff-only fix/mgmt-self-mcp-connector-binding` im Main-Checkout
+  → Main-HEAD `d98cd54`, Parents `0e205dc`, `0320c8d`.
+- Readback Main: `OCVM_VERSION=0.7.34`, `MCP_ADAPTER_VERSION=0.1.43` + SHA-Pin
+  `52f405…425ff` (Byte-Identität, lokal reproduzierbar gebaut), Tags v0.7.34 ×3;
+  `tests/release_metadata_test.py` OK (5/5), `tests/monitor_service_test.sh` OK,
+  `tests/mcp_self_connection_test.py` PASS auf Main (reale Runtime, ocvm-self
+  connected, skill-frei). Vorbestehender Skill-r49/r48-Testdrift unangetastet.
+- Nächste Schritte nach Veröffentlichung (MCP-/Web-Session, z. B. bi-mcrepo):
+  Ctrl-C → `opencode-vm update` → `opencode-vm attach` (Web/tui-mcp: gleiche
+  Guest-Payload, re-register + connect; kein `web`-Aufruf, kein VM-/Base-Reset).
