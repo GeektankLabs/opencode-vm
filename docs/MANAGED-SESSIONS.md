@@ -53,9 +53,16 @@ the former manual-session clause. Executable permissions remain unchanged.
   an operator-side `OCVM_A2A_SCOPE_DIRS`/`OCVM_OPENLIVE_SCOPE_DIRS`
   environment declaration (path-separated). Scope is never derived from prompt
   text; reads and pure management never adopt or extend a scope. A missed
-  `permission.asked` event (subscription gap or transient lineage-check error)
-  is covered by a bounded pending-list reconciliation sweep on every
-  (re)subscribe that applies the same reject+terminal-blocker handling. Manual sessions keep the native interactive ask;
+  `permission.asked` event or a transient lineage-check API error is covered
+  two ways: a bounded pending-list reconciliation sweep on every
+  (re)subscribe, plus one bounded delayed re-check (max 3 per ask, 1.5 s
+  apart) scheduled when the intact event path hits such an error — an intact
+  stream never reconnects on its own, so the re-check is what closes that
+  window. The sweep processes managed-lineage asks first (fairness), is
+  bounded at 64 per pass, and leaves manual sessions' asks untouched. If the
+  lineage stays unverifiable after the bounded attempts, the ask remains
+  honestly pending (never auto-allowed, never rejected without verified
+  lineage). Manual sessions keep the native interactive ask;
   nothing approves or bypasses a real permission, and host/mount/remote-write
   boundaries are untouched.
 
@@ -113,3 +120,18 @@ Maintained gates: `tests/managed_policy_test.mjs`, `tests/managed_a2a_test.py`,
 MCP/OpenLive package suites and lifecycle/standalone checks. Historical V1 spike
 evidence remains under `tests/agent-managed-v1-spike/`; its old external-G3 model
 selection interpretation is superseded by this task's canonical operator plan.
+
+## Known pre-existing limitation: legacy adopted sessions (documented, no migration)
+
+`policyDelta` writes are append-only. Sessions adopted by a plugin from before
+the F0 correction (0.7.36) keep the previously copied OpenCode default rules —
+including the copied generic `"*": "allow"` and the default external ask — in
+front of the newly desired tail on reuse/attach/re-adopt. The external-directory
+watcher protects the external ask path in those sessions regardless of the
+stale rules, but other agent-level asks (e.g. doom_loop, `.env` reads) can
+remain silently overridden by the stale copied blanket allow in exactly those
+cross-version-reused sessions. This is a pre-existing residual, not a
+regression of the current change, and no cleanup is performed automatically:
+re-adopt/attach does not remove previously written session rules or foreign
+plugin references. A dedicated later migration (stripping previously copied
+default rules on re-adopt) is recorded as separate follow-up work.

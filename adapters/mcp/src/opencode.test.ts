@@ -3695,7 +3695,7 @@ test("unverifiable descendant coverage is reported as unknown, never as a clean 
 });
 
 test("validateScopeDirs enforces the managed plugin contract fail-fast", () => {
-  assert.deepEqual(validateScopeDirs(["/srv/data", "/srv/data/"]), ["/srv/data", "/srv/data"]);
+  assert.deepEqual(validateScopeDirs(["/srv/data", "/srv/data/"]), ["/srv/data"], "normalized duplicates dedupe like the plugin merge");
   assert.throws(() => validateScopeDirs([]), /non-empty/u);
   assert.throws(() => validateScopeDirs(Array.from({ length: 17 }, (_, i) => `/d/${i}`)), /at most 16/u);
   assert.throws(() => validateScopeDirs(["relative/path"]), /absolute/u);

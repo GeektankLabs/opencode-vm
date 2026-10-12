@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { policyDelta, remoteWrite, questionInResponse, terminalResponse, handback, permissionBlocker, matchesGlob, scopeAllowRules, authorizedFor, mergeScopeDirs } from "../runtime/managed-core.mjs";
+import { policyDelta, remoteWrite, questionInResponse, terminalResponse, handback, permissionBlocker, matchesGlob, scopeAllowRules, authorizedFor, mergeScopeDirs, orderSweepAsks } from "../runtime/managed-core.mjs";
 
 test("policy composition is idempotent and preserves independent agent/session denies", () => {
   const scope = [{ permission: "read", pattern: "secret*", action: "deny" }, { permission: "bash", pattern: "git commit *", action: "deny" }];
@@ -119,4 +119,15 @@ test("scope directory merges are atomic and never silently truncated", () => {
   assert.deepEqual(mergeScopeDirs(sixteen, ["/d/0"]), sixteen);
   assert.throws(() => mergeScopeDirs(sixteen, ["/new"]), /MANAGED_SCOPE_LIMIT/);
   assert.throws(() => mergeScopeDirs([], Array.from({ length: 17 }, (_, i) => `/d/${i}`)), /MANAGED_SCOPE_LIMIT/);
+});
+
+// R5 regression: the bounded sweep processes managed-lineage asks first, so a
+// volume of foreign/manual pending asks cannot starve the sweep's own line.
+test("sweep ordering keeps managed asks ahead of foreign pending volume", () => {
+  const foreign = Array.from({ length: 65 }, (_, i) => ({ id: `per_f${i}`, sessionID: `ses_manual_${i}`, permission: "external_directory", patterns: [`/f/${i}/*`] }));
+  const own = { id: "per_own", sessionID: "ses_managed_child", permission: "external_directory", patterns: ["/own/*"] };
+  const ordered = orderSweepAsks([...foreign, own], ["ses_managed_child"]);
+  assert.equal(ordered[0].id, "per_own", "the managed ask behind 65 foreign pendings must be processed first");
+  assert.equal(ordered.length, 66);
+  assert.deepEqual(orderSweepAsks([own, { id: "x", sessionID: "s", permission: "bash" }], []), [own], "non-external asks are not swept");
 });

@@ -5,7 +5,7 @@ import { dirname, join, normalize as normalizePath, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { policyDelta, remoteWrite, tokens, handback, permissionBlocker, PRIMER, COMMIT_SENTENCE, LEGACY_VM_ASK, MANAGED_VM_ASK, protocol, questionInResponse, responseUsage, terminalResponse, matchesGlob, mergeScopeDirs, authorizedFor, REVISION } from "./managed-core.mjs";
+import { policyDelta, remoteWrite, tokens, handback, permissionBlocker, PRIMER, COMMIT_SENTENCE, LEGACY_VM_ASK, MANAGED_VM_ASK, protocol, questionInResponse, responseUsage, terminalResponse, matchesGlob, mergeScopeDirs, authorizedFor, orderSweepAsks, REVISION } from "./managed-core.mjs";
 
 const FETCH_STATE = Symbol.for("ocvm.managed.fetch.v1");
 const HEADER = "x-ocvm-managed-turn";
@@ -230,13 +230,24 @@ export default async ({ client, directory }) => {
   const asked = new AbortController();
   // Shared reject+terminal-report handling for one pending external ask.
   // Empty/absent ask patterns are NEVER authorized (fail closed into the
-  // terminal blocker instead of a hidden wait); isManaged API errors leave
-  // the ask untouched here — the bounded sweep below retries them.
+  // terminal blocker instead of a hidden wait). A transient isManaged API
+  // error schedules ONE bounded delayed re-check (max 3 per ask, 1.5 s apart)
+  // instead of relying on a future event resubscribe — an intact event stream
+  // never reconnects on its own, so without this the ask could wait forever.
+  const askRechecks = new Map();
+  const scheduleAskRecheck = info => {
+    if (asked.signal.aborted) return;
+    const attempts = askRechecks.get(info.id) ?? 0;
+    if (attempts >= 3) return;
+    askRechecks.set(info.id, attempts + 1);
+    const timer = setTimeout(() => { askRechecks.delete(info.id); void sweepPendingAsks(); }, 1500);
+    timer.unref?.();
+  };
   const rejectUnauthorizedAsk = async info => {
     if (info?.permission !== "external_directory" || typeof info.sessionID !== "string" || typeof info.id !== "string") return false;
     let managed = true;
     try { managed = await isManaged(info.sessionID); }
-    catch { return false; }
+    catch { scheduleAskRecheck(info); return false; }
     if (!managed) return false;
     const patterns = Array.isArray(info.patterns) && info.patterns.length ? info.patterns : (info.metadata?.parentDir ? [`${info.metadata.parentDir}/*`] : []);
     if (authorizedFor(saved.sessions[info.sessionID]?.scopeDirs ?? [], patterns)) return false;
@@ -251,18 +262,22 @@ export default async ({ client, directory }) => {
     try {
       await api("POST", `/permission/${encodeURIComponent(info.id)}/reply`, { reply: "reject", message: "External directory access is not authorized for this managed session; end the turn with a readable blocker." });
     } catch { /* already answered or gone: the terminal report above still ends the turn */ }
+    askRechecks.delete(info.id);
     return true;
   };
   // Bounded fail-open reconciliation: asks that appeared while the event
-  // subscription was down (or whose lineage check hit a transient API error)
-  // are swept once per (re)subscribe from the pending list. No scheduling
-  // architecture, no automatic allow, no touch of manual sessions.
+  // subscription was down, or whose lineage check hit a transient API error,
+  // are swept from the pending list. Managed-session asks are ordered first
+  // (fairness) so foreign/manual volume cannot starve the sweep's own line
+  // behind the bound; anything beyond the bound is retried by the next
+  // sweep/re-check. No scheduling architecture, no automatic allow, no touch
+  // of manual sessions.
   const sweepPendingAsks = async () => {
     try {
       const pending = await api("GET", "/permission");
       if (!Array.isArray(pending)) return;
-      for (const info of pending.slice(0, 64)) await rejectUnauthorizedAsk(info);
-    } catch { /* transient backend read: the next (re)subscribe sweeps again */ }
+      for (const info of orderSweepAsks(pending, Object.keys(saved.sessions)).slice(0, 64)) await rejectUnauthorizedAsk(info);
+    } catch { /* transient backend read: the next (re)subscribe or re-check sweeps again */ }
   };
   const watchAsks = (async () => {
     for (;;) {

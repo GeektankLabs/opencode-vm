@@ -14,7 +14,7 @@ WORKFLOW = (ROOT / ".github/workflows/release.yml").read_text()
 REPO = "fixture/project"
 TAG = "v0.5.51"
 SHA = "a" * 40
-ASSET = "opencode-vm-openlive-adapter-0.1.7.tar"
+ASSET = "opencode-vm-openlive-adapter-0.1.8.tar"
 MCP_ASSET = "opencode-vm-mcp-adapter-0.1.0.tar"
 HUB_ASSET = "opencode-vm-hub-1.tar"
 REF = ["api", f"repos/{REPO}/git/ref/tags/{TAG}"]
@@ -130,6 +130,38 @@ class ReleaseStateTest(unittest.TestCase):
                             f"gh: No commit found for SHA: {TAG} (HTTP 422)")]
                 result, _ = self.run_step(name, replies, success=False)
                 self.assertIn("HTTP 422", result.stderr)
+
+
+
+class OpenLivePinRebuildTest(unittest.TestCase):
+    """R1 regression: a source change without rebuilding/pinning the OpenLive
+    archive must fail here, not at install/update time. Rebuilds the real
+    archive from the current tree twice and compares against the script pin."""
+
+    def test_openlive_archive_rebuild_matches_pin_and_version(self):
+        import hashlib
+        import re
+        script = (ROOT / "opencode-vm.sh").read_text()
+        version = re.search(r'^OPENLIVE_ADAPTER_VERSION="([^"]+)"', script, re.M)[1]
+        pin = re.search(r'^OPENLIVE_ADAPTER_SHA256="([0-9a-f]{64})"', script, re.M)[1]
+        package = json.loads((ROOT / "adapters/openlive-acp/package.json").read_text())
+        self.assertEqual(package["version"], version)
+        for source in ("src/acp/transport.ts", "src/remote/server.ts"):
+            content = (ROOT / "adapters/openlive-acp" / source).read_text()
+            self.assertIn(f'ADAPTER_VERSION = "{version}"', content)
+        digests = []
+        for _ in range(2):
+            with tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "openlive.tar"
+                build = subprocess.run(
+                    ["bash", str(ROOT / "scripts/build-openlive-adapter.sh"), str(output)],
+                    cwd=ROOT, capture_output=True, text=True,
+                    env={**os.environ, "SOURCE_DATE_EPOCH": "0"},
+                )
+                self.assertEqual(build.returncode, 0, build.stderr)
+                digests.append(hashlib.sha256(output.read_bytes()).hexdigest())
+        self.assertEqual(digests[0], digests[1], "OpenLive archive build is not reproducible")
+        self.assertEqual(digests[0], pin, "OpenLive pin does not match the rebuilt archive")
 
 
 if __name__ == "__main__":

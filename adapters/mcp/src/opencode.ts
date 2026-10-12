@@ -3580,7 +3580,7 @@ export function validateScopeDirs(input: unknown): string[] {
       "scope_dirs accepts at most 16 directories.",
     );
   }
-  return input.map((dir) => {
+  const normalized = input.map((dir) => {
     if (
       typeof dir !== "string" ||
       dir.length === 0 ||
@@ -3593,15 +3593,25 @@ export function validateScopeDirs(input: unknown): string[] {
         "scope_dirs entries must be absolute paths of at most 512 characters without control characters.",
       );
     }
-    const normalized = dir.replace(/\/+$/u, "");
-    if (normalized === "" || normalized === "/" || normalized.endsWith("/..") || normalized.includes("/../") || normalized.includes("/./")) {
+    const trimmed = dir.replace(/\/+$/u, "");
+    if (trimmed === "" || trimmed === "/" || trimmed.endsWith("/..") || trimmed.includes("/../") || trimmed.includes("/./")) {
       throw new AdapterError(
         "INVALID_ARGUMENT",
         "scope_dirs entries must be normalized absolute directories without '.', '..' or a trailing slash; the filesystem root is not a scope.",
       );
     }
-    return normalized;
+    return trimmed;
   });
+  // Mirror the plugin's merge dedup so duplicates never consume the atomic
+  // 16-directory budget differently on the two sides of the contract.
+  const unique = [...new Set(normalized)];
+  if (unique.length === 0) {
+    throw new AdapterError(
+      "INVALID_ARGUMENT",
+      "scope_dirs must contain at least one directory after normalization.",
+    );
+  }
+  return unique;
 }
 
 function isActivity(value: unknown): value is SessionActivity {

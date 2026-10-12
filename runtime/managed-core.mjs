@@ -62,6 +62,19 @@ export function mergeScopeDirs(existing = [], incoming = []) {
   return merged;
 }
 
+// Fair bounded sweep order: pending external asks of already-managed sessions
+// come first so a volume of foreign/manual asks cannot starve the sweep's own
+// managed line behind the processing bound. This is an ordering heuristic
+// only; the authoritative lineage check still runs per ask.
+export function orderSweepAsks(pending, managedSessions) {
+  const external = (Array.isArray(pending) ? pending : []).filter(item => item?.permission === "external_directory" && typeof item.sessionID === "string");
+  const managed = new Set(managedSessions ?? []);
+  return [
+    ...external.filter(item => managed.has(item.sessionID)),
+    ...external.filter(item => !managed.has(item.sessionID)),
+  ];
+}
+
 export function restrictions(rules) {
   const independent = rules.filter(r => r.permission !== "question" && !remoteRules.some(remote => same(r, remote)));
   const denied = new Set(independent.filter(r => r.action === "deny").map(r => r.permission));

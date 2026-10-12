@@ -1,9 +1,10 @@
 """Maintained real-runner regression; no origin, credentials or real publishing."""
 import argparse
+import concurrent.futures
 import json
 from pathlib import Path
 import urllib.error
-from helpers.managed_runtime import Runtime, run, wait
+from helpers.managed_runtime import ROOT, Runtime, run, wait
 
 QUESTION = ("question", {"questions": [{"question": "Which fixture direction?", "header": "Decision", "options": [{"label": "A", "description": "Keep local scope"}, {"label": "B", "description": "Pause dependent work"}]}]})
 
@@ -269,6 +270,78 @@ def check(binary=None, sdk="@ai-sdk/openai-compatible"):
         print("PASS real MCP ingress scope_dirs admission (authorized child, no ask)", flush=True)
     finally:
         ext.close()
+
+
+    # R2+R5 real fault regression (disposable, outside the /tmp/opencode
+    # whitelist): a transient isManaged API error on the intact event path
+    # must NOT hang the ask until some future resubscribe — the bounded
+    # delayed re-check sweeps it — and the sweep must process the managed ask
+    # first even when it sits behind 65 foreign/manual pending asks. Product
+    # code stays clean: the one-shot fault is injected into a test-local copy
+    # of the plugin.
+    fault = Runtime(prefix="/tmp/opencode-ext")
+    try:
+        del fault.cfg["permission"]["*"]
+        fault_dir = fault.root / "fault-plugin"
+        fault_dir.mkdir()
+        (fault_dir / "managed-core.mjs").write_text((ROOT / "runtime/managed-core.mjs").read_text())
+        policy = (ROOT / "runtime/managed-policy.mjs").read_text()
+        anchor = "try { managed = await isManaged(info.sessionID); }"
+        injected = anchor.replace(
+            "try {",
+            "try { if (!globalThis.__ocvmFaultOnce && JSON.stringify(info.patterns ?? []).includes('bi-archive')) { globalThis.__ocvmFaultOnce = true; throw new Error('injected transient isManaged fault'); }",
+            1,
+        )
+        assert anchor in policy
+        (fault_dir / "managed-policy.mjs").write_text(policy.replace(anchor, injected, 1))
+        fault.cfg["plugin"] = [(fault_dir / "managed-policy.mjs").as_uri()]
+        archive = fault.root / "bi-archive"
+        archive.mkdir()
+        (archive / "needle.txt").write_text("needle\n")
+        manual_dir = fault.root / "bi-manual"
+        manual_dir.mkdir()
+        (manual_dir / "needle.txt").write_text("needle\n")
+        fault.start()
+        # 65 manual sessions block on their own interactive external asks
+        # (separate directory so the injected fault stays bound to the
+        # managed child's ask patterns). Blocked turns never return, so they
+        # need their own executor — the fixture's 8-worker pool would starve.
+        # Each session gets a unique CASE name: the fixture model server
+        # counts script steps globally, so a shared name would hand later
+        # sessions the follow-up text instead of the grep tool call.
+        volume_pool = concurrent.futures.ThreadPoolExecutor(max_workers=70)
+        manual_futures = []
+        try:
+            for i in range(65):
+                manual = fault.session()
+                name = f"manual-volume-{i}"
+                fault.scripts[name] = [("grep", {"pattern": "needle", "path": "../bi-manual"}), "manual continuation"]
+                manual_futures.append(volume_pool.submit(
+                    fault.api, "POST", f"/session/{manual}/message",
+                    {"agent": "build", "model": {"providerID": "fixture", "modelID": "gpt-fixture"}, "parts": [{"type": "text", "text": f"CASE:{name}"}]},
+                ))
+            wait(lambda: len([item for item in fault.pending_permissions() if item["permission"] == "external_directory"]) >= 65, 180)
+            # Managed child ask last: its event-path lineage check fails once
+            # (injected fault), so only the bounded delayed re-check sweep can
+            # reach it — behind 65 foreign pendings.
+            fault_root_session = fault.session()
+            fault.adopt(fault_root_session)
+            fault.scripts["fault-child"] = [("grep", {"pattern": "needle", "path": "../bi-archive"}), "fault child continuation"]
+            fault.finish(fault.prompt(fault_root_session, "fault-parent", [("task", {"description": "Fault regression", "subagent_type": "fixture-child", "prompt": "CASE:fault-child"}), "Fault parent continued"]), fault_root_session)
+            for info in fault.api("GET", f"/session/{fault_root_session}/children"):
+                messages = fault.api("GET", f"/session/{info['id']}/message")
+                if any("CASE:fault-child" in str(m["parts"]) for m in messages):
+                    terminal = [m for m in messages if m["info"].get("finish") == "stop"]
+                    assert terminal, "delayed re-check sweep must terminate the faulted managed child turn"
+                    assert "INPUT_REQUIRED:" in str(terminal) and "not approved automatically" in str(terminal)
+            remaining = [item for item in fault.pending_permissions() if item["permission"] == "external_directory"]
+            assert all(item["sessionID"] != fault_root_session and not any(item["sessionID"] == c["id"] for c in fault.api("GET", f"/session/{fault_root_session}/children")) for item in remaining), "no managed-lineage ask may remain pending"
+            assert len(remaining) >= 65, "manual asks stay untouched and interactive"
+            print("PASS transient event-path lineage fault and 65+ pending sweep fairness (R2/R5)", flush=True)
+        finally:
+            volume_pool.shutdown(wait=False, cancel_futures=True)
+    finally:
+        fault.close()
 
 
 if __name__ == "__main__":
