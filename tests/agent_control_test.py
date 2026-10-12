@@ -205,6 +205,10 @@ class PolicyTest(unittest.TestCase):
                     selection[{"provider_unavailable": "provider_id", "model_unavailable": "model_id",
                                 "variant_unavailable": "variant"}[state]] = "gone"
                 policy["profiles"][role] = selection
+            if vector.get("disabled"):
+                policy["disabled"] = {"profiles": {name: name in vector["disabled"] for name in PROFILES},
+                                      "profileFallbacks": {name: False for name in PROFILES},
+                                      "finalFallback": False}
             catalog = None if vector["catalog"] == "unavailable" else {**CATALOG, "truncated": vector["catalog"] == "incomplete"}
             result = resolve_profile(policy, vector["profile"], catalog)
             for key in ("status", "resolved_profile", "resolution_path"):
@@ -315,6 +319,42 @@ class PolicyTest(unittest.TestCase):
         self.assertEqual(sorted(json.loads(store.path.read_text())["profiles"]), sorted(PROFILES))
         self.assertEqual(upgraded["finalFallback"], None)
 
+
+    def test_slot_disabled_resolution_skip_and_identical_runtime_in_other_slot(self):
+        policy = {"schemaVersion": 5, "revision": 3, "updatedAt": "2026-10-12T00:00:00Z",
+                  "profiles": {"deep": SELECTION, "standard": SELECTION, "execution": None,
+                               "design": SELECTION, "review": None},
+                  "finalFallback": None,
+                  "profileFallbacks": {name: None for name in PROFILES},
+                  "strategies": {"degrading": None, "providerSkip": None},
+                  "disabled": {"profiles": {"deep": True, "standard": False, "execution": False,
+                                            "design": True, "review": False},
+                               "profileFallbacks": {name: False for name in PROFILES},
+                               "finalFallback": False}}
+        self.assertEqual(validate_policy(policy)["schemaVersion"], 5)
+        # deep has no resolution fallback: its paused main alone ends in a hold —
+        # no backend default choice, no substitute model.
+        resolved = resolve_profile(policy, "deep", CATALOG)
+        self.assertEqual(resolved["status"], "hold_disabled")
+        self.assertEqual(resolved["resolution_path"], ["deep"])
+        self.assertEqual([c["label"] for c in resolved["candidates"] if c["disabled"]], ["deep.main"])
+        # The identical runtime in another ACTIVE slot stays selectable (no identity ban):
+        # design walks past its paused main to the same tuple stored in standard.
+        design = resolve_profile(policy, "design", CATALOG)
+        self.assertEqual(design["status"], "available")
+        self.assertEqual(design["resolved_profile"], "standard")
+        self.assertEqual(design["resolved_label"], "standard.main")
+        self.assertEqual(design["runtime"], SELECTION)
+        # review walks review(null), deep(paused) to the active standard main.
+        review = resolve_profile(policy, "review", CATALOG)
+        self.assertEqual(review["status"], "available")
+        self.assertEqual(review["resolved_label"], "standard.main")
+        self.assertEqual(review["resolution_path"], ["review", "deep", "standard"])
+        # Re-enabling restores the identical stored primary at its original position.
+        policy["disabled"]["profiles"]["deep"] = False
+        restored = resolve_profile(policy, "deep", CATALOG)
+        self.assertEqual(restored["resolved_label"], "deep.main")
+        self.assertEqual(restored["runtime"], SELECTION)
 
 class HubApiTest(PolicyTest):
     def setUp(self):
@@ -566,6 +606,126 @@ class HubApiTest(PolicyTest):
             snapshot = json.load(response)
         self.assertEqual(snapshot["strategies"], {"degrading": None, "providerSkip": None})
         self.assertEqual(snapshot["routing"]["strategiesEffective"], {"degrading": False, "providerSkip": False})
+
+
+    def disabled_request(self, kind, profile=None, disabled=True, revision=0, origin=True):
+        path = {"primary": f"/api/control/profiles/{profile}/disabled",
+                "own": f"/api/control/profiles/{profile}/fallback/disabled",
+                "final": "/api/control/fallback/disabled"}[kind]
+        body = json.dumps({"revision": revision, "disabled": disabled}).encode()
+        headers = {"Content-Type": "application/json"}
+        if origin: headers["Origin"] = self.base
+        request = Request(self.base + path, data=body, headers=headers, method="PUT")
+        try:
+            with urlopen(request, timeout=3) as response:
+                return response.status, json.load(response)
+        except HTTPError as error:
+            return error.code, None
+
+    def test_slot_disabled_store_write_upgrades_backs_up_and_preserves(self):
+        self.store.update("deep", SELECTION, 0)
+        self.store.update_fallback({"mode": "degrading", "selection": SELECTION}, 1, optional_capable=True)
+        self.store.update_profile_fallback("deep", SELECTION, 2, schema4_capable=True)
+        with self.assertRaises(PolicyCapabilityError):
+            self.store.update_slot_disabled(("profile", "deep"), True, 3)
+        saved = self.store.update_slot_disabled(("profile", "deep"), True, 3,
+                                                schema4_capable=True, schema5_capable=True)
+        self.assertEqual(saved["schemaVersion"], 5)
+        self.assertTrue(saved["disabled"]["profiles"]["deep"])
+        self.assertFalse(saved["disabled"]["profileFallbacks"]["deep"])
+        self.assertFalse(saved["disabled"]["finalFallback"])
+        # The stored selections survive byte-exact beside the disable state.
+        self.assertEqual(saved["profiles"]["deep"], SELECTION)
+        self.assertEqual(saved["profileFallbacks"]["deep"], SELECTION)
+        self.assertEqual(saved["finalFallback"], {"mode": "degrading", "selection": SELECTION})
+        self.assertEqual(list(json.loads(self.store.path.read_text())),
+                         ["schemaVersion", "revision", "updatedAt", "profiles", "finalFallback",
+                          "profileFallbacks", "strategies", "disabled"],
+                         "canonical key order matches the adapter writer")
+        backup = self.store.directory / "agent-control.schema4-rev3.backup.json"
+        self.assertTrue(backup.is_file())
+        self.assertEqual(json.loads(backup.read_text())["schemaVersion"], 4)
+        # The other two slots are independent; clearing never downgrades.
+        own = self.store.update_slot_disabled(("profileFallback", "deep"), True, 4, schema5_capable=True)
+        self.assertTrue(own["disabled"]["profileFallbacks"]["deep"])
+        self.assertTrue(own["disabled"]["profiles"]["deep"])
+        final = self.store.update_slot_disabled(("finalFallback", None), True, 5, schema5_capable=True)
+        self.assertTrue(final["disabled"]["finalFallback"])
+        reenabled = self.store.update_slot_disabled(("profile", "deep"), False, 6, schema5_capable=True)
+        self.assertEqual(reenabled["schemaVersion"], 5, "clearing never downgrades")
+        self.assertFalse(reenabled["disabled"]["profiles"]["deep"])
+        self.assertTrue(reenabled["disabled"]["profileFallbacks"]["deep"])
+        self.assertEqual(reenabled["profiles"]["deep"], SELECTION)
+        with self.assertRaises(PolicyConflict):
+            self.store.update_slot_disabled(("profile", "deep"), True, 3)
+        for bad_slot in [("profile", "nope"), ("finalFallback", "deep"), ("bogus", None)]:
+            with self.assertRaises(PolicyError):
+                self.store.update_slot_disabled(bad_slot, True, 7, schema5_capable=True)
+        with self.assertRaises(PolicyError):
+            self.store.update_slot_disabled(("profile", "deep"), "yes", 7, schema5_capable=True)
+        # A schema-5 document stays valid for the strict reader and regime rules.
+        policy = self.store.read()
+        self.assertEqual(policy["schemaVersion"], 5)
+        self.assertEqual(routing_regime(policy)["regime"], "per_profile")
+        # Every other writer preserves the schema-5 disable state and never drops it.
+        self.assertEqual(self.store.update("standard", SELECTION, 7)["schemaVersion"], 5)
+        self.assertIn("disabled", json.loads(self.store.path.read_text()))
+        self.assertEqual(self.store.read()["disabled"]["profileFallbacks"]["deep"], True)
+
+    def test_slot_disabled_routes_are_capability_gated_cas_protected_and_parity_with_mcp(self):
+        self.assertEqual(self.disabled_request("primary", "deep", origin=False)[0], 403)
+        for bad in [{"revision": 0}, {"revision": 0, "disabled": True, "extra": 1},
+                    {"revision": 0, "disabled": "yes"}, {"revision": -1, "disabled": False}]:
+            self.assertEqual(self.raw_put("/api/control/profiles/deep/disabled", bad), 400, bad)
+        self.assertEqual(self.request(SELECTION), 200, "a schema-1 policy exists before the upgrade")
+        # Schema-5 upgrade needs the live capability confirmation (and schema 2 from schema 1).
+        self.assertEqual(self.disabled_request("primary", "deep", True, revision=1)[0], 409)
+        self.assertNotIn("disabled", self.store.path.read_text())
+        with patch.object(server, "read_capabilities", return_value=True), \
+             patch.object(server, "read_schema4_capabilities", return_value=True), \
+             patch.object(server, "read_slot_disabled_capabilities", return_value=True):
+            status, body = self.disabled_request("primary", "deep", True, revision=1)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["policy"]["schemaVersion"], 5)
+        self.assertTrue(body["policy"]["disabled"]["profiles"]["deep"])
+        self.assertEqual(body["policy"]["profiles"]["deep"], SELECTION, "the stored tuple is preserved")
+        self.assertIn("routing", body)
+        self.assertIn("strategies", body)
+        self.assertIn("disabled", body)
+        # Stale revision conflicts, never writes.
+        self.assertEqual(self.disabled_request("primary", "deep", False, revision=1)[0], 409)
+        self.assertTrue(json.loads(self.store.path.read_text())["disabled"]["profiles"]["deep"])
+        # Own-fallback and final-fallback slot routes hit their own slots.
+        with patch.object(server, "read_capabilities", return_value=True), \
+             patch.object(server, "read_schema4_capabilities", return_value=True), \
+             patch.object(server, "read_slot_disabled_capabilities", return_value=True):
+            self.store.update_fallback({"mode": "total", "selection": SELECTION}, 2, optional_capable=True)
+            own_status, own_body = self.disabled_request("own", "deep", True, revision=3)
+            self.assertEqual(own_status, 200)
+            self.assertTrue(own_body["policy"]["disabled"]["profileFallbacks"]["deep"])
+            self.assertTrue(own_body["policy"]["disabled"]["profiles"]["deep"],
+                            "the primary slot keeps its independent pause")
+            final_status, final_body = self.disabled_request("final", disabled=True, revision=4)
+            self.assertEqual(final_status, 200)
+            self.assertTrue(final_body["policy"]["disabled"]["finalFallback"])
+        # The disabled slot disappears from the effective resolution but stays readable.
+        policy = self.store.read()
+        resolved = resolve_profile(policy, "deep", CATALOG)
+        self.assertEqual(resolved["status"], "hold_disabled")
+        self.assertEqual(resolved["resolution_path"], ["deep"])
+        self.assertEqual([c["label"] for c in resolved["candidates"] if c["disabled"]], ["deep.main"])
+        with urlopen(self.base + "/api/control", timeout=3) as response:
+            snapshot = json.load(response)
+        self.assertTrue(snapshot["disabled"]["profiles"]["deep"])
+        # Without any live MCP connection the capability discovery is honestly False.
+        self.assertFalse(snapshot["capabilities"]["slotDisabled"])
+        self.assertEqual(snapshot["resolutions"]["deep"]["status"], "hold_disabled")
+        # A live schema-5 adapter passes its flag through the snapshot unchanged.
+        with patch.object(server, "read_policy_capabilities",
+                          return_value={"optionalProfiles": True, "profileFallbacks": True, "slotDisabled": True}), \
+             urlopen(self.base + "/api/control", timeout=3) as response:
+            snapshot = json.load(response)
+        self.assertTrue(snapshot["capabilities"]["slotDisabled"])
 
 
 class CatalogTest(PolicyTest):

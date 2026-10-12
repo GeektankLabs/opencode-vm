@@ -174,13 +174,44 @@ def read_schema4_capabilities(connection):
     return _supports_profile_fallbacks(tools) if tools is not None else False
 
 
+def _supports_slot_disabled(tools):
+    """Schema-5 contract (task_f2d0ccc6): additive disabled readback fields plus
+    the per-slot write tool with the discriminated slot selector."""
+    try:
+        output = tools["get_project_model_policy"]["outputSchema"]["properties"]
+        write = tools["set_project_model_policy_slot_disabled"]["inputSchema"]["properties"]
+        slot = write["slot"]
+        one_of = slot.get("oneOf", [])
+        kinds = set()
+        for variant in one_of:
+            kind = variant.get("properties", {}).get("kind", {}).get("const")
+            if kind:
+                kinds.add(kind)
+        return bool(_version_supported(output["schema_version"], 5)
+                    and "resolution" in output
+                    and {"disabled"} <= set(output["profiles"]["properties"]["deep"])
+                    and {"revision", "slot", "disabled"} <= set(write)
+                    and isinstance(write["disabled"], dict)
+                    and write["disabled"].get("type") == "boolean"
+                    and {"profile", "profile_fallback", "final_fallback"} <= kinds)
+    except (KeyError, TypeError, AttributeError):
+        return False
+
+
+def read_slot_disabled_capabilities(connection):
+    """Discover the *active* schema-5 slot-disable contract."""
+    tools = _tools_list(connection)
+    return _supports_slot_disabled(tools) if tools is not None else False
+
+
 def read_policy_capabilities(connection):
-    """Both policy capability flags from ONE bounded tools/list discovery."""
+    """All policy capability flags from ONE bounded tools/list discovery."""
     tools = _tools_list(connection)
     if tools is None:
-        return {"optionalProfiles": False, "profileFallbacks": False}
+        return {"optionalProfiles": False, "profileFallbacks": False, "slotDisabled": False}
     return {"optionalProfiles": _supports_optional_profiles(tools),
-            "profileFallbacks": _supports_profile_fallbacks(tools)}
+            "profileFallbacks": _supports_profile_fallbacks(tools),
+            "slotDisabled": _supports_slot_disabled(tools)}
 
 
 def read_board_tasks(runtime, session_root, project_hash, *, connection=None, limit=MAX_CANDIDATE_TASKS):

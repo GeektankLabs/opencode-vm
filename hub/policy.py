@@ -28,7 +28,13 @@ PRIVATE_VALUE = re.compile(r"(?i)^(?:/|\\|file:|bearer|sk-[a-z0-9_-]{16,}|gh[pou
 KEY_SETS = ({"schemaVersion", "revision", "updatedAt", "profiles"},
             {"schemaVersion", "revision", "updatedAt", "profiles", "finalFallback"},
             {"schemaVersion", "revision", "updatedAt", "profiles", "finalFallback",
-             "profileFallbacks", "strategies"})
+             "profileFallbacks", "strategies"},
+            {"schemaVersion", "revision", "updatedAt", "profiles", "finalFallback",
+             "profileFallbacks", "strategies", "disabled"})
+# Additive schema-5 per-slot disable state (task_f2d0ccc6): a manually paused
+# slot keeps its stored selection but is skipped by every effective resolution
+# before any request — never deleted, never a synthetic provider error, no
+# expiry, no automatic re-enable. Missing flag (schema 1-4) means enabled.
 
 
 class PolicyError(ValueError):
@@ -52,15 +58,17 @@ def _timestamp():
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def _document(version, revision, profiles, final=None, profile_fallbacks=None, strategies=None):
+def _document(version, revision, profiles, final=None, profile_fallbacks=None, strategies=None, disabled=None):
     """Next policy document in the canonical persisted key order (Python/TS parity)."""
     updated = {"schemaVersion": version, "revision": revision, "updatedAt": _timestamp(),
                "profiles": dict(profiles)}
     if version >= 3:
         updated["finalFallback"] = final
-    if version == 4:
+    if version >= 4:
         updated["profileFallbacks"] = dict(profile_fallbacks)
         updated["strategies"] = dict(strategies)
+    if version == 5:
+        updated["disabled"] = dict(disabled)
     return updated
 
 
@@ -129,6 +137,44 @@ def validate_strategies(value):
     return result
 
 
+DISABLED_SLOTS = ("profiles", "profileFallbacks", "finalFallback")
+
+
+def validate_disabled(value):
+    """Additive schema-5 slot: the per-slot manual pause (task_f2d0ccc6).
+
+    Fully occupied shape (mirroring profileFallbacks): `profiles` and
+    `profileFallbacks` carry a boolean for every profile, `finalFallback` is one
+    boolean. Only strict booleans are accepted — no expiry, no timestamps.
+    """
+    if not isinstance(value, dict) or set(value) != set(DISABLED_SLOTS):
+        raise PolicyError("Disabled state needs profiles, profileFallbacks and finalFallback.")
+    for key in ("profiles", "profileFallbacks"):
+        entry = value[key]
+        if not isinstance(entry, dict) or set(entry) != set(PROFILES):
+            raise PolicyError(f"Disabled {key} need an entry for every profile.")
+        for name in PROFILES:
+            if type(entry[name]) is not bool:
+                raise PolicyError(f"Disabled {key}.{name} must be a boolean.")
+    if type(value["finalFallback"]) is not bool:
+        raise PolicyError("Disabled finalFallback must be a boolean.")
+    return {"profiles": dict(value["profiles"]),
+            "profileFallbacks": dict(value["profileFallbacks"]),
+            "finalFallback": value["finalFallback"]}
+
+
+def disabled_view(policy):
+    """Normalized disable view; schema 1-4 policies have every slot enabled."""
+    stored = policy.get("disabled")
+    if isinstance(stored, dict) and set(stored) == set(DISABLED_SLOTS):
+        return {"profiles": {name: bool(stored["profiles"].get(name, False)) for name in PROFILES},
+                "profileFallbacks": {name: bool(stored["profileFallbacks"].get(name, False)) for name in PROFILES},
+                "finalFallback": bool(stored["finalFallback"])}
+    return {"profiles": {name: False for name in PROFILES},
+            "profileFallbacks": {name: False for name in PROFILES},
+            "finalFallback": False}
+
+
 def profile_fallbacks_view(policy):
     """Normalized five-key view; schema 1/2/3 policies have no own fallbacks."""
     stored = policy.get("profileFallbacks")
@@ -151,7 +197,7 @@ def routing_regime(policy):
     deliberately not part of the chain; that relationship is surfaced, not hidden.
     """
     strategies = strategies_view(policy)
-    per_profile = policy["schemaVersion"] == 4 and (
+    per_profile = policy["schemaVersion"] >= 4 and (
         any(value is not None for value in profile_fallbacks_view(policy).values())
         or any(strategies[key] is not None for key in STRATEGY_KEYS))
     return {"regime": "per_profile" if per_profile else "legacy_final_fallback",
@@ -186,12 +232,14 @@ def candidate_order(policy, profile):
 def validate_policy(value):
     if not isinstance(value, dict) or set(value) not in KEY_SETS:
         raise PolicyError("Unsupported Agent Control policy format.")
-    if type(value["schemaVersion"]) is not int or value["schemaVersion"] not in (1, 2, 3, 4):
+    if type(value["schemaVersion"]) is not int or value["schemaVersion"] not in (1, 2, 3, 4, 5):
         raise PolicyError("Unsupported Agent Control policy version.")
     if (value["schemaVersion"] >= 3) != ("finalFallback" in value):
         raise PolicyError("Unsupported Agent Control policy format.")
-    if (value["schemaVersion"] == 4) != ("profileFallbacks" in value) \
-            or (value["schemaVersion"] == 4) != ("strategies" in value):
+    if (value["schemaVersion"] >= 4) != ("profileFallbacks" in value) \
+            or (value["schemaVersion"] >= 4) != ("strategies" in value):
+        raise PolicyError("Unsupported Agent Control policy format.")
+    if (value["schemaVersion"] == 5) != ("disabled" in value):
         raise PolicyError("Unsupported Agent Control policy format.")
     if type(value["revision"]) is not int or value["revision"] < 1:
         raise PolicyError("Invalid policy revision.")
@@ -205,9 +253,11 @@ def validate_policy(value):
     result = {**value, "profiles": {**{name: None for name in PROFILES}, **value["profiles"]}}
     if value["schemaVersion"] >= 3:
         result["finalFallback"] = validate_final_fallback(value["finalFallback"])
-    if value["schemaVersion"] == 4:
+    if value["schemaVersion"] >= 4:
         result["profileFallbacks"] = validate_profile_fallbacks(value["profileFallbacks"])
         result["strategies"] = validate_strategies(value["strategies"])
+    if value["schemaVersion"] == 5:
+        result["disabled"] = validate_disabled(value["disabled"])
     return result
 
 
@@ -243,7 +293,7 @@ class PolicyStore:
                                 {**current["profiles"], profile: selection},
                                 final=current.get("finalFallback"),
                                 profile_fallbacks=profile_fallbacks_view(current),
-                                strategies=strategies_view(current))
+                                strategies=strategies_view(current), disabled=disabled_view(current))
             return updated, _persisted(updated, version), "schema1" if upgrade else None
 
         return self._write(expected_revision, mutate)
@@ -265,7 +315,7 @@ class PolicyStore:
             version = 3 if upgrade or current["schemaVersion"] == 3 else current["schemaVersion"]
             updated = _document(version, expected_revision + 1, current["profiles"], final=fallback,
                                 profile_fallbacks=profile_fallbacks_view(current),
-                                strategies=strategies_view(current))
+                                strategies=strategies_view(current), disabled=disabled_view(current))
             label = f"schema{current['schemaVersion']}" if upgrade else None
             return updated, _persisted(updated, version), label
 
@@ -285,7 +335,7 @@ class PolicyStore:
         validate_selection(selection)
 
         def mutate(current):
-            upgrade = current["schemaVersion"] != 4 and selection is not None
+            upgrade = current["schemaVersion"] < 4 and selection is not None
             if upgrade:
                 if not schema4_capable:
                     raise PolicyCapabilityError(
@@ -296,7 +346,7 @@ class PolicyStore:
             fallbacks = {**profile_fallbacks_view(current), profile: selection}
             updated = _document(version, expected_revision + 1, current["profiles"],
                                 final=current.get("finalFallback"), profile_fallbacks=fallbacks,
-                                strategies=strategies_view(current))
+                                strategies=strategies_view(current), disabled=disabled_view(current))
             label = f"schema{current['schemaVersion']}" if upgrade else None
             return updated, _persisted(updated, version), label
 
@@ -314,7 +364,7 @@ class PolicyStore:
 
         def mutate(current):
             explicit = any(strategies[key] is not None for key in STRATEGY_KEYS)
-            upgrade = current["schemaVersion"] != 4 and explicit
+            upgrade = current["schemaVersion"] < 4 and explicit
             if upgrade:
                 if not schema4_capable:
                     raise PolicyCapabilityError(
@@ -324,7 +374,53 @@ class PolicyStore:
             version = 4 if upgrade or current["schemaVersion"] == 4 else current["schemaVersion"]
             updated = _document(version, expected_revision + 1, current["profiles"],
                                 final=current.get("finalFallback"),
-                                profile_fallbacks=profile_fallbacks_view(current), strategies=strategies)
+                                profile_fallbacks=profile_fallbacks_view(current), strategies=strategies,
+                                disabled=disabled_view(current))
+            label = f"schema{current['schemaVersion']}" if upgrade else None
+            return updated, _persisted(updated, version), label
+
+        return self._write(expected_revision, mutate)
+
+    def update_slot_disabled(self, slot, disabled, expected_revision, *,
+                             optional_capable=False, schema4_capable=False, schema5_capable=False):
+        """CAS update of the additive schema-5 per-slot disable state (task_f2d0ccc6).
+
+        `slot` is `("profile", name)`, `("profileFallback", name)` or
+        `("finalFallback", None)`. Setting `True` on a schema 1-4 policy upgrades
+        to schema 5 after an exact-bytes backup; clearing never downgrades and
+        never touches any stored selection. Every other key is preserved
+        verbatim; the disable state itself never changes the routing regime.
+        """
+        if (not isinstance(slot, tuple) or len(slot) != 2
+                or slot[0] not in ("profile", "profileFallback", "finalFallback")
+                or (slot[0] != "finalFallback" and slot[1] not in PROFILES)
+                or (slot[0] == "finalFallback" and slot[1] is not None)):
+            raise PolicyError("Invalid disable slot.")
+        if type(disabled) is not bool:
+            raise PolicyError("Disabled must be a boolean.")
+
+        def mutate(current):
+            upgrade = current["schemaVersion"] < 5 and disabled
+            if upgrade:
+                if not schema5_capable:
+                    raise PolicyCapabilityError(
+                        "Active MCP adapter does not confirm schema 5 slot disabling.")
+                if current["schemaVersion"] == 1 and not optional_capable:
+                    raise PolicyCapabilityError("Active MCP adapter does not confirm schema 2 and optional profiles.")
+                if current["schemaVersion"] < 4 and not schema4_capable:
+                    raise PolicyCapabilityError(
+                        "Active MCP adapter does not confirm schema 4 profile fallbacks and strategies.")
+            view = disabled_view(current)
+            key = {"profile": "profiles", "profileFallback": "profileFallbacks", "finalFallback": "finalFallback"}[slot[0]]
+            if key == "finalFallback":
+                view["finalFallback"] = disabled
+            else:
+                view[key][slot[1]] = disabled
+            version = 5 if upgrade or current["schemaVersion"] == 5 else current["schemaVersion"]
+            updated = _document(version, expected_revision + 1, current["profiles"],
+                                final=current.get("finalFallback"),
+                                profile_fallbacks=profile_fallbacks_view(current),
+                                strategies=strategies_view(current), disabled=view)
             label = f"schema{current['schemaVersion']}" if upgrade else None
             return updated, _persisted(updated, version), label
 
@@ -437,16 +533,78 @@ def check_selection(selection, catalog):
     return "available"
 
 
+def slot_disabled(policy, kind, profile=None):
+    """True only for an explicitly persisted disable flag; absent state = enabled."""
+    stored = policy.get("disabled")
+    if not isinstance(stored, dict):
+        return False
+    if kind == "profile":
+        return bool(stored.get("profiles", {}).get(profile, False))
+    if kind == "profileFallback":
+        return bool(stored.get("profileFallbacks", {}).get(profile, False))
+    return bool(stored.get("finalFallback", False))
+
+
+def new_start_candidates(policy, profile):
+    """Ordered NEW-START candidate formation (task_f2d0ccc6, TS parity).
+
+    per_profile regime: entry stage main then own fallback, further regular
+    stages only with explicitly activated degrading. Legacy regime: the entry
+    primary plus the fixed design/review resolution map — the legacy global
+    final stage is never a new-start candidate. Returns
+    `(label, kind, profile, selection, disabled)` tuples for configured slots.
+    """
+    out = []
+    if routing_regime(policy)["regime"] == "per_profile":
+        degrading = strategies_view(policy)["degrading"] is True
+        stages = STAGE_ORDER[profile] if degrading and profile in STAGE_ORDER else (profile,)
+        for stage in stages:
+            main = policy["profiles"].get(stage)
+            if main is not None:
+                out.append((f"{stage}.main", "profile", stage, main,
+                            slot_disabled(policy, "profile", stage)))
+            fallbacks = profile_fallbacks_view(policy)
+            own = fallbacks.get(stage)
+            if own is not None:
+                out.append((f"{stage}.fallback", "profileFallback", stage, own,
+                            slot_disabled(policy, "profileFallback", stage)))
+    else:
+        main = policy["profiles"].get(profile)
+        if main is not None:
+            out.append((f"{profile}.main", "profile", profile, main,
+                        slot_disabled(policy, "profile", profile)))
+        for target in FALLBACKS.get(profile, []):
+            selection = policy["profiles"].get(target)
+            if selection is not None:
+                out.append((f"{target}.main", "profile", target, selection,
+                            slot_disabled(policy, "profile", target)))
+    return out
+
+
 def resolve_profile(policy, profile, catalog):
-    result = {"profile": profile, "policy_revision": policy["revision"],
-              "status": "unconfigured", "resolution_path": []}
-    for candidate in [profile, *FALLBACKS.get(profile, [])]:
-        result["resolution_path"].append(candidate)
-        selection = policy["profiles"][candidate]
-        if selection is None:
+    """Effective NEW-START resolution: disabled slots are skipped (never a
+    request, never a synthetic error), order of active slots preserved, and the
+    identical runtime in another active slot stays selectable. `resolution_path`
+    stays the visited prefix of the fixed primary walk (shared vectors)."""
+    resolution_path = []
+    for name in [profile, *FALLBACKS.get(profile, [])]:
+        resolution_path.append(name)
+        entry = policy["profiles"].get(name)
+        if entry is not None and not slot_disabled(policy, "profile", name):
+            break
+    candidates = [{"label": label, "disabled": disabled, "status": "skipped_disabled" if disabled else "not_evaluated"}
+                  for label, _kind, _slot_profile, _selection, disabled in new_start_candidates(policy, profile)]
+    for index, (label, _kind, slot_profile, selection, disabled) in enumerate(new_start_candidates(policy, profile)):
+        if disabled:
             continue
-        result.update(resolved_profile=candidate, status=check_selection(selection, catalog))
-        if result["status"] == "available":
+        status = check_selection(selection, catalog)
+        candidates[index]["status"] = status
+        result = {"profile": profile, "policy_revision": policy["revision"], "status": status,
+                  "resolution_path": resolution_path, "resolved_label": label,
+                  "resolved_profile": slot_profile, "candidates": candidates}
+        if status == "available":
             result["runtime"] = selection
-        break
-    return result
+        return result
+    return {"profile": profile, "policy_revision": policy["revision"],
+            "status": "hold_disabled" if candidates else "unconfigured",
+            "resolution_path": resolution_path, "candidates": candidates}

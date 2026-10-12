@@ -1705,6 +1705,7 @@ function perProfileView(profiles: Record<string, { provider_id: string; model_id
   profileFallbacks?: Record<string, { provider_id: string; model_id: string; variant?: string } | null>;
   strategies?: { degrading: boolean | null; providerSkip: boolean | null };
   finalFallback?: { mode: "total" | "degrading"; selection: { provider_id: string; model_id: string; variant?: string } } | null;
+  disabled?: { profiles?: Record<string, boolean>; profileFallbacks?: Record<string, boolean>; finalFallback?: boolean };
   revision?: number;
 } = {}): MonitorPolicyView {
   const own = { deep: null, standard: null, execution: null, design: null, review: null, ...(extras.profileFallbacks ?? {}) };
@@ -1715,6 +1716,13 @@ function perProfileView(profiles: Record<string, { provider_id: string; model_id
     profiles: { deep: null, standard: null, execution: null, design: null, review: null, ...profiles },
     profileFallbacks: own,
     strategies,
+    ...(extras.disabled ? {
+      disabled: {
+        profiles: { deep: false, standard: false, execution: false, design: false, review: false, ...(extras.disabled.profiles ?? {}) },
+        profileFallbacks: { deep: false, standard: false, execution: false, design: false, review: false, ...(extras.disabled.profileFallbacks ?? {}) },
+        finalFallback: extras.disabled.finalFallback ?? false,
+      },
+    } : {}),
     revision: extras.revision ?? 7,
     routing: perProfile
       ? { regime: "per_profile", legacy_final_stage_applies: false, strategies_effective: { degrading: strategies.degrading === true, provider_skip: strategies.providerSkip === true } }
@@ -3562,6 +3570,125 @@ test("Z1: observer probes are timeout-bounded and fail visibly without misattrib
     assert.equal((probeEntry!.detail as { worker_key?: string }).worker_key, reserved.worker_key);
     assert.equal(record.run.active, true, "observer never releases the owner");
     assert.equal(state.sends.length, 1, "observer never sends");
+  } finally {
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// task_f2d0ccc6: engine behavior for manually disabled slots — real dispatch,
+// update, park and recovery paths (never text-only assertions).
+// ---------------------------------------------------------------------------
+
+test("slot disabled: new dispatch skips the paused primary to its own fallback before any request, and reactivation restores the identical primary", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    const { gateway, board } = fakes(state);
+    const paused = perProfileView({ deep: { provider_id: "deep-provider", model_id: "deep-model" }, standard: null },
+      { profileFallbacks: { deep: { provider_id: "deep-provider", model_id: "deep-fb" } }, disabled: { profiles: { deep: true } } });
+    const engine = new MonitorEngine({ project, gateway, board, readPolicy: async () => paused, now: () => 100_000 });
+    await withRegistry(project, (registry) => {
+      const monitor = defaultMonitorRecord("M", TASK, { interval_seconds: 60 }, 100_000);
+      monitor.scheduler.next_run_at = 0;
+      monitor.state.last_seen_digest = "different";
+      registry.monitors.push(monitor);
+      return registry;
+    });
+    assert.equal(await engine.tick(), "dispatched");
+    assert.equal(state.updates.length, 1, "the disabled primary is never dispatched; the own fallback is applied");
+    assert.deepEqual(state.updates[0], { provider_id: "deep-provider", model_id: "deep-fb" });
+    assert.equal(state.sends.length, 1);
+    // Re-enable the same slot: the identical stored primary is restored at the next new dispatch.
+    const active = perProfileView({ deep: { provider_id: "deep-provider", model_id: "deep-model" }, standard: null },
+      { profileFallbacks: { deep: { provider_id: "deep-provider", model_id: "deep-fb" } } });
+    await withRegistry(project, (registry) => { registry.monitors[0]!.state.last_seen_digest = "changed-again"; return registry; });
+    const engine2 = new MonitorEngine({ project, gateway, board, readPolicy: async () => active, now: () => 200_000 });
+    await withRegistry(project, (registry) => { registry.monitors[0]!.scheduler.next_run_at = 0; return registry; });
+    assert.equal(await engine2.tick(), "dispatched");
+    assert.equal(state.updates.length, 2);
+    assert.deepEqual(state.updates[1], { provider_id: "deep-provider", model_id: "deep-model" },
+      "reactivation restores the byte-identical stored primary");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("slot disabled: every stored slot paused parks honestly without any provider request", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    const { gateway, board } = fakes(state);
+    const paused = perProfileView({ deep: { provider_id: "deep-provider", model_id: "deep-model" }, standard: null },
+      { disabled: { profiles: { deep: true }, finalFallback: true },
+        finalFallback: { mode: "total", selection: { provider_id: "fallback-provider", model_id: "fallback-model" } } });
+    const engine = new MonitorEngine({ project, gateway, board, readPolicy: async () => paused, now: () => 100_000 });
+    await withRegistry(project, (registry) => {
+      const monitor = defaultMonitorRecord("M", TASK, { interval_seconds: 60 }, 100_000);
+      monitor.scheduler.next_run_at = 0;
+      monitor.state.last_seen_digest = "different";
+      registry.monitors.push(monitor);
+      return registry;
+    });
+    assert.equal(await engine.tick(), "runtime-unavailable");
+    assert.equal(state.sends.length, 0, "no message is sent");
+    assert.equal(state.updates.length, 0, "no runtime is switched");
+    const record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(record.state.work, "parked_input_required");
+    assert.equal(record.state.parked_reason, "runtime-unavailable");
+    const entry = record.history.find((item) => item.type === "runtime-unavailable");
+    assert.ok(entry && JSON.stringify(entry.detail).includes("manually disabled"), JSON.stringify(entry?.detail));
+    // A healthy wake after operator reactivation clears the stale park label.
+    const active = perProfileView({ deep: { provider_id: "deep-provider", model_id: "deep-model" }, standard: null });
+    await withRegistry(project, (registry) => {
+      registry.monitors[0]!.state.last_seen_digest = "changed-after-reactivation";
+      registry.monitors[0]!.scheduler.next_run_at = 0;
+      return registry;
+    });
+    const engine2 = new MonitorEngine({ project, gateway, board, readPolicy: async () => active, now: () => 200_000 });
+    assert.equal(await engine2.tick(), "dispatched");
+    const resumed = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(resumed.state.work, "active", "reactivation ends the park");
+    assert.equal(resumed.state.parked_reason, undefined);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("slot disabled: a recovery chain exhausted only by paused slots parks as recovery-chain-disabled without attempts or requests", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    state.status = blockedStatus("provider_timeout");
+    const { gateway, board } = fakes(state);
+    // Legacy regime, mode total: the chain is exactly the global final stage — paused.
+    const policy = perProfileView({ deep: { provider_id: "deep-provider", model_id: "deep-model" } },
+      { finalFallback: { mode: "total", selection: { provider_id: "fallback-provider", model_id: "fallback-model" } },
+        disabled: { finalFallback: true } });
+    await seededFailedMonitor(project);
+    const engine = new MonitorEngine({ project, gateway, board, readPolicy: async () => policy, now: () => 200_000, log: () => undefined });
+    assert.equal(await engine.tick(), "recovery-parked");
+    assert.equal(state.sends.length, 0, "a paused fallback is never requested");
+    assert.equal(state.updates.length, 0, "a paused fallback is never switched to");
+    const record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(record.state.work, "parked_input_required");
+    assert.equal(record.state.parked_reason, "recovery-chain-disabled");
+    assert.equal(record.recovery_episode?.attempts.length, 1,
+      "only the really failed current runtime is an attempt; the paused slot is not");
+    assert.deepEqual(record.recovery_episode?.attempts.map((entry) => entry.identity), ["deep-provider/deep-model"]);
+    const resolution = record.recovery_resolution?.at(-1)!;
+    assert.deepEqual(resolution.candidates, [{ label: "final.main", identity: "fallback-provider/fallback-model", status: "skipped_disabled" }]);
+    assert.ok(record.history.some((entry) => entry.type === "recovery-chain-disabled"));
+    // The paused chain is not restartable by trigger — reactivation is the explicit exit.
+    await withRegistry(project, (registry) => {
+      const monitor = registry.monitors[0]!;
+      monitor.wake_request = { requested_at: new Date(250_000).toISOString(), reason: "operator" };
+      monitor.scheduler.next_run_at = 0;
+      return registry;
+    });
+    const engine2 = new MonitorEngine({ project, gateway, board, readPolicy: async () => policy, now: () => 300_000, log: () => undefined });
+    assert.equal(await engine2.tick(), "recovery-parked", "no trigger bypasses the manual pause");
+    assert.equal(state.sends.length, 0);
   } finally {
     await cleanup();
   }

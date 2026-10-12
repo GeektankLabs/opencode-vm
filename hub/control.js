@@ -40,15 +40,84 @@
     || { degrading: false, providerSkip: false };
   const perProfileRegime = () => snapshot?.routing?.regime === "per_profile";
   const schema4Capable = () => !!(snapshot?.capabilities?.profileFallbacks || snapshot?.policy?.schemaVersion === 4);
+  const slotDisabledCapable = () => !!snapshot?.capabilities?.slotDisabled || snapshot?.policy?.schemaVersion === 5;
+  // task_f2d0ccc6: per-slot manual pause. The stored selection is never deleted;
+  // a disabled slot is skipped for new starts and shown greyed out with its
+  // stored tuple intact. Missing flag (schema 1-4) means every slot is enabled.
+  const disabledView = () => {
+    const stored = snapshot?.policy?.disabled || {};
+    const bools = map => ({ deep: false, standard: false, execution: false, design: false, review: false, ...(map || {}) });
+    return { profiles: bools(stored.profiles), profileFallbacks: bools(stored.profileFallbacks),
+      finalFallback: stored.finalFallback === true };
+  };
+  const isSlotOff = (kind, profile) => {
+    const view = disabledView();
+    return kind === "final" ? view.finalFallback : kind === "own" ? view.profileFallbacks[profile] : view.profiles[profile];
+  };
+  const noWriteWindow = () => writing || loading || pendingUncertain() || formatBlocked;
   const node = (tag, text, className) => {
     const element = document.createElement(tag); if (text) element.textContent = text;
     if (className) element.className = className; return element;
   };
 
+  // task_f2d0ccc6: one small An/Aus switch per stored slot (primary, own
+  // fallback, global final fallback). Off greys the editor fields out while the
+  // stored tuple stays visible; re-enabling restores the identical selection.
+  function makeSlotToggle(kind, profile) {
+    const label = node("label", ""); label.className = "switch slot-switch";
+    const input = node("input"); input.type = "checkbox"; input.name = `slot-${kind}-${profile}`;
+    label.append(input, node("span", "Aktiv"));
+    input.addEventListener("change", () => { void saveSlotDisabled(kind, profile, !input.checked); });
+    return { label, input };
+  }
+  async function saveSlotDisabled(kind, profile, disabled) {
+    if (noWriteWindow()) { updateAll(); return; }
+    const route = kind === "final" ? "/api/control/fallback/disabled"
+      : kind === "own" ? `/api/control/profiles/${profile}/fallback/disabled`
+      : `/api/control/profiles/${profile}/disabled`;
+    const feedback = (kind === "final" ? fallbackCard?.feedback : kind === "own" ? own[profile]?.feedback : cards[profile]?.feedback) ?? null;
+    const revision = snapshot.policy.revision;
+    writing = true; updateAll();
+    try {
+      const response = await fetch(route, { method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ revision, disabled }), signal: AbortSignal.timeout(20000) });
+      const result = await response.json().catch(() => null);
+      if (!response.ok) {
+        if (result?.code === "POLICY_REVISION_CONFLICT") {
+          if (feedback) feedback.textContent = "Policy anderweitig geändert; Schalter nicht umgelegt. Neu laden und bewusst erneut schalten.";
+        } else if (result?.code === "POLICY_FORMAT_UNSUPPORTED") {
+          formatBlocked = true;
+          if (feedback) feedback.textContent = "Policyformat nicht unterstützt. Bearbeitung gesperrt; Version/Format prüfen.";
+        } else if (result?.code === "POLICY_CAPABILITY_UNAVAILABLE") {
+          if (feedback) feedback.textContent = "Aktiver Adapter bestätigt das Slot-Pausieren (Format 5) nicht. Nicht gespeichert.";
+        } else if (feedback) {
+          feedback.textContent = `Schalter nicht umgelegt: Service-/Requestfehler ${response.status}. ${result?.error || ""}`;
+        }
+      } else {
+        if (!result?.policy) throw new Error("Unconfirmed");
+        snapshot.policy = result.policy;
+        if (result.routing) snapshot.routing = result.routing;
+        if (result.strategies) snapshot.strategies = result.strategies;
+        if (feedback) feedback.textContent = disabled
+          ? `Slot pausiert · Revision ${result.policy.revision}. Gespeicherte Belegung bleibt erhalten; neue Aufträge überspringen ihn, ohne ihn anzufragen.`
+          : `Slot reaktiviert · Revision ${result.policy.revision}. Die gespeicherte Belegung ist wieder regulär wählbar.`;
+        if (!pendingUncertain()) void load();
+      }
+    } catch {
+      if (feedback) feedback.textContent = "Schalterergebnis nicht bestätigt. Ansicht neu laden und den gespeicherten Stand vergleichen; kein automatischer Wiederholungswrite.";
+    } finally {
+      writing = false; updateAll();
+    }
+  }
+
   function createCard(profile) {
     if (profile === "design") $("control-profiles").append(node("h3", "Optionale Profile", "optional-heading"));
     const card = node("article", "", "card profile-card"); card.id = `profile-${profile}`;
-    const title = node("h3", roles[profile][0]); card.append(title, node("p", roles[profile][1], "muted"));
+    const head = node("div", "", "card-head");
+    head.append(node("h3", roles[profile][0]));
+    const slotToggle = makeSlotToggle("primary", profile);
+    head.append(slotToggle.label);
+    card.append(head, node("p", roles[profile][1], "muted"));
     const summary = node("p", "", "profile-summary"), effective = node("p", "", "profile-effective"); card.append(summary, effective);
     const ids = node("details", "", "technical-ids"), idText = node("p", "", "muted"); ids.append(node("summary", "Technische IDs"), idText); card.append(ids);
     if (profile === "review") card.append(node("p", "Review bewertet; eigene Findings werden nicht automatisch umgesetzt.", "muted"));
@@ -78,7 +147,7 @@
     const recovery = node("button", "Aktuellen Stand vergleichen", "button secondary"); recovery.type = "button"; recovery.hidden = true;
     const draftPreview = node("p", "", "muted");
     form.append(errors, fieldset, draftPreview, hint, actions, feedback, recovery); details.append(form); card.append(details); $("control-profiles").append(card);
-    const c = cards[profile] = { summary, effective, ids, idText, draftPreview, form, fieldset, controls, save, cancel, remove, hint, feedback, errors, recovery,
+    const c = cards[profile] = { card, summary, effective, ids, idText, draftPreview, form, fieldset, controls, save, cancel, remove, hint, feedback, errors, recovery, slotToggle,
       draft: blank(), baseline: null, dirty: false, conflict: false, compared: false };
     form.addEventListener("submit", event => { event.preventDefault(); void saveProfile(profile, c.draft); });
     remove.addEventListener("click", () => void saveProfile(profile, null));
@@ -103,6 +172,8 @@
   function createOwnFallbackEditor(profile, card) {
     const summary = node("p", "", "profile-fallback-summary muted");
     card.querySelector(".profile-effective").after(summary);
+    const ownToggle = makeSlotToggle("own", profile);
+    summary.after(ownToggle.label);
     const details = node("details", "", "profile-fallback-editor");
     details.append(node("summary", "Eigenes Fallback (optional)"));
     // Deliberately not a second <form> and not type=submit: the existing card
@@ -133,7 +204,7 @@
     const draftPreview = node("p", "", "muted");
     form.append(errors, fieldset, draftPreview, hint, actions, feedback, recovery);
     details.append(form); card.append(details);
-    const c = own[profile] = { summary, details, form, fieldset, controls, save, cancel, remove, hint, feedback, errors, recovery, draftPreview,
+    const c = own[profile] = { summary, details, form, fieldset, controls, save, cancel, remove, hint, feedback, errors, recovery, draftPreview, ownToggle,
       draft: blank(), baseline: null, dirty: false, conflict: false, compared: false, saving: false };
     save.addEventListener("click", () => void saveOwnFallback(profile, c.draft));
     remove.addEventListener("click", () => void saveOwnFallback(profile, null));
@@ -173,11 +244,15 @@
   function updateOwnCard(profile) {
     const c = own[profile]; if (!c || !snapshot) return;
     const stored = storedOwn(profile);
-    const status = snapshot.profileFallbackValidation?.[profile] || "unconfigured";
+    const off = stored ? isSlotOff("own", profile) : false;
     c.summary.textContent = stored
-      ? `Eigenes Fallback: ${friendlyTuple(stored)} · ${states[status]}`
+      ? `Eigenes Fallback: ${friendlyTuple(stored)} · ${states[snapshot.profileFallbackValidation?.[profile]] || "unconfigured"}${off ? " · pausiert" : ""}`
       : "Kein eigenes Fallback — ohne Degrading endet die Kette nach dem Hauptmodell mit einer auslesbaren INPUT_REQUIRED-Meldung.";
-    c.summary.className = `profile-fallback-summary ${stored && !["available", "unconfigured"].includes(status) ? "warning" : "muted"}`;
+    c.summary.className = `profile-fallback-summary ${stored && !["available", "unconfigured"].includes(snapshot.profileFallbackValidation?.[profile]) ? "warning" : "muted"}`;
+    c.ownToggle.label.hidden = !stored;
+    c.ownToggle.input.checked = stored && !off;
+    c.ownToggle.input.disabled = noWriteWindow() || !slotDisabledCapable() || !!c.conflict;
+    c.details.classList.toggle("slot-off", off);
     c.draftPreview.textContent = c.dirty ? `Entwurf: ${tuple(c.draft)}` : "";
     populate(c.controls.provider_id, (snapshot.catalog?.providers || []).map(p => [p.provider_id, p.name]), c.draft.provider_id);
     const models = sortedModels((snapshot.catalog?.models || []).filter(m => m.provider_id === c.draft.provider_id));
@@ -185,13 +260,13 @@
     const variants = models.find(m => m.model_id === c.draft.model_id)?.variants || [];
     populate(c.controls.variant, variants.map(v => [v, v]), c.draft.variant);
     const upgrade = snapshot.policy.schemaVersion < 4;
-    c.hint.textContent = `${c.dirty ? "Ungespeicherte Änderungen. " : ""}${snapshot.catalogStatus !== "complete" ? "Kein vollständiger Katalog; ein eigenes Fallback kann nicht gespeichert werden (Entfernen bleibt möglich). " : ""}${upgrade && !snapshot.capabilities.profileFallbacks ? "Aktiver MCP-Adapter bestätigt Format 4 (profilbezogene Fallbacks/Strategien) nicht. Normalen autorisierten Reconnect und Tooldiscovery prüfen. " : ""}${upgrade ? "Beim ersten Speichern wird die Policy auf Format 4 erweitert; das vorhandene Original wird gesichert. Ältere Connectoren können Format 4 nicht lesen. " : ""}Das bisherige globale finale Fallback bleibt gespeichert und wird im profilbezogenen Modus nicht still als zusätzliche Endstufe angehängt.`;
+    c.hint.textContent = `${c.dirty ? "Ungespeicherte Änderungen. " : ""}${snapshot.catalogStatus !== "complete" ? "Kein vollständiger Katalog; ein eigenes Fallback kann nicht gespeichert werden (Entfernen bleibt möglich). " : ""}${upgrade && !snapshot.capabilities.profileFallbacks ? "Aktiver MCP-Adapter bestätigt Format 4 (profilbezogene Fallbacks/Strategien) nicht. Normalen autorisierten Reconnect und Tooldiscovery prüfen. " : ""}${upgrade ? "Beim ersten Speichern wird die Policy auf Format 4 erweitert; das vorhandene Original wird gesichert. Ältere Connectoren können Format 4 nicht lesen. " : ""}Das bisherige globale finale Fallback bleibt gespeichert und wird im profilbezogenen Modus nicht still als zusätzliche Endstufe angehängt.${stored && !slotDisabledCapable() ? " Aktiver MCP-Adapter bestätigt das Slot-Pausieren (Format 5) nicht; der Schalter bleibt gesperrt." : ""}`;
     c.save.textContent = upgrade ? "Eigenes Fallback speichern und Policy erweitern" : "Eigenes Fallback speichern";
     const compatible = schema4Capable();
-    c.save.disabled = writing || pendingUncertain() || formatBlocked || c.conflict || !compatible || snapshot.catalogStatus !== "complete";
-    c.remove.disabled = writing || pendingUncertain() || formatBlocked || c.conflict || !stored;
+    c.save.disabled = off || writing || pendingUncertain() || formatBlocked || c.conflict || !compatible || snapshot.catalogStatus !== "complete";
+    c.remove.disabled = off || writing || pendingUncertain() || formatBlocked || c.conflict || !stored;
     c.cancel.disabled = c.saving || pendingUncertain();
-    c.fieldset.disabled = !!c.saving;
+    c.fieldset.disabled = !!c.saving || off;
     c.recovery.hidden = !c.conflict && ownUncertain?.profile !== profile;
     c.recovery.disabled = writing || loading || formatBlocked;
   }
@@ -262,16 +337,25 @@
   }
   function updateCard(profile) {
     const c = cards[profile], stored = snapshot.policy.profiles[profile], catalog = snapshot.catalog;
-    c.summary.textContent = stored ? `${friendlyTuple(stored)} · ${states[snapshot.validation[profile]]}` : "Keine eigene Zuordnung";
+    const off = stored ? isSlotOff("primary", profile) : false;
+    c.summary.textContent = stored ? `${friendlyTuple(stored)} · ${states[snapshot.validation[profile]]}${off ? " · pausiert" : ""}` : "Keine eigene Zuordnung";
+    c.card.classList.toggle("slot-off", off);
+    c.slotToggle.label.hidden = !stored;
+    c.slotToggle.input.checked = stored && !off;
+    // No `loading` term: load()'s finally clears the flag without an updateAll,
+    // so a loading term would leave the switch stale-disabled after every load
+    // (save buttons behave the same; the write guard rejects during a read).
+    c.slotToggle.input.disabled = writing || pendingUncertain() || formatBlocked || !!c.conflict || !slotDisabledCapable();
     c.idText.textContent = tuple(stored);
     c.draftPreview.textContent = c.dirty ? `Entwurf: ${tuple(c.draft)}` : "";
     const resolution = snapshot.resolutions[profile];
     c.ids.hidden = !stored && !resolution?.resolved_profile;
     c.idText.textContent = `${tuple(stored)}${!stored && resolution?.resolved_profile ? ` · Effektiv: ${tuple(snapshot.policy.profiles[resolution.resolved_profile])}` : ""}`;
     const chain = [profile, ...(snapshot.fallbacks?.[profile] || [])].map(role => roles[role][0]).join(" → ");
-    c.effective.textContent = resolution?.resolved_profile ? `${chain} · nutzt ${roles[resolution.resolved_profile][0]}: ${friendlyTuple(snapshot.policy.profiles[resolution.resolved_profile])} · ${states[resolution.status]}` :
+    const resolutionText = resolution?.resolved_profile ? `${chain} · nutzt ${roles[resolution.resolved_profile][0]}: ${friendlyTuple(snapshot.policy.profiles[resolution.resolved_profile])} · ${resolution.status === "hold_disabled" ? "alle Slots pausiert" : states[resolution.status]}` :
       `${chain} · keine Projektzuordnung; bestehende geeignete Session-Runtime / Backend-Default.`;
-    c.effective.className = `profile-effective ${resolution && !["available", "unconfigured"].includes(resolution.status) ? "warning" : "muted"}`;
+    c.effective.textContent = off ? `Pausiert — neue Aufträge überspringen diese Belegung, ohne sie anzufragen. ${resolutionText}` : resolutionText;
+    c.effective.className = `profile-effective ${off || (resolution && !["available", "unconfigured"].includes(resolution.status)) ? "warning" : "muted"}`;
     populate(c.controls.provider_id, (catalog?.providers || []).map(p => [p.provider_id, p.name]), c.draft.provider_id);
     const models = sortedModels((catalog?.models || []).filter(m => m.provider_id === c.draft.provider_id));
     populate(c.controls.model_id, models.map(m => [m.model_id, m.name]), c.draft.model_id);
@@ -279,12 +363,12 @@
     populate(c.controls.variant, variants.map(v => [v, v]), c.draft.variant);
     const optional = profile === "design" || profile === "review";
     const compatible = snapshot.capabilities.optionalProfiles || (!optional && snapshot.policy.schemaVersion === 1);
-    c.hint.textContent = `${c.dirty ? "Ungespeicherte Änderungen. " : ""}${snapshot.catalogStatus !== "complete" ? "Kein vollständiger Katalog; Zuordnung kann nicht gespeichert werden. " : ""}${!compatible ? "Aktiver MCP-Adapter bestätigt Format 2 / Optionalprofile nicht. Normalen autorisierten Reconnect und Tooldiscovery prüfen. " : ""}${optional && snapshot.policy.schemaVersion === 1 ? "Beim ersten Zuordnungssave wird die Policy auf Format 2 erweitert; vorhandenes Original wird gesichert. Ältere Connectoren können Format 2 nicht lesen." : ""}`;
+    c.hint.textContent = `${c.dirty ? "Ungespeicherte Änderungen. " : ""}${snapshot.catalogStatus !== "complete" ? "Kein vollständiger Katalog; Zuordnung kann nicht gespeichert werden. " : ""}${!compatible ? "Aktiver MCP-Adapter bestätigt Format 2 / Optionalprofile nicht. Normalen autorisierten Reconnect und Tooldiscovery prüfen. " : ""}${optional && snapshot.policy.schemaVersion === 1 ? "Beim ersten Zuordnungssave wird die Policy auf Format 2 erweitert; vorhandenes Original wird gesichert. Ältere Connectoren können Format 2 nicht lesen." : ""}${stored && !slotDisabledCapable() ? "Aktiver MCP-Adapter bestätigt das Slot-Pausieren (Format 5) nicht; der Schalter bleibt gesperrt. " : ""}`;
     c.save.textContent = optional && snapshot.policy.schemaVersion === 1 ? `${roles[profile][0]} speichern und Policy erweitern` : "Profil speichern";
-    c.save.disabled = writing || pendingUncertain() || formatBlocked || c.conflict || !compatible || snapshot.catalogStatus !== "complete";
-    c.remove.disabled = writing || pendingUncertain() || formatBlocked || c.conflict || !stored;
+    c.save.disabled = off || writing || pendingUncertain() || formatBlocked || c.conflict || !compatible || snapshot.catalogStatus !== "complete";
+    c.remove.disabled = off || writing || pendingUncertain() || formatBlocked || c.conflict || !stored;
     c.cancel.disabled = c.saving || pendingUncertain();
-    c.fieldset.disabled = !!c.saving;
+    c.fieldset.disabled = !!c.saving || off;
     c.recovery.hidden = !c.conflict && uncertain?.profile !== profile;
     c.recovery.disabled = writing || loading || formatBlocked;
   }
@@ -417,6 +501,8 @@
       "Abschließende Runtime bei bestätigtem Provider-Timeout/-Quota (Total oder Degrading). Strikt getrennt von der regulären Design-/Review-Auflösung; nicht konfiguriert bedeutet eine präzise INPUT_REQUIRED-Meldung statt automatischer Providerwahl.",
       "muted"));
     const summary = node("p", "", "profile-summary"); card.append(summary);
+    const finalToggle = makeSlotToggle("final", null);
+    summary.after(finalToggle.label);
     const details = node("details", "", "profile-editor");
     details.append(node("summary", "Fallback konfigurieren"));
     const form = node("form"); form.noValidate = true;
@@ -438,7 +524,7 @@
     const recovery = node("button", "Speicherstand zurücklesen", "button secondary"); recovery.type = "button"; recovery.hidden = true;
     form.append(errors, fieldset, hint, actions, feedback, recovery);
     details.append(form); card.append(details); $("control-profiles").append(card);
-    fallbackCard = { summary, form, fieldset, controls, save, clear, hint, feedback, errors, recovery,
+    fallbackCard = { card, summary, form, fieldset, controls, save, clear, hint, feedback, errors, recovery, finalToggle,
       draft: blankFallback(), baseline: null, dirty: false, conflict: false, compared: false, saving: false };
     for (const [field, select] of Object.entries(controls)) {
       select.addEventListener("change", () => {
@@ -488,12 +574,17 @@
   function updateFallbackCard() {
     const c = fallbackCard; if (!c || !snapshot) return;
     const stored = storedFallback();
+    const off = stored ? isSlotOff("final") : false;
     c.summary.textContent = stored
-      ? `${fallbackModes[stored.mode] || stored.mode} · ${friendlyTuple(stored)} · ${states[snapshot.finalFallbackStatus || "unconfigured"]}`
+      ? `${fallbackModes[stored.mode] || stored.mode} · ${friendlyTuple(stored)} · ${states[snapshot.finalFallbackStatus || "unconfigured"]}${off ? " · pausiert" : ""}`
       : "Nicht konfiguriert — das Management-Routing meldet eine präzise INPUT_REQUIRED-Anweisung; keine automatische Providerwahl.";
+    c.card.classList.toggle("slot-off", off);
+    c.finalToggle.label.hidden = !stored;
+    c.finalToggle.input.checked = stored && !off;
+    c.finalToggle.input.disabled = noWriteWindow() || !slotDisabledCapable() || !!c.conflict;
     const upgradeNeeded = snapshot.policy.schemaVersion === 1;
     const compatible = snapshot.capabilities.optionalProfiles || !upgradeNeeded;
-    c.hint.textContent = `${c.dirty ? "Ungespeicherte Änderungen. " : ""}${snapshot.catalogStatus !== "complete" ? "Kein vollständiger Katalog; eine neue Fallback-Zuordnung kann nicht gespeichert werden (Entfernen bleibt möglich). " : ""}${upgradeNeeded && !snapshot.capabilities.optionalProfiles ? "Aktiver MCP-Adapter bestätigt die Erweiterung auf Format 3 nicht. Normalen autorisierten Reconnect und Tooldiscovery prüfen. " : ""}${upgradeNeeded ? "Beim ersten Fallback-Save wird die Policy auf Format 3 erweitert; das vorhandene Original wird gesichert. Ältere Connectoren können Format 3 nicht lesen. " : ""}${perProfileRegime() ? "Profilbezogener Modus aktiv: Diese globale Endstufe ist nicht Teil der neuen Kette, bleibt aber gespeichert und lesbar und wird nicht still angehängt. " : ""}`;
+    c.hint.textContent = `${c.dirty ? "Ungespeicherte Änderungen. " : ""}${snapshot.catalogStatus !== "complete" ? "Kein vollständiger Katalog; eine neue Fallback-Zuordnung kann nicht gespeichert werden (Entfernen bleibt möglich). " : ""}${upgradeNeeded && !snapshot.capabilities.optionalProfiles ? "Aktiver MCP-Adapter bestätigt die Erweiterung auf Format 3 nicht. Normalen autorisierten Reconnect und Tooldiscovery prüfen. " : ""}${upgradeNeeded ? "Beim ersten Fallback-Save wird die Policy auf Format 3 erweitert; das vorhandene Original wird gesichert. Ältere Connectoren können Format 3 nicht lesen. " : ""}${perProfileRegime() ? "Profilbezogener Modus aktiv: Diese globale Endstufe ist nicht Teil der neuen Kette, bleibt aber gespeichert und lesbar und wird nicht still angehängt. " : ""}${stored && !slotDisabledCapable() ? "Aktiver MCP-Adapter bestätigt das Slot-Pausieren (Format 5) nicht; der Schalter bleibt gesperrt. " : ""}`;
     fillModes(c.controls.mode, c.draft.mode);
     populate(c.controls.provider_id, (snapshot.catalog?.providers || []).map(p => [p.provider_id, p.name]), c.draft.provider_id);
     const models = sortedModels((snapshot.catalog?.models || []).filter(m => m.provider_id === c.draft.provider_id));
@@ -501,9 +592,9 @@
     const variants = models.find(m => m.model_id === c.draft.model_id)?.variants || [];
     populate(c.controls.variant, variants.map(v => [v, v]), c.draft.variant);
     c.save.textContent = upgradeNeeded ? "Fallback speichern und Policy erweitern" : "Fallback speichern";
-    c.save.disabled = writing || pendingUncertain() || formatBlocked || c.conflict || !compatible || snapshot.catalogStatus !== "complete";
-    c.clear.disabled = writing || pendingUncertain() || formatBlocked || c.conflict || !stored;
-    c.fieldset.disabled = !!c.saving;
+    c.save.disabled = off || writing || pendingUncertain() || formatBlocked || c.conflict || !compatible || snapshot.catalogStatus !== "complete";
+    c.clear.disabled = off || writing || pendingUncertain() || formatBlocked || c.conflict || !stored;
+    c.fieldset.disabled = !!c.saving || off;
     c.recovery.hidden = !c.conflict && !fallbackUncertain;
     c.recovery.disabled = writing || loading || formatBlocked;
   }

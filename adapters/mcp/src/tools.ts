@@ -17,7 +17,7 @@ import type { DocumentRole } from "./taskboard.js";
 import { traceToolCall } from "./diagnostics.js";
 import { SUPPORTED_ATTACHMENT_TYPES } from "./attachments.js";
 import { PROFILE_NAMES, describePolicy, profileState, readPolicy, resolveProfile, type PolicySelection } from "./agent-control.js";
-import { commitFinalFallback, commitProfileFallback, commitStrategies } from "./policy-commit.js";
+import { commitFinalFallback, commitProfileFallback, commitSlotDisabled, commitStrategies } from "./policy-commit.js";
 import {
   confirmWorkerCreation,
   defaultMonitorRecord,
@@ -495,21 +495,36 @@ const runtimeOptionsOutput = z
   .strict();
 const profileSelection = z.object({ provider_id: sessionId, model_id: sessionId, variant: sessionId }).strict();
 const profileStatus = z.enum(["available", "unconfigured", "provider_unavailable", "model_unavailable",
-  "variant_unavailable", "catalog_unavailable", "catalog_incomplete"]);
-const profileEntry = z.object({ selection: profileSelection.nullable(), status: profileStatus }).strict();
+  "variant_unavailable", "catalog_unavailable", "catalog_incomplete", "hold_disabled"]);
+const profileEntry = z.object({ selection: profileSelection.nullable(), status: profileStatus, disabled: z.boolean() }).strict();
 const strategySwitch = z.boolean().nullable();
 const strategySwitches = z.object({ degrading: strategySwitch, provider_skip: strategySwitch }).strict();
 const candidateOrderEntry = z.array(z.string()).nullable();
+const resolutionCandidate = z.object({
+  label: z.string(),
+  disabled: z.boolean(),
+  status: z.enum(["selected", "skipped_disabled", "skipped_unavailable", "skipped_provider_scope",
+    "skipped_current_failure", "skipped_attempted", "not_evaluated", "available",
+    "provider_unavailable", "model_unavailable", "variant_unavailable", "catalog_unavailable", "catalog_incomplete"]),
+}).strict();
+const resolutionEntry = z.object({
+  status: profileStatus,
+  resolved_label: z.string().optional(),
+  runtime: profileSelection.optional(),
+  candidates: z.array(resolutionCandidate),
+}).strict();
 const modelPolicyOutput = z.object({
-  project_id: z.string(), schema_version: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]), revision: z.number().int().nonnegative(),
+  project_id: z.string(), schema_version: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5)]), revision: z.number().int().nonnegative(),
   updated_at: z.string().nullable(), catalog_status: z.enum(["complete", "incomplete", "unavailable"]),
   profiles: z.object({ deep: profileEntry, standard: profileEntry, execution: profileEntry, design: profileEntry, review: profileEntry }).strict(),
   fallbacks: z.object({ design: z.array(z.enum(PROFILE_NAMES)), review: z.array(z.enum(PROFILE_NAMES)) }).strict(),
   final_fallback: z.object({
-    mode: z.enum(["total", "degrading"]), selection: profileSelection, status: profileStatus,
+    mode: z.enum(["total", "degrading"]), selection: profileSelection, status: profileStatus, disabled: z.boolean(),
   }).strict().nullable(),
   profile_fallbacks: z.object({ deep: profileEntry, standard: profileEntry, execution: profileEntry, design: profileEntry, review: profileEntry }).strict(),
   strategies: strategySwitches,
+  resolution: z.object({ deep: resolutionEntry, standard: resolutionEntry, execution: resolutionEntry,
+    design: resolutionEntry, review: resolutionEntry }).strict(),
   routing: z.object({
     regime: z.enum(["legacy_final_fallback", "per_profile"]),
     legacy_final_stage_applies: z.boolean(),
@@ -522,7 +537,9 @@ const recommendedInput = z.object({ profile: z.enum(PROFILE_NAMES) }).strict();
 const recommendedOutput = z.object({
   profile: z.enum(PROFILE_NAMES), policy_revision: z.number().int().nonnegative(), status: profileStatus,
   runtime: profileSelection.optional(),
-  resolution_path: z.array(z.enum(PROFILE_NAMES)), resolved_profile: z.enum(PROFILE_NAMES).optional(),
+  resolution_path: z.array(z.string()), resolved_label: z.string().optional(),
+  resolved_profile: z.enum(PROFILE_NAMES).optional(),
+  candidates: z.array(resolutionCandidate),
 }).strict();
 const policyFallbackInput = z.object({
   revision: z.number().int().nonnegative(),
@@ -536,6 +553,16 @@ const policyProfileFallbackInput = z.object({
 const policyStrategiesInput = z.object({
   revision: z.number().int().nonnegative(),
   strategies: strategySwitches,
+}).strict();
+const slotSelector = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("profile"), profile: z.enum(PROFILE_NAMES) }).strict(),
+  z.object({ kind: z.literal("profile_fallback"), profile: z.enum(PROFILE_NAMES) }).strict(),
+  z.object({ kind: z.literal("final_fallback") }).strict(),
+]);
+const policySlotDisabledInput = z.object({
+  revision: z.number().int().nonnegative(),
+  slot: slotSelector,
+  disabled: z.boolean(),
 }).strict();
 const runtimeUpdateOutput = z
   .object({
@@ -2491,7 +2518,7 @@ export function createMcpServer(
   });
   server.registerTool(
     "get_project_model_policy",
-    { title: "Get Project Model Policy", description: "Read schema 1/2/3/4 preferences for deep, standard, execution, design and review with catalog validation and fixed absence fallbacks. Additive schema-4 fields: profile_fallbacks (each profile's optional own fallback), strategies (degrading/provider_skip, null means not explicitly set) and routing (regime, legacy_final_stage_applies, strategies_effective, candidate_order).",
+    { title: "Get Project Model Policy", description: "Read schema 1/2/3/4/5 preferences for deep, standard, execution, design and review with catalog validation and fixed absence fallbacks. Additive schema-4 fields: profile_fallbacks (each profile's optional own fallback), strategies (degrading/provider_skip, null means not explicitly set) and routing (regime, legacy_final_stage_applies, strategies_effective, candidate_order). Additive schema-5 fields: disabled per stored slot (profiles, profile_fallbacks, final_fallback — manually paused slot, stored selection preserved and skipped for new starts) and resolution (the effective next allowed candidate per profile with every skip reason; hold_disabled means every configured slot of that profile is paused).",
       inputSchema: z.object({}).strict(), outputSchema: modelPolicyOutput, annotations: readOnlyAnnotations },
     modelPolicyHandler,
   );
@@ -2552,6 +2579,24 @@ export function createMcpServer(
       description: "Set the two independent additive schema-4 fallback-strategy switches: degrading (continue with the next regular profile after an own fallback) and provider_skip (skip remaining candidates of an already failed provider identity, including profile fallbacks). Both must be sent explicitly as true, false or null (null = not explicitly set, surfaced as strategies_effective). Uses revision CAS with an exact-bytes backup on the first schema 4 upgrade; clearing both never downgrades the schema, and all profile mappings plus the legacy global final fallback are preserved. The response is the committed policy readback.",
       inputSchema: policyStrategiesInput, outputSchema: modelPolicyOutput, annotations: { ...writeAnnotations, openWorldHint: false } },
     setStrategiesHandler,
+  );
+  const setSlotDisabledHandler = safeHandler(async ({ revision, slot, disabled }: z.output<typeof policySlotDisabledInput>) => {
+    if (!runtime) throw new AdapterError("UNSUPPORTED_CONFIGURATION", "Project runtime is unavailable.");
+    const catalog = await gateway.getSessionRuntimeOptions().catch(() => undefined);
+    const ref = slot.kind === "final_fallback" ? { kind: "finalFallback" as const }
+      : slot.kind === "profile_fallback" ? { kind: "profileFallback" as const, profile: slot.profile }
+      : { kind: "profile" as const, profile: slot.profile };
+    const updated = await commitSlotDisabled(runtime, revision, ref, disabled);
+    return success(describePolicy(runtime, updated, catalog), disabled
+      ? "Slot disabled; this response is the policy readback. The stored selection is preserved and skipped for NEW starts before any request (no synthetic error, no deletion); an already running turn or recovery attempt is unchanged. Re-enable the same slot to make the identical selection available again."
+      : "Slot enabled; this response is the policy readback. The previously stored selection is available again for new starts at its configured position.");
+  });
+  server.registerTool(
+    "set_project_model_policy_slot_disabled",
+    { title: "Set Project Model Policy Slot Disabled",
+      description: "Manually pause or reactivate exactly ONE stored runtime slot of the project policy: a profile primary (slot {kind:'profile', profile}), a profile's optional own fallback (slot {kind:'profile_fallback', profile}) or the legacy global final error fallback (slot {kind:'final_fallback'}). disabled:true skips that slot for every NEW start and recovery resolution before any provider request — the stored provider/model/variant is preserved byte-exact, never deleted or set to null, and is never reported as a provider error. No provider/account/model-wide ban: the identical runtime in another active slot stays selectable. No expiry and no automatic re-enable; missing flag on schema 1-4 policies means enabled. Uses revision CAS with an exact-bytes backup on the first schema 5 upgrade; disabled:false never downgrades. The response is the committed policy readback including resolution (the effective next allowed candidate per profile).",
+      inputSchema: policySlotDisabledInput, outputSchema: modelPolicyOutput, annotations: { ...writeAnnotations, openWorldHint: false } },
+    setSlotDisabledHandler,
   );
   if (journalEnabled) {
   server.registerTool(

@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, writeFile, readFile, symlink, unlink, rm } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { candidateOrder, describePolicy, isRecoveryProviderAdmission, profileState, providerFailureScope, readPolicy, resolveProfile, resolveRecoveryChain, routingRegime, PROFILE_NAMES, type ProfileName } from "./agent-control.js";
+import { candidateOrder, describePolicy, isRecoveryProviderAdmission, newStartCandidates, profileState, providerFailureScope, readPolicy, resolveProfile, resolveRecoveryChain, routingRegime, PROFILE_NAMES, type ProfileName } from "./agent-control.js";
 import type { RuntimeDescriptor, RuntimeOptions } from "./types.js";
 
 const catalog: RuntimeOptions = { agents: ["build"], providers: [{ provider_id: "p", name: "P" }],
@@ -46,12 +46,15 @@ test("shared absence-fallback vectors match Python and never write policy", asyn
       profiles[role as ProfileName] = tuple;
     }
     const policy = { schemaVersion: 2 as const, revision: 7, updatedAt: null, profiles, finalFallback: null,
-      profileFallbacks: { ...profiles }, strategies: { degrading: null, providerSkip: null } };
+      profileFallbacks: { ...profiles }, strategies: { degrading: null, providerSkip: null },
+      disabled: { profiles: Object.fromEntries(PROFILE_NAMES.map((name) => [name, (vector as { disabled?: string[] }).disabled?.includes(name) ?? false])) as Record<ProfileName, boolean>,
+        profileFallbacks: { deep: false, standard: false, execution: false, design: false, review: false },
+        finalFallback: false } };
     const before = JSON.stringify(policy);
     const result = resolveProfile(policy, vector.profile, vector.catalog === "unavailable" ? undefined :
       { ...catalog, truncated: vector.catalog === "incomplete" });
     assert.equal(result.status, vector.status);
-    assert.equal("resolved_profile" in result ? result.resolved_profile : undefined, vector.resolved_profile);
+    assert.equal(("resolved_profile" in result ? result.resolved_profile : undefined) ?? null, vector.resolved_profile ?? null);
     assert.deepEqual(result.resolution_path, vector.resolution_path);
     assert.equal("runtime" in result, vector.status === "available");
     assert.equal(JSON.stringify(policy), before);
@@ -122,7 +125,7 @@ test("schema-4 documents are read additively and invalid shapes fail closed", as
     assert.deepEqual(policy.finalFallback, { mode: "total", selection });
     const described = describePolicy(runtime, policy, catalog);
     assert.deepEqual(described.profile_fallbacks.standard,
-      { selection: { ...selection, variant: "default" }, status: "available" });
+      { selection: { ...selection, variant: "default" }, status: "available", disabled: false });
     assert.equal(described.profile_fallbacks.deep?.status, "unconfigured");
     assert.deepEqual(described.strategies, { degrading: true, provider_skip: null });
     assert.equal(described.routing.regime, "per_profile");
@@ -184,7 +187,7 @@ test("schema-3 final fallback is read additively, described with availability, a
     assert.equal(policy.schemaVersion, 3);
     assert.deepEqual(policy.finalFallback, { mode: "degrading", selection });
     assert.deepEqual(describePolicy(runtime, policy, catalog).final_fallback,
-      { mode: "degrading", selection, status: "available" });
+      { mode: "degrading", selection, status: "available", disabled: false });
     assert.equal(describePolicy(runtime, policy, { ...catalog, truncated: true }).final_fallback?.status, "catalog_incomplete");
     await writeFile(path, JSON.stringify({ ...base, finalFallback: null }));
     const cleared = await readPolicy(runtime);
@@ -236,8 +239,9 @@ function recoveryView(profiles: Record<string, ViewTuple | null>, extras: {
   profileFallbacks?: Record<string, ViewTuple | null>;
   strategies?: { degrading: boolean | null; providerSkip: boolean | null };
   finalFallback?: { mode: "total" | "degrading"; selection: ViewTuple } | null;
+  disabled?: { profiles?: Record<string, boolean>; profileFallbacks?: Record<string, boolean>; finalFallback?: boolean };
   revision?: number;
-  schemaVersion?: 3 | 4;
+  schemaVersion?: 3 | 4 | 5;
 }) {
   const fallbacksAll = { deep: null, standard: null, execution: null, design: null, review: null, ...(extras.profileFallbacks ?? {}) };
   const strategies = extras.strategies ?? { degrading: null, providerSkip: null };
@@ -249,6 +253,13 @@ function recoveryView(profiles: Record<string, ViewTuple | null>, extras: {
     finalFallback: extras.finalFallback ?? null,
     profileFallbacks: fallbacksAll,
     strategies,
+    ...(extras.disabled ? {
+      disabled: {
+        profiles: { deep: false, standard: false, execution: false, design: false, review: false, ...(extras.disabled.profiles ?? {}) },
+        profileFallbacks: { deep: false, standard: false, execution: false, design: false, review: false, ...(extras.disabled.profileFallbacks ?? {}) },
+        finalFallback: extras.disabled.finalFallback ?? false,
+      },
+    } : {}),
   } as unknown as Parameters<typeof routingRegime>[0];
   return { ...policy, routing: routingRegime(policy), revision: policy.revision };
 }
@@ -353,4 +364,183 @@ test("Welle B matrix F (doppelte Runtimes): identical full tuples anywhere in th
     ["skipped_attempted", "skipped_attempted", "skipped_attempted"]);
   assert.equal(after.reason, "chain_exhausted");
   assert.equal(after.selected, null);
+});
+
+// ---------------------------------------------------------------------------
+// task_f2d0ccc6: per-slot disable (schema 5) — stored selections are skipped,
+// never deleted, never a synthetic provider error.
+// ---------------------------------------------------------------------------
+
+test("schema-5 disable state is read additively, normalized for older schemas, and fail-closed on invalid shapes", async () => {
+  const project = await mkdtemp(join(tmpdir(), "policy-schema5-"));
+  const runtime = { project, projectHash: "project-id" } as RuntimeDescriptor;
+  const directory = join(project, ".opencode-vm");
+  const path = join(directory, "agent-control.json");
+  await mkdir(directory);
+  try {
+    const disabled = {
+      profiles: { deep: true, standard: false, execution: false, design: false, review: false },
+      profileFallbacks: { deep: false, standard: true, execution: false, design: false, review: false },
+      finalFallback: false,
+    };
+    const valid = { schemaVersion: 5, revision: 4, updatedAt: "2026-10-12T00:00:00Z",
+      profiles: { deep: selection, standard: null, execution: null, design: null, review: null },
+      finalFallback: { mode: "total", selection }, profileFallbacks: { deep: null, standard: selection, execution: null, design: null, review: null },
+      strategies: { degrading: null, providerSkip: null }, disabled };
+    await writeFile(path, JSON.stringify(valid));
+    const policy = await readPolicy(runtime);
+    assert.equal(policy.schemaVersion, 5);
+    assert.equal(policy.disabled.profiles.deep, true);
+    assert.equal(policy.disabled.profileFallbacks.standard, true);
+    assert.equal(policy.disabled.finalFallback, false);
+    // The stored selections survive byte-exact beside the disable state.
+    assert.deepEqual(policy.profiles.deep, selection);
+    assert.deepEqual(policy.profileFallbacks.standard, selection);
+    const described = describePolicy(runtime, policy, catalog);
+    assert.equal(described.profiles.deep?.disabled, true);
+    assert.equal(described.profile_fallbacks.standard?.disabled, true);
+    assert.equal(described.final_fallback?.disabled, false);
+    assert.equal(described.routing.regime, "per_profile",
+      "schema 5 keeps the schema-4 regime rule: a configured own fallback is per_profile");
+    await writeFile(path, JSON.stringify({ ...valid, profileFallbacks: { deep: null, standard: null, execution: null, design: null, review: null } }));
+    const unset = await readPolicy(runtime);
+    assert.equal(routingRegime(unset).regime, "legacy_final_fallback",
+      "a schema-5 policy without configured fallbacks/switches keeps today's legacy regime");
+    // Schema 1-4 normalize to everything enabled.
+    await writeFile(path, JSON.stringify({ schemaVersion: 3, revision: 2, updatedAt: "2026-10-12T00:00:00Z",
+      profiles: valid.profiles, finalFallback: null }));
+    const legacy = await readPolicy(runtime);
+    assert.deepEqual(legacy.disabled, { profiles: { deep: false, standard: false, execution: false, design: false, review: false },
+      profileFallbacks: { deep: false, standard: false, execution: false, design: false, review: false }, finalFallback: false });
+    for (const bad of [
+      { ...valid, disabled: { ...disabled, profiles: { deep: true, standard: false, execution: false, design: false } } },
+      { ...valid, disabled: { ...disabled, finalFallback: "no" } },
+      { ...valid, disabled: { profiles: disabled.profiles, profileFallbacks: disabled.profileFallbacks } },
+      { ...valid, disabled: { ...disabled, extra: true } },
+      { ...valid, disabled: { ...disabled, profiles: { ...disabled.profiles, deep: "yes" } } },
+      { ...valid, schemaVersion: 4 },
+    ]) {
+      await writeFile(path, JSON.stringify(bad));
+      await assert.rejects(readPolicy(runtime), { code: "UNSUPPORTED_CONFIGURATION" });
+    }
+  } finally { await rm(project, { recursive: true, force: true }); }
+});
+
+test("schema-5 routing regime stays per_profile for configured fallbacks and candidate_order ignores disabled state", () => {
+  const view = recoveryView({ deep: deepT, standard: null, execution: null }, {
+    profileFallbacks: { deep: fbT }, strategies: { degrading: true, providerSkip: null },
+    disabled: { profiles: { deep: true } }, schemaVersion: 5,
+  });
+  assert.equal(view.routing.regime, "per_profile");
+  assert.deepEqual(candidateOrder(view as never, "deep"), ["deep.main", "deep.fallback"],
+    "candidate_order stays the pure configuration projection");
+});
+
+test("new-start formation: per_profile main then own fallback, degrading stages only when activated; legacy entry plus resolution map, never the final stage", () => {
+  const perProfile = recoveryView({ deep: deepT, standard: qT, execution: qT }, {
+    profileFallbacks: { deep: fbT, standard: null, execution: null }, strategies: { degrading: true, providerSkip: null },
+  });
+  assert.deepEqual(newStartCandidates(perProfile, "deep").map((entry) => entry.label),
+    ["deep.main", "deep.fallback", "standard.main", "execution.main"]);
+  const noDegrade = recoveryView({ deep: deepT, standard: qT }, {
+    profileFallbacks: { deep: fbT }, strategies: { degrading: false, providerSkip: null },
+  });
+  assert.deepEqual(newStartCandidates(noDegrade, "deep").map((entry) => entry.label), ["deep.main", "deep.fallback"]);
+  const legacy = recoveryView({ review: deepT, deep: fbT, standard: qT }, { finalFallback: { mode: "total", selection: qT }, schemaVersion: 3 });
+  assert.deepEqual(newStartCandidates(legacy, "review").map((entry) => entry.label),
+    ["review.main", "deep.main", "standard.main"],
+    "the legacy error fallback is never a new-start candidate");
+  assert.deepEqual(newStartCandidates(legacy, "deep").map((entry) => entry.label), ["deep.main"]);
+  // Design falls back to standard's MAIN slot in legacy regime (existing resolution map).
+  assert.deepEqual(newStartCandidates(legacy, "design").map((entry) => entry.label), ["standard.main"],
+    "unconfigured slots are absent from the formation");
+});
+
+test("recovery chain: disabled slots are skipped with an honest status, before availability and after failure evidence", () => {
+  const view = recoveryView({ deep: deepT, standard: qT }, {
+    profileFallbacks: { deep: fbT }, strategies: { degrading: true, providerSkip: null },
+    disabled: { profiles: { standard: true } },
+  });
+  const chain = resolveRecoveryChain(view, { entryProfile: "deep", catalog: fullCatalog, evidenceCategory: "provider_quota", currentIdentity: "p/m" });
+  assert.deepEqual(chain.candidates.map((entry) => `${entry.label}=${entry.status}`),
+    ["deep.main=skipped_current_failure", "deep.fallback=selected", "standard.main=skipped_attempted"],
+    "after a winner the remaining slots keep the existing skipped_attempted convention");
+  // Disabled never becomes an attempt and never a provider request; the identical
+  // runtime in another ACTIVE slot stays selectable (no identity ban).
+  const ownDisabled = recoveryView({ deep: deepT, standard: qT }, {
+    profileFallbacks: { deep: qT }, strategies: { degrading: true, providerSkip: null },
+    disabled: { profileFallbacks: { deep: true } },
+  });
+  const other = resolveRecoveryChain(ownDisabled, { entryProfile: "deep", catalog: fullCatalog, evidenceCategory: "provider_quota", currentIdentity: "p/m" });
+  assert.deepEqual(other.candidates.map((entry) => `${entry.label}=${entry.status}`),
+    ["deep.main=skipped_current_failure", "deep.fallback=skipped_disabled", "standard.main=selected"]);
+  assert.equal(other.selected_identity, "q/m");
+  // A really failed runtime keeps the stronger attempted status even when disabled meanwhile.
+  const midEpisode = resolveRecoveryChain(view, {
+    entryProfile: "deep", catalog: fullCatalog, evidenceCategory: "provider_quota",
+    attempted: ["q/m"], currentIdentity: "p/m",
+  });
+  assert.equal(midEpisode.candidates.find((entry) => entry.label === "standard.main")?.status, "skipped_attempted");
+  // Legacy: disabled degrade stage mains and a disabled final stage are skipped.
+  const legacy = recoveryView({ deep: deepT, standard: qT, execution: fbT }, {
+    finalFallback: { mode: "degrading", selection: qT }, schemaVersion: 3,
+    disabled: { profiles: { standard: true }, finalFallback: true },
+  });
+  const legacyChain = resolveRecoveryChain(legacy, { entryProfile: "deep", catalog: fullCatalog, evidenceCategory: "provider_timeout", currentIdentity: "p/m" });
+  assert.deepEqual(legacyChain.candidates.map((entry) => `${entry.label}=${entry.status}`),
+    ["degrade.standard.main=skipped_disabled", "degrade.execution.main=selected", "final.main=skipped_attempted"],
+    "after a winner the remaining slots keep the existing skipped_attempted convention");
+  assert.equal(legacyChain.selected_identity, "p/fb");
+});
+
+test("resolveProfile: disabled slots are skipped, hold_disabled is distinct from unconfigured, and the effective path stays visible", () => {
+  const high: ViewTuple = { provider_id: "p", model_id: "m", variant: "high" };
+  const disabledMain = recoveryView({ deep: high, standard: qT }, {
+    disabled: { profiles: { deep: true } }, schemaVersion: 5,
+  });
+  const deep = resolveProfile(disabledMain as never, "deep", catalog);
+  assert.equal(deep.status, "hold_disabled");
+  assert.deepEqual(deep.candidates, [{ label: "deep.main", disabled: true, status: "skipped_disabled" }]);
+  assert.deepEqual(deep.resolution_path, ["deep"]);
+  assert.equal("runtime" in deep, false);
+  // design walks past its disabled main to the active standard main.
+  // design walks past its disabled main to the active standard main.
+  const designView = recoveryView({ design: high, standard: { ...high, variant: "default" } }, { disabled: { profiles: { design: true } }, schemaVersion: 5 });
+  const design = resolveProfile(designView as never, "design", catalog);
+  assert.equal(design.status, "available");
+  assert.equal(design.resolved_label, "standard.main");
+  assert.deepEqual(design.candidates.map((entry) => `${entry.label}=${entry.status}`),
+    ["design.main=skipped_disabled", "standard.main=available"],
+    "the winner carries its catalog status; selection is the result itself");
+  // per_profile: own fallback wins after the paused main.
+  const withOwn = recoveryView({ deep: high, standard: null, execution: null }, {
+    profileFallbacks: { deep: { ...high, variant: "default" } }, strategies: { degrading: null, providerSkip: null },
+    disabled: { profiles: { deep: true } }, schemaVersion: 5,
+  });
+  const resolved = resolveProfile(withOwn as never, "deep", catalog);
+  assert.equal(resolved.status, "available");
+  assert.equal(resolved.resolved_label, "deep.fallback");
+  // Re-enabling restores the identical stored selection.
+  const reEnabled = recoveryView({ deep: high, standard: null, execution: null }, { schemaVersion: 5 });
+  const restored = resolveProfile(reEnabled as never, "deep", catalog);
+  assert.equal(restored.resolved_label, "deep.main");
+  assert.deepEqual(restored.runtime, high);
+  // An enabled but catalog-unavailable slot still stops the walk (never substituted);
+  // deep has no resolution fallback, so the unavailable entry main ends the walk.
+  const unavailableView = recoveryView({ deep: { ...high, model_id: "gone" }, standard: qT }, { schemaVersion: 5 });
+  const unavailable = resolveProfile(unavailableView as never, "deep", catalog);
+  assert.equal(unavailable.status, "model_unavailable");
+  assert.equal(unavailable.resolved_label, "deep.main");
+  assert.deepEqual(unavailable.candidates, [{ label: "deep.main", disabled: false, status: "model_unavailable" }]);
+});
+
+test("describePolicy exposes the effective resolution block for every profile", () => {
+  const view = recoveryView({ deep: { ...deepT, variant: "high" }, standard: { ...deepT, variant: "high" }, execution: null, design: null, review: null }, {
+    disabled: { profiles: { deep: true } }, schemaVersion: 5,
+  });
+  const described = describePolicy({ project: "/p", projectHash: "project-id" } as never, view as never, catalog);
+  assert.equal(described.resolution.deep?.status, "hold_disabled");
+  assert.equal(described.resolution.review?.status, "available", "review walks review(null-skip), deep(disabled-skip) then standard");
+  assert.equal(described.resolution.review?.resolved_label, "standard.main");
+  assert.ok(described.resolution.execution?.candidates.every((entry) => entry.disabled === false));
 });

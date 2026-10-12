@@ -5,6 +5,7 @@ import {
   catalogAvailable,
   fallbackChain,
   isRecoveryProviderAdmission,
+  newStartCandidates,
   resolveRecoveryChain,
   runtimeIdentityKey,
 } from "./agent-control.js";
@@ -172,6 +173,12 @@ const RESTARTABLE_EXHAUSTION_REASONS = new Set([
   "final-fallback-unconfigured",
   "final-fallback-unavailable",
   "profile-fallback-unconfigured",
+  // task_f2d0ccc6: a runtime-unavailable park (unconfigured profile, or every
+  // stored slot manually disabled) must stop lying after the operator fixes the
+  // cause and a healthy admitted dispatch succeeds — the label then clears and
+  // work returns to active. Recovery episodes are unaffected (none exists on
+  // this park), so the extra set entry changes no trigger/restart semantics.
+  "runtime-unavailable",
 ]);
 /** Version of the MANAGEMENT role/context contract. Bumping it re-primes once. */
 const PRIMING_CONTRACT = "mgmt-v3";
@@ -1714,53 +1721,55 @@ export class MonitorEngine {
     monitor: MonitorRecord,
   ): Promise<{ kind: "already" } | { kind: "switched" } | { kind: "unavailable"; reason: string }> {
     const policy = await this.readPolicy();
-    const resolved = await this.resolveProfileSelection(policy, monitor.runtime_profile);
-    if (!resolved) return { kind: "unavailable", reason: `profile ${monitor.runtime_profile} not configured` };
+    // task_f2d0ccc6: the shared NEW-START candidate formation. Disabled slots
+    // (manual per-slot pause) are skipped BEFORE any provider request — the
+    // stored selection survives and is never turned into a synthetic error or
+    // an attempt record. Order of active slots is preserved; the legacy regime
+    // walks the entry primary plus the fixed design/review resolution map and
+    // never mixes in the global final stage.
+    const candidates = newStartCandidates(policy, monitor.runtime_profile);
+    if (candidates.length === 0) return { kind: "unavailable", reason: `profile ${monitor.runtime_profile} not configured` };
     const catalog = await this.gateway.getSessionRuntimeOptions(monitor.session.session_id ?? undefined);
-    if (!catalogAvailable(catalog, resolved)) {
-      return { kind: "unavailable", reason: `profile ${monitor.runtime_profile} configured but unavailable or incomplete` };
-    }
     const details = await this.gateway.getSessionDetails(monitor.session.session_id!);
     const current = {
       provider_id: details.provider_id,
       model_id: details.model_id,
       variant: details.variant,
     };
-    if (
-      current.provider_id !== undefined &&
-      current.model_id !== undefined &&
-      current.provider_id === resolved.provider_id &&
-      current.model_id === resolved.model_id &&
-      (resolved.variant === undefined || current.variant === resolved.variant)
-    ) {
-      return { kind: "already" };
+    for (const candidate of candidates) {
+      if (candidate.disabled) continue;
+      if (!catalogAvailable(catalog, candidate.tuple)) {
+        return { kind: "unavailable", reason: `profile ${monitor.runtime_profile} enabled slot ${candidate.label} configured but unavailable or incomplete` };
+      }
+      if (
+        current.provider_id !== undefined &&
+        current.model_id !== undefined &&
+        current.provider_id === candidate.tuple.provider_id &&
+        current.model_id === candidate.tuple.model_id &&
+        (candidate.tuple.variant === undefined || current.variant === candidate.tuple.variant)
+      ) {
+        return { kind: "already" };
+      }
+      const updated = await this.gateway.updateSessionRuntime(monitor.session.session_id!, {
+        provider_id: candidate.tuple.provider_id,
+        model_id: candidate.tuple.model_id,
+        ...(candidate.tuple.variant !== undefined ? { variant: candidate.tuple.variant } : {}),
+      });
+      const verified = await this.gateway.getSessionDetails(monitor.session.session_id!);
+      if (
+        updated.state !== "updated" ||
+        verified.provider_id !== candidate.tuple.provider_id ||
+        verified.model_id !== candidate.tuple.model_id ||
+        // Welle B: the variant is part of the full identity — never send under an
+        // unverified variant (concept §4.5, fails through the existing
+        // recovery-update-unverified/error path instead of a silent mismatch).
+        (candidate.tuple.variant !== undefined && verified.variant !== candidate.tuple.variant)
+      ) {
+        throw new Error("runtime update could not be verified");
+      }
+      return { kind: "switched" };
     }
-    const updated = await this.gateway.updateSessionRuntime(monitor.session.session_id!, {
-      provider_id: resolved.provider_id,
-      model_id: resolved.model_id,
-      ...(resolved.variant !== undefined ? { variant: resolved.variant } : {}),
-    });
-    const verified = await this.gateway.getSessionDetails(monitor.session.session_id!);
-    if (
-      updated.state !== "updated" ||
-      verified.provider_id !== resolved.provider_id ||
-      verified.model_id !== resolved.model_id ||
-      // Welle B: the variant is part of the full identity — never send under an
-      // unverified variant (concept §4.5, fails through the existing
-      // recovery-update-unverified/error path instead of a silent mismatch).
-      (resolved.variant !== undefined && verified.variant !== resolved.variant)
-    ) {
-      throw new Error("runtime update could not be verified");
-    }
-    return { kind: "switched" };
-  }
-
-  private async resolveProfileSelection(
-    policy: MonitorPolicyView,
-    profile: string,
-  ): Promise<{ provider_id: string; model_id: string; variant?: string } | null> {
-    const entry = policy.profiles[profile];
-    return entry ? { ...entry } : null;
+    return { kind: "unavailable", reason: `profile ${monitor.runtime_profile} configured but every stored slot is manually disabled` };
   }
 
   // -------------------------------------------------------------- recovery
@@ -1918,9 +1927,14 @@ export class MonitorEngine {
     const attemptedList = episode.attempts.map((entry) => entry.identity);
     if (!selected) {
       const onlyUnavailable = chain.candidates.length > 0 && chain.candidates.every((entry) => entry.status === "skipped_unavailable");
+      // task_f2d0ccc6: a chain exhausted ONLY by manually disabled slots gets
+      // its own honest reason — the exit is the explicit operator re-enable,
+      // never an automatic retry bypassing the pause (not restartable).
+      const onlyDisabled = chain.candidates.length > 0 && chain.candidates.every((entry) => entry.status === "skipped_disabled");
       const reason = chain.reason === "chain_empty"
         ? (chain.regime === "per_profile" ? "profile-fallback-unconfigured" : "final-fallback-unconfigured")
-        : onlyUnavailable ? "final-fallback-unavailable" : "recovery-chain-exhausted";
+        : onlyDisabled ? "recovery-chain-disabled"
+          : onlyUnavailable ? "final-fallback-unavailable" : "recovery-chain-exhausted";
       await this.release(id, now, "recovery-parked", (m) => {
         m.state.work = "parked_input_required";
         m.state.parked_reason = reason;
