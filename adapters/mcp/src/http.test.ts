@@ -62,7 +62,9 @@ test("profile MCP reads resolve an exact configured runtime without mutating the
       { provider_id: "provider", model_id: "model", variant: "high" });
     const review = await client.callTool({ name: "get_recommended_runtime", arguments: { profile: "review" } });
     assert.deepEqual(review.structuredContent, { profile: "review", policy_revision: 1, status: "available",
-      resolved_profile: "deep", resolution_path: ["review", "deep"], runtime: { provider_id: "provider", model_id: "model", variant: "high" } });
+      resolved_profile: "deep", resolved_label: "deep.main", resolution_path: ["review", "deep"],
+      runtime: { provider_id: "provider", model_id: "model", variant: "high" },
+      candidates: [{ label: "deep.main", disabled: false, status: "available" }] });
     const path = join(project, ".opencode-vm", "agent-control.json");
     const upgraded = { schemaVersion: 2, revision: 2, updatedAt: "2026-09-30T03:00:00Z", profiles: {
       deep: { provider_id: "provider", model_id: "model", variant: "gone" },
@@ -70,7 +72,9 @@ test("profile MCP reads resolve an exact configured runtime without mutating the
     await writeFile(path, JSON.stringify(upgraded));
     const blocked = await client.callTool({ name: "get_recommended_runtime", arguments: { profile: "review" } });
     assert.deepEqual(blocked.structuredContent, { profile: "review", policy_revision: 2, status: "variant_unavailable",
-      resolved_profile: "deep", resolution_path: ["review", "deep"] });
+      resolved_profile: "deep", resolved_label: "deep.main", resolution_path: ["review", "deep"],
+      candidates: [{ label: "deep.main", disabled: false, status: "variant_unavailable" },
+        { label: "standard.main", disabled: false, status: "not_evaluated" }] });
     const design = await client.callTool({ name: "get_recommended_runtime", arguments: { profile: "design" } });
     assert.equal((design.structuredContent as { resolved_profile: string }).resolved_profile, "standard");
     assert.equal(await readFile(path, "utf8"), JSON.stringify(upgraded));
@@ -541,7 +545,7 @@ test("final fallback write is callable on both protocol paths with commit, CAS a
   assert.deepEqual(await readFile(policyPath), beforeStale, "an unavailable catalog selection never writes");
 });
 
-test("official MCP client discovers forty-four stateless HTTP tools and invokes session tools by ID", async () => {
+test("official MCP client discovers forty-five stateless HTTP tools and invokes session tools by ID", async () => {
   const gateway = new FakeGateway();
   const server = new McpHttpServer(runtime(), token, gateway);
   const port = await server.start();
@@ -590,6 +594,7 @@ test("official MCP client discovers forty-four stateless HTTP tools and invokes 
       "send_session_followup",
       "set_project_model_policy_fallback",
       "set_project_model_policy_profile_fallback",
+      "set_project_model_policy_slot_disabled",
       "set_project_model_policy_strategies",
       "supersede_unresolved_submission",
       "trigger_monitor",
@@ -604,7 +609,7 @@ test("official MCP client discovers forty-four stateless HTTP tools and invokes 
     assert.equal(listed.tools.find((tool) => tool.name === "get_project_model_policy")?.annotations?.readOnlyHint, true);
     assert.equal(listed.tools.find((tool) => tool.name === "get_recommended_runtime")?.annotations?.readOnlyHint, true);
     assert.equal(listed.tools.find((tool) => tool.name === "set_project_model_policy_fallback")?.annotations?.readOnlyHint, false);
-    for (const name of ["set_project_model_policy_profile_fallback", "set_project_model_policy_strategies"])
+    for (const name of ["set_project_model_policy_profile_fallback", "set_project_model_policy_strategies", "set_project_model_policy_slot_disabled"])
       assert.equal(listed.tools.find((tool) => tool.name === name)?.annotations?.readOnlyHint, false, name);
     for (const name of ["open_repo_live", "refresh_repo_live", "get_repo_live_session"])
       assert.equal(listed.tools.find((tool) => tool.name === name)?.annotations?.readOnlyHint, true, name);

@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import { lstat, link, mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { readPolicy, PROFILE_NAMES, type AgentControlPolicy, type PolicyFinalFallback, type PolicySelection, type PolicyStrategies } from "./agent-control.js";
+import { readPolicy, PROFILE_NAMES, type AgentControlPolicy, type PolicyFinalFallback, type PolicySelection, type PolicyStrategies, type SlotDisabled } from "./agent-control.js";
 import { AdapterError, type AdapterErrorCode, type RuntimeDescriptor } from "./types.js";
 
 /**
@@ -216,11 +216,13 @@ export type PolicyCommitOptions = { lockTimeoutSeconds?: number };
 export type FinalFallbackCommitOptions = PolicyCommitOptions;
 
 type PolicyPlan = {
-  version: 1 | 2 | 3 | 4;
+  version: 1 | 2 | 3 | 4 | 5;
   profiles: Record<string, PolicySelection | null>;
   finalFallback: PolicyFinalFallback;
   profileFallbacks: Record<string, PolicySelection | null>;
   strategies: PolicyStrategies;
+  /** Schema-5 per-slot disable state; written only when version === 5. */
+  disabled: SlotDisabled;
   /** Exact-bytes backup label, or null when this write is not a schema upgrade. */
   backupLabel: string | null;
 };
@@ -266,10 +268,11 @@ async function commitPolicyMutation(
       profiles: Object.fromEntries(names.map((name) => [name, mutation.profiles[name] ?? null])),
     };
     if (mutation.version >= 3) persisted.finalFallback = mutation.finalFallback;
-    if (mutation.version === 4) {
+    if (mutation.version === 4 || mutation.version === 5) {
       persisted.profileFallbacks = Object.fromEntries(PROFILE_NAMES.map((name) => [name, mutation.profileFallbacks[name] ?? null]));
       persisted.strategies = { degrading: mutation.strategies.degrading, providerSkip: mutation.strategies.providerSkip };
     }
+    if (mutation.version === 5) persisted.disabled = mutation.disabled;
     await ensureIgnore(runtime.project);
     await publish(directory, path, persisted);
     return {
@@ -278,8 +281,9 @@ async function commitPolicyMutation(
       updatedAt,
       profiles: mutation.profiles as AgentControlPolicy["profiles"],
       finalFallback: mutation.version >= 3 ? mutation.finalFallback : null,
-      profileFallbacks: (mutation.version === 4 ? mutation.profileFallbacks : NO_SELECTIONS) as AgentControlPolicy["profileFallbacks"],
-      strategies: mutation.version === 4 ? mutation.strategies : NO_STRATEGIES,
+      profileFallbacks: (mutation.version >= 4 ? mutation.profileFallbacks : NO_SELECTIONS) as AgentControlPolicy["profileFallbacks"],
+      strategies: mutation.version >= 4 ? mutation.strategies : NO_STRATEGIES,
+      disabled: mutation.disabled,
     };
   } finally {
     await lock.release();
@@ -301,6 +305,7 @@ export async function commitFinalFallback(
       finalFallback: normalizedFallback,
       profileFallbacks: current.profileFallbacks,
       strategies: current.strategies,
+      disabled: current.disabled,
       backupLabel: upgrade ? `schema${current.schemaVersion}` : null,
     };
   });
@@ -325,13 +330,14 @@ export async function commitProfileFallback(
   }
   const selection = fallback === null || fallback === undefined ? null : validateSelectionValue(fallback);
   return commitPolicyMutation(runtime, expectedRevision, options, (current) => {
-    const upgrade = selection !== null && current.schemaVersion !== 4;
+    const upgrade = selection !== null && current.schemaVersion < 4;
     return {
       version: upgrade ? 4 : current.schemaVersion,
       profiles: current.profiles,
       finalFallback: current.finalFallback,
       profileFallbacks: { ...current.profileFallbacks, [profile]: selection },
       strategies: current.strategies,
+      disabled: current.disabled,
       backupLabel: upgrade ? `schema${current.schemaVersion}` : null,
     };
   });
@@ -353,13 +359,58 @@ export async function commitStrategies(
   const normalized = validateStrategiesValue(strategies);
   return commitPolicyMutation(runtime, expectedRevision, options, (current) => {
     const explicit = normalized.degrading !== null || normalized.providerSkip !== null;
-    const upgrade = explicit && current.schemaVersion !== 4;
+    const upgrade = explicit && current.schemaVersion < 4;
     return {
       version: upgrade ? 4 : current.schemaVersion,
       profiles: current.profiles,
       finalFallback: current.finalFallback,
       profileFallbacks: current.profileFallbacks,
       strategies: normalized,
+      disabled: current.disabled,
+      backupLabel: upgrade ? `schema${current.schemaVersion}` : null,
+    };
+  });
+}
+
+/** Slot-disable commit (task_f2d0ccc6, additive schema 5): pause or reactivate
+ * exactly one stored slot — a profile primary (`profile`), a profile's own
+ * fallback (`profileFallback`) or the legacy global final fallback
+ * (`finalFallback`). Setting `true` on a schema 1-4 policy upgrades to schema 5
+ * after an exact-bytes backup; clearing never downgrades and never touches the
+ * stored selection. Every other key (profiles, fallbacks, strategies) is
+ * preserved verbatim. */
+export type SlotDisabledRef =
+  | { kind: "profile"; profile: string }
+  | { kind: "profileFallback"; profile: string }
+  | { kind: "finalFallback" };
+
+export async function commitSlotDisabled(
+  runtime: RuntimeDescriptor,
+  expectedRevision: number,
+  ref: SlotDisabledRef,
+  disabled: boolean,
+  options: PolicyCommitOptions = {},
+): Promise<AgentControlPolicy> {
+  if (ref.kind !== "finalFallback" && !(PROFILE_NAMES as readonly string[]).includes(ref.profile)) {
+    fail("INVALID_ARGUMENT", "profile must be one of deep, standard, execution, design or review.");
+  }
+  if (typeof disabled !== "boolean") fail("INVALID_ARGUMENT", "disabled must be a boolean.");
+  return commitPolicyMutation(runtime, expectedRevision, options, (current) => {
+    const next: SlotDisabled = {
+      profiles: { ...current.disabled.profiles },
+      profileFallbacks: { ...current.disabled.profileFallbacks },
+      finalFallback: current.disabled.finalFallback,
+    };
+    if (ref.kind === "finalFallback") next.finalFallback = disabled;
+    else next[ref.kind === "profile" ? "profiles" : "profileFallbacks"][ref.profile as keyof SlotDisabled["profiles"]] = disabled;
+    const upgrade = disabled && current.schemaVersion < 5;
+    return {
+      version: upgrade ? 5 : current.schemaVersion,
+      profiles: current.profiles,
+      finalFallback: current.finalFallback,
+      profileFallbacks: current.profileFallbacks,
+      strategies: current.strategies,
+      disabled: next,
       backupLabel: upgrade ? `schema${current.schemaVersion}` : null,
     };
   });

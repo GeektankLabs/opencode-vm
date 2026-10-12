@@ -22,14 +22,25 @@ export type RoutingRegime = "legacy_final_fallback" | "per_profile";
 type Selection = { provider_id: string; model_id: string; variant: string };
 type FinalFallback = { mode: (typeof FINAL_FALLBACK_MODES)[number]; selection: Selection } | null;
 type ProfileFallbacks = Record<ProfileName, Selection | null>;
+/** Schema 5 slot-disable state: the per-slot manual pause. A stored selection
+ * is never deleted; a disabled slot is skipped by every effective resolution
+ * (never a provider request, never a synthetic error). Missing flag (schema 1-4
+ * policies) means enabled. No expiry, no automatic re-enable. */
+export type SlotDisabled = {
+  profiles: Record<ProfileName, boolean>;
+  profileFallbacks: Record<ProfileName, boolean>;
+  finalFallback: boolean;
+};
+export type PolicyFinalFallbackEnabled = SlotDisabled["finalFallback"];
 type Policy = {
-  schemaVersion: 1 | 2 | 3 | 4;
+  schemaVersion: 1 | 2 | 3 | 4 | 5;
   revision: number;
   updatedAt: string | null;
   profiles: Record<ProfileName, Selection | null>;
   finalFallback: FinalFallback;
   profileFallbacks: ProfileFallbacks;
   strategies: Strategies;
+  disabled: SlotDisabled;
 };
 
 export type PolicySelection = Selection;
@@ -42,6 +53,10 @@ const NO_OWN_FALLBACKS = (): ProfileFallbacks =>
 const NO_SELECTIONS = (): Record<ProfileName, Selection | null> =>
   ({ deep: null, standard: null, execution: null, design: null, review: null });
 const NO_STRATEGIES = (): Strategies => ({ degrading: null, providerSkip: null });
+const NO_DISABLED = (): SlotDisabled =>
+  ({ profiles: { deep: false, standard: false, execution: false, design: false, review: false },
+    profileFallbacks: { deep: false, standard: false, execution: false, design: false, review: false },
+    finalFallback: false });
 
 const id = (value: unknown): value is string =>
   typeof value === "string" && value.length > 0 && value.length <= 256 &&
@@ -53,6 +68,7 @@ const EXPECTED_KEYS: Record<number, string> = {
   2: "profiles,revision,schemaVersion,updatedAt",
   3: "finalFallback,profiles,revision,schemaVersion,updatedAt",
   4: "finalFallback,profileFallbacks,profiles,revision,schemaVersion,strategies,updatedAt",
+  5: "disabled,finalFallback,profileFallbacks,profiles,revision,schemaVersion,strategies,updatedAt",
 };
 
 function parseSelection(raw: unknown, label: string): Selection | null {
@@ -77,6 +93,24 @@ function parseStrategies(raw: unknown): Strategies {
   return result;
 }
 
+function parseDisabled(raw: unknown): SlotDisabled {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("invalid disabled");
+  const value = raw as Record<string, unknown>;
+  if (Object.keys(value).sort().join() !== "finalFallback,profileFallbacks,profiles") throw new Error("invalid disabled");
+  const boolMap = (entry: unknown): Record<ProfileName, boolean> => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error("invalid disabled");
+    const map = entry as Record<string, unknown>;
+    if (Object.keys(map).sort().join() !== [...PROFILE_NAMES].sort().join()) throw new Error("invalid disabled");
+    return Object.fromEntries(PROFILE_NAMES.map((name) => {
+      const item = map[name];
+      if (typeof item !== "boolean") throw new Error("invalid disabled");
+      return [name, item];
+    })) as Record<ProfileName, boolean>;
+  };
+  if (typeof value.finalFallback !== "boolean") throw new Error("invalid disabled");
+  return { profiles: boolMap(value.profiles), profileFallbacks: boolMap(value.profileFallbacks), finalFallback: value.finalFallback };
+}
+
 export async function readPolicy(runtime: RuntimeDescriptor): Promise<Policy> {
   const directory = join(runtime.project, ".opencode-vm");
   const path = join(directory, "agent-control.json");
@@ -91,7 +125,7 @@ export async function readPolicy(runtime: RuntimeDescriptor): Promise<Policy> {
     const schema = value.schemaVersion as number;
     const keys = Object.keys(value).sort().join();
     if (keys !== EXPECTED_KEYS[schema] ||
-      ![1, 2, 3, 4].includes(schema) || !Number.isSafeInteger(value.revision) || (value.revision as number) < 1 ||
+      ![1, 2, 3, 4, 5].includes(schema) || !Number.isSafeInteger(value.revision) || (value.revision as number) < 1 ||
       typeof value.updatedAt !== "string" || !value.updatedAt.endsWith("Z") ||
       !value.profiles || typeof value.profiles !== "object" || Array.isArray(value.profiles))
       throw new Error("unsupported policy");
@@ -114,7 +148,7 @@ export async function readPolicy(runtime: RuntimeDescriptor): Promise<Policy> {
     }
     let profileFallbacks: ProfileFallbacks = NO_OWN_FALLBACKS();
     let strategies: Strategies = NO_STRATEGIES();
-    if (schema === 4) {
+    if (schema === 4 || schema === 5) {
       const raw = value.profileFallbacks;
       if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("invalid profile fallbacks");
       const entries = raw as Record<string, unknown>;
@@ -122,16 +156,20 @@ export async function readPolicy(runtime: RuntimeDescriptor): Promise<Policy> {
       for (const name of PROFILE_NAMES) profileFallbacks[name] = parseSelection(entries[name], "invalid profile fallbacks");
       strategies = parseStrategies(value.strategies);
     }
+    // Schema 1-4 policies carry no disable state: every slot is enabled. The
+    // normalized view is total, so no consumer branches on the schema version.
+    const disabled: SlotDisabled = schema === 5 ? parseDisabled(value.disabled) : NO_DISABLED();
     return { schemaVersion: schema as Policy["schemaVersion"], revision: value.revision as number,
       updatedAt: value.updatedAt as string,
       profiles: { ...NO_SELECTIONS(), ...profiles },
-      finalFallback, profileFallbacks, strategies };
+      finalFallback, profileFallbacks, strategies, disabled };
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") {
       // A missing directory or file is a virtual, entirely unconfigured policy.
       return { schemaVersion: 1, revision: 0, updatedAt: null,
         profiles: { deep: null, standard: null, execution: null, design: null, review: null },
-        finalFallback: null, profileFallbacks: NO_OWN_FALLBACKS(), strategies: NO_STRATEGIES() };
+        finalFallback: null, profileFallbacks: NO_OWN_FALLBACKS(), strategies: NO_STRATEGIES(),
+        disabled: NO_DISABLED() };
     }
     throw new AdapterError("UNSUPPORTED_CONFIGURATION", "Project Agent Control policy is invalid or unsupported.");
   }
@@ -159,7 +197,9 @@ export function profileState(selection: Selection | null, catalog?: RuntimeOptio
 export function routingRegime(policy: Policy) {
   const strategies = policy.strategies ?? NO_STRATEGIES();
   const own = policy.profileFallbacks ?? NO_OWN_FALLBACKS();
-  const perProfile = policy.schemaVersion === 4 &&
+  // Schema 5 is additive on 4: a configured own fallback or an explicit switch
+  // still makes the regime per_profile. The disable state never changes it.
+  const perProfile = policy.schemaVersion >= 4 &&
     (PROFILE_NAMES.some((name) => own[name] !== null) ||
       strategies.degrading !== null || strategies.providerSkip !== null);
   return {
@@ -199,31 +239,93 @@ export function describePolicy(runtime: RuntimeDescriptor, policy: Policy, catal
     fallbacks: FALLBACKS,
     profiles: Object.fromEntries(PROFILE_NAMES.map((name) => [name, {
       selection: policy.profiles[name], status: profileState(policy.profiles[name], catalog),
+      disabled: policy.disabled.profiles[name],
     }])),
     final_fallback: policy.finalFallback
       ? { mode: policy.finalFallback.mode, selection: policy.finalFallback.selection,
-          status: profileState(policy.finalFallback.selection, catalog) }
+          status: profileState(policy.finalFallback.selection, catalog),
+          disabled: policy.disabled.finalFallback }
       : null,
     profile_fallbacks: Object.fromEntries(PROFILE_NAMES.map((name) => [name, {
       selection: policy.profileFallbacks[name], status: profileState(policy.profileFallbacks[name], catalog),
+      disabled: policy.disabled.profileFallbacks[name],
     }])),
     strategies: { degrading: policy.strategies.degrading, provider_skip: policy.strategies.providerSkip },
+    // task_f2d0ccc6: effective NEW-START resolution per profile from the one
+    // shared candidate formation — disabled slots skipped, winner and every
+    // skip reason visible. Pure management readback, never a dispatch.
+    resolution: Object.fromEntries(PROFILE_NAMES.map((name) => {
+      const result = resolveProfile(policy, name, catalog);
+      return [name, {
+        status: result.status,
+        resolved_label: result.resolved_label,
+        ...(result.status === "available" ? { runtime: result.runtime } : {}),
+        candidates: result.candidates,
+      }];
+    })),
     routing: { ...routingRegime(policy),
       candidate_order: Object.fromEntries(PROFILE_NAMES.map((name) => [name, candidateOrder(policy, name)])) },
   };
 }
 
-export function resolveProfile(policy: Policy, profile: ProfileName, catalog?: RuntimeOptions) {
+/** Effective NEW-START resolution for one profile (task_f2d0ccc6): the ordered
+ * shared candidate formation; disabled slots are skipped (never a request,
+ * never a synthetic error), the order of active slots is preserved, and the
+ * identical runtime in another active slot stays selectable (no identity ban).
+ * `null` slots are absent from the candidate list; an enabled configured slot
+ * that is catalog-unavailable stops the walk with its honest status (existing
+ * semantics, never substituted). Everything disabled (or nothing configured)
+ * ends in `hold_disabled` / `unconfigured` — a precise hold, never a backend
+ * default choice. */
+export type ProfileResolution = {
+  profile: ProfileName;
+  policy_revision: number;
+  status: ReturnType<typeof profileState> | "hold_disabled";
+  resolution_path: ProfileName[];
+  resolved_label?: string;
+  resolved_profile?: ProfileName;
+  candidates: Array<{ label: string; disabled: boolean; status: string }>;
+  runtime?: { provider_id: string; model_id: string; variant: string };
+};
+
+export function resolveProfile(policy: Policy, profile: ProfileName, catalog?: RuntimeOptions): ProfileResolution {
+  // resolution_path stays the visited prefix of the fixed primary walk (existing
+  // contract, shared Python vectors): disabled slots are passed like null ones.
+  const primaryWalk: ProfileName[] = [profile, ...(FALLBACKS[profile] ?? [])];
   const resolution_path: ProfileName[] = [];
-  for (const candidate of [profile, ...(FALLBACKS[profile] ?? [])]) {
-    resolution_path.push(candidate);
-    const selection = policy.profiles[candidate];
-    if (selection === null) continue;
-    const status = profileState(selection, catalog);
-    return { profile, policy_revision: policy.revision, status, resolved_profile: candidate, resolution_path,
-      ...(status === "available" ? { runtime: selection } : {}) };
+  for (const name of primaryWalk) {
+    resolution_path.push(name);
+    const entry = policy.profiles[name];
+    if (entry !== null && !slotDisabled(policy, { kind: "profile", profile: name })) break;
   }
-  return { profile, policy_revision: policy.revision, status: "unconfigured" as const, resolution_path };
+  // The effective selection uses the shared candidate formation (own fallbacks
+  // included in the per-profile regime); candidates carries every visited slot
+  // with its disable flag and honest status.
+  const candidates = newStartCandidates(policy, profile);
+  const detail = candidates.map((candidate) => ({
+    label: candidate.label,
+    disabled: candidate.disabled,
+    status: candidate.disabled ? "skipped_disabled" : "not_evaluated",
+  }));
+  for (let index = 0; index < candidates.length; index++) {
+    const candidate = candidates[index]!;
+    if (candidate.disabled) continue;
+    const selection = candidate.tuple as { provider_id: string; model_id: string; variant: string };
+    const status = profileState(selection, catalog);
+    detail[index]!.status = status;
+    return {
+      profile, policy_revision: policy.revision, status, resolution_path,
+      resolved_label: candidate.label,
+      resolved_profile: candidate.ref.profile,
+      candidates: detail,
+      ...(status === "available" ? { runtime: selection } : {}),
+    };
+  }
+  return {
+    profile, policy_revision: policy.revision,
+    status: candidates.length > 0 ? "hold_disabled" : "unconfigured",
+    resolution_path, candidates: detail,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -236,14 +338,16 @@ export function resolveProfile(policy: Policy, profile: ProfileName, catalog?: R
 
 export type RecoveryRuntimeTuple = { provider_id: string; model_id: string; variant?: string };
 
-/** The full Schema-4 policy view as transported to the engine. Optional
+/** The full Schema-4/5 policy view as transported to the engine. Optional
  * additive fields keep reduced/legacy views valid: an absent `routing`
- * means the legacy regime (today's chain semantics unchanged). */
+ * means the legacy regime (today's chain semantics unchanged), an absent
+ * `disabled` means every slot is enabled. */
 export type RecoveryPolicyView = {
   finalFallback: { mode: (typeof FINAL_FALLBACK_MODES)[number]; selection: RecoveryRuntimeTuple } | null;
   profiles: Partial<Record<string, RecoveryRuntimeTuple | null>>;
   profileFallbacks?: Partial<Record<string, RecoveryRuntimeTuple | null>>;
   strategies?: Strategies;
+  disabled?: SlotDisabled;
   routing?: { regime: RoutingRegime; legacy_final_stage_applies: boolean; strategies_effective: { degrading: boolean; provider_skip: boolean } };
   revision?: number | null;
 };
@@ -277,6 +381,101 @@ export function runtimeIdentityKey(selection: RecoveryRuntimeTuple): string {
   return `${selection.provider_id}/${selection.model_id}${selection.variant !== undefined ? `/${selection.variant}` : ""}`;
 }
 
+// ---------------------------------------------------------------------------
+// Slot-disable resolution (task_f2d0ccc6): one shared candidate formation for
+// NEW-START and RECOVERY selection. A disabled slot keeps its stored selection
+// but is skipped before any request is made — never a synthetic provider
+// error, never a deletion. Order of active slots is preserved; the identical
+// runtime in another active slot stays selectable (no identity ban).
+// ---------------------------------------------------------------------------
+
+export type SlotKind = "profile" | "profileFallback" | "finalFallback";
+export type SlotRef = { kind: SlotKind; profile?: ProfileName };
+export type SlotCandidate = { label: string; ref: SlotRef; tuple: RecoveryRuntimeTuple; disabled: boolean };
+
+/** True only for an explicitly persisted disable flag; absent state = enabled. */
+export function slotDisabled(policy: RecoveryPolicyView, ref: SlotRef): boolean {
+  const disabled = policy.disabled;
+  if (!disabled) return false;
+  if (ref.kind === "profile") return disabled.profiles[ref.profile as ProfileName] === true;
+  if (ref.kind === "profileFallback") return disabled.profileFallbacks[ref.profile as ProfileName] === true;
+  return disabled.finalFallback === true;
+}
+
+/** The routing regime for either a transported view (routing present) or a
+ * full Policy object (derive exactly like routingRegime; never reinterpret). */
+function effectiveRegime(policy: RecoveryPolicyView): RoutingRegime {
+  if (policy.routing) return policy.routing.regime;
+  const schema = (policy as { schemaVersion?: number }).schemaVersion;
+  const own = policy.profileFallbacks ?? {};
+  const strategies = policy.strategies ?? { degrading: null, providerSkip: null };
+  const perProfile = (schema === 4 || schema === 5) &&
+    (PROFILE_NAMES.some((name) => own[name] !== null && own[name] !== undefined) ||
+      strategies.degrading !== null || strategies.providerSkip !== null);
+  return perProfile ? "per_profile" : "legacy_final_fallback";
+}
+
+function effectiveDegrading(policy: RecoveryPolicyView): boolean {
+  if (policy.routing) return policy.routing.strategies_effective.degrading === true;
+  return policy.strategies?.degrading === true;
+}
+
+/**
+ * Ordered NEW-START candidate formation over stored slots (main before that
+ * stage's own fallback). per_profile regime: entry stage, then further regular
+ * stages only with explicitly activated degrading. Legacy regime: the entry
+ * primary plus the fixed design/review resolution map — the legacy global
+ * final stage is never a new-start candidate (no unauthorized mixing).
+ */
+export function newStartCandidates(policy: RecoveryPolicyView, entryProfile: string): SlotCandidate[] {
+  const out: SlotCandidate[] = [];
+  const push = (ref: SlotRef, label: string, tuple: RecoveryRuntimeTuple | null | undefined) => {
+    if (!tuple) return;
+    out.push({ label, ref, tuple: { ...tuple }, disabled: slotDisabled(policy, ref) });
+  };
+  if (effectiveRegime(policy) === "per_profile") {
+    const stages: string[] = effectiveDegrading(policy) && (STAGE_ORDER as Record<string, string[]>)[entryProfile]
+      ? (STAGE_ORDER as Record<string, string[]>)[entryProfile]!
+      : [entryProfile];
+    for (const stage of stages) {
+      push({ kind: "profile", profile: stage as ProfileName }, `${stage}.main`, policy.profiles[stage]);
+      push({ kind: "profileFallback", profile: stage as ProfileName }, `${stage}.fallback`, policy.profileFallbacks?.[stage]);
+    }
+  } else {
+    push({ kind: "profile", profile: entryProfile as ProfileName }, `${entryProfile}.main`, policy.profiles[entryProfile]);
+    for (const profile of FALLBACKS[entryProfile as ProfileName] ?? []) {
+      push({ kind: "profile", profile }, `${profile}.main`, policy.profiles[profile]);
+    }
+  }
+  return out;
+}
+
+/** Ordered RECOVERY candidate formation: per_profile identical to new-start;
+ * legacy keeps today's chain — degrading stage mains (only with a degrading
+ * finalFallback mode) then the global final stage. Disabled flags travel with
+ * each candidate; filtering stays with the consumer. */
+export function recoveryCandidates(policy: RecoveryPolicyView, entryProfile: string): SlotCandidate[] {
+  const out: SlotCandidate[] = [];
+  const push = (ref: SlotRef, label: string, tuple: RecoveryRuntimeTuple | null | undefined) => {
+    if (!tuple) return;
+    out.push({ label, ref, tuple: { ...tuple }, disabled: slotDisabled(policy, ref) });
+  };
+  if (effectiveRegime(policy) === "per_profile") return newStartCandidates(policy, entryProfile);
+  if (policy.finalFallback && policy.finalFallback.mode === "degrading") {
+    const order: string[] =
+      entryProfile === "design" || entryProfile === "review"
+        ? ["standard", "execution"]
+        : entryProfile === "deep"
+          ? ["standard", "execution"]
+          : ["execution"];
+    for (const profile of order) {
+      push({ kind: "profile", profile: profile as ProfileName }, `degrade.${profile}.main`, policy.profiles[profile]);
+    }
+  }
+  if (policy.finalFallback) push({ kind: "finalFallback" }, "final.main", policy.finalFallback.selection);
+  return out;
+}
+
 export function catalogAvailable(
   catalog: RuntimeOptions,
   selection: RecoveryRuntimeTuple,
@@ -298,7 +497,8 @@ export function catalogAvailable(
  * Legacy regime chain — today's semantics preserved unchanged (monitor-engine
  * fallbackChain moved here as the single canonical implementation): only a
  * `degrading` finalFallback mode descends, the global final stage always
- * applies when configured, Schema-4 fields are never reinterpreted.
+ * applies when configured, Schema-4 fields are never reinterpreted. Disabled
+ * slots (schema 5) keep their stored value but are not part of the chain.
  */
 export function fallbackChain(
   policy: RecoveryPolicyView,
@@ -313,11 +513,14 @@ export function fallbackChain(
   const chain: RecoveryRuntimeTuple[] = [];
   if (policy.finalFallback && policy.finalFallback.mode === "degrading") {
     for (const profile of order) {
+      if (slotDisabled(policy, { kind: "profile", profile: profile as ProfileName })) continue;
       const entry = policy.profiles[profile];
       if (entry) chain.push({ ...entry });
     }
   }
-  if (policy.finalFallback) chain.push({ ...policy.finalFallback.selection });
+  if (policy.finalFallback && !slotDisabled(policy, { kind: "finalFallback" })) {
+    chain.push({ ...policy.finalFallback.selection });
+  }
   return chain;
 }
 
@@ -325,6 +528,7 @@ export type RecoveryCandidateStatus =
   | "selected"
   | "skipped_current_failure"
   | "skipped_attempted"
+  | "skipped_disabled"
   | "skipped_provider_scope"
   | "skipped_unavailable";
 
@@ -361,34 +565,11 @@ export function resolveRecoveryChain(
     currentIdentity?: string | null;
   },
 ): RecoveryChain {
-  const regime: RoutingRegime = policy.routing?.regime ?? "legacy_final_fallback";
-  const raw: Array<{ label: string; tuple: RecoveryRuntimeTuple }> = [];
-  if (regime === "per_profile") {
-    const effective = policy.routing?.strategies_effective ?? { degrading: false, provider_skip: false };
-    const stages: string[] = effective.degrading && (STAGE_ORDER as Record<string, string[]>)[params.entryProfile]
-      ? (STAGE_ORDER as Record<string, string[]>)[params.entryProfile]!
-      : [params.entryProfile];
-    for (const stage of stages) {
-      const main = policy.profiles[stage];
-      if (main) raw.push({ label: `${stage}.main`, tuple: main });
-      const own = policy.profileFallbacks?.[stage];
-      if (own) raw.push({ label: `${stage}.fallback`, tuple: own });
-    }
-  } else {
-    const order: string[] =
-      params.entryProfile === "design" || params.entryProfile === "review"
-        ? ["standard", "execution"]
-        : params.entryProfile === "deep"
-          ? ["standard", "execution"]
-          : ["execution"];
-    if (policy.finalFallback && policy.finalFallback.mode === "degrading") {
-      for (const profile of order) {
-        const entry = policy.profiles[profile];
-        if (entry) raw.push({ label: `degrade.${profile}.main`, tuple: entry });
-      }
-    }
-    if (policy.finalFallback) raw.push({ label: "final.main", tuple: policy.finalFallback.selection });
-  }
+  const regime: RoutingRegime = effectiveRegime(policy);
+  // task_f2d0ccc6: the shared candidate formation — the disabled flag travels
+  // with each candidate and is filtered AFTER current-failure/attempt evidence
+  // (a really failed runtime stays the stronger event) and BEFORE availability.
+  const raw = recoveryCandidates(policy, params.entryProfile);
   const attempted = new Set(params.attempted ?? []);
   const providerSkip = policy.routing?.strategies_effective.provider_skip === true;
   const accountScope = providerFailureScope(params.evidenceCategory) === "account_scope";
@@ -399,7 +580,8 @@ export function resolveRecoveryChain(
     status: "selected" as RecoveryCandidateStatus,
   }));
   let selectedIdentity: string | null = null;
-  for (const candidate of candidates) {
+  for (let index = 0; index < candidates.length; index++) {
+    const candidate = candidates[index]!;
     if (selectedIdentity !== null) {
       candidate.status = "skipped_attempted";
       continue;
@@ -410,6 +592,10 @@ export function resolveRecoveryChain(
     }
     if (attempted.has(candidate.identity)) {
       candidate.status = "skipped_attempted";
+      continue;
+    }
+    if (raw[index]!.disabled) {
+      candidate.status = "skipped_disabled";
       continue;
     }
     if (!params.catalog || !catalogAvailable(params.catalog, candidate.tuple)) {

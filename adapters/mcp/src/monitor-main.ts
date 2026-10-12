@@ -88,6 +88,7 @@ async function main(): Promise<void> {
       profiles: policy.profiles,
       profileFallbacks: policy.profileFallbacks,
       strategies: policy.strategies,
+      disabled: policy.disabled,
       routing: routingRegime(policy),
       revision: policy.revision,
     };

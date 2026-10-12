@@ -91,7 +91,7 @@ export type RecoveryResolutionEntry = {
 export const RECOVERY_ATTEMPT_LIMIT = 24;
 export const RECOVERY_RESOLUTION_LIMIT = 8;
 const RECOVERY_ATTEMPT_OUTCOMES: readonly string[] = ["current_failure", "update_unverified", "dispatched", "dispatch_uncertain", "send_failed"];
-const RECOVERY_CANDIDATE_STATUSES: readonly string[] = ["selected", "skipped_current_failure", "skipped_attempted", "skipped_provider_scope", "skipped_unavailable"];
+const RECOVERY_CANDIDATE_STATUSES: readonly string[] = ["selected", "skipped_current_failure", "skipped_attempted", "skipped_disabled", "skipped_provider_scope", "skipped_unavailable"];
 const RECOVERY_CHAIN_REASONS: readonly string[] = ["selected", "chain_empty", "chain_exhausted"];
 
 function boundedToken(value: unknown, max: number): value is string {

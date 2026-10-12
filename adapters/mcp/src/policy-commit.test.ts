@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, open, readFile, readdir, rm, writeFile } from "node:fs/
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { commitFinalFallback, commitProfileFallback, commitStrategies, validateFinalFallbackValue, validateStrategiesValue } from "./policy-commit.js";
+import { commitFinalFallback, commitProfileFallback, commitSlotDisabled, commitStrategies, validateFinalFallbackValue, validateStrategiesValue } from "./policy-commit.js";
 import type { RuntimeDescriptor } from "./types.js";
 
 const selection = { provider_id: "p", model_id: "m", variant: "high" };
@@ -253,6 +253,100 @@ test("the new schema-4 commits fail closed on a held canonical lock", async () =
     assert.deepEqual(await readFile(policyPath(project)), before, "a held lock means no write");
     await lock.close();
     assert.equal((await commitStrategies(runtime, 2, { degrading: true, providerSkip: true })).revision, 3);
+  } finally {
+    await cleanup();
+  }
+});
+// ---------------------------------------------------------------------------
+// task_f2d0ccc6: commitSlotDisabled — additive schema 5 per-slot pause.
+// ---------------------------------------------------------------------------
+
+test("commitSlotDisabled upgrades to schema 5 with an exact-bytes backup and preserves every stored selection", async () => {
+  const { project, runtime, cleanup } = await setup();
+  try {
+    await writePolicy(project, {
+      schemaVersion: 4, revision: 6, updatedAt: "2026-10-12T00:00:00Z",
+      profiles: { deep: selection, standard: null, execution: null, design: null, review: null },
+      finalFallback: { mode: "total", selection },
+      profileFallbacks: { deep: null, standard: { ...selection, variant: "default" }, execution: null, design: null, review: null },
+      strategies: { degrading: true, providerSkip: null },
+    });
+    const before = await readFile(policyPath(project));
+    const updated = await commitSlotDisabled(runtime, 6, { kind: "profile", profile: "deep" }, true);
+    assert.equal(updated.schemaVersion, 5);
+    assert.equal(updated.revision, 7);
+    assert.equal(updated.disabled.profiles.deep, true);
+    // Every stored slot survives byte-exact beside the disable state.
+    assert.deepEqual(updated.profiles.deep, selection);
+    assert.deepEqual(updated.profileFallbacks.standard, { ...selection, variant: "default" });
+    assert.deepEqual(updated.finalFallback, { mode: "total", selection });
+    assert.deepEqual(updated.strategies, { degrading: true, providerSkip: null });
+    const persisted = JSON.parse(await readFile(policyPath(project), "utf8"));
+    assert.equal(persisted.schemaVersion, 5);
+    assert.deepEqual(persisted.disabled, {
+      profiles: { deep: true, standard: false, execution: false, design: false, review: false },
+      profileFallbacks: { deep: false, standard: false, execution: false, design: false, review: false },
+      finalFallback: false,
+    });
+    // Canonical persisted key order: disabled is the last key of a schema-5 document.
+    assert.deepEqual(Object.keys(persisted), ["schemaVersion", "revision", "updatedAt", "profiles",
+      "finalFallback", "profileFallbacks", "strategies", "disabled"]);
+    const backup = await readFile(join(project, ".opencode-vm", "agent-control.schema4-rev6.backup.json"));
+    assert.deepEqual(backup, before, "the original bytes are backed up exactly before the upgrade");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("commitSlotDisabled clears without downgrade, upgrades from schema 1, covers fallback and final slots, and validates input", async () => {
+  const { project, runtime, cleanup } = await setup();
+  try {
+    const schema5 = {
+      schemaVersion: 5, revision: 9, updatedAt: "2026-10-12T00:00:00Z",
+      profiles: { deep: selection, standard: null, execution: null, design: null, review: null },
+      finalFallback: { mode: "degrading", selection },
+      profileFallbacks: { deep: { ...selection, variant: "default" }, standard: null, execution: null, design: null, review: null },
+      strategies: { degrading: null, providerSkip: null },
+      disabled: {
+        profiles: { deep: true, standard: false, execution: false, design: false, review: false },
+        profileFallbacks: { deep: false, standard: false, execution: false, design: false, review: false },
+        finalFallback: true,
+      },
+    };
+    await writePolicy(project, schema5);
+    // Clearing a primary never downgrades and never touches the stored selection.
+    const reenabled = await commitSlotDisabled(runtime, 9, { kind: "profile", profile: "deep" }, false);
+    assert.equal(reenabled.schemaVersion, 5);
+    assert.equal(reenabled.disabled.profiles.deep, false);
+    assert.equal(reenabled.disabled.finalFallback, true);
+    assert.deepEqual(reenabled.profiles.deep, selection, "the stored tuple survives re-enable");
+    // A different slot of the same profile is independent.
+    await writePolicy(project, schema5);
+    const own = await commitSlotDisabled(runtime, 9, { kind: "profileFallback", profile: "deep" }, true);
+    assert.equal(own.disabled.profiles.deep, true, "other slots stay unchanged");
+    assert.equal(own.disabled.profileFallbacks.deep, true);
+    const final = await commitSlotDisabled(runtime, 10, { kind: "finalFallback" }, false);
+    assert.equal(final.disabled.finalFallback, false);
+    assert.equal(final.disabled.profileFallbacks.deep, true);
+    // Upgrade straight from schema 1: an explicit disable publishes schema 5 with a backup.
+    await rm(join(project, ".opencode-vm"), { recursive: true, force: true });
+    await writePolicy(project, {
+      schemaVersion: 1, revision: 1, updatedAt: "2026-10-01T00:00:00Z",
+      profiles: { deep: selection, standard: null, execution: null },
+    });
+    const upgraded = await commitSlotDisabled(runtime, 1, { kind: "profile", profile: "standard" }, true);
+    assert.equal(upgraded.schemaVersion, 5);
+    assert.equal(upgraded.disabled.profiles.standard, true);
+    assert.deepEqual(upgraded.profiles.deep, selection);
+    const backups = (await readdir(join(project, ".opencode-vm"))).filter((name) => name.includes("backup"));
+    assert.deepEqual(backups, ["agent-control.schema1-rev1.backup.json"]);
+    // Input validation fails closed before any write.
+    await assert.rejects(commitSlotDisabled(runtime, 12, { kind: "profile", profile: "nope" }, true), { code: "INVALID_ARGUMENT" });
+    await assert.rejects(commitSlotDisabled(runtime, 12, { kind: "profileFallback", profile: "nope" }, true), { code: "INVALID_ARGUMENT" });
+    // CAS conflict never writes.
+    const frozen = await readFile(policyPath(project));
+    await assert.rejects(commitSlotDisabled(runtime, 1, { kind: "finalFallback" }, true), { code: "POLICY_REVISION_CONFLICT" });
+    assert.deepEqual(await readFile(policyPath(project)), frozen);
   } finally {
     await cleanup();
   }
