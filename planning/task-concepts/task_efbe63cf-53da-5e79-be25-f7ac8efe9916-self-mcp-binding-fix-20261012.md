@@ -1,6 +1,7 @@
 Task-ID: task_efbe63cf-53da-5e79-be25-f7ac8efe9916 (Folge-/Reparaturbeleg; kein neuer Task erfunden)
 Datum: 2026-10-12 (Fix-Freigabe 03:36 Europe/Berlin, Nutzer: "Der Fix ist freigegeben")
-Status: IMPLEMENTED_READY_FOR_INDEPENDENT_QC (Kandidatenbranch, keine Main-Integration)
+Status: RELEASE_PREP_READY_FOR_INDEPENDENT_QC (Kandidatenbranch, keine Main-Integration,
+kein Tag/Push/Release)
 
 # Self-MCP-Bindung folgt dem MCP-Connector statt dem Orchestrator-Skill-Opt-in (U1-Fix)
 
@@ -43,17 +44,35 @@ Status: IMPLEMENTED_READY_FOR_INDEPENDENT_QC (Kandidatenbranch, keine Main-Integ
 - Branch: `fix/mgmt-self-mcp-connector-binding`, Basis `0320c8d` (v0.7.33/Adapter 0.1.43)
 - Worktree: `.opencode-vm/worktrees/task_efbe63cf-self-mcp-binding-fix`
 
-## Upgrade-Pfad bestehender VMs (belegt, kein Reset nötig)
-- Script-Update (installierte Fassung ≥ 0.7.34) + ein normaler Reconnect
-  (`opencode-vm web` Reconnect-Pfad): Gast-Payload läuft `stop_mcp_adapter`
-  (unregister) → `prepare_mcp_adapter`/`start_mcp_adapter` (re-register, Reconnect
-  behält Port/Token) → `mcp_watch_ready`/`mcp_self_connect` (POST
-  `/mcp/ocvm-self/connect` an die laufende OpenCode-Runtime; OpenCode liest MCP-Server
-  nur beim Start und retryt nicht — der Connect-POST ist der unterstützte Weg).
-- Kein Base-Neuaufbau, kein VM-Neustart, keine OpenCode-Dienstneustart-Pflicht;
+## Upgrade-Pfad bestehender VMs (belegt, kein Reset nötig) — KORRIGIERT 03:58+
+- Script-Update (installierte Fassung ≥ 0.7.34) + **ein normales `opencode-vm attach`**
+  auf der bestehenden Web-Session genügt; ein separates `web` ist NICHT nötig.
+  Beleg: `attach_session` führt für web/tui-mcp dieselbe gemeinsame Guest-Payload aus
+  (opencode-vm.sh:17787ff.; Payload ruft `prepare_mcp_adapter`/`start_mcp_adapter`
+  → `mcp_self_register` :18053–18062 und `mcp_watch_ready` → `mcp_self_connect`);
+  die vorherige Web/OpenLive-Runtime wird sicher gestoppt (:17595–17600, inkl.
+  `stop_mcp_adapter`/Unregister). Ctrl-C läuft denselben bereinigenden EXIT-Pfad
+  (:18014); attach re-registriert/reconnectet idempotent — keine Duplikate.
+- Optionabhängig: reine TUI-Sessions ohne OpenAI-MCP-Zuweisung haben keinen Connector
+  (attach = nur TUI-Attach, kein ocvm-self); `--no-mcp` unterdrückt aufruflokal.
+- Kein Base-Neuaufbau, kein VM-Neustart, kein OpenCode-Dienstneustart-Pflicht;
   Sessions/Taskdaten/Monitor-Registry bleiben erhalten; Monitor-Bindung
   (anchor+priming) wird unverändert wiederaufgenommen.
 - Remote bi-mcrepo: LIVE_UNVERIFIED — keine lokale Evidenz als Beweis dort.
+
+## Release-Prep (QC-F1, Folgeauftrag 03:58)
+- QC-F1 behoben: `OPENLIVE_ADAPTER_TAG`/`MCP_ADAPTER_TAG`/`HUB_ASSET_TAG`
+  0.7.33 → v0.7.34 (opencode-vm.sh:37/48/55), Adapter 0.1.43 unverändert
+  (keine Quelländerung → kein künstlicher Adapterbump).
+- `tests/release_metadata_test.py`: 5/5 OK (identity assertions gegen v0.7.34).
+- Lokaler Repro-Proxy: `scripts/build-mcp-adapter.sh` (SOURCE_DATE_EPOCH=0) liefert
+  exakt den gepinnten SHA-256 `52f405…425ff` → Doppelbuild/Pin-Konsistenz vom
+  CI-Workflow lokal vorbereitet; voller Doppelbuild läuft in release.yml (CI).
+- F5 (vorbestehend, getrennt dokumentiert, NICHT bereinigt — out of scope):
+  `tests/skills_orchestrator_test.sh` erwartet Skill-Revision `2026-10-09-r49`,
+  die Quelle (integrations/chatgpt) trägt r48; am Basiscommit `0320c8d` identisch
+  reproduziert. Betrifft den Skill-Bundle-Workflow, nicht diesen Kandidaten.
+- Kein Git-Tag/Push/Release/Main-Integration/Installation ausgeführt.
 
 ## Offen / Folge
 - Unabhängige QC + Main-Integration/Release (Operator-Gates; RELEASING.md).
