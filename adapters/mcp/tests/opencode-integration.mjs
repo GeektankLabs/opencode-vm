@@ -1301,9 +1301,13 @@ try {
     assert.equal(idleAbort.state, "no_active_turn");
     assert.equal(idleAbort.aborted_message_id, undefined);
     assert.equal(idleAbort.activity_after, "idle");
+    // Adapter 0.1.46: pending_input carries the additive descendant-line
+    // coverage ("session+descendants" here — the sweep verified no other
+    // session holds a pending permission).
     assert.deepEqual(idleAbort.pending_input_after, {
       permissions: 0,
       questions: 0,
+      coverage: "session+descendants",
     });
 
     // An idle session refuses follow-ups and points at send_message.

@@ -1,7 +1,7 @@
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { dirname, isAbsolute } from "node:path";
 
-export const ADAPTER_VERSION = "0.1.45";
+export const ADAPTER_VERSION = "0.1.46";
 export const MCP_TRANSPORT = "streamable-http-stateless";
 
 export type RuntimeDescriptor = {
@@ -49,6 +49,10 @@ export type ProjectIdentity = {
 export type PendingInput = {
   permissions: number;
   questions: number;
+  // Additive descendant-line coverage (adapter 0.1.46): "unknown" is an
+  // honest value and must never be stripped or coerced to a clean zero.
+  coverage?: "session" | "session+descendants" | "unknown";
+  descendant_permissions?: { session_id: string; permission: string }[];
 };
 
 /** Additive pending-input coverage over the session's descendant line.

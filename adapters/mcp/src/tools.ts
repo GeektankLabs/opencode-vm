@@ -259,10 +259,35 @@ const transferTaskInput = z
   .strict();
 
 const projectSchema = z.object({ id: z.string(), name: z.string() }).strict();
+// Pending-input coverage over the session's descendant line, mirroring the
+// wire types (types.ts PendingCoverage) and every runtime emitter
+// (pendingCounts/combinedPending/correlatedStatus). "unknown" must stay a
+// first-class honest value — it is never stripped or coerced to a clean zero.
+const pendingCoverageSchema = z.enum([
+  "session",
+  "session+descendants",
+  "unknown",
+]);
+const descendantPermissionSchema = z
+  .object({
+    session_id: z.string(),
+    permission: z.string(),
+  })
+  .strict();
+const pendingScopeSchema = z.enum([
+  "session",
+  "session+descendants",
+  "unknown",
+]);
 const pendingSchema = z
   .object({
     permissions: z.number().int().nonnegative(),
     questions: z.number().int().nonnegative(),
+    coverage: pendingCoverageSchema.optional(),
+    descendant_permissions: z
+      .array(descendantPermissionSchema)
+      .max(20)
+      .optional(),
   })
   .strict();
 const admissionSchema = z
@@ -291,7 +316,7 @@ const sessionProgressOutput = z
     source: z.literal("backend_snapshot"),
     backend_activity: activitySchema,
     pending_input: pendingSchema,
-    pending_input_scope: z.literal("session"),
+    pending_input_scope: pendingScopeSchema,
     in_flight_tools: z.array(toolObservationSchema).max(10),
     last_finished_tool: toolObservationSchema.optional(),
     last_activity_at: z.number().nonnegative().optional(),
@@ -800,7 +825,7 @@ const sessionStatusOutputSchema = z
     error_details_total: z.number().int().positive().optional(),
     error_details_truncated: z.boolean().optional(),
     active_assistant_message_ids: z.array(z.string()).optional(),
-    pending_input_scope: z.literal("session").optional(),
+    pending_input_scope: pendingScopeSchema.optional(),
     admission: admissionSchema.optional(),
     receipt_resolution: receiptResolutionSchema.optional(),
     observed_at: z.string().optional(),

@@ -107,6 +107,9 @@ class FakeGateway implements SessionGateway {
   messageResult?: MessageResult;
   historyResult?: SessionHistoryResult;
   statusResult?: SessionStatusResult;
+  detailsResult?: SessionDetailsResult;
+  progressResult?: SessionProgressResult;
+  abortResult?: AbortSessionTurnResult;
   taskResult?: TaskResult;
   async getProjectAttention(): Promise<AttentionResult> {
     return this.attentionResult ?? {
@@ -124,6 +127,7 @@ class FakeGateway implements SessionGateway {
   }
   updateCalls: Array<{ id: string; patch: RuntimePatch }> = [];
   async getSessionProgress(sessionId: string): Promise<SessionProgressResult> {
+    if (this.progressResult) return this.progressResult;
     return {
       session_id: sessionId,
       observed_at: new Date().toISOString(),
@@ -277,6 +281,7 @@ class FakeGateway implements SessionGateway {
   }
 
   async getSessionDetails(_sessionId: string): Promise<SessionDetailsResult> {
+    if (this.detailsResult) return this.detailsResult;
     throw new Error("backend-secret-must-not-leak");
   }
 
@@ -377,6 +382,7 @@ class FakeGateway implements SessionGateway {
   abortCalls: string[] = [];
   async abortSessionTurn(sessionId: string): Promise<AbortSessionTurnResult> {
     this.abortCalls.push(sessionId);
+    if (this.abortResult) return this.abortResult;
     return {
       session_id: sessionId,
       state: "no_active_turn",
@@ -1937,5 +1943,112 @@ test("W2-F2/W4: monitor workers use the locked identity lifecycle through the MC
     assert.ok(types.includes("worker-reconcile_created"));
   } finally {
     await client.close(); await adapter.close(); await rm(project, { recursive: true, force: true });
+  }
+});
+
+test("pending-input coverage and descendant fields pass real tool output validation; strictness is retained", async () => {
+  const gateway = new FakeGateway();
+  gateway.detailsResult = {
+    id: "ses_work",
+    title: "Coverage fixture",
+    created: 1,
+    updated: 2,
+    activity: "idle",
+    pending_input: {
+      permissions: 2,
+      questions: 0,
+      coverage: "session+descendants",
+      descendant_permissions: [
+        { session_id: "ses_child", permission: "external_directory" },
+      ],
+    },
+    admission: { write_in_progress: false },
+  };
+  gateway.statusResult = {
+    session_id: "ses_work",
+    backend_activity: "busy",
+    state: "input_required",
+    pending_input: { permissions: 1, questions: 0, coverage: "unknown" },
+    pending_input_scope: "unknown",
+    assistant_message_ids: [],
+  };
+  gateway.progressResult = {
+    session_id: "ses_work",
+    observed_at: new Date().toISOString(),
+    source: "backend_snapshot",
+    backend_activity: "busy",
+    pending_input: { permissions: 1, questions: 0, coverage: "session" },
+    pending_input_scope: "session+descendants",
+    in_flight_tools: [],
+    idle_with_in_flight_tools: false,
+    coverage: {
+      message_limit: 100,
+      messages_scanned: 0,
+      history_has_more: false,
+      in_flight_total: 0,
+      in_flight_truncated: false,
+      metadata_incomplete: false,
+      unattributed_tools: 0,
+    },
+  };
+  gateway.abortResult = {
+    session_id: "ses_work",
+    state: "no_active_turn",
+    observed_at: new Date().toISOString(),
+    activity_after: "idle",
+    pending_input_after: {
+      permissions: 1,
+      questions: 0,
+      coverage: "session+descendants",
+      descendant_permissions: [
+        { session_id: "ses_child", permission: "external_directory" },
+      ],
+    },
+    guidance: "fixture",
+  };
+  const adapter = new McpHttpServer({ ...runtime(), project: await mkdtemp(join(tmpdir(), "ocvm-pending-wire-")) }, token, gateway);
+  const port = await adapter.start();
+  const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`),
+    { requestInit: { headers: { "X-OCVM-MCP-Token": token } } });
+  const client = new Client({ name: "pending-wire", version: "1.0.0" });
+  try {
+    await client.connect(transport);
+    // Positive: every coverage form and the bounded descendant field pass the
+    // REAL dispatch path (client -> server -> safeHandler -> outputSchema).
+    const details = await client.callTool({ name: "get_session", arguments: { session_id: "ses_work" } });
+    assert.equal(Boolean(details.isError), false, JSON.stringify(details));
+    const detailContent = details.structuredContent as { pending_input: { coverage?: string; descendant_permissions?: { session_id: string }[] } };
+    assert.equal(detailContent.pending_input.coverage, "session+descendants");
+    assert.equal(detailContent.pending_input.descendant_permissions?.[0]?.session_id, "ses_child");
+    const status = await client.callTool({ name: "get_session_status", arguments: { session_id: "ses_work" } });
+    assert.equal(Boolean(status.isError), false, JSON.stringify(status));
+    const statusContent = status.structuredContent as { pending_input: { coverage?: string }, pending_input_scope?: string };
+    assert.equal(statusContent.pending_input.coverage, "unknown", "unknown coverage must stay honest");
+    assert.equal(statusContent.pending_input_scope, "unknown");
+    const progress = await client.callTool({ name: "get_session_progress", arguments: { session_id: "ses_work" } });
+    assert.equal(Boolean(progress.isError), false, JSON.stringify(progress));
+    const progressContent = progress.structuredContent as { pending_input_scope?: string };
+    assert.equal(progressContent.pending_input_scope, "session+descendants");
+    const abort = await client.callTool({ name: "abort_session_turn", arguments: { session_id: "ses_work" } });
+    assert.equal(Boolean(abort.isError), false, JSON.stringify(abort));
+    // Negative: strict validation is retained — unknown coverage values and
+    // unknown extra fields still produce INTERNAL_ERROR invalid results.
+    const baseDetails = gateway.detailsResult!;
+    gateway.detailsResult = {
+      ...baseDetails,
+      pending_input: { permissions: 1, questions: 0, coverage: "sometimes" } as never,
+    };
+    const badCoverage = await client.callTool({ name: "get_session", arguments: { session_id: "ses_work" } });
+    assert.equal("isError" in badCoverage && badCoverage.isError, true, "unknown coverage value must fail strict validation");
+    gateway.detailsResult = {
+      ...baseDetails,
+      pending_input: { permissions: 1, questions: 0, coverage: "session", extra_field: true } as never,
+    };
+    const badField = await client.callTool({ name: "get_session", arguments: { session_id: "ses_work" } });
+    assert.equal("isError" in badField && badField.isError, true, "unknown pending_input field must fail strict validation");
+    assert.match(JSON.stringify(badField), /The MCP adapter produced an invalid result\./u);
+  } finally {
+    await client.close().catch(() => undefined);
+    await adapter.close();
   }
 });
