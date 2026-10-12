@@ -328,3 +328,30 @@ test("W3 prepared attention: disabled/unavailable is honest with reason and pres
   assert.equal(s4.prepared_attention.available, true);
   assert.equal(s4.prepared_attention.entries.length, 1, "reconnect does not duplicate entries");
 });
+
+test("snapshot session order follows inventory order regardless of reader resolution order",async()=>{
+  // CI release-run 38323154598: completion-order pushes made /api/v1/status
+  // rows nondeterministic between refreshes when parallel readers resolved
+  // out of order. Rows must be placed by inventory index instead.
+  const inventory: Inventory = { observed_at: new Date(1).toISOString(), sessions: ["ses_A","ses_B","ses_C"].map(id=>({
+    id, projectID:"p", title:id, location:{directory:"/d"}, parentID:undefined, time:{created:1,updated:2},
+    cost:0, tokens:{input:0,output:0,reasoning:0,cache:{read:0,write:0}} })), complete:true };
+  const row=(id:string):Session=>({ session_id:id, title:id.slice(0,240), parent_session_id:null, kind:"root",
+    archived:false, backend_activity:"idle",
+    pending_input:{scope:"session",permissions:0,questions:0}, observed_at:new Date(1).toISOString(),
+    last_activity_at:2, current_runtime:null, turns:[], turns_truncated:false, history_has_more:false });
+  const deferred:{id:string;resolve:(value:Session)=>void}[]=[];
+  const reader:DashboardReader={ inventory:async()=>inventory,
+    session:s=>new Promise(resolve=>{ deferred.push({id:s.id,resolve}); }),
+    board:async()=>[], activity:async()=>({epoch:"e",recent:[]}) };
+  const collector=new DashboardCollector({id:"p",name:"P"},"generation",reader,()=>1);
+  const running=collector.tick();
+  // Let all three readers be in flight, then resolve in REVERSE order.
+  await new Promise(r=>setTimeout(r,20));
+  assert.equal(deferred.length,3);
+  for(const entry of [...deferred].reverse()) entry.resolve(row(entry.id));
+  await running;
+  const snapshot=collector.snapshot(false);
+  assert.ok("sessions" in snapshot);
+  assert.deepEqual(snapshot.sessions.map(s=>s.session_id),["ses_A","ses_B","ses_C"]);
+});

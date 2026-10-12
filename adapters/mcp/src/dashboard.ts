@@ -141,18 +141,24 @@ export class DashboardCollector {
       await this.read("sessions", async () => {
         if (!this.inventory) throw new Error("No inventory");
         const items = this.inventory.sessions;
-        const result: Session[] = [];
+        // Index-keyed placement: identical inventory data must produce an
+        // identically ordered snapshot regardless of which of the parallel
+        // readers resolves first. Completion-order pushes made the public
+        // sessions array (and /api/v1/status rows) nondeterministic between
+        // refreshes.
+        const result: Session[] = new Array(items.length);
         let offset = 0, failed = false;
         const deadline = this.now() + 10000;
         await Promise.all(Array.from({ length: 4 }, async () => {
           while (offset < items.length && this.now() <= deadline) {
-            const item = items[offset++];
+            const index = offset++;
+            const item = items[index];
             if (!item) break;
-            try { result.push(await this.reader.session(item)); }
+            try { result[index] = await this.reader.session(item); }
             catch {
               failed = true;
               const previous = this.sessions.find(s => s.session_id === item.id);
-              if (previous) result.push(previous);
+              if (previous) result[index] = previous;
             }
           }
         }));
@@ -162,11 +168,13 @@ export class DashboardCollector {
           failed = true;
           for (const item of items.slice(offset)) {
             const previous = this.sessions.find(s => s.session_id === item.id);
-            if (previous) result.push(previous);
+            if (previous) result[items.indexOf(item)] = previous;
           }
         }
-        this.sessions = result;
-        const known = new Set(result.map(s => s.session_id));
+        // Compact in inventory order: unprocessed budget gaps leave holes that
+        // are dropped, so relative order stays deterministic.
+        this.sessions = result.filter(s => s);
+        const known = new Set(this.sessions.map(s => s.session_id));
         this.unknown = items.filter(item => !known.has(item.id)).map(item => ({ session_id: item.id,
           title: item.title.slice(0,240), parent_session_id: item.parentID ?? null, archived: Boolean(item.time.archived) }));
         return !failed && offset >= items.length && result.length <= 200 && result.filter(operational).length <= 50;
