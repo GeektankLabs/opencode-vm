@@ -219,6 +219,315 @@ export type MonitorReceiptObservation = {
   at: string;
 };
 
+// ---------------------------------------------------------------------------
+// Adaptive progress / investigation (task_a234c341 V2 §13, package e67c39cf).
+// All clocks, cooldowns, evidence and claims live PER WORKER EPISODE
+// (worker_key + dispatch_receipt); monitor-level fields are DERIVED
+// projections only. Investigation results are never progress.
+// ---------------------------------------------------------------------------
+
+export const INVESTIGATION_DEFAULTS = {
+  first_check_s: 3600,
+  cooldown_s: 3600,
+  ladder_s: [7200, 14400, 28800],
+  budget: { max_duration_ms: 300_000, max_calls: 10, max_bytes: 262_144 },
+} as const;
+
+/** Documented hard caps: degenerate configurations fail closed (V2 §13.3). */
+export const INVESTIGATION_LIMITS = {
+  seconds_min: 60,
+  seconds_max: 604_800,
+  max_duration_ms: 3_600_000,
+  max_calls: 100,
+  max_bytes: 1_048_576,
+} as const;
+
+export type InvestigationTaskType = "default" | "long_runner" | "milestoned";
+
+export type MonitorInvestigationConfig = {
+  schema: 1;
+  config: {
+    first_check_s: number;
+    cooldown_s: number;
+    ladder_s: [number, number, number];
+    budget: { max_duration_ms: number; max_calls: number; max_bytes: number };
+  };
+  task: {
+    task_type: InvestigationTaskType;
+    expected_milestone: string | null;
+    milestone_due_at: string | null;
+  };
+};
+
+export function defaultInvestigationConfig(): MonitorInvestigationConfig {
+  return {
+    schema: 1,
+    config: {
+      first_check_s: INVESTIGATION_DEFAULTS.first_check_s,
+      cooldown_s: INVESTIGATION_DEFAULTS.cooldown_s,
+      ladder_s: [...INVESTIGATION_DEFAULTS.ladder_s] as [number, number, number],
+      budget: { ...INVESTIGATION_DEFAULTS.budget },
+    },
+    task: { task_type: "default", expected_milestone: null, milestone_due_at: null },
+  };
+}
+
+function secondsField(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) ||
+      value < INVESTIGATION_LIMITS.seconds_min || value > INVESTIGATION_LIMITS.seconds_max)
+    throw new Error(`investigation.${label} must be an integer between ${INVESTIGATION_LIMITS.seconds_min} and ${INVESTIGATION_LIMITS.seconds_max} seconds`);
+  return value;
+}
+
+/** Normalizes operator input; degenerate values fail closed (never silently clamped). */
+export function validateInvestigationConfigInput(input: unknown): MonitorInvestigationConfig {
+  const next = defaultInvestigationConfig();
+  if (input === undefined || input === null) return next;
+  if (typeof input !== "object") throw new Error("investigation config must be an object");
+  const raw = input as Record<string, unknown>;
+  if (raw.first_check_s !== undefined) next.config.first_check_s = secondsField(raw.first_check_s, "first_check_s");
+  if (raw.cooldown_s !== undefined) next.config.cooldown_s = secondsField(raw.cooldown_s, "cooldown_s");
+  if (raw.ladder_s !== undefined) {
+    if (!Array.isArray(raw.ladder_s) || raw.ladder_s.length !== 3)
+      throw new Error("investigation.ladder_s must be exactly 3 values");
+    const ladder = raw.ladder_s.map((entry, index) => secondsField(entry, `ladder_s[${index}]`)) as [number, number, number];
+    if (!(ladder[0] < ladder[1] && ladder[1] < ladder[2]))
+      throw new Error("investigation.ladder_s must be strictly increasing");
+    next.config.ladder_s = ladder;
+  }
+  if (raw.budget !== undefined) {
+    if (typeof raw.budget !== "object" || raw.budget === null) throw new Error("investigation.budget must be an object");
+    const budgetRaw = raw.budget as Record<string, unknown>;
+    const bounded = (key: string, cap: number): number => {
+      const value = budgetRaw[key];
+      if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0 || value > cap)
+        throw new Error(`investigation.budget.${key} must be a positive integer <= ${cap}`);
+      return value;
+    };
+    if (budgetRaw.max_duration_ms !== undefined) next.config.budget.max_duration_ms = bounded("max_duration_ms", INVESTIGATION_LIMITS.max_duration_ms);
+    if (budgetRaw.max_calls !== undefined) next.config.budget.max_calls = bounded("max_calls", INVESTIGATION_LIMITS.max_calls);
+    if (budgetRaw.max_bytes !== undefined) next.config.budget.max_bytes = bounded("max_bytes", INVESTIGATION_LIMITS.max_bytes);
+  }
+  if (raw.task_type !== undefined || raw.expected_milestone !== undefined || raw.milestone_due_at !== undefined) {
+    if (raw.task_type !== undefined) {
+      if (raw.task_type !== "default" && raw.task_type !== "long_runner" && raw.task_type !== "milestoned")
+        throw new Error("task_contract.task_type must be default|long_runner|milestoned");
+      next.task.task_type = raw.task_type;
+    }
+    if (raw.expected_milestone !== undefined) {
+      if (raw.expected_milestone !== null && (typeof raw.expected_milestone !== "string" || raw.expected_milestone.length < 1 || raw.expected_milestone.length > 200))
+        throw new Error("task_contract.expected_milestone must be a string (1..200) or null");
+      next.task.expected_milestone = raw.expected_milestone ?? null;
+    }
+    if (raw.milestone_due_at !== undefined) {
+      if (raw.milestone_due_at !== null && !validIso(raw.milestone_due_at))
+        throw new Error("task_contract.milestone_due_at must be an ISO timestamp or null");
+      next.task.milestone_due_at = raw.milestone_due_at ?? null;
+    }
+  }
+  // Compatibility guard: optional aggregate budgets must never make the
+  // contracted first check or cooldown unreachable (V2 §13.3).
+  if (raw.daily_budget !== undefined) {
+    const daily = raw.daily_budget;
+    if (typeof daily !== "number" || !Number.isSafeInteger(daily) || daily < Math.ceil(86_400 / next.config.cooldown_s))
+      throw new Error(`investigation.daily_budget must be >= ceil(86400 / cooldown_s) = ${Math.ceil(86_400 / next.config.cooldown_s)}`);
+  }
+  return next;
+}
+
+export type InvestigationEvidenceEntry = { kind: string; source: string; at: string; digest: string };
+
+export type InvestigationEpisodeState = {
+  started_at: string;
+  finished_at: string | null;
+  outcome: "long_work_evidenced" | "no_progress_evidenced" | "inconclusive" | "aborted_budget" | null;
+  evidence: InvestigationEvidenceEntry[];
+  expected_milestone: string | null;
+  wait_reason: string | null;
+  worker_key: string | null;
+  dispatch_receipt: string | null;
+  generation_source: "runtime_json" | "heartbeat" | null;
+  generation_value: string | null;
+};
+
+export type InvestigationWorkerState = {
+  worker_key: string;
+  dispatch_receipt: string | null;
+  anchored_at: string | null;
+  anchor_source: "dispatch" | "creation" | "reconciled" | null;
+  last_progress_at: string | null;
+  last_tool_digest: string | null;
+  cooldown_until: number | null;
+  next_deep_check_at: number | null;
+  backoff_stage: number;
+};
+
+export type InvestigationObserverLease = { owner: string; lease_until: number; generation: number };
+
+export type MonitorInvestigationState = {
+  schema: 1;
+  last_progress_at: string | null;
+  last_investigation_at: string | null;
+  cooldown_until: number | null;
+  backoff_stage: number;
+  next_deep_check_at: number | null;
+  episode: InvestigationEpisodeState | null;
+  workers: InvestigationWorkerState[];
+  counters: { investigations_total: number; inconclusive_total: number; anchor_unknown_total: number };
+  observer_lease?: InvestigationObserverLease | null;
+};
+
+export function defaultInvestigationState(): MonitorInvestigationState {
+  return {
+    schema: 1,
+    last_progress_at: null,
+    last_investigation_at: null,
+    cooldown_until: null,
+    backoff_stage: 0,
+    next_deep_check_at: null,
+    episode: null,
+    workers: [],
+    counters: { investigations_total: 0, inconclusive_total: 0, anchor_unknown_total: 0 },
+    observer_lease: null,
+  };
+}
+
+const INVESTIGATION_WORKERS_MAX = 8;
+const INVESTIGATION_EVIDENCE_MAX = 6;
+
+function investigationWorkerShapeOk(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (typeof value.worker_key !== "string" || !/^worker_[0-9a-f]{32}$/.test(value.worker_key)) return false;
+  if (value.dispatch_receipt !== null && typeof value.dispatch_receipt !== "string") return false;
+  if (value.anchored_at !== null && !validIso(value.anchored_at)) return false;
+  if (value.anchor_source !== null && !["dispatch", "creation", "reconciled"].includes(String(value.anchor_source))) return false;
+  if (value.last_progress_at !== null && !validIso(value.last_progress_at)) return false;
+  if (value.last_tool_digest !== null && (typeof value.last_tool_digest !== "string" || !/^[0-9a-f]{64}$/.test(value.last_tool_digest))) return false;
+  for (const field of ["cooldown_until", "next_deep_check_at"] as const) {
+    if (value[field] !== null && (typeof value[field] !== "number" || !Number.isSafeInteger(value[field]))) return false;
+  }
+  if (typeof value.backoff_stage !== "number" || !Number.isSafeInteger(value.backoff_stage) || value.backoff_stage < 0 || value.backoff_stage > 3) return false;
+  return true;
+}
+
+export function investigationShapeOk(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (value.schema !== 1) return false;
+  for (const field of ["last_progress_at", "last_investigation_at"] as const) {
+    if (value[field] !== null && !validIso(value[field])) return false;
+  }
+  for (const field of ["cooldown_until", "next_deep_check_at"] as const) {
+    if (value[field] !== null && (typeof value[field] !== "number" || !Number.isSafeInteger(value[field]))) return false;
+  }
+  if (typeof value.backoff_stage !== "number" || !Number.isSafeInteger(value.backoff_stage) || value.backoff_stage < 0 || value.backoff_stage > 3) return false;
+  if (value.episode !== undefined && value.episode !== null) {
+    const episode = value.episode;
+    if (!isRecord(episode) || !validIso(episode.started_at)) return false;
+    if (episode.finished_at !== null && !validIso(episode.finished_at)) return false;
+    if (episode.outcome !== null && !["long_work_evidenced", "no_progress_evidenced", "inconclusive", "aborted_budget"].includes(String(episode.outcome))) return false;
+    if (!Array.isArray(episode.evidence) || episode.evidence.length > INVESTIGATION_EVIDENCE_MAX) return false;
+    for (const entry of episode.evidence) {
+      if (!isRecord(entry) || typeof entry.kind !== "string" || entry.kind.length < 1 || entry.kind.length > 64 ||
+          typeof entry.source !== "string" || entry.source.length < 1 || entry.source.length > 64 ||
+          !validIso(entry.at) || typeof entry.digest !== "string" || entry.digest.length > 64) return false;
+    }
+    if (episode.expected_milestone !== null && typeof episode.expected_milestone !== "string") return false;
+    if (episode.wait_reason !== null && typeof episode.wait_reason !== "string") return false;
+    if (episode.worker_key !== null && (typeof episode.worker_key !== "string" || !/^worker_[0-9a-f]{32}$/.test(episode.worker_key))) return false;
+    if (episode.dispatch_receipt !== null && typeof episode.dispatch_receipt !== "string") return false;
+    if (episode.generation_source !== null && !["runtime_json", "heartbeat"].includes(String(episode.generation_source))) return false;
+    if (episode.generation_value !== null && (typeof episode.generation_value !== "string" || episode.generation_value.length < 1 || episode.generation_value.length > 128)) return false;
+  }
+  if (!Array.isArray(value.workers) || value.workers.length > INVESTIGATION_WORKERS_MAX) return false;
+  if (!value.workers.every(investigationWorkerShapeOk)) return false;
+  if (!isRecord(value.counters)) return false;
+  for (const field of ["investigations_total", "inconclusive_total", "anchor_unknown_total"] as const) {
+    if (typeof value.counters[field] !== "number" || !Number.isSafeInteger(value.counters[field]) || value.counters[field] < 0) return false;
+  }
+  if (value.observer_lease !== undefined && value.observer_lease !== null) {
+    const lease = value.observer_lease;
+    if (!isRecord(lease) || typeof lease.owner !== "string" || lease.owner.length < 1 || lease.owner.length > 160 ||
+        typeof lease.lease_until !== "number" || !Number.isSafeInteger(lease.lease_until) ||
+        typeof lease.generation !== "number" || !Number.isSafeInteger(lease.generation) || lease.generation < 0) return false;
+  }
+  return true;
+}
+
+export function investigationConfigShapeOk(value: unknown): boolean {
+  if (!isRecord(value) || value.schema !== 1) return false;
+  try {
+    const validated = validateInvestigationConfigInput({
+      first_check_s: isRecord(value.config) ? value.config.first_check_s : undefined,
+      cooldown_s: isRecord(value.config) ? value.config.cooldown_s : undefined,
+      ladder_s: isRecord(value.config) ? value.config.ladder_s : undefined,
+      budget: isRecord(value.config) ? value.config.budget : undefined,
+      task_type: isRecord(value.task) ? value.task.task_type : undefined,
+      expected_milestone: isRecord(value.task) ? value.task.expected_milestone : undefined,
+      milestone_due_at: isRecord(value.task) ? value.task.milestone_due_at : undefined,
+    });
+    // Exact-shape check: values must round-trip identically (no silent normalization drift).
+    const stored = value as MonitorInvestigationConfig;
+    return JSON.stringify(stored.config) === JSON.stringify(validated.config) &&
+      JSON.stringify(stored.task) === JSON.stringify(validated.task);
+  } catch {
+    return false;
+  }
+}
+
+/** Per-worker get-or-create with episode reset on dispatch_receipt change (V2 §13.1). */
+export function investigationWorkerFor(
+  investigation: MonitorInvestigationState,
+  workerKey: string,
+  dispatchReceipt: string | null,
+): InvestigationWorkerState {
+  let state = investigation.workers.find((entry) => entry.worker_key === workerKey);
+  if (!state) {
+    state = {
+      worker_key: workerKey,
+      dispatch_receipt: dispatchReceipt,
+      anchored_at: null,
+      anchor_source: null,
+      last_progress_at: null,
+      last_tool_digest: null,
+      cooldown_until: null,
+      next_deep_check_at: null,
+      backoff_stage: 0,
+    };
+    investigation.workers.push(state);
+    if (investigation.workers.length > INVESTIGATION_WORKERS_MAX)
+      investigation.workers.splice(0, investigation.workers.length - INVESTIGATION_WORKERS_MAX);
+    return state;
+  }
+  if (state.dispatch_receipt !== dispatchReceipt) {
+    // New dispatch episode: fresh clock, prior episode stays in this bounded
+    // record's past values only (stage restarts at 0 for the new episode).
+    state.dispatch_receipt = dispatchReceipt;
+    state.anchored_at = null;
+    state.anchor_source = null;
+    state.last_tool_digest = null;
+    state.cooldown_until = null;
+    state.next_deep_check_at = null;
+    state.backoff_stage = 0;
+  }
+  return state;
+}
+
+/** Recomputes the DERIVED monitor-level projections from per-worker state. */
+export function refreshInvestigationProjections(investigation: MonitorInvestigationState): void {
+  const cooldowns = investigation.workers.map((entry) => entry.cooldown_until).filter((value): value is number => value !== null);
+  const nexts = investigation.workers.map((entry) => entry.next_deep_check_at).filter((value): value is number => value !== null);
+  const progresses = investigation.workers.map((entry) => entry.last_progress_at).filter((value): value is string => value !== null);
+  investigation.cooldown_until = cooldowns.length > 0 ? Math.min(...cooldowns) : null;
+  investigation.next_deep_check_at = nexts.length > 0 ? Math.min(...nexts) : null;
+  // Most-stale progress across workers (monitor-wide projection must not mask
+  // a hung worker, V2 §13.1): earliest last_progress_at.
+  investigation.last_progress_at = progresses.length > 0 ? progresses.slice().sort()[0]! : null;
+  const dueWorker = investigation.workers
+    .filter((entry) => entry.anchored_at !== null)
+    .sort((a, b) => (a.next_deep_check_at ?? Number.MAX_SAFE_INTEGER) - (b.next_deep_check_at ?? Number.MAX_SAFE_INTEGER))[0];
+  investigation.backoff_stage = dueWorker ? dueWorker.backoff_stage : 0;
+}
+
 export type MonitorRecord = {
   id: string;
   title: string;
@@ -248,11 +557,15 @@ export type MonitorRecord = {
     string,
     { attempts: number; next_at: number | null; exhausted_at: string | null; alerted: boolean }
   >;
-  run: { active: boolean; started_at: string | null; action: string | null };
+  run: { active: boolean; started_at: string | null; action: string | null; owner_pid?: number; owner_generation?: string };
   recovery: { active: boolean; started_at: string | null; last_error_fingerprint: string | null };
   /** Welle B additive persistence (see RecoveryEpisode docs); absent on legacy records. */
   recovery_episode?: RecoveryEpisode | null;
   recovery_resolution?: RecoveryResolutionEntry[] | null;
+  /** task_a234c341 V2 §13: adaptive progress/investigation state (additive, fail-closed). */
+  investigation?: MonitorInvestigationState | null;
+  /** V2 §13.3: configurable starting values + task contract (additive, validated). */
+  investigation_config?: MonitorInvestigationConfig | null;
   dispatch_wal: {
     action_id: string;
     at: string;
@@ -375,6 +688,17 @@ function shapeOk(registry: unknown): registry is MonitorRegistry {
         !(["healthy", "held"] as const).includes(observation.outcome as never) ||
         !validIso(observation.at)) return false;
     }
+    // V2 §13.8 claim fencing: owner identity fields validated when present
+    // (legacy claims without identity stay valid; the recovery path treats
+    // them as provably-unknown, never as sufficient process identity).
+    if (!isRecord(monitor.run)) return false;
+    if (monitor.run.owner_pid !== undefined &&
+      (typeof monitor.run.owner_pid !== "number" || !Number.isSafeInteger(monitor.run.owner_pid) || monitor.run.owner_pid <= 0)) return false;
+    if (monitor.run.owner_generation !== undefined &&
+      (typeof monitor.run.owner_generation !== "string" || (monitor.run.owner_generation as string).length < 1 || (monitor.run.owner_generation as string).length > 128)) return false;
+    // V2 §13: adaptive investigation state + config fail closed when present.
+    if (monitor.investigation !== undefined && monitor.investigation !== null && !investigationShapeOk(monitor.investigation)) return false;
+    if (monitor.investigation_config !== undefined && monitor.investigation_config !== null && !investigationConfigShapeOk(monitor.investigation_config)) return false;
     if (!Array.isArray(monitor.history) || !Array.isArray(monitor.logs)) return false;
     if (!validIso(monitor.created_at) || !validIso(monitor.updated_at)) return false;
     if (monitor.alias !== undefined &&

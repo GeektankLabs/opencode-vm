@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { lstat, readFile } from "node:fs/promises";
+import { join } from "node:path";
 import {
   catalogAvailable,
   fallbackChain,
@@ -14,7 +16,9 @@ import type { RecoveryPolicyView } from "./agent-control.js";
 export { catalogAvailable, fallbackChain };
 import {
   appendRecoveryResolution,
+  defaultInvestigationState,
   digest,
+  investigationWorkerFor,
   monitorDecision,
   monitorHistory,
   monitorLog,
@@ -22,10 +26,19 @@ import {
   readEpisode,
   readRegistrySnapshot,
   recordRepair,
+  refreshInvestigationProjections,
   withRegistry,
   workerIndexDigest,
 } from "./monitor.js";
-import type { MonitorWorkerErrorMarker, MonitorWorkerRecord, RecoveryEpisode } from "./monitor.js";
+import type {
+  InvestigationEpisodeState,
+  InvestigationEvidenceEntry,
+  InvestigationWorkerState,
+  MonitorInvestigationConfig,
+  MonitorWorkerErrorMarker,
+  MonitorWorkerRecord,
+  RecoveryEpisode,
+} from "./monitor.js";
 import { isRecord } from "./types.js";
 import type {
   MonitorRecord,
@@ -39,6 +52,7 @@ import type {
   RuntimeUpdateResult,
   SendMessageResult,
   SessionDetailsResult,
+  SessionProgressResult,
   SessionRuntime,
   SessionStatusResult,
 } from "./types.js";
@@ -52,6 +66,11 @@ import type {
  * engine reuses the existing OpenCode gateway (v1 runner, WAL receipts, native
  * abort, runtime updates) — it is not a second platform.
  */
+
+// V2 §13 (task_a234c341 / package task_e67c39cf) — investigation constants.
+const HEARTBEAT_FRESH_MS = 90_000; // 3× the 30 s heartbeat period
+const OBSERVER_LEASE_TTL_MS = 15_000;
+const CLAIM_STUCK_INTERVAL_FACTOR = 10;
 
 export type MonitorBoardTask = {
   id?: unknown;
@@ -82,6 +101,9 @@ export type MonitorGatewayLike = {
   createSession(title: string): Promise<CreateSessionResult>;
   getSessionDetails(sessionId: string, includeArchived?: boolean): Promise<SessionDetailsResult>;
   getSessionStatus(sessionId: string, messageId?: string): Promise<SessionStatusResult>;
+  /** V2 §13.4 optional: attributable in-flight tool observations (existing
+   * backend capability; absent gateways degrade evidence to `inconclusive`). */
+  getSessionProgress?(sessionId: string, messageId?: string): Promise<SessionProgressResult>;
   getCombinedPendingInput(sessionId: string): Promise<PendingInput>;
   getSessionHistory?(sessionId: string, limit: number, before?: string): Promise<{ messages: Array<{ id: string; role: string; text: string }> }>;
   sendMessage(sessionId: string, message: string, attachments?: string[]): Promise<SendMessageResult>;
@@ -102,6 +124,10 @@ export type MonitorEngineDeps = {
   readPolicy: () => Promise<MonitorPolicyView>;
   now?: () => number;
   log?: (level: "info" | "warn" | "error", message: string) => void;
+  /** V2 §13.8: this engine instance's runtime generation (claim fencing +
+   * investigation episode attribution). Defaults to "unknown" (never treated
+   * as a sufficient process identity). */
+  engineGeneration?: string;
 };
 
 export type WakeOutcome =
@@ -120,6 +146,7 @@ export type WakeOutcome =
   | "compaction-continued"
   | "recovery-continued"
   | "recovery-parked"
+  | "investigated"
   | "expired"
   | "error";
 
@@ -175,6 +202,7 @@ export class MonitorEngine {
   private readonly readPolicy: () => Promise<MonitorPolicyView>;
   private readonly now: () => number;
   private readonly log: (level: "info" | "warn" | "error", message: string) => void;
+  private readonly engineGeneration: string;
   private waking = false;
   /** Wave A bounded streak logging: silent tick paths name themselves once and
    * then only periodically, with first time and count visible — never per tick. */
@@ -220,6 +248,9 @@ export class MonitorEngine {
     this.readPolicy = deps.readPolicy;
     this.now = deps.now ?? Date.now;
     this.log = deps.log ?? (() => undefined);
+    // "unknown" is never treated as a sufficient process identity (V2 §13.8:
+    // PID without generation/start evidence is not ownership proof).
+    this.engineGeneration = deps.engineGeneration ?? "unknown";
   }
 
   /** One deterministic scan; at most one bounded action per call. */
@@ -274,7 +305,18 @@ export class MonitorEngine {
           monitor.scheduler.next_run_at = now + monitor.scheduler.interval_seconds * 1000;
           return;
         }
-        monitor.run = { active: true, started_at: iso(now), action: null };
+        // V2 §13.8: every claim carries owner identity (fencing). Fields are
+        // additive; release() drops them with the claim.
+        monitor.run = {
+          active: true,
+          started_at: iso(now),
+          action: null,
+          owner_pid: process.pid,
+          ...(this.engineGeneration !== "unknown" ? { owner_generation: this.engineGeneration } : {}),
+        };
+        // V2 §13.1/§13.2: sync per-worker investigation episodes (anchor init
+        // from creation fallback) BEFORE the due evaluation reads them.
+        this.syncWorkerInvestigation(monitor, now);
         monitor.updated_at = iso(now);
         return registry;
       },
@@ -393,6 +435,7 @@ export class MonitorEngine {
           record.state.last_seen_digest = summary.digest;
           record.state.worker_digest = workerDigest;
           record.wake_request = null;
+          this.reanchorAfterReconciliation(record, now);
           this.resumeRecoveryPark(record, "dispatch-reconciled", now);
           this.appendDecisionSummary(record, summary, decisionsSince, now);
         });
@@ -405,6 +448,15 @@ export class MonitorEngine {
         monitorHistory(record, "dispatch-uncertain", { action_id: record.dispatch_wal?.action_id ?? null }, now);
       });
       return "dispatch-uncertain";
+    }
+
+    // ---- P5 (V2 §13.3/§13.7): adaptive investigation due — evaluated BEFORE
+    // the no-op shortcut AND the busy gate, so a due read-only investigation is
+    // never absorbed by `noop-unchanged` or `busy-held` (V2 §13.7, C1b). The
+    // investigation is this wake's one bounded action and performs zero sends.
+    const dueWorker = this.investigationDue(monitor, now);
+    if (dueWorker) {
+      return await this.runInvestigation(id, monitor, dueWorker, summary, workerDigest, now);
     }
 
     // Cheap unchanged path: no model call, no note growth. A pending trigger or
@@ -528,6 +580,7 @@ export class MonitorEngine {
             record.wake_request = null;
             if (reconciled.kind === "found") {
               monitorHistory(record, "dispatch-reconciled", { message_id: reconciled.messageId }, now);
+              this.reanchorAfterReconciliation(record, now);
               this.appendDecisionSummary(record, summary, decisionsSince, now);
             } else {
               record.state.work = "parked_input_required";
@@ -686,6 +739,22 @@ export class MonitorEngine {
             record.result_receipt = observation.resultReceipt;
             record.updated_at = iso(now);
             monitorRecord.updated_at = iso(now);
+            // V2 §13.4/§10-A8: a receipt-correlated terminal worker result is
+            // ENGINE-SIDE evidence of professional progress (A). It resets the
+            // worker's progress clock, cooldown and backoff ladder to stage 0.
+            // Investigation results never do this (V2 §13.4).
+            const cfg = this.effectiveInvestigationConfig(monitorRecord).config;
+            const inv = monitorRecord.investigation ??= defaultInvestigationState();
+            const workerState = investigationWorkerFor(inv, record.worker_key, record.dispatch_receipt);
+            workerState.last_progress_at = iso(now);
+            workerState.backoff_stage = 0;
+            workerState.cooldown_until = null;
+            workerState.next_deep_check_at = now + cfg.first_check_s * 1000;
+            if (workerState.anchored_at === null) {
+              workerState.anchored_at = record.created_at;
+              workerState.anchor_source = "creation";
+            }
+            refreshInvestigationProjections(inv);
             monitorHistory(monitorRecord, "worker-observed-complete", {
               worker_key: record.worker_key,
               alias: record.alias,
@@ -842,6 +911,7 @@ export class MonitorEngine {
         record.recovery_episode = null;
         monitorHistory(record, "recovery-episode-closed", { reason: "receipt-observed-healthy" }, now);
       }
+      this.reanchorAfterReconciliation(record, now);
       monitorDecision(
         record,
         "noop-unchanged",
@@ -872,6 +942,403 @@ export class MonitorEngine {
       },
       { now },
     );
+  }
+
+  // --------------------------------------------------- investigation (V2 §13)
+
+  private effectiveInvestigationConfig(monitor: MonitorRecord): MonitorInvestigationConfig {
+    return monitor.investigation_config ?? {
+      schema: 1,
+      config: {
+        first_check_s: 3600,
+        cooldown_s: 3600,
+        ladder_s: [7200, 14400, 28800],
+        budget: { max_duration_ms: 300_000, max_calls: 10, max_bytes: 262_144 },
+      },
+      task: { task_type: "default", expected_milestone: null, milestone_due_at: null },
+    };
+  }
+
+  /**
+   * V2 §13.1/§13.2: per-worker episode sync. A worker gets an investigation
+   * state on first sight; a dispatch_receipt change starts a NEW episode with
+   * a fresh anchor. Anchor (§13.2): the actual dispatch is not recorded
+   * engine-side per worker, so the documented creation fallback
+   * (`worker.created_at`) is used; only when even that is missing does the
+   * anchor become "reconciled" at first observation (counted, transparent).
+   * The first deep check happens T_first AFTER the anchor — never immediately.
+   */
+  private syncWorkerInvestigation(monitor: MonitorRecord, now: number): void {
+    const workers = monitor.workers ?? [];
+    const withReceipt = workers.filter((worker) => worker.dispatch_receipt);
+    if (withReceipt.length === 0) return;
+    const inv = monitor.investigation ??= defaultInvestigationState();
+    const cfg = this.effectiveInvestigationConfig(monitor).config;
+    for (const worker of withReceipt) {
+      const state = investigationWorkerFor(inv, worker.worker_key, worker.dispatch_receipt);
+      if (state.anchored_at === null) {
+        if (worker.created_at) {
+          state.anchored_at = worker.created_at;
+          state.anchor_source = "creation";
+        } else {
+          state.anchored_at = iso(now);
+          state.anchor_source = "reconciled";
+          inv.counters.anchor_unknown_total += 1;
+          monitorDecision(
+            monitor,
+            "investigation-anchor-unknown",
+            { worker_key: worker.worker_key, anchor: iso(now) },
+            `investigation-anchor-unknown:${worker.worker_key}:${(worker.dispatch_receipt ?? "none").slice(0, 24)}`,
+            now,
+          );
+        }
+        state.next_deep_check_at = Date.parse(state.anchored_at) + cfg.first_check_s * 1000;
+      }
+    }
+    refreshInvestigationProjections(inv);
+  }
+
+  /**
+   * V2 §13.3: the due worker for this wake (oldest due first, one
+   * investigation per wake). Holds: parked/stopped work, open recovery
+   * (clock hold, §13.5), unresolved dispatch WAL (uncertain writes reconcile
+   * first), an open episode, and the not-yet-anchored initial window.
+   */
+  private investigationDue(monitor: MonitorRecord, now: number): InvestigationWorkerState | null {
+    const inv = monitor.investigation;
+    if (!inv || monitor.state.work !== "active" || monitor.recovery.active) return null;
+    if (monitor.dispatch_wal && monitor.dispatch_wal.message_id === null) return null;
+    if (inv.episode && inv.episode.finished_at === null) return null;
+    return inv.workers
+      .filter((worker) => worker.anchored_at !== null && (worker.next_deep_check_at ?? Number.MAX_SAFE_INTEGER) <= now)
+      .sort((a, b) => (a.next_deep_check_at ?? 0) - (b.next_deep_check_at ?? 0))[0] ?? null;
+  }
+
+  /**
+   * V2 §13.5: after an admitted reconciliation step (healthy dispatch,
+   * recovery-continued, verified-healthy receipt) the worker clocks RE-ANCHOR
+   * at the reconciliation completion (new episode); `last_progress_at` is
+   * NEVER touched and `backoff_stage` stays unchanged (no false reset).
+   */
+  private reanchorAfterReconciliation(monitor: MonitorRecord, now: number): void {
+    const inv = monitor.investigation;
+    if (!inv || inv.workers.length === 0) return;
+    const cfg = this.effectiveInvestigationConfig(monitor).config;
+    for (const worker of inv.workers) {
+      worker.anchored_at = iso(now);
+      worker.anchor_source = "reconciled";
+      worker.next_deep_check_at = now + cfg.first_check_s * 1000;
+      worker.cooldown_until = null;
+    }
+    refreshInvestigationProjections(inv);
+  }
+
+  /**
+   * V2 §13.3/§13.4: one budgeted, strictly read-only investigation for the
+   * due worker episode. Sends zero messages, routes nothing, never counts as
+   * progress. Positive long-work evidence is deliberately narrow (V2 §13.4):
+   * (a) attributable in-flight tool progress delta on the worker's OWN
+   * dispatch receipt (optional `getSessionProgress`), (c) a newly admitted
+   * dispatch episode since the previous investigation. Merely stale running,
+   * unattributable activity or board bookkeeping is `inconclusive`.
+   */
+  private async runInvestigation(
+    id: string,
+    monitor: MonitorRecord,
+    dueWorker: InvestigationWorkerState,
+    summary: CanonicalSummary,
+    workerDigest: string,
+    now: number,
+  ): Promise<WakeOutcome> {
+    const { config, task } = this.effectiveInvestigationConfig(monitor);
+    const evidence: InvestigationEvidenceEntry[] = [];
+    let outcome: InvestigationEpisodeState["outcome"] = null;
+    let waitReason: string | null = null;
+    const worker = (monitor.workers ?? []).find((entry) => entry.worker_key === dueWorker.worker_key) ?? null;
+    const sessionId = worker?.runtime_session_id ?? null;
+    let callsUsed = 0;
+    let toolDigest: string | null = null;
+    let episodeAdvanced = false;
+
+    if (!worker || !worker.dispatch_receipt) {
+      outcome = "no_progress_evidenced";
+    } else if (worker.dispatch_receipt !== dueWorker.dispatch_receipt) {
+      // (c) new dispatch episode admitted after the previous investigation.
+      evidence.push({ kind: "new_dispatch_episode", source: "worker_registry", at: iso(now), digest: digest({ r: worker.dispatch_receipt }).slice(0, 16) });
+      outcome = "long_work_evidenced";
+      waitReason = "worker re-dispatched after the previous investigation";
+      episodeAdvanced = true;
+    } else if (worker.lifecycle === "idle" && worker.result_receipt && !worker.last_synthesis_at) {
+      evidence.push({ kind: "terminal_result_pending_synthesis", source: "worker_registry", at: iso(now), digest: digest({ r: worker.result_receipt }).slice(0, 16) });
+      outcome = "long_work_evidenced";
+      waitReason = "worker result awaiting manager synthesis";
+    } else if (worker.lifecycle === "active" && sessionId) {
+      // (a) attributable tool progress via the optional progress capability.
+      if (this.gateway.getSessionProgress) {
+        callsUsed += 1;
+        try {
+          const progress = await this.gateway.getSessionProgress(sessionId, worker.dispatch_receipt);
+          toolDigest = digest(progress.in_flight_tools.map((tool) => [tool.call_id, tool.status, tool.finished_at ?? null]));
+          if (dueWorker.last_tool_digest !== null && toolDigest !== dueWorker.last_tool_digest) {
+            evidence.push({ kind: "attributable_tool_progress", source: "get_session_progress", at: iso(now), digest: toolDigest.slice(0, 16) });
+            outcome = "long_work_evidenced";
+            waitReason = "attributable in-flight tool progress on the worker's own dispatch receipt";
+          }
+          // First observation records the baseline only: a delta needs two
+          // points, so this round stays inconclusive (stale running alone is
+          // never long-work evidence, V2 §13.4).
+        } catch (error) {
+          evidence.push({ kind: "progress_read_failed", source: "get_session_progress", at: iso(now), digest: (errorCode(error) ?? "unknown").slice(0, 16) });
+        }
+      } else {
+        evidence.push({ kind: "progress_telemetry_unavailable", source: "gateway", at: iso(now), digest: "none" });
+      }
+      if (outcome === null && !this.gateway.getSessionProgress) {
+        // Attribution impossible without telemetry; a bounded status read
+        // names the observed state honestly (one extra call, still in budget).
+        callsUsed += 1;
+        try {
+          const status = await this.gateway.getSessionStatus(sessionId, worker.dispatch_receipt);
+          evidence.push({ kind: `status_${status.backend_activity}`, source: "get_session_status", at: iso(now), digest: digest({ s: status.state }).slice(0, 16) });
+        } catch (error) {
+          evidence.push({ kind: "status_read_failed", source: "get_session_status", at: iso(now), digest: (errorCode(error) ?? "unknown").slice(0, 16) });
+        }
+      }
+    }
+
+    if (outcome === null) {
+      const attributionBlocked = evidence.some((entry) => entry.kind === "progress_read_failed" ||
+        entry.kind === "status_read_failed" || entry.kind === "progress_telemetry_unavailable");
+      outcome = attributionBlocked || worker?.lifecycle === "active" ? "inconclusive" : "no_progress_evidenced";
+    }
+    if (callsUsed > config.budget.max_calls) outcome = "aborted_budget";
+
+    const finishedMs = this.now();
+    const finished = iso(finishedMs);
+    await withRegistry(
+      this.project,
+      (registry) => {
+        const record = registry.monitors.find((entry) => entry.id === id);
+        if (!record) return registry;
+        const inv = record.investigation ??= defaultInvestigationState();
+        // The investigation observed this canonical snapshot: record it like
+        // every other observed-wake path, so the following wake stays a cheap
+        // no-op unless something actually changed.
+        record.state.last_seen_digest = summary.digest;
+        record.state.worker_digest = workerDigest;
+        record.wake_request = null;
+        inv.last_investigation_at = finished;
+        inv.counters.investigations_total += 1;
+        if (outcome === "inconclusive") inv.counters.inconclusive_total += 1;
+        const state = investigationWorkerFor(inv, dueWorker.worker_key, dueWorker.dispatch_receipt);
+        state.last_tool_digest = toolDigest ?? state.last_tool_digest;
+        if (outcome === "long_work_evidenced") {
+          state.backoff_stage = Math.min(3, state.backoff_stage + 1);
+          state.next_deep_check_at = finishedMs + config.ladder_s[Math.min(2, state.backoff_stage - 1)]! * 1000;
+          state.cooldown_until = null;
+        } else {
+          // Cooldown from the investigation END; the progress clock is
+          // untouched (V2 §13.3 — never a already-past deadline, no due loop).
+          state.cooldown_until = finishedMs + config.cooldown_s * 1000;
+          state.next_deep_check_at = state.cooldown_until;
+        }
+        if (episodeAdvanced && worker?.dispatch_receipt) {
+          // Follow the worker into its new episode (fresh anchor per §13.2).
+          state.dispatch_receipt = worker.dispatch_receipt;
+          state.anchored_at = worker.created_at ?? finished;
+          state.anchor_source = worker.created_at ? "creation" : "reconciled";
+          state.next_deep_check_at = Date.parse(state.anchored_at) + config.first_check_s * 1000;
+          state.cooldown_until = null;
+        }
+        refreshInvestigationProjections(inv);
+        inv.episode = {
+          started_at: iso(now),
+          finished_at: finished,
+          outcome,
+          evidence: evidence.slice(0, 6),
+          expected_milestone: task.expected_milestone,
+          wait_reason: outcome === "long_work_evidenced" ? waitReason : null,
+          worker_key: dueWorker.worker_key,
+          dispatch_receipt: dueWorker.dispatch_receipt,
+          generation_source: this.engineGeneration !== "unknown" ? "runtime_json" : null,
+          generation_value: this.engineGeneration !== "unknown" ? this.engineGeneration : null,
+        };
+        // Release the wake claim this investigation consumed (V2 §13.8
+        // hygiene: a finished action never leaves an active claim behind).
+        record.run = { active: false, started_at: null, action: "investigation" };
+        if (record.scheduler.expiry_at !== null && finishedMs >= record.scheduler.expiry_at && record.scheduler.enabled) {
+          record.scheduler.enabled = false;
+          record.scheduler.next_run_at = null;
+          monitorHistory(record, "expired", { at: finished }, now);
+        } else if (record.scheduler.enabled) {
+          record.scheduler.next_run_at = finishedMs + record.scheduler.interval_seconds * 1000;
+        }
+        monitorDecision(
+          record,
+          "investigation",
+          { outcome, worker_key: dueWorker.worker_key, wait_reason: outcome === "long_work_evidenced" ? waitReason : null },
+          `investigation:${dueWorker.worker_key}:${(dueWorker.dispatch_receipt ?? "none").slice(0, 24)}:${outcome}`,
+          now,
+        );
+        monitorHistory(record, `investigation-${outcome}`, {
+          worker_key: dueWorker.worker_key,
+          stage: state.backoff_stage,
+          next_deep_check_at: state.next_deep_check_at,
+          evidence: evidence.slice(0, 3).map((entry) => entry.kind),
+        }, now);
+        return registry;
+      },
+      { now: finishedMs },
+    );
+    this.log("info", `investigation outcome=${outcome} monitor=${id} worker=${dueWorker.worker_key} stage-read-only`);
+    return "investigated";
+  }
+
+  /**
+   * V2 §13.7: minimal independent cheap observer. Registry-only (zero gateway
+   * calls): it stays observation-capable while a wake blocks on a tool call
+   * (`waking` does not protect it — the lease does). It evaluates due-ness,
+   * makes a stuck OWN claim visible, and hands a due investigation to the
+   * next regular wake via the existing `wake_request` mechanism. It never
+   * sends, recovers or releases a claim.
+   */
+  async observe(): Promise<void> {
+    const now = this.now();
+    const engineId = `${process.pid}:${this.engineGeneration}`;
+    await withRegistry(
+      this.project,
+      (registry) => {
+        for (const monitor of registry.monitors) {
+          if (!monitor.scheduler.enabled || monitor.state.work === "stopped") continue;
+          if (
+            monitor.run.active && monitor.run.started_at &&
+            (monitor.run.owner_generation ?? "") === this.engineGeneration &&
+            now - Date.parse(monitor.run.started_at) > monitor.scheduler.interval_seconds * 1000 * CLAIM_STUCK_INTERVAL_FACTOR
+          ) {
+            monitorDecision(
+              monitor,
+              "wake-claim-stuck",
+              { reason: "own-claim-extended", since: monitor.run.started_at },
+              `wake-claim-stuck:${monitor.id}:own`,
+              now,
+            );
+          }
+          this.syncWorkerInvestigation(monitor, now);
+          const inv = monitor.investigation;
+          if (!inv) continue;
+          const lease = inv.observer_lease;
+          if (lease && lease.owner !== engineId && lease.lease_until > now) continue;
+          inv.observer_lease = { owner: engineId, lease_until: now + OBSERVER_LEASE_TTL_MS, generation: registry.generation };
+          const due = this.investigationDue(monitor, now);
+          if (due && !monitor.wake_request) {
+            monitor.wake_request = { requested_at: iso(now), reason: `investigation-due:${due.worker_key}` };
+            monitorDecision(
+              monitor,
+              "observer-investigation-due",
+              { worker_key: due.worker_key },
+              `observer-investigation-due:${monitor.id}:${due.worker_key}:${(due.dispatch_receipt ?? "none").slice(0, 24)}`,
+              now,
+            );
+          }
+        }
+        return registry;
+      },
+      { now },
+    );
+  }
+
+  /**
+   * V2 §13.8: boot-time recovery of orphaned wake claims. Release requires
+   * PROOF the owner is gone: the claim carries an owner_generation that
+   * matches the recorded heartbeat generation AND that heartbeat is stale.
+   * A fresh heartbeat of the claim's owner generation is treated as a
+   * possibly still-living old engine — NEVER released (A11b). Legacy claims
+   * without owner identity are never released on identity grounds (PID alone
+   * is not sufficient process identity); they stay visible as
+   * `wake-claim-stuck`. An unresolved uncertain dispatch is reconciled
+   * through the existing WAL path first; an unresolved WAL parks
+   * `dispatch-uncertain` (never a silent release). No parallel recovery:
+   * the sweep runs under the same registry CAS before the wake loop starts.
+   */
+  async recoverAbandonedClaims(): Promise<number> {
+    const now = this.now();
+    const heartbeat = await readEngineHeartbeat(this.project, now);
+    const orphaned: Array<{ id: string; ownerGeneration: string }> = [];
+    await withRegistry(
+      this.project,
+      (registry) => {
+        for (const monitor of registry.monitors) {
+          if (!monitor.run.active) continue;
+          const ownerGeneration = monitor.run.owner_generation ?? null;
+          if (ownerGeneration === null) {
+            monitorDecision(monitor, "wake-claim-stuck", { reason: "claim-without-owner-identity" }, `wake-claim-stuck:${monitor.id}:no-identity`, now);
+            continue;
+          }
+          if (ownerGeneration === this.engineGeneration) continue; // possibly living engine (own generation)
+          if (!heartbeat || heartbeat.generation !== ownerGeneration) {
+            monitorDecision(monitor, "wake-claim-stuck", { reason: "no-heartbeat-evidence", owner_generation: ownerGeneration }, `wake-claim-stuck:${monitor.id}:no-hb`, now);
+            continue;
+          }
+          if (heartbeat.fresh) {
+            // A11b: a fresh heartbeat of the owner generation also covers a
+            // still-living old engine — never release.
+            monitorDecision(monitor, "wake-claim-stuck", { reason: "heartbeat-fresh-owner-generation" }, `wake-claim-stuck:${monitor.id}:fresh-hb`, now);
+            continue;
+          }
+          orphaned.push({ id: monitor.id, ownerGeneration });
+        }
+        return registry;
+      },
+      { now },
+    );
+    let recovered = 0;
+    for (const orphan of orphaned) {
+      const snapshot = await readRegistrySnapshot(this.project);
+      const monitor = snapshot.registry.monitors.find((entry) => entry.id === orphan.id);
+      if (!monitor || !monitor.run.active) continue;
+      let reconciledMessageId: string | null = null;
+      if (monitor.dispatch_wal && monitor.dispatch_wal.message_id === null && monitor.session.session_id) {
+        const reconciled = await this.reconcileDispatch(monitor, monitor.session.session_id);
+        if (reconciled.kind === "found") reconciledMessageId = reconciled.messageId;
+      }
+      await withRegistry(
+        this.project,
+        (registry) => {
+          const record = registry.monitors.find((entry) => entry.id === orphan.id);
+          if (!record || !record.run.active) return registry;
+          let uncertain = false;
+          if (record.dispatch_wal && record.dispatch_wal.message_id === null) {
+            if (reconciledMessageId !== null) {
+              record.dispatch_wal.message_id = reconciledMessageId;
+              monitorHistory(record, "dispatch-reconciled", { message_id: reconciledMessageId, via: "claim-recovery" }, now);
+            } else {
+              uncertain = true;
+              record.state.work = "parked_input_required";
+              record.state.parked_reason = "dispatch-uncertain";
+              monitorHistory(record, "dispatch-uncertain", { action_id: record.dispatch_wal.action_id, via: "claim-recovery" }, now);
+            }
+          }
+          record.run = { active: false, started_at: null, action: "claim-recovery" };
+          if (record.scheduler.expiry_at !== null && now >= record.scheduler.expiry_at && record.scheduler.enabled) {
+            record.scheduler.enabled = false;
+            record.scheduler.next_run_at = null;
+            monitorHistory(record, "expired", { at: iso(now) }, now);
+          } else if (record.scheduler.enabled) {
+            record.scheduler.next_run_at = now + record.scheduler.interval_seconds * 1000;
+          }
+          monitorHistory(record, "wake-claim-recovered", {
+            owner_generation: orphan.ownerGeneration,
+            heartbeat_generation: heartbeat?.generation ?? null,
+            uncertain,
+          }, now);
+          return registry;
+        },
+        { now },
+      );
+      recovered += 1;
+      this.log("info", `wake claim recovered monitor=${orphan.id} owner_generation=${orphan.ownerGeneration}`);
+    }
+    return recovered;
   }
 
   private appendDecisionSummary(
@@ -1360,6 +1827,7 @@ export class MonitorEngine {
       if (m.recovery_episode && chain.selected_identity) {
         pushRecoveryAttempt(m.recovery_episode, { at: iso(now), identity: chain.selected_identity, category: evidence.category, fingerprint: evidence.fingerprint, outcome: "dispatched" });
       }
+      this.reanchorAfterReconciliation(m, now);
       this.resumeRecoveryPark(m, "recovery-continued", now);
       if (prime && priming) this.recordPriming(m, priming, now);
       monitorHistory(m, "recovery-continued", {
@@ -1608,6 +2076,28 @@ export class MonitorEngine {
 }
 
 // ------------------------------------------------------------------ helpers
+
+/** V2 §13.8 heartbeat evidence: the engine's own boot/liveness record
+ * (`<project>/.opencode-vm/monitor/heartbeat.json`, written by the service
+ * every 30 s). Freshness is content-time based (`at`), never assumed. */
+async function readEngineHeartbeat(project: string, nowMs: number): Promise<{ generation: string; at: number; fresh: boolean } | null> {
+  const path = join(project, ".opencode-vm", "monitor", "heartbeat.json");
+  try {
+    const info = await lstat(path);
+    if (!info.isFile() || info.isSymbolicLink() || info.size > 16_384) return null;
+    const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
+    if (!isRecord(parsed) || parsed.schema !== 1 || typeof parsed.generation !== "string" || parsed.generation.length < 1 || typeof parsed.at !== "string") return null;
+    const at = Date.parse(parsed.at);
+    if (!Number.isFinite(at)) return null;
+    return {
+      generation: parsed.generation,
+      at,
+      fresh: nowMs - at < HEARTBEAT_FRESH_MS,
+    };
+  } catch {
+    return null;
+  }
+}
 
 export function classifyEvidence(status: SessionStatusResult): { kind: "blocked"; fingerprint: string; category: string } | { kind: "none" } {
   if (status.state !== "failed") return { kind: "none" };

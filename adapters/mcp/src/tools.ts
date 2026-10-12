@@ -31,9 +31,10 @@ import {
   reuseWorker,
   setWorkerLifecycle,
   setWorkerSynthesis,
+  validateInvestigationConfigInput,
   withRegistry,
 } from "./monitor.js";
-import type { MonitorRecord, MonitorWorkerRecord } from "./monitor.js";
+import type { MonitorInvestigationState, MonitorRecord, MonitorWorkerRecord } from "./monitor.js";
 import type { CreateSessionResult } from "./types.js";
 
 import {
@@ -1038,6 +1039,60 @@ const listMonitorsOutput = z
   })
   .strict();
 const getMonitorInput = z.object({ monitor_id: monitorIdSchema }).strict();
+// V2 §13.3 (task_e67c39cf): smallest config/task-contract surface on the
+// EXISTING create/update monitor tools — operational timing/budget/milestone
+// configuration only, never authority (autonomy profiles and grants are
+// separate). Degenerate values fail closed through the shared validator.
+const investigationBudgetInput = z
+  .object({
+    max_duration_ms: z.number().int().positive().optional(),
+    max_calls: z.number().int().positive().optional(),
+    max_bytes: z.number().int().positive().optional(),
+  })
+  .strict();
+const investigationConfigInput = z
+  .object({
+    first_check_s: z.number().int().optional(),
+    cooldown_s: z.number().int().optional(),
+    ladder_s: z.array(z.number().int()).length(3).optional(),
+    budget: investigationBudgetInput.optional(),
+    daily_budget: z.number().int().optional(),
+    task_type: z.enum(["default", "long_runner", "milestoned"]).optional(),
+    expected_milestone: z.string().min(1).max(200).nullable().optional(),
+    milestone_due_at: z.string().nullable().optional(),
+  })
+  .strict();
+const investigationWorkerOutput = z
+  .object({
+    worker_key: z.string(),
+    dispatch_receipt: z.string().nullable(),
+    anchored_at: z.string().nullable(),
+    anchor_source: z.string().nullable(),
+    last_progress_at: z.string().nullable(),
+    cooldown_until: z.number().nullable(),
+    next_deep_check_at: z.number().nullable(),
+    backoff_stage: z.number().int(),
+  })
+  .strict();
+const investigationStateOutput = z
+  .object({
+    schema: z.number().int(),
+    last_progress_at: z.string().nullable(),
+    last_investigation_at: z.string().nullable(),
+    cooldown_until: z.number().nullable(),
+    backoff_stage: z.number().int(),
+    next_deep_check_at: z.number().nullable(),
+    episode: z.unknown().nullable().optional(),
+    workers: z.array(investigationWorkerOutput),
+    counters: z
+      .object({
+        investigations_total: z.number().int(),
+        inconclusive_total: z.number().int(),
+        anchor_unknown_total: z.number().int(),
+      })
+      .strict(),
+  })
+  .strict();
 const getMonitorOutput = z
   .object({
     monitor: monitorSummaryOutput,
@@ -1051,6 +1106,8 @@ const getMonitorOutput = z
       .strict(),
     last_event: z.object({ at: z.string(), type: z.string() }).strict().nullable(),
     next_run_at: z.number().nullable(),
+    investigation: investigationStateOutput.nullable().optional(),
+    investigation_config: z.unknown().nullable().optional(),
     observed_at: z.string(),
   })
   .strict();
@@ -1062,6 +1119,7 @@ const createMonitorInput = z
     autonomy_profile: monitorAutonomySchema.optional(),
     runtime_profile: monitorRuntimeProfileSchema.optional(),
     expiry_at: z.number().int().positive().nullable().optional(),
+    investigation: investigationConfigInput.optional(),
   })
   .strict();
 const monitorMutationOutput = z
@@ -1080,6 +1138,7 @@ const updateMonitorInput = z
     autonomy_profile: monitorAutonomySchema.optional(),
     runtime_profile: monitorRuntimeProfileSchema.optional(),
     expiry_at: z.number().int().positive().nullable().optional(),
+    investigation: investigationConfigInput.optional(),
   })
   .strict();
 const triggerMonitorInput = z
@@ -1811,6 +1870,50 @@ export function createMcpServer(
     if (!Number.isFinite(at)) return "unknown";
     return now - at <= monitor.scheduler.interval_seconds * 2 * 1000 ? "fresh" : "stale";
   };
+  // V2 §13.3: validate + attach the smallest config/task-contract surface.
+  const applyInvestigationConfig = (monitor: MonitorRecord, input: z.output<typeof investigationConfigInput> | undefined): void => {
+    if (input === undefined) return;
+    try {
+      monitor.investigation_config = validateInvestigationConfigInput(input);
+    } catch (error) {
+      throw new AdapterError("INVALID_ARGUMENT", error instanceof Error ? error.message : "investigation config is invalid.");
+    }
+  };
+  const publicInvestigation = (inv: MonitorInvestigationState) => ({
+    schema: inv.schema,
+    last_progress_at: inv.last_progress_at,
+    last_investigation_at: inv.last_investigation_at,
+    cooldown_until: inv.cooldown_until,
+    backoff_stage: inv.backoff_stage,
+    next_deep_check_at: inv.next_deep_check_at,
+    ...(inv.episode
+      ? {
+          episode: {
+            started_at: inv.episode.started_at,
+            finished_at: inv.episode.finished_at,
+            outcome: inv.episode.outcome,
+            evidence: inv.episode.evidence,
+            expected_milestone: inv.episode.expected_milestone,
+            wait_reason: inv.episode.wait_reason,
+            worker_key: inv.episode.worker_key,
+            dispatch_receipt: inv.episode.dispatch_receipt,
+            generation_source: inv.episode.generation_source,
+            generation_value: inv.episode.generation_value,
+          },
+        }
+      : {}),
+    workers: inv.workers.map((worker) => ({
+      worker_key: worker.worker_key,
+      dispatch_receipt: worker.dispatch_receipt,
+      anchored_at: worker.anchored_at,
+      anchor_source: worker.anchor_source,
+      last_progress_at: worker.last_progress_at,
+      cooldown_until: worker.cooldown_until,
+      next_deep_check_at: worker.next_deep_check_at,
+      backoff_stage: worker.backoff_stage,
+    })),
+    counters: inv.counters,
+  });
   const listMonitorsHandler = safeHandler(async (input: z.output<typeof listMonitorsInput>) => {
     const project = monitorRuntime().project;
     const snapshot = await readRegistrySnapshot(project);
@@ -1852,6 +1955,8 @@ export function createMcpServer(
         },
         last_event: last ? { at: last.at, type: last.type } : null,
         next_run_at: monitor.scheduler.next_run_at,
+        ...(monitor.investigation ? { investigation: publicInvestigation(monitor.investigation) } : {}),
+        investigation_config: monitor.investigation_config ?? null,
         observed_at: new Date().toISOString(),
       },
       `Monitor ${monitor.id} is ${monitor.state.work}; scheduler ${monitor.scheduler.enabled ? "enabled" : "disabled"}.`,
@@ -1880,6 +1985,7 @@ export function createMcpServer(
         now,
       );
       ensureManagerAlias(registry, record);
+      applyInvestigationConfig(record, input.investigation);
       monitorHistory(record, "created", { alias: record.alias, interval_seconds: record.scheduler.interval_seconds }, now);
       registry.monitors.push(record);
       return registry;
@@ -1903,6 +2009,7 @@ export function createMcpServer(
         if (input.autonomy_profile !== undefined) monitor.autonomy_profile = input.autonomy_profile;
         if (input.runtime_profile !== undefined) monitor.runtime_profile = input.runtime_profile;
         if (input.expiry_at !== undefined) monitor.scheduler.expiry_at = input.expiry_at;
+        applyInvestigationConfig(monitor, input.investigation);
         monitor.updated_at = new Date().toISOString();
         monitorHistory(monitor, "updated", undefined, now);
         return registry;

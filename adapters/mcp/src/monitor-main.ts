@@ -98,6 +98,8 @@ async function main(): Promise<void> {
     gateway,
     ...(board ? { board } : {}),
     readPolicy: policyView,
+    // V2 §13.8: the runtime generation is the engine's claim-fencing identity.
+    engineGeneration: runtime.generation,
     log: (level, message) => {
       process.stderr.write(`[monitor] ${level}: ${message}\n`);
     },
@@ -120,12 +122,22 @@ async function main(): Promise<void> {
     if (stopped) return;
     stopped = true;
     clearInterval(wakeTimer);
+    clearInterval(observerTimer);
     clearInterval(heartbeatTimer);
   };
   const wakeTimer = setInterval(() => {
     if (stopped) return;
     engine.tick().catch((error) => {
       process.stderr.write(`[monitor] wake error: ${error instanceof Error ? error.message : "unknown"}\n`);
+    });
+  }, 5000);
+  // V2 §13.7: minimal independent cheap observer — registry-only (no gateway
+  // calls), so it stays observation-capable while a wake blocks inside a
+  // long tool call. It never sends, recovers or releases claims.
+  const observerTimer = setInterval(() => {
+    if (stopped) return;
+    engine.observe().catch((error) => {
+      process.stderr.write(`[monitor] observer error: ${error instanceof Error ? error.message : "unknown"}\n`);
     });
   }, 5000);
   const heartbeatTimer = setInterval(() => {
@@ -143,6 +155,16 @@ async function main(): Promise<void> {
       })
       .catch(() => shutdown());
   }, 5000).unref();
+
+  // V2 §13.8: recover orphaned wake claims ONCE at boot (owner-generation +
+  // stale-heartbeat evidence; uncertain WAL reconciled first). A claim whose
+  // owner generation still has a fresh heartbeat is never released here.
+  try {
+    const recovered = await engine.recoverAbandonedClaims();
+    if (recovered > 0) process.stderr.write(`[monitor] recovered ${recovered} orphaned wake claim(s)\n`);
+  } catch (error) {
+    process.stderr.write(`[monitor] claim recovery error: ${error instanceof Error ? error.message : "unknown"}\n`);
+  }
 
   await writeHeartbeat();
   await engine.tick();

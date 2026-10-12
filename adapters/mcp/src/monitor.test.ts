@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
   assignMonitorAlias,
   confirmWorkerCreation,
+  defaultInvestigationConfig,
+  defaultInvestigationState,
   defaultMonitorRecord,
   digest,
   getWorker,
+  investigationWorkerFor,
   listWorkers,
   managerAliasFor,
   MONITOR_HISTORY_LIMIT,
@@ -25,13 +28,15 @@ import {
   reconcileWorkerCreate,
   recordRepair,
   rebindWorker,
+  refreshInvestigationProjections,
   reserveWorker,
   reuseWorker,
   setWorkerLifecycle,
   setWorkerSynthesis,
-  workerIndexDigest,
+  validateInvestigationConfigInput,
   withRegistry,
   workerAliasFor,
+  workerIndexDigest,
 } from "./monitor.js";
 import {
   MonitorEngine,
@@ -2535,6 +2540,536 @@ test("gate fix QC-G1: submitted/running/retry/busy activity and bare-failed stat
     assert.ok(watchEntries.length >= 1, "the holds are visible as merged decisions");
     assert.ok(record.history.filter((entry) => entry.type === "receipt-watch").every((entry) =>
       (entry.detail as { reason?: string }).reason !== undefined));
+  } finally {
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// V2 adaptive progress / investigation (task_a234c341 §13, package
+// task_e67c39cf): per-worker clocks, dispatch anchor, bounded budgets,
+// claim recovery with heartbeat evidence, registry-only observer. C1/C4/C6
+// contract tests; the harness stays deterministic (temp registries, fakes).
+// ---------------------------------------------------------------------------
+
+function progressResult(sessionId: string, tick: number) {
+  return {
+    session_id: sessionId,
+    observed_at: "2026-10-07T00:00:00.000Z",
+    source: "backend_snapshot" as const,
+    backend_activity: "busy" as const,
+    pending_input: { permissions: 0, questions: 0 },
+    pending_input_scope: "session" as const,
+    in_flight_tools: [
+      { message_id: `msg_t${tick}`, call_id: `call_${tick}`, tool: "bash", status: "running" as const },
+    ],
+    idle_with_in_flight_tools: false,
+    coverage: { message_limit: 100, messages_scanned: 100, history_has_more: false, in_flight_total: 1, in_flight_truncated: false, metadata_incomplete: false, unattributed_tools: 0 },
+  };
+}
+
+async function writeHeartbeat(project: string, generation: string, atMs: number): Promise<void> {
+  const dir = join(project, ".opencode-vm", "monitor");
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, "heartbeat.json"), JSON.stringify({ schema: 1, projectHash: "p", generation, pid: 1, at: new Date(atMs).toISOString() }) + "\n");
+}
+
+/** Seeds a due investigation worker state for the standard dispatched worker. */
+async function seedDueWorker(project: string, workerKey: string, dueAt: number): Promise<void> {
+  await withRegistry(project, (registry) => {
+    const monitor = registry.monitors[0]!;
+    const inv = monitor.investigation ??= defaultInvestigationState();
+    const state = investigationWorkerFor(inv, workerKey, "msg_dispatch");
+    state.anchored_at = "2026-10-07T00:00:00.000Z";
+    state.anchor_source = "creation";
+    state.dispatch_receipt = "msg_dispatch";
+    state.next_deep_check_at = dueAt;
+    refreshInvestigationProjections(inv);
+    return registry;
+  });
+}
+
+test("investigation config: defaults are valid; degenerate values fail closed (C4)", () => {
+  const defaults = validateInvestigationConfigInput(undefined);
+  assert.equal(defaults.config.first_check_s, 3600);
+  assert.equal(defaults.config.cooldown_s, 3600);
+  assert.deepEqual(defaults.config.ladder_s, [7200, 14400, 28800]);
+  assert.equal(defaults.task.task_type, "default");
+  assert.deepEqual(defaultInvestigationConfig().config.budget, { max_duration_ms: 300_000, max_calls: 10, max_bytes: 262_144 });
+  for (const bad of [
+    { first_check_s: 30 },
+    { cooldown_s: 0 },
+    { ladder_s: [1, 1, 1] },
+    { ladder_s: [28800, 7200, 14400] },
+    { ladder_s: [60, 120] },
+    { budget: { max_calls: 0 } },
+    { budget: { max_bytes: 2_000_000 } },
+    { budget: { max_duration_ms: 7_200_000 } },
+    { task_type: "yolo" },
+    { daily_budget: 10 },
+  ]) {
+    assert.throws(() => validateInvestigationConfigInput(bad), `degenerate value must fail closed: ${JSON.stringify(bad)}`);
+  }
+  const custom = validateInvestigationConfigInput({
+    first_check_s: 120,
+    cooldown_s: 180,
+    ladder_s: [600, 1200, 2400],
+    budget: { max_calls: 5 },
+    daily_budget: Math.ceil(86_400 / 180),
+    task_type: "milestoned",
+    expected_milestone: "MVP green",
+  });
+  assert.equal(custom.config.first_check_s, 120);
+  assert.deepEqual(custom.config.ladder_s, [600, 1200, 2400]);
+  assert.equal(custom.task.expected_milestone, "MVP green");
+});
+
+test("A11 claim recovery: stale heartbeat of the owner generation releases after WAL reconciliation (no duplicate dispatch)", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    const { gateway } = fakes(state);
+    await withRegistry(project, (registry) => {
+      const recovered = defaultMonitorRecord("M", TASK, {}, 100_000);
+      recovered.run = { active: true, started_at: "2026-10-07T00:00:00.000Z", action: "dispatch", owner_pid: 4242, owner_generation: "gen-old" };
+      recovered.dispatch_wal = { action_id: "act_known", at: "2026-10-07T00:00:00.000Z", prompt_digest: "d", message_id: null };
+      recovered.session = { session_id: "ses_monitor", title: null, primed_at: null, priming_digest: null };
+      state.history.push({ id: "msg_hist", role: "user", text: "[MONITOR-ACTION act_known] hi" });
+      const parked = defaultMonitorRecord("M2", TASK, {}, 100_000);
+      parked.run = { active: true, started_at: "2026-10-07T00:00:00.000Z", action: "dispatch", owner_pid: 4242, owner_generation: "gen-old" };
+      parked.dispatch_wal = { action_id: "act_lost", at: "2026-10-07T00:00:00.000Z", prompt_digest: "d", message_id: null };
+      parked.session = { session_id: "ses_monitor", title: null, primed_at: null, priming_digest: null };
+      registry.monitors.push(recovered, parked);
+      return registry;
+    });
+    // Stale heartbeat of exactly the claim owner generation: owner provably gone.
+    await writeHeartbeat(project, "gen-old", 100_000 - 120_000);
+    const engine = new MonitorEngine({ project, gateway, readPolicy: async () => policyConfigured, now: () => 200_000, engineGeneration: "gen-new" });
+    const recoveredCount = await engine.recoverAbandonedClaims();
+    assert.equal(recoveredCount, 2);
+    const after = (await readRegistrySnapshot(project)).registry.monitors;
+    assert.equal(after[0]!.run.active, false);
+    assert.equal(after[0]!.dispatch_wal!.message_id, "msg_hist", "uncertain WAL reconciled through the existing path");
+    assert.ok(after[0]!.history.some((entry) => entry.type === "wake-claim-recovered"));
+    assert.equal(after[1]!.run.active, false);
+    assert.equal(after[1]!.state.parked_reason, "dispatch-uncertain", "unresolved WAL parks, never a silent release");
+    assert.equal(state.sends.length, 0, "claim recovery never re-sends");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("A11b: a fresh heartbeat of the owner generation is never released; identity-less claims stay visible; own generation untouched", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    const { gateway } = fakes(state);
+    await withRegistry(project, (registry) => {
+      const old = defaultMonitorRecord("M", TASK, {}, 100_000);
+      old.run = { active: true, started_at: "2026-10-07T00:00:00.000Z", action: null, owner_pid: 4242, owner_generation: "gen-old" };
+      const legacy = defaultMonitorRecord("M2", TASK, {}, 100_000);
+      legacy.run = { active: true, started_at: "2026-10-07T00:00:00.000Z", action: null, owner_pid: 99 };
+      const own = defaultMonitorRecord("M3", TASK, {}, 100_000);
+      own.run = { active: true, started_at: "2026-10-07T00:00:00.000Z", action: null, owner_pid: process.pid, owner_generation: "gen-new" };
+      registry.monitors.push(old, legacy, own);
+      return registry;
+    });
+    // FRESH heartbeat of gen-old: the old engine may still be alive (A11b).
+    await writeHeartbeat(project, "gen-old", 200_000 - 1_000);
+    const engine = new MonitorEngine({ project, gateway, readPolicy: async () => policyConfigured, now: () => 200_000, engineGeneration: "gen-new" });
+    assert.equal(await engine.recoverAbandonedClaims(), 0);
+    const after = (await readRegistrySnapshot(project)).registry.monitors;
+    assert.equal(after[0]!.run.active, true, "fresh heartbeat of the owner generation blocks release");
+    assert.ok(after[0]!.history.some((entry) => entry.type === "wake-claim-stuck" && (entry.detail as { reason?: string }).reason === "heartbeat-fresh-owner-generation"));
+    assert.equal(after[1]!.run.active, true, "PID without generation is not sufficient process identity");
+    assert.ok(after[1]!.history.some((entry) => entry.type === "wake-claim-stuck" && (entry.detail as { reason?: string }).reason === "claim-without-owner-identity"));
+    assert.equal(after[2]!.run.active, true);
+    assert.equal(after[2]!.history.some((entry) => entry.type === "wake-claim-stuck"), false, "own generation is never touched");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("anchor: creation fallback anchors the first deep check T_first out; investigation never fires immediately", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    const { gateway, board } = fakes(state);
+    const engine = new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => 100_000, engineGeneration: "gen-new" });
+    await withRegistry(project, (registry) => {
+      const monitor = defaultMonitorRecord("M", TASK, { interval_seconds: 60 }, 100_000);
+      monitor.scheduler.next_run_at = 0;
+      monitor.state.last_seen_digest = "different";
+      registry.monitors.push(monitor);
+      return registry;
+    });
+    assert.equal(await engine.tick(), "dispatched");
+    const monitorId = (await readRegistrySnapshot(project)).registry.monitors[0]!.id;
+    const reserved = await reserveWorker(project, monitorId, { runtime_session_id: "ses_worker" }, { now: 100_400 });
+    await confirmWorkerCreation(project, monitorId, reserved.worker_key, { runtime_session_id: "ses_worker", creation_receipt: "msg_create" }, { now: 100_500 });
+    await rebindWorker(project, monitorId, reserved.worker_key, { runtime_session_id: "ses_worker", dispatch_receipt: "msg_dispatch" }, { now: 100_600 });
+
+    // The next wake claims and anchors the worker; the worker-index delta
+    // itself wakes the manager (existing W4 mechanism), the anchor makes the
+    // FOLLOWING unchanged wake a cheap no-op — never an immediate investigation.
+    const engine2 = new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => 200_000, engineGeneration: "gen-new" });
+    await advanceDue(project, 200_000);
+    assert.equal(await engine2.tick(), "dispatched", "worker delta wakes the manager; the claim anchors the episode");
+    assert.equal(state.sends.length, 2);
+    let after = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.ok(after.investigation, "investigation state exists after the first claimed wake");
+    let ws = after.investigation!.workers.find((entry) => entry.worker_key === reserved.worker_key)!;
+    assert.equal(ws.anchor_source, "creation");
+    assert.equal(ws.anchored_at, new Date(100_400).toISOString());
+    assert.equal(ws.next_deep_check_at, 100_400 + 3600 * 1000, "first deep check T_first after the dispatch anchor");
+    assert.equal(after.investigation!.counters.anchor_unknown_total, 0);
+
+    // The quiet-board receipt watch settles the admitted dispatch as verified
+    // healthy — a reconciliation completion that re-anchors per §13.5 (never
+    // an immediate deep check, never a progress reset).
+    const engine3 = new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => 300_000, engineGeneration: "gen-new" });
+    await advanceDue(project, 300_000);
+    assert.equal(await engine3.tick(), "noop-unchanged");
+    after = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    ws = after.investigation!.workers.find((entry) => entry.worker_key === reserved.worker_key)!;
+    assert.equal(after.state.receipt_observation!.outcome, "healthy");
+    assert.equal(ws.anchor_source, "reconciled", "§13.5: healthy receipt settlement re-anchors");
+    assert.equal(ws.next_deep_check_at, 300_000 + 3600 * 1000);
+    assert.equal(ws.last_progress_at, null);
+    assert.equal(state.sends.length, 2);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("P5: a due investigation runs before the no-op shortcut AND before the busy gate; results are never progress (C1b)", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    const { gateway, board } = fakes(state);
+    const engineFactory = (now: number) =>
+      new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => now, engineGeneration: "gen-new" });
+    await withRegistry(project, (registry) => {
+      const monitor = defaultMonitorRecord("M", TASK, { interval_seconds: 60 }, 100_000);
+      monitor.scheduler.next_run_at = 0;
+      monitor.state.last_seen_digest = "different";
+      registry.monitors.push(monitor);
+      return registry;
+    });
+    assert.equal(await engineFactory(100_000).tick(), "dispatched");
+    const monitorId = (await readRegistrySnapshot(project)).registry.monitors[0]!.id;
+    const reserved = await reserveWorker(project, monitorId, { runtime_session_id: "ses_worker" }, { now: 100_400 });
+    await confirmWorkerCreation(project, monitorId, reserved.worker_key, { runtime_session_id: "ses_worker", creation_receipt: "msg_create" }, { now: 100_500 });
+    await rebindWorker(project, monitorId, reserved.worker_key, { runtime_session_id: "ses_worker", dispatch_receipt: "msg_dispatch" }, { now: 100_600 });
+    await seedDueWorker(project, reserved.worker_key, 150_000);
+
+    // (1) Unchanged board + due worker -> investigation, not a silent no-op.
+    const investigated = await engineFactory(200_000).tick();
+    assert.equal(investigated, "investigated");
+    assert.equal(state.sends.length, 1, "investigation performs zero sends");
+    let record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(record.investigation!.episode!.outcome, "inconclusive", "active worker without progress telemetry is honestly inconclusive — never progress");
+    assert.equal(record.investigation!.last_progress_at, null, "an investigation result is never progress");
+    assert.ok(record.investigation!.workers.find((entry) => entry.worker_key === reserved.worker_key)!.cooldown_until !== null, "cooldown from the investigation end");
+
+    // (2) Cooldown prevents an immediate second investigation (no due loop).
+    await advanceDue(project, 300_000);
+    assert.equal(await engineFactory(300_000).tick(), "noop-unchanged");
+
+    // (3) Busy/blocked worker: due investigation still runs read-only (C1b),
+    // unattributable running without telemetry stays inconclusive.
+    state.statusFor = (sessionId) => (sessionId === "ses_worker" ? okStatus({ backend_activity: "retry", state: "running" }) : okStatus());
+    await withRegistry(project, (registry) => {
+      const target = registry.monitors[0]!.investigation!.workers.find((entry) => entry.worker_key === reserved.worker_key)!;
+      target.next_deep_check_at = 350_000;
+      refreshInvestigationProjections(registry.monitors[0]!.investigation!);
+      return registry;
+    });
+    const busyInvestigated = await engineFactory(400_000).tick();
+    assert.equal(busyInvestigated, "investigated", "due check precedes the busy gate");
+    record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(record.investigation!.episode!.outcome, "inconclusive", "stale running without attributable telemetry is inconclusive");
+    assert.equal(record.investigation!.last_progress_at, null);
+    assert.ok(state.statusCalls.some((call) => call.session_id === "ses_worker"), "the honest status read names the observed state");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("long-work ladder advances 2h/4h/8h-cap ONLY on positive evidence; attributable tool delta qualifies (A1)", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    const { gateway, board } = fakes(state);
+    let progressTick = 0;
+    gateway.getSessionProgress = async (sessionId: string) => progressResult(sessionId, ++progressTick);
+    const engineFactory = (now: number) =>
+      new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => now, engineGeneration: "gen-new" });
+    await withRegistry(project, (registry) => {
+      const monitor = defaultMonitorRecord("M", TASK, { interval_seconds: 60 }, 100_000);
+      monitor.scheduler.next_run_at = 0;
+      monitor.state.last_seen_digest = "different";
+      registry.monitors.push(monitor);
+      return registry;
+    });
+    assert.equal(await engineFactory(100_000).tick(), "dispatched");
+    const monitorId = (await readRegistrySnapshot(project)).registry.monitors[0]!.id;
+    const reserved = await reserveWorker(project, monitorId, { runtime_session_id: "ses_worker" }, { now: 100_400 });
+    await confirmWorkerCreation(project, monitorId, reserved.worker_key, { runtime_session_id: "ses_worker", creation_receipt: "msg_create" }, { now: 100_500 });
+    await rebindWorker(project, monitorId, reserved.worker_key, { runtime_session_id: "ses_worker", dispatch_receipt: "msg_dispatch" }, { now: 100_600 });
+    await seedDueWorker(project, reserved.worker_key, 150_000);
+
+    // Round 1: baseline only (delta needs two points) -> inconclusive, cooldown.
+    assert.equal(await engineFactory(200_000).tick(), "investigated");
+    let record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    let ws = record.investigation!.workers.find((entry) => entry.worker_key === reserved.worker_key)!;
+    assert.equal(record.investigation!.episode!.outcome, "inconclusive");
+    assert.ok(ws.last_tool_digest !== null, "baseline recorded");
+
+    // Rounds 2-4: attributable tool delta each round -> ladder 1,2,3 (2h/4h/8h).
+    for (const [round, now] of [[2, 400_000], [3, 900_000], [4, 3_400_000]] as const) {
+      await withRegistry(project, (registry) => {
+        const target = registry.monitors[0]!.investigation!.workers.find((entry) => entry.worker_key === reserved.worker_key)!;
+        target.next_deep_check_at = now - 1_000;
+        refreshInvestigationProjections(registry.monitors[0]!.investigation!);
+        return registry;
+      });
+      assert.equal(await engineFactory(now).tick(), "investigated", `round ${round}`);
+      record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+      ws = record.investigation!.workers.find((entry) => entry.worker_key === reserved.worker_key)!;
+      assert.equal(record.investigation!.episode!.outcome, "long_work_evidenced", `round ${round}`);
+      assert.equal(ws.backoff_stage, round - 1, `round ${round}`);
+      assert.equal(ws.cooldown_until, null);
+    }
+    // Stage cap: a fifth positive round stays at stage 3 (8 h cap).
+    await withRegistry(project, (registry) => {
+      const target = registry.monitors[0]!.investigation!.workers.find((entry) => entry.worker_key === reserved.worker_key)!;
+      target.next_deep_check_at = 10_400_000;
+      refreshInvestigationProjections(registry.monitors[0]!.investigation!);
+      return registry;
+    });
+    assert.equal(await engineFactory(10_500_000).tick(), "investigated");
+    record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    ws = record.investigation!.workers.find((entry) => entry.worker_key === reserved.worker_key)!;
+    assert.equal(ws.backoff_stage, 3);
+    assert.ok(record.investigation!.episode!.wait_reason !== null);
+    // The ladder never touched the progress clock.
+    assert.equal(record.investigation!.last_progress_at, null);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("A8: a receipt-correlated terminal worker result resets the ladder to stage 0 and T_first; investigations never do", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    const { gateway, board } = fakes(state);
+    const engineFactory = (now: number) =>
+      new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => now, engineGeneration: "gen-new" });
+    await withRegistry(project, (registry) => {
+      const monitor = defaultMonitorRecord("M", TASK, { interval_seconds: 60 }, 100_000);
+      monitor.scheduler.next_run_at = 0;
+      monitor.state.last_seen_digest = "different";
+      registry.monitors.push(monitor);
+      return registry;
+    });
+    assert.equal(await engineFactory(100_000).tick(), "dispatched");
+    const monitorId = (await readRegistrySnapshot(project)).registry.monitors[0]!.id;
+    const reserved = await reserveWorker(project, monitorId, { runtime_session_id: "ses_worker" }, { now: 100_400 });
+    await confirmWorkerCreation(project, monitorId, reserved.worker_key, { runtime_session_id: "ses_worker", creation_receipt: "msg_create" }, { now: 100_500 });
+    await rebindWorker(project, monitorId, reserved.worker_key, { runtime_session_id: "ses_worker", dispatch_receipt: "msg_dispatch" }, { now: 100_600 });
+    await seedDueWorker(project, reserved.worker_key, 150_000);
+    assert.equal(await engineFactory(200_000).tick(), "investigated");
+
+    // The worker completes: observeWorkers marks it and A resets the ladder.
+    state.status = okStatus({ assistant_message_ids: ["msg_result"] });
+    await withRegistry(project, (registry) => {
+      registry.monitors[0]!.investigation!.workers.find((entry) => entry.worker_key === reserved.worker_key)!.next_deep_check_at = 5_000_000;
+      refreshInvestigationProjections(registry.monitors[0]!.investigation!);
+      return registry;
+    });
+    assert.equal(await engineFactory(1_000_000).tick(), "dispatched", "worker delta wakes the manager");
+    let record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    let ws = record.investigation!.workers.find((entry) => entry.worker_key === reserved.worker_key)!;
+    assert.ok(ws.last_progress_at !== null, "terminal result receipt is engine-side A evidence");
+    assert.equal(ws.backoff_stage, 0, "A resets the ladder");
+    assert.equal(ws.cooldown_until, null);
+    assert.equal(ws.next_deep_check_at, 1_000_000 + 3600 * 1000);
+
+    // A subsequent investigation still never claims progress.
+    await withRegistry(project, (registry) => {
+      registry.monitors[0]!.investigation!.workers.find((entry) => entry.worker_key === reserved.worker_key)!.next_deep_check_at = 1_100_000;
+      refreshInvestigationProjections(registry.monitors[0]!.investigation!);
+      return registry;
+    });
+    assert.equal(await engineFactory(1_200_000).tick(), "investigated");
+    record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(record.investigation!.last_progress_at, ws.last_progress_at, "investigation results never advance the progress clock");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("§13.5: recovery holds the due check; a healthy dispatch re-anchors WITHOUT touching progress or stage", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    const { gateway, board } = fakes(state);
+    const engineFactory = (now: number) =>
+      new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => now, engineGeneration: "gen-new" });
+    await withRegistry(project, (registry) => {
+      const monitor = defaultMonitorRecord("M", TASK, { interval_seconds: 60 }, 100_000);
+      monitor.scheduler.next_run_at = 0;
+      monitor.state.last_seen_digest = "different";
+      registry.monitors.push(monitor);
+      return registry;
+    });
+    assert.equal(await engineFactory(100_000).tick(), "dispatched");
+    const monitorId = (await readRegistrySnapshot(project)).registry.monitors[0]!.id;
+    const reserved = await reserveWorker(project, monitorId, { runtime_session_id: "ses_worker" }, { now: 100_400 });
+    await confirmWorkerCreation(project, monitorId, reserved.worker_key, { runtime_session_id: "ses_worker", creation_receipt: "msg_create" }, { now: 100_500 });
+    await rebindWorker(project, monitorId, reserved.worker_key, { runtime_session_id: "ses_worker", dispatch_receipt: "msg_dispatch" }, { now: 100_600 });
+    // Absorb the worker-index delta so the board digest is current.
+    await advanceDue(project, 200_000);
+    assert.equal(await engineFactory(200_000).tick(), "dispatched");
+    const seedReceipt = (await readRegistrySnapshot(project)).registry.monitors[0]!.dispatch_wal!.message_id!;
+
+    await seedDueWorker(project, reserved.worker_key, 150_000);
+    await withRegistry(project, (registry) => {
+      const monitor = registry.monitors[0]!;
+      monitor.recovery.active = true;
+      // Settle the receipt watch so the quiet board stays a true no-op path.
+      monitor.state.receipt_observation = { receipt: seedReceipt, outcome: "healthy", at: "2026-10-07T00:03:00.000Z" };
+      const target = monitor.investigation!.workers.find((entry) => entry.worker_key === reserved.worker_key)!;
+      target.backoff_stage = 2;
+      target.last_progress_at = "2026-10-07T01:00:00.000Z";
+      refreshInvestigationProjections(monitor.investigation!);
+      return registry;
+    });
+    // Open recovery holds the due check: unchanged board stays a cheap no-op.
+    await advanceDue(project, 300_000);
+    assert.equal(await engineFactory(300_000).tick(), "noop-unchanged", "clock hold during recovery (§13.5)");
+
+    // A healthy receipt settlement (existing receipt watch) is a reconciliation
+    // completion: it re-anchors WITHOUT touching progress or stage.
+    await withRegistry(project, (registry) => {
+      const monitor = registry.monitors[0]!;
+      monitor.recovery.active = false;
+      monitor.state.receipt_observation = null;
+      const target = monitor.investigation!.workers.find((entry) => entry.worker_key === reserved.worker_key)!;
+      target.next_deep_check_at = 5_000_000; // P5 quiet; the receipt watch runs instead
+      refreshInvestigationProjections(monitor.investigation!);
+      return registry;
+    });
+    await advanceDue(project, 400_000);
+    assert.equal(await engineFactory(400_000).tick(), "noop-unchanged", "verified terminal health settles the watch");
+    const record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(record.state.receipt_observation!.outcome, "healthy");
+    const ws = record.investigation!.workers.find((entry) => entry.worker_key === reserved.worker_key)!;
+    assert.equal(ws.backoff_stage, 2, "re-anchor keeps the stage (no false reset)");
+    assert.equal(ws.last_progress_at, "2026-10-07T01:00:00.000Z", "re-anchor never touches the progress clock");
+    assert.equal(ws.anchor_source, "reconciled");
+    assert.equal(ws.next_deep_check_at, 400_000 + 3600 * 1000, "anchor = reconciliation completion");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("§13.7 observer: registry-only (zero gateway calls), leases, wake_request handover, stuck own-claim visibility", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    const { gateway, board } = fakes(state);
+    const engine = new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => 100_000, engineGeneration: "gen-new" });
+    await withRegistry(project, (registry) => {
+      const monitor = defaultMonitorRecord("M", TASK, { interval_seconds: 60 }, 100_000);
+      monitor.scheduler.next_run_at = 0;
+      monitor.state.last_seen_digest = "different";
+      registry.monitors.push(monitor);
+      return registry;
+    });
+    assert.equal(await engine.tick(), "dispatched");
+    const monitorId = (await readRegistrySnapshot(project)).registry.monitors[0]!.id;
+    const reserved = await reserveWorker(project, monitorId, { runtime_session_id: "ses_worker" }, { now: 100_400 });
+    await confirmWorkerCreation(project, monitorId, reserved.worker_key, { runtime_session_id: "ses_worker", creation_receipt: "msg_create" }, { now: 100_500 });
+    await rebindWorker(project, monitorId, reserved.worker_key, { runtime_session_id: "ses_worker", dispatch_receipt: "msg_dispatch" }, { now: 100_600 });
+    await seedDueWorker(project, reserved.worker_key, 90_000);
+
+    const statusCallsBefore = state.statusCalls.length;
+    await engine.observe();
+    assert.equal(state.statusCalls.length, statusCallsBefore, "the observer performs zero gateway calls");
+    let record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(record.wake_request?.reason, `investigation-due:${reserved.worker_key}`, "due investigation handed to the next regular wake");
+    assert.ok(record.investigation!.observer_lease, "lease recorded");
+    assert.ok(record.history.some((entry) => entry.type === "observer-investigation-due"));
+
+    // A foreign fresh lease blocks the observer (no double handover).
+    await withRegistry(project, (registry) => {
+      const monitor = registry.monitors[0]!;
+      monitor.wake_request = null;
+      monitor.investigation!.observer_lease = { owner: "other:gen", lease_until: 200_000, generation: 1 };
+      return registry;
+    });
+    await engine.observe();
+    record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(record.wake_request, null, "foreign unexpired lease blocks observation");
+    assert.equal(record.investigation!.observer_lease!.owner, "other:gen");
+
+    // Stuck OWN claim is made visible (never released by the observer).
+    await withRegistry(project, (registry) => {
+      const monitor = registry.monitors[0]!;
+      monitor.run = { active: true, started_at: new Date(100_000 - 61 * 60_000).toISOString(), action: null, owner_pid: process.pid, owner_generation: "gen-new" };
+      monitor.investigation!.observer_lease = null;
+      return registry;
+    });
+    await engine.observe();
+    record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(record.run.active, true, "the observer never releases a claim");
+    assert.ok(record.history.some((entry) => entry.type === "wake-claim-stuck" && (entry.detail as { reason?: string }).reason === "own-claim-extended"));
+
+    // Observation stays possible while a wake is in flight (blocked await).
+    await withRegistry(project, (registry) => {
+      registry.monitors[0]!.run = { active: false, started_at: null, action: null };
+      registry.monitors[0]!.investigation!.observer_lease = null;
+      return registry;
+    });
+    const pending = engine.tick();
+    await engine.observe();
+    await pending;
+    assert.ok(true, "observer completed while the wake was between awaits");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("board bookkeeping alone is never progress: changed decisions dispatch, but the progress clock stays untouched (A8 guard)", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    const { gateway, board } = fakes(state);
+    const engineFactory = (now: number) =>
+      new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => now, engineGeneration: "gen-new" });
+    await withRegistry(project, (registry) => {
+      const monitor = defaultMonitorRecord("M", TASK, { interval_seconds: 60 }, 100_000);
+      monitor.scheduler.next_run_at = 0;
+      monitor.state.last_seen_digest = "different";
+      registry.monitors.push(monitor);
+      return registry;
+    });
+    assert.equal(await engineFactory(100_000).tick(), "dispatched");
+    const monitorId = (await readRegistrySnapshot(project)).registry.monitors[0]!.id;
+    const reserved = await reserveWorker(project, monitorId, { runtime_session_id: "ses_worker" }, { now: 100_400 });
+    await confirmWorkerCreation(project, monitorId, reserved.worker_key, { runtime_session_id: "ses_worker", creation_receipt: "msg_create" }, { now: 100_500 });
+    await rebindWorker(project, monitorId, reserved.worker_key, { runtime_session_id: "ses_worker", dispatch_receipt: "msg_dispatch" }, { now: 100_600 });
+    await seedDueWorker(project, reserved.worker_key, 900_000);
+
+    // Board bookkeeping changes (new journal entries) -> normal dispatch path.
+    state.entries.push({ sequence: 2, entry_id: "e2", appended_at: "2026-10-07T02:00:00.000Z" });
+    assert.equal(await engineFactory(200_000).tick(), "dispatched");
+    const record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(record.investigation!.last_progress_at, null, "decisionsSince/entries alone are not A evidence");
+    assert.equal(record.investigation!.workers.find((entry) => entry.worker_key === reserved.worker_key)!.last_progress_at, null);
   } finally {
     await cleanup();
   }
