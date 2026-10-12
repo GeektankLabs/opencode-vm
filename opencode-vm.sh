@@ -287,7 +287,7 @@ TASKBOARD_ARM64_SHA256="3749fb985f544fdb6788ba1dff69761e599ff82b3fe86d39ca54307c
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.7.33"
+OCVM_VERSION="0.7.34"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -15633,7 +15633,6 @@ mcp_self_connect() {
   [ "${OC_MCP_ENABLED:-0}" = "1" ] || return 0
   local cfg="$SESS_SHARE/config/opencode/opencode.json" directory waited=0
   { [ -f "$cfg" ] && [ ! -L "$cfg" ]; } || return 0
-  [ -d "$SESS_SHARE/config/opencode/skills/orchestrator/opencode-session-orchestrator" ] || return 0
   jq -e '.mcp["ocvm-self"] != null' "$cfg" >/dev/null 2>&1 || return 0
   [ -n "${OC_PORT_INTERNAL:-}" ] || return 0
   directory="$(jq -rn --arg d "${PROJ_DIR:-}" '$d|@uri')"
@@ -15654,15 +15653,17 @@ mcp_self_register() {
   [ "${OC_MCP_ENABLED:-0}" = "1" ] || return 0
   local cfg="$SESS_SHARE/config/opencode/opencode.json" credential="$SESS_SHARE/mcp/credential" token=""
   { [ -f "$cfg" ] && [ ! -L "$cfg" ]; } || return 0
-  # Only when the canonical local orchestrator skill is mounted (opt-in D5 path).
-  [ -d "$SESS_SHARE/config/opencode/skills/orchestrator/opencode-session-orchestrator" ] || return 0
+  # Since 0.7.34 the self-connection follows the MCP connector itself (U1 fix:
+  # "skill inactive -> no ocvm-self -> missing tools" silently broke primed
+  # monitor managers). The orchestrator skill remains optional knowledge; tool
+  # visibility is not authorization — cooperative manager/worker rules bind.
   { [ -f "$credential" ] && [ ! -L "$credential" ]; } || return 0
   token="$(cat "$credential" 2>/dev/null || true)"
   [ -n "$token" ] || return 0
   web_jq_inplace "$cfg" --arg url "http://127.0.0.1:${OC_MCP_PORT:-40960}/mcp" --arg token "$token" '
     .mcp = ((.mcp // {}) + {"ocvm-self": {type:"remote", url:$url, headers:{"X-OCVM-MCP-Token":$token}, enabled:true}})
   ' || { echo "[mcp] WARNING: monitor self-connection could not be registered." >&2; return 0; }
-  echo "[mcp] Monitor self-connection registered for the canonical orchestrator skill."
+  echo "[mcp] Monitor self-connection registered for the internal management surface."
 }
 
 start_mcp_adapter() {
@@ -17019,7 +17020,7 @@ doctor_collect_binding() {
     DOCTOR_UNVERIFIED=$((DOCTOR_UNVERIFIED + 1))
   fi
   _dout "[vm-doctor] skill-binding: canonical-orchestrator=$state (mounted-file evidence; a startup claim alone is not proof)"
-  _dout "[vm-doctor] binding-note: management tool visibility requires BOTH a loaded skill and a real MCP tools/list inventory; /experimental/tool/ids is an OpenCode-internal tool-id map, NOT an MCP client inventory, and is never used as proof"
+  _dout "[vm-doctor] binding-note: since 0.7.34 the ocvm-self management tools follow the MCP connector; the orchestrator skill is optional knowledge. Management tool visibility requires a real MCP tools/list inventory; /experimental/tool/ids is an OpenCode-internal tool-id map, NOT an MCP client inventory, and is never used as proof"
   # Standalone/offline source truth: where the skill source comes from, or explicit absence.
   local cache="$HOME/.opencode-vm/skills-src" state_src="unknown"
   if [ -d "$cache" ] && [ ! -L "$cache" ]; then

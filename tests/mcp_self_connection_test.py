@@ -35,11 +35,14 @@ def main():
         port = free_port()
         token = uuid4().hex + uuid4().hex
         share = fixture.root / "share"
-        (share / "config/opencode/skills/orchestrator/opencode-session-orchestrator").mkdir(parents=True)
-        (share / "mcp").mkdir(exist_ok=True)
+        # No orchestrator skill directory on purpose: since 0.7.34 the
+        # self-connection follows the MCP connector, not the skill opt-in
+        # (regression proof for the U1 "skill inactive -> no tools" gap).
+        (share / "mcp").mkdir(parents=True, exist_ok=True)
         (share / "mcp").chmod(0o700)
         (share / "mcp/credential").write_text(token + "\n")
         (share / "mcp/credential").chmod(0o600)
+        (share / "config/opencode").mkdir(parents=True)
         (share / "config/opencode/opencode.json").write_text('{"mcp":{}}')
 
         script = ROOT / "opencode-vm.sh"
@@ -57,7 +60,7 @@ def main():
                 '{ awk "/^mcp_self_unregister\\(\\) \\{/,/^\\}$/" "$share/lib/web.sh"; '
                 'awk "/^mcp_self_register\\(\\) \\{/,/^\\}$/" "$share/lib/web.sh"; '
                 'awk "/^mcp_self_connect\\(\\) \\{/,/^\\}$/" "$share/lib/web.sh"; '
-                'awk "/^jq_inplace\\(\\) \\{/,/^\\}$/" "$src"; } > "$out"',
+                'awk "/^web_jq_inplace\\(\\) \\{/,/^\\}$/" "$share/lib/web.sh"; } > "$out"',
             ],
             text=True,
             env={
