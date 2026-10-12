@@ -1,0 +1,137 @@
+diff --git a/adapters/mcp/src/monitor.test.ts b/adapters/mcp/src/monitor.test.ts
+index 8ccccdc..7d55d97 100644
+--- a/adapters/mcp/src/monitor.test.ts
++++ b/adapters/mcp/src/monitor.test.ts
+@@ -3543,3 +3543,132 @@ test("Z1: observer probes are timeout-bounded and fail visibly without misattrib
+     await cleanup();
+   }
+ });
++
++// QC4-INTEGRATION (independent integration review, Main c426e28): counter-probes.
++test("QC4: Z1 — during a genuinely hung investigation await the observer probes, persists evidence, releases nothing, no double dispatch", async () => {
++  const { project, cleanup } = await setup();
++  try {
++    const state = baseState();
++    const { gateway, board } = fakes(state);
++    let release: () => void = () => undefined;
++    const gate = new Promise<void>((resolve) => { release = resolve; });
++    gateway.getSessionProgress = async () => { await gate; return progressResult("ses_worker", 99); };
++    const engineFactory = (now: number) =>
++      new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => now, engineGeneration: "gen-qc4" });
++    await withRegistry(project, (registry) => {
++      const monitor = defaultMonitorRecord("M", TASK, { interval_seconds: 60 }, 100_000);
++      monitor.scheduler.next_run_at = 0;
++      monitor.state.last_seen_digest = "different";
++      registry.monitors.push(monitor);
++      return registry;
++    });
++    await engineFactory(100_000).tick();
++    const monitorId = (await readRegistrySnapshot(project)).registry.monitors[0]!.id;
++    const reserved = await reserveWorker(project, monitorId, { runtime_session_id: "ses_worker" }, { now: 100_400 });
++    await confirmWorkerCreation(project, monitorId, reserved.worker_key, { runtime_session_id: "ses_worker", creation_receipt: "msg_create" }, { now: 100_500 });
++    await rebindWorker(project, monitorId, reserved.worker_key, { runtime_session_id: "ses_worker", dispatch_receipt: "msg_dispatch" }, { now: 100_600 });
++    await seedDueWorker(project, reserved.worker_key, 150_000);
++
++    const engine2 = engineFactory(200_000);
++    const blockedTick = engine2.tick();
++    await new Promise((resolve) => setTimeout(resolve, 60));
++    let record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
++    assert.equal(record.run.active, true, "wake claim held");
++    const walBefore = record.dispatch_wal ? { id: record.dispatch_wal.action_id, msg: record.dispatch_wal.message_id } : null;
++
++    const sendsBefore = state.sends.length;
++    const statusBefore = state.statusCalls.filter((c) => c.session_id === "ses_worker").length;
++    await engine2.observe();
++    const workerStatusAfter = state.statusCalls.filter((c) => c.session_id === "ses_worker").length;
++    assert.ok(workerStatusAfter > statusBefore, "observer performed a REAL status probe during the blocked wake");
++    record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
++    assert.ok(record.history.some((h) => h.type === "observer-probe"), "observer-probe decision persisted during blockage");
++    assert.equal(record.run.active, true, "observer still never releases the claim");
++    assert.equal(record.investigation!.episode, null, "no episode from the probe lane");
++    assert.equal(state.sends.length, sendsBefore, "observer sent nothing");
++    assert.equal(await engine2.tick(), "skipped", "next tick still blocked by waking");
++
++    release();
++    assert.equal(await blockedTick, "investigated");
++    record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
++    const walAfter = record.dispatch_wal ? { id: record.dispatch_wal.action_id, msg: record.dispatch_wal.message_id } : null;
++    assert.deepEqual(walAfter, walBefore, "no duplicate dispatch");
++    assert.equal(state.sends.length, sendsBefore, "still zero sends from observer/investigation");
++  } finally {
++    await cleanup();
++  }
++});
++
++test("QC4: stale response after a receipt change is ignored (no misattribution)", async () => {
++  const { project, cleanup } = await setup();
++  try {
++    const state = baseState();
++    const { gateway, board } = fakes(state);
++    const origStatus = gateway.getSessionStatus.bind(gateway);
++    gateway.getSessionStatus = async (sessionId: string, messageId?: string) => {
++      if (sessionId === "ses_worker") await new Promise((resolve) => setTimeout(resolve, 120));
++      return origStatus(sessionId, messageId);
++    };
++    const engine = new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => 200_000, engineGeneration: "gen-qc4" });
++    await withRegistry(project, (registry) => {
++      const monitor = defaultMonitorRecord("M", TASK, { interval_seconds: 60 }, 100_000);
++      monitor.scheduler.next_run_at = 0;
++      registry.monitors.push(monitor);
++      return registry;
++    });
++    const monitorId = (await readRegistrySnapshot(project)).registry.monitors[0]!.id;
++    const reserved = await reserveWorker(project, monitorId, { runtime_session_id: "ses_worker" }, { now: 100_400 });
++    await confirmWorkerCreation(project, monitorId, reserved.worker_key, { runtime_session_id: "ses_worker", creation_receipt: "msg_create" }, { now: 100_500 });
++    await rebindWorker(project, monitorId, reserved.worker_key, { runtime_session_id: "ses_worker", dispatch_receipt: "msg_old" }, { now: 100_600 });
++    await withRegistry(project, (registry) => {
++      registry.monitors[0]!.run = { active: true, started_at: new Date(200_000).toISOString(), action: null, owner_pid: process.pid, owner_generation: "gen-qc4" };
++      return registry;
++    });
++    const observing = engine.observe();
++    await new Promise((resolve) => setTimeout(resolve, 30));
++    await rebindWorker(project, monitorId, reserved.worker_key, { runtime_session_id: "ses_worker", dispatch_receipt: "msg_new" }, { now: 100_700 });
++    await observing;
++    const record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
++    assert.equal(record.history.find((h) => h.type === "observer-probe" && JSON.stringify(h.detail ?? {}).includes("msg_old")), undefined, "no probe decision attributed to the stale receipt");
++  } finally {
++    await cleanup();
++  }
++});
++
++test("QC4: daily budget survives an engine restart (registry-persisted window)", async () => {
++  const { project, cleanup } = await setup();
++  try {
++    const state = baseState();
++    const { gateway, board } = fakes(state);
++    const engineFactory = (now: number) =>
++      new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => now, engineGeneration: "gen-qc4" });
++    await withRegistry(project, (registry) => {
++      const monitor = defaultMonitorRecord("M", TASK, { interval_seconds: 60 }, 100_000);
++      monitor.scheduler.next_run_at = 0;
++      monitor.state.last_seen_digest = "different";
++      monitor.investigation_config = validateInvestigationConfigInput({ cooldown_s: 3600, daily_budget: 24, first_check_s: 60 });
++      registry.monitors.push(monitor);
++      return registry;
++    });
++    await engineFactory(100_000).tick();
++    const monitorId = (await readRegistrySnapshot(project)).registry.monitors[0]!.id;
++    const reserved = await reserveWorker(project, monitorId, { runtime_session_id: "ses_worker" }, { now: 100_400 });
++    await confirmWorkerCreation(project, monitorId, reserved.worker_key, { runtime_session_id: "ses_worker", creation_receipt: "msg_create" }, { now: 100_500 });
++    await rebindWorker(project, monitorId, reserved.worker_key, { runtime_session_id: "ses_worker", dispatch_receipt: "msg_dispatch" }, { now: 100_600 });
++    await seedDueWorker(project, reserved.worker_key, 150_000);
++    await withRegistry(project, (registry) => {
++      const monitor = registry.monitors[0]!;
++      const inv = monitor.investigation!;
++      inv.recent_investigations = Array.from({ length: 24 }, (_, k) => 200_000 - k * 1000);
++      const ws = investigationWorkerFor(inv, reserved.worker_key, "msg_dispatch");
++      ws.next_deep_check_at = 150_000;
++      refreshInvestigationProjections(inv);
++      return registry;
++    });
++    assert.equal(await engineFactory(200_000).tick(), "investigation-deferred", "a restarted engine honors the persisted 24h window");
++    const record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
++    assert.ok(record.history.some((h) => h.type === "investigation-deferred"), "deferral is visible");
++  } finally {
++    await cleanup();
++  }
++});

@@ -2,20 +2,47 @@ Task-ID: task_e67c39cf-d674-5a80-9760-d84b11c5056d
 
 # Integrations-Handback — Lokale Main-Integration Monitor-Paket (2026-10-12)
 
-Status: **LOKAL INTEGRIERT — UNABHÄNGIGE INTEGRATIONSPRÜFUNG + CLEANUP AUSSTEHEND**
-Kein Push/Tag/Release/Publish/Deploy/Neustart/Live-Monitor-Eingriff; Worktrees/
-Branches/Tasks unangetastet (kein done).
+Status: **LOKAL INTEGRIERT + UNABHÄNGIG ABGENOMMEN + CLEANUP AUSGEFÜHRT (Abschluss 2026-10-12)**
+Integrations-Gate: LOCAL_MAIN_INTEGRATION_PASS (registriertes
+`…-integration-review-20261012.md`, SHA `3fa45b0145b17ca8db5b0035886f65661e9ea85effde3a444f03c1f2ed491b56`;
+unabhängiges Original `ses_ed04c2e41ffe6196JY82WyZd2q` / `msg_13044e2e2001XuwpqpdosaWDBZ`).
+Kein Push/Tag/Release/Publish/Deploy/Neustart/Live-Monitor-Eingriff.
+
+## 0 Abschluss (finale Korrektur dieses Receipts)
+
+- **Finaler Main-Tip ist `c426e287d9f020c0bfa1aa8787abd166399800e6`**
+  (Tree `6431bb2039e55e8c9fae36602d9c88583e2d6754`) — dieses Receipt wurde
+  zunächst bei `93a7c18` geschrieben und mit dem Docs-Commit `c426e28`
+  (dieses Receipt selbst) auf Main übernommen; die ursprüngliche „Nachher"-
+  Angabe in §1 bezog sich auf diesen Zwischenstand und ist hiermit korrigiert.
+- **Unabhängige Integrationsprüfung:** LOCAL_MAIN_INTEGRATION_PASS —
+  verifiziert exakt Main `c426e28`/Tree `6431bb20`, nur Mode-Restore `93a7c18`
+  + Docs `c426e28` gegenüber `d7765e8`, Pin `c211da15…`, 14 isolierte Läufe
+  mit 3 Gegenproben (12×278 pass/0 fail/2 skip; 2×277 pass/1 fail bekannter
+  Dashboard-Flake); QC4-Teständerungen des Reviewers sind dauerhaft als
+  Patch+Evidence gesichert (`planning/task-concepts/evidence-task_e67c39cf-qc4/`,
+  Patch-SHA `64e06b25919153e8a7ee6d97cdb00bf747c567abdefa046c41942a0237972913`),
+  eigener /tmp-Replay-Worktree sauber ohne Force entfernt.
+- **Cleanup ausgeführt (2026-10-12):** Autoren-Worktree
+  `.opencode-vm/worktrees/task_e67c39cf-…` über normales `git worktree remove`
+  **ohne Force** entfernt (vorher sauber, vollständig integriert); Branch
+  `task/monitor-progress-package` bleibt als erreichbare Historie erhalten.
+  Fremde Worktrees/Dateien/Tasks unberührt; generische /tmp-Reste bewusst
+  erhalten (teils unklare Ownership).
+- Spätere Trennung: **Veröffentlichung (Push/Tag/Release) und Liveabnahme**
+  bleiben separate, operatorseitige Schritte — durch die Integration nicht
+  abgedeckt.
 
 ## 1 Exakte Identität (Vorher/Nachher)
 
 | Feld | Vorher | Nachher |
 |---|---|---|
-| Main-HEAD | `b7aa2640aa328ee5705ffb51de2cbac10db0705a` | **`93a7c18` (Tip; „chore: restore executable bit")** |
+| Main-HEAD | `b7aa2640aa328ee5705ffb51de2cbac10db0705a` | **`c426e287d9f020c0bfa1aa8787abd166399800e6`** (final; Zwischenstand `93a7c18` — siehe §0) |
 | Main-Tree | `9e69a…` (Base-Baum) | direkt nach FF verifiziert (= `ba0e6ea8…`); RestORE-Chore/Docs-Commits ändern danach bewusst Mode/Docs |
 | Integrationsart | — | **Fast-forward** `b7aa264..d7765e8` (`--ff-only`, kein Merge-Commit), danach 1 Restore-Chore-Commit + 1 Docs-Commit |
 | Kandidat | `d7765e8e7303d7bb8cb45abb64e06fc64abd3169`, Tree `ba0e6ea83009e032e9a2d001f28f3dca33a0bc33` | exakt integriert (Tree des FF = Kandidaten-Baum; danach nur Mode-Restore + Docs) |
 | Gate | QC_PASS laut registriertem `…-candidate-qc-20261012.md` (Addendum 2, Delta-QC d7765e8; unabhängiges Original `ses_ed04c2e41ffe6196JY82WyZd2q` / `msg_1302a767700155lZCPzbZmrxBv` — überlieferte Quelle, frisch gegen die registrierte Datei abgeglichen) | unverändert übernommen |
-| Commits neu auf Main | — | `d7765e8`, `8fca026`, `960cb41`, `9ed3411`, `cb28047` (Kandidat), **`93a7c18` chore: restore executable bit**, *(folgt: docs receipt)* |
+| Commits neu auf Main | — | `cb28047`, `9ed3411`, `960cb41`, `8fca026`, `d7765e8` (Kandidat), **`93a7c18`** (Exec-Bit-Restore), **`c426e28`** (dieses Receipt) — finaler Tip `c426e28` |
 
 Erhaltene Versionen/Pins: `OCVM_VERSION 0.7.35` (`opencode-vm.sh:290`),
 MCP-Adapter **0.1.44** (`opencode-vm.sh:47-50`, `package.json`/lock,
@@ -67,25 +94,25 @@ Punkt zu verifizieren (Kandidat `d7765e8` trägt den Defekt; Main nach
 trat er **nicht** auf (Volllauf 0 fail); kein selektives Berichten — der
 sporadische Charakter bleibt als bekannte Grenze bestehen.
 
-## 5 Sichere Cleanup-Kandidaten (für die NÄCHSTE Phase — jetzt NICHT ausgeführt)
+## 5 Cleanup (AUSGEFÜHRT am 2026-10-12)
 
 - Autoren-Worktree `.opencode-vm/worktrees/task_e67c39cf-d674-5a80-9760-d84b11c5056d`
-  (Branch `task/monitor-progress-package`): sauber, Kandidat vollständig in
-  Main (FF + Restore); klar paketzugehörig ⇒ Integrations-Cleanup-Kandidat
-  nach unabhängiger Prüfung (Entscheid laut WORKTREES.md; Branch bleibt
-  Git-Historie).
-- Review-Isolation: laut QC-Bericht bereits entfernt (kein Worktree vorhanden).
+  via normales `git worktree remove` **ohne Force** entfernt (vorher sauber,
+  vollständig integriert); Branch `task/monitor-progress-package` bleibt als
+  erreichbare Historie.
+- Review-Isolation: bereits durch die QC selbst entfernt (kein Worktree
+  vorhanden); generische /tmp-Reste bewusst erhalten (teils unklare Ownership).
 - Fremde Worktrees (controller-id-cleanup, task_278d4136 ×2, task_efbe63cf):
-  **nicht paketzugehörig, unberührt, keine Cleanup-Kandidaten dieses Pakets.**
-- Hinweis Fresh-VM-Sweep: autor-/review-worktrees unter `.opencode-vm/worktrees/`
-  fallen bei der nächsten frischen Session unter die Sweep-Grenze; benötigte
-  Arbeit ist committet.
+  **nicht paketzugehörig, unberührt.**
+- Task-eigene Dokumente/Evidence dauerhaft außerhalb von Worktrees gesichert
+  (docs-only Sicherungscommit auf Main; Liste im Receipt-Text).
 
-## 6 Offene Gates (nach diesem Auftrag)
+## 6 Gates (Abschlussstand)
 
-1. Unabhängige **Integrationsprüfung** (seriell, nächste Phase) — inkl. §2
-   Mode-Restore-Verifikation.
-2. **Cleanup** der Autoren-/Review-Reste (erst nach Phase 1).
-3. **Board-Abschluss** des Paket-Tasks (erst nach Phase 1+2; Status bleibt
-   bis dahin unverändert).
-4. Push/Tag/Release/Publish/Deploy bleiben operatorseitig (unverändert).
+1. Unabhängige **Integrationsprüfung**: PASS (§0) — erledigt.
+2. **Cleanup**: erledigt (§5).
+3. **Board-Abschluss**: Paket-Task `task_e67c39cf` und Konzept-Task
+   `task_a234c341` zum Integrationszeitpunkt abgeschlossen (Board-Move in
+   Phase 3; Historie in den Compact-Kontexten).
+4. **Offen (bewusst separat)**: Push/Tag/Release/Publish/Deploy und
+   Liveabnahme — operatorseitig, durch diesen Abschluss NICHT abgedeckt.
