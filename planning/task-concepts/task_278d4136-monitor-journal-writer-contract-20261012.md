@@ -26,22 +26,30 @@ Bewiesen aus Code und reproduzierbarem Verhalten:
   Journalwriter stammen. Der einzig konsistente Entstehungspfad: die Datei wurde
   außerhalb des Writers direkt erzeugt/verändert — plausibel per Shell-Umleitung
   eines Agenten mit Default-Umask 022 (→ 0644, erfüllt exakt Bedingung (a)).
-- Die In-VM-Management-/Worker-Sessions haben den Tool-Namen
-  `add_task_management_note` nicht (Adapter-Tools sind nur externen MCP-Clients
-  zugänglich; In-VM-Opencode-Sessions erhalten nur Registry-MCPs). Der
-  mgmt-v2-Priming-Text (`monitor-engine.ts`, `buildPrimingBlock`) fordert aber
+- Die Standard-In-VM-Sessions erhalten den Tool-Namen
+  `add_task_management_note` nicht über die Registry-MCPs (Adapter-Tools sind
+  primär externe MCP-Clients). Einschränkung (QC F3): Konfigurationen wie
+  ocvm-self können In-VM-Sessions sehr wohl Zugriff auf die Board-Tools
+  verschaffen — „in-VM nie verfügbar" ist keine gültige Allgemeinheit. Der
+  mgmt-v2-Priming-Text (`monitor-engine.ts`, `buildPrimingBlock`) forderte
   „journal checkpoints … current" halten, ohne den einzigen legalen Writer zu
-  nennen. Ein gehorsamer In-VM-Agent erfüllt das Auftragswortlaut dann per
-  direktem Dateischreib — Worker-Behauptungen („Journal geschrieben") sind
+  nennen; für Sessions ohne Tool-Zugang blieb nur der direkte Dateipfad als
+  scheinbare Erfüllung — Worker-Behauptungen („Journal geschrieben") sind
   Agenten-Claims, keine Tool-Receipts.
 
-Evidenzgrenze: Die physischen Repro-Dateien der Projekte bi-mcrepo und
-admin-in-the-loop liegen in fremden Host-Projektverzeichnissen und sind in
-dieser VM nicht gemountet; ein physischer Nachweis von mode/uid der konkreten
-Dateien task_14c21b4f…/task_c4fbb2a8… war nicht erreichbar. Die Ursachenkette
-ist aus Code + gleichartiger Umgebung belegt; das konkrete 0644-Byte-Muster
-der Fremddateien bleibt die einzige plausible, nicht physisch verifizierte
-Schlussfolgerung. Kein OpenCode-Upstream-Bug behauptet.
+Evidenzgrenze (QC F2-Korrektur, präzisiert): Die physischen Repro-Dateien der
+Projekte bi-mcrepo und admin-in-the-loop liegen in fremden Host-Projekt-
+verzeichnissen und sind in dieser VM nicht gemountet; die tatsächlichen
+mode/uid-Werte der konkreten Dateien task_14c21b4f…/task_c4fbb2a8… konnten
+nicht physisch verifiziert werden. Belegt ist: (a) die exakten Fehlerbedingungen
+aus dem Code, (b) dass kein unterstützter Writer solche Dateien erzeugen kann,
+(c) eine lokal getreue Repro des Fehlerbilds aus dem Codepfad. Ein späteres
+chmod oder Fremdersatz durch Dritte ist damit nicht ausgeschlossen. Die
+direkte Fremderzeugung (plausibel Shell-Umleitung, umask 022 → 0644) ist
+damit eine **plausible, lokal reproduzierte Repro**, nicht die bewiesene
+Produktionsursache der konkreten Vorfälle. Kein OpenCode-Upstream-Bug
+behauptet. Die Instruktionstests beweisen die Vertragsauslieferung im
+Priming-Text, keine Agent-Compliance im Betrieb.
 
 ## 2. Minimaler Fix
 
@@ -98,29 +106,78 @@ dokumentierter Reparaturpfad für exakt task-eigene Daten (nicht ausgeführt):
 
 ## 5. Paket-/Versionsflächen und Konsolidierung mit controller-id-cleanup
 
+### 5a. Ursprünglicher Einzelkandidat (unverändert erhalten)
+
+- Branch `task/monitor-journal-writer-contract`, Tip 338f26a0e25330e516e20addea8632d985b2e559,
+  Worktree `.opencode-vm/worktrees/task_278d4136-8d7b-559b-80fe-3e9ae7282140`.
+- Bekannter Mainblocker (QC F1 major, behoben in 5b): VERSION 0.1.43, aber
+  FILENAME/SHA256/TAGs standen noch auf 0.1.42/v0.7.31 — RELEASING.md Schritt 4
+  verletzt; release.yml metadata-Asserts würden failen.
 - Adapter: `package.json`/`package-lock.json`/`src/types.ts ADAPTER_VERSION`
   0.1.42 → 0.1.43; Script-Pin `MCP_ADAPTER_VERSION="0.1.43"`.
-- Script: `OCVM_VERSION` 0.7.31 → **0.7.33** (0.7.32 ist vom unabhängig
-  QC_PASS Cleanup-Kandidaten `task/controller-id-cleanup`
-  (Commit 01070210af58f4122d4c0374d500d6c273f7be3f) belegt; kein zweiter
-  widersprüchlicher Pin).
-- Kompatibilität: geänderte Dateien sind disjunkt (dieser Fix:
-  monitor-engine.ts, monitor.test.ts, taskboard.test.ts, adapter-Versionen;
-  Cleanup: opencode-vm.sh controller_id-Bereich, tests/provider_lifecycle_test.sh,
-  OCVM_VERSION). Konsolidierung: Cleanup-Branch zuerst (0.7.32), dann dieser
-  Branch — einziger Versionskonflikt ist OCVM_VERSION, dort 0.7.33 setzen.
-- Release-Reihenfolge (später, nicht hier): MCP-Adapter-Archiv 0.1.43 bauen,
-  SHA-256 ins Script-Pin übernehmen, unter `v0.7.33` publishen (RELEASING.md);
-  bis dahin gilt der Fix für Source-Checkouts (bauen aus Source).
-- Kombinierte Checks für die Konsolidierung: adapters/mcp `npm test` + `tsc`;
-  `tests/provider_lifecycle_test.sh`; `tests/mcp_lock_test.sh` (macOS+Linux);
-  shellcheck der geänderten Script-Regionen; ChatGPT-Skill-Konsistenz
-  (`scripts/build-chatgpt-skill.py --check` + Skill-Test), falls Skill-Flächen
-  berührt werden (hier: nein).
+- `OCVM_VERSION` 0.7.31 → **0.7.33** (0.7.32 ist vom unabhängig QC_PASS
+  Cleanup-Kandidaten belegt; kein zweiter widersprüchlicher Pin).
+
+### 5b. Konsolidierter Paketkandidat (dieser Stand, autorisiert)
+
+Konsolidierung: Cleanup-Commit 01070210af58f4122d4c0374d500d6c273f7be3f als
+Parent übernommen, Journal-Fix als Cherry-Picks darauf; einziger Konflikt
+`OCVM_VERSION` semantisch aufgelöst → 0.7.33 (von QC vorab geprüfte
+Entscheidung, kein blind ours/theirs). Original-Branches/Worktrees und
+QC-Belege unverändert; neuer eindeutig getaggter Worktree/Branch.
+
+Paket-Fix (F1): `MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.43.tar"`,
+`MCP_ADAPTER_SHA256="52f405716fb6e0d2d6575d1f95da9da52c9309b23b982b4fcdcf4ed0f43425ff"`,
+alle drei Asset-Tags (`OPENLIVE_ADAPTER_TAG`, `MCP_ADAPTER_TAG`, `HUB_ASSET_TAG`)
+auf `v0.7.33` gemäß RELEASING.md Schritt 2. OpenLive 0.1.7 und Hub unverändert
+(Filename/Hash bestehende Pins, reproduzierbar bestätigt). Keine CI-Assert-
+Abschwächung, keine Versionsausnahme: 0.7.33 ist die nächste freie Patch-Version
+nach dem belegten 0.7.32.
+
+Doppelbuild-Nachweis (deterministisch, GNU tar 1.35, SOURCE_DATE_EPOCH-Default):
+- mcp-a.tar == mcp-b.tar, SHA-256 52f405716fb6e0d2d6575d1f95da9da52c9309b23b982b4fcdcf4ed0f43425ff
+  (= Script-Pin), Archivname opencode-vm-mcp-adapter-0.1.43.tar
+- ol-a.tar == ol-b.tar, SHA-256 39a50c5127b0a577b54e4790b5c3c1f463b35a52b42c4343aa639dcea53bad47
+  (= bestehender Pin)
+- hub-a.tar == hub-b.tar, SHA-256 deaf12ef80599cd5fb603f0ab5491e799adc47a01ce7597cde19f8a494224368
+  (= bestehender Pin)
+
+Version-/Tag-Metadaten als Dateiangaben (keine tatsächlichen Git-Tag-Writes,
+kein Push/Release): Release-Tag-Feld v0.7.33 in allen drei Tag-Pins; Git-Tags
+werden ausschließlich vom Release-Workflow nach Validierung erzeugt.
+
+Validierung des konsolidierten Kandidaten (RELEASING.md-Liste vollständig):
+- adapters/openlive-acp: check/build/test 47/0, test:integration PASS
+- adapters/mcp: check (tsc) PASS, test 257 pass / 0 fail / 2 skipped, test:integration PASS
+- tests/provider_lifecycle_test.sh (26 Lifecycle-Tests inkl. Cleanup-Fix): 26 ok / 0 fail
+- tests/release_metadata_test.py: 5/5 OK; tests/release_state_test.py: 5/5 OK
+- bash -n (7 Dateien) OK; shellcheck --severity=error (7 Dateien) OK
+- tests/hub_release_test.sh PASS; tests/mcp_adapter_test.sh PASS (Standalone-
+  Install-/Metadata-Pfad); tests/mcp_lock_test.sh PASS (Linux; macOS-Bash-3.2-Job
+  bleibt CI); tests/openlive_test.sh PASS (nach Working-Copy-chmod 755; Index-
+  Mode war korrekt 100755, virtiofs-Schreibartifact)
+- actionlint release.yml OK (actionlint 1.7.7)
+- scripts/build-chatgpt-skill.py --check OK (r51); python3 -B tests/chatgpt_skill_test.py OK
+- git diff --check OK
+- UNVERIFIED bleibt: echter GitHub-Release-Run/Assets (Operator-push-abhängig),
+  macOS-nativer Bash-3.2-Lock-Job, gehostete ChatGPT/Voice-Akzeptanz.
+
+### 5c. Nächster Mainintegrationsweg
+
+1. Erneute unabhängige QC genau auf diesem konsolidierten Kandidaten (separat).
+2. Operator pusht den exakten Kandidaten-Commit nach `main` (host-seitig);
+   Release-Workflow erstellt Tag v0.7.33 und published die fünf Assets.
+3. Release-Completion-Gate gemäß RELEASING.md gegen exakt diesen Commit prüfen.
+4. Ausgeschlossen: Fremddeltas jenseits Cleanup+Journal (keine weiteren
+   Änderungen enthalten; `.opencode/tasks/`-Main-Dirty bleibt unberührt).
 
 ## 6. Exakte Artefakte
 
 - Base: bdedc9a575ff1b4831b7cabbe0613d10600d2b47
-- Branch: task/monitor-journal-writer-contract
-- Worktree: .opencode-vm/worktrees/task_278d4136-8d7b-559b-80fe-3e9ae7282140
-- Commit/Tree: siehe `git log -1` im Branch (nach Commit dieses Dokuments).
+- Branch (konsolidiert): task/monitor-journal-package-consolidated
+- Worktree (konsolidiert): .opencode-vm/worktrees/task_278d4136-consolidated-20261012-main
+- Commit-Kette: 01070210 (Cleanup, unverändert übernommen) → 09c7348 (Journal-Fix,
+  Cherry-Pick mit OCVM_VERSION-Konfliktlösung 0.7.33) → 55d6044 (exec-bit) →
+  finaler Paketcommit (siehe `git log -1`).
+- Ursprünglicher Journal-Kandidat: task/monitor-journal-writer-contract,
+  Tip 338f26a0e25330e516e20addea8632d985b2e559 (unverändert erhalten).
