@@ -306,6 +306,48 @@ try {
     await page.locator("#refresh").evaluate(e => e.click()); await page.waitForTimeout(100);
     assert.equal(await page.locator("#connection-incoming-mcp .connection-help").evaluate(e => e.open), open);
     assert.equal(await page.locator("#connection-incoming-mcp .connection-help summary").evaluate(e => e === document.activeElement), true);
+    // Slot pause (task_f2d0ccc6): the small An/Aus switch on a stored slot greys
+    // the editor out, keeps the stored tuple visible, persists the pause, and
+    // restores the identical selection when switched back on. A full reload first:
+    // the pause state lives server-side and must survive restarts/reloads anyway.
+    await page.unroute("**/api/control");
+    await page.reload();
+    await page.waitForSelector("#profile-deep .card-head .slot-switch input:not([disabled])");
+    await page.locator("#profile-deep .card-head .slot-switch input").click();
+    await page.waitForFunction(() => document.querySelector("#profile-deep .profile-feedback").textContent.includes("Slot pausiert"));
+    assert.equal(await page.locator("#profile-deep .card-head .slot-switch input").isChecked(), false);
+    assert.equal(await page.locator("#profile-deep .card-head .slot-switch").evaluate(e => e.offsetParent !== null), true, "the switch only exists on stored slots");
+    assert.equal(await page.locator("#profile-deep").evaluate(e => e.classList.contains("slot-off")), true);
+    assert.equal(await page.locator("#deep-variant").isDisabled(), true, "paused slot greys the selection fields out");
+    assert.match(await page.locator("#profile-deep .profile-summary").innerText(), /pausiert/);
+    assert.match(await page.locator("#profile-deep .profile-effective").innerText(), /Pausiert/);
+    assert.match(await page.locator("#profile-deep .profile-summary").innerText(), /Representative development model · Fixture Provider · high · .* · pausiert/, "the stored tuple stays visible while paused");
+    const pausedPolicy = JSON.parse(await readFile(`${project}/.opencode-vm/agent-control.json`));
+    assert.equal(pausedPolicy.schemaVersion, 5, "the first pause upgrades to schema 5");
+    assert.equal(pausedPolicy.disabled.profiles.deep, true);
+    assert.deepEqual(pausedPolicy.profiles.deep, tuple, "the stored selection survives the pause byte-exact");
+    assert.ok(JSON.stringify(pausedPolicy).includes("disabled"), "the pause flag is persisted");
+    const regimeBefore = (await (await page.request.get(`${base}/api/control`)).json()).routing.regime;
+    assert.equal(await page.evaluate(async regime => (await (await fetch("/api/control")).json()).routing.regime === regime, regimeBefore), true,
+      "the disable state never changes the routing regime");
+    // A fresh snapshot keeps the honest disabled state and the effective path.
+    await page.locator("#refresh-control").click();
+    await page.waitForFunction(() => document.querySelector("#control-status").textContent.includes("Format 5"));
+    assert.equal(await page.locator("#deep-variant").isDisabled(), true);
+    // The paused primary is skipped before any request; the configured own
+    // fallback of the same profile becomes the effective next candidate.
+    const pausedResolution = (await (await page.request.get(`${base}/api/control`)).json()).resolutions.deep;
+    assert.equal(pausedResolution.status, "available");
+    assert.equal(pausedResolution.resolved_label, "deep.fallback");
+    // Re-enable restores the identical stored selection.
+    await page.locator("#profile-deep .card-head .slot-switch input").click();
+    await page.waitForFunction(() => document.querySelector("#profile-deep .profile-feedback").textContent.includes("reaktiviert"));
+    assert.equal(await page.locator("#profile-deep .card-head .slot-switch input").isChecked(), true);
+    assert.equal(await page.locator("#deep-variant").isDisabled(), false);
+    const restoredPolicy = JSON.parse(await readFile(`${project}/.opencode-vm/agent-control.json`));
+    assert.equal(restoredPolicy.disabled.profiles.deep, false);
+    assert.deepEqual(restoredPolicy.profiles.deep, tuple, "reactivation restores the identical tuple");
+    assert.equal(restoredPolicy.schemaVersion, 5, "clearing never downgrades");
     // Reflow, zoom equivalent, text resize, keyboard and target sizes on real DOM.
     for (const width of [1280, 700, 320]) {
       await page.setViewportSize({ width, height: 900 });
@@ -315,6 +357,7 @@ try {
     await page.addStyleTag({ content: "html{font-size:200%} p,button,summary,label,select{font-size:1rem!important}" });
     if (await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)) console.log(await page.evaluate(() => ({width:innerWidth,scroll:document.documentElement.scrollWidth,nodes:[...document.querySelectorAll("*")].filter(e=>e.scrollWidth>e.clientWidth+2).map(e=>[e.tagName,e.id,e.className,e.scrollWidth,e.clientWidth]).slice(-15)})));
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, `${name} text resize overflow`);
+    await page.locator("#profile-design .profile-editor summary").click();
     await page.locator("#design-provider_id").focus(); await page.keyboard.press("Tab");
     assert.equal(await page.locator("#design-model_id").evaluate(e => e === document.activeElement), true);
     assert.equal(await page.locator("#profile-design button[type=submit]").evaluate(e => e.getBoundingClientRect().height >= 44), true);

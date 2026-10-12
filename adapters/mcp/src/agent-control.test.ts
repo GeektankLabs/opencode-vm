@@ -47,14 +47,14 @@ test("shared absence-fallback vectors match Python and never write policy", asyn
     }
     const policy = { schemaVersion: 2 as const, revision: 7, updatedAt: null, profiles, finalFallback: null,
       profileFallbacks: { ...profiles }, strategies: { degrading: null, providerSkip: null },
-      disabled: { profiles: { deep: false, standard: false, execution: false, design: false, review: false },
+      disabled: { profiles: Object.fromEntries(PROFILE_NAMES.map((name) => [name, (vector as { disabled?: string[] }).disabled?.includes(name) ?? false])) as Record<ProfileName, boolean>,
         profileFallbacks: { deep: false, standard: false, execution: false, design: false, review: false },
         finalFallback: false } };
     const before = JSON.stringify(policy);
     const result = resolveProfile(policy, vector.profile, vector.catalog === "unavailable" ? undefined :
       { ...catalog, truncated: vector.catalog === "incomplete" });
     assert.equal(result.status, vector.status);
-    assert.equal("resolved_profile" in result ? result.resolved_profile : undefined, vector.resolved_profile);
+    assert.equal(("resolved_profile" in result ? result.resolved_profile : undefined) ?? null, vector.resolved_profile ?? null);
     assert.deepEqual(result.resolution_path, vector.resolution_path);
     assert.equal("runtime" in result, vector.status === "available");
     assert.equal(JSON.stringify(policy), before);

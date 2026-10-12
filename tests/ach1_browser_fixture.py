@@ -44,8 +44,9 @@ if __name__ == "__main__":
         server.REQUEST_SCHEME = "http"
         server.read_catalog = lambda *args, **kwargs: CATALOG
         server.read_capabilities = lambda *args: True
-        server.read_policy_capabilities = lambda *args: {"optionalProfiles": True, "profileFallbacks": True}
+        server.read_policy_capabilities = lambda *args: {"optionalProfiles": True, "profileFallbacks": True, "slotDisabled": True}
         server.read_schema4_capabilities = lambda *args: True
+        server.read_slot_disabled_capabilities = lambda *args: True
         http = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
         print(json.dumps({"port": http.server_port, "project": str(server.PROJECT)}), flush=True)
         try:

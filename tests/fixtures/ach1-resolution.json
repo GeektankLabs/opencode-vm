@@ -9,5 +9,8 @@
   {"profile":"review","mappings":{"deep":"available"},"catalog":"incomplete","status":"catalog_incomplete","resolved_profile":"deep","resolution_path":["review","deep"]},
   {"profile":"design","mappings":{"standard":"available"},"catalog":"unavailable","status":"catalog_unavailable","resolved_profile":"standard","resolution_path":["design","standard"]},
   {"profile":"review","mappings":{},"catalog":"unavailable","status":"unconfigured","resolution_path":["review","deep","standard"]},
-  {"profile":"deep","mappings":{"standard":"available"},"catalog":"complete","status":"unconfigured","resolution_path":["deep"]}
+  {"profile":"deep","mappings":{"standard":"available"},"catalog":"complete","status":"unconfigured","resolution_path":["deep"]},
+  {"profile":"design","mappings":{"design":"available","standard":"available"},"catalog":"complete","disabled":["design"],"status":"available","resolved_profile":"standard","resolution_path":["design","standard"]},
+  {"profile":"review","mappings":{"deep":"available","standard":"available"},"catalog":"complete","disabled":["deep"],"status":"available","resolved_profile":"standard","resolution_path":["review","deep","standard"]},
+  {"profile":"deep","mappings":{"deep":"available"},"catalog":"complete","disabled":["deep"],"status":"hold_disabled","resolved_profile":null,"resolution_path":["deep"]}
 ]
