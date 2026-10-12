@@ -167,6 +167,10 @@ export type MonitorWorkerRecord = {
   runtime_session_id: string | null;
   creation_receipt: string | null;
   dispatch_receipt: string | null;
+  /** V2 §13.2/F4: time basis of the CURRENT dispatch episode, captured when a
+   * genuinely NEW dispatch receipt is applied (rebind/reconcile). Absent on
+   * legacy records — creation time stays the flagged fallback anchor. */
+  dispatch_at?: string | null;
   /** Latest observed terminal assistant message of a dispatched worker; proves
    * a fresh result/receipt delta for the manager without a subscription. */
   result_receipt: string | null;
@@ -230,7 +234,7 @@ export const INVESTIGATION_DEFAULTS = {
   first_check_s: 3600,
   cooldown_s: 3600,
   ladder_s: [7200, 14400, 28800],
-  budget: { max_duration_ms: 300_000, max_calls: 10, max_bytes: 262_144 },
+  budget: { max_duration_ms: 300_000, max_calls: 10, max_bytes: 262_144, call_timeout_ms: 3_000, daily_budget: 24 },
 } as const;
 
 /** Documented hard caps: degenerate configurations fail closed (V2 §13.3). */
@@ -240,6 +244,8 @@ export const INVESTIGATION_LIMITS = {
   max_duration_ms: 3_600_000,
   max_calls: 100,
   max_bytes: 1_048_576,
+  call_timeout_ms_min: 250,
+  call_timeout_ms_max: 15_000,
 } as const;
 
 export type InvestigationTaskType = "default" | "long_runner" | "milestoned";
@@ -250,7 +256,7 @@ export type MonitorInvestigationConfig = {
     first_check_s: number;
     cooldown_s: number;
     ladder_s: [number, number, number];
-    budget: { max_duration_ms: number; max_calls: number; max_bytes: number };
+    budget: { max_duration_ms: number; max_calls: number; max_bytes: number; call_timeout_ms: number; daily_budget: number };
   };
   task: {
     task_type: InvestigationTaskType;
@@ -307,6 +313,13 @@ export function validateInvestigationConfigInput(input: unknown): MonitorInvesti
     if (budgetRaw.max_duration_ms !== undefined) next.config.budget.max_duration_ms = bounded("max_duration_ms", INVESTIGATION_LIMITS.max_duration_ms);
     if (budgetRaw.max_calls !== undefined) next.config.budget.max_calls = bounded("max_calls", INVESTIGATION_LIMITS.max_calls);
     if (budgetRaw.max_bytes !== undefined) next.config.budget.max_bytes = bounded("max_bytes", INVESTIGATION_LIMITS.max_bytes);
+    if (budgetRaw.call_timeout_ms !== undefined) {
+      const value = budgetRaw.call_timeout_ms;
+      if (typeof value !== "number" || !Number.isSafeInteger(value) ||
+          value < INVESTIGATION_LIMITS.call_timeout_ms_min || value > INVESTIGATION_LIMITS.call_timeout_ms_max)
+        throw new Error(`investigation.budget.call_timeout_ms must be an integer between ${INVESTIGATION_LIMITS.call_timeout_ms_min} and ${INVESTIGATION_LIMITS.call_timeout_ms_max}`);
+      next.config.budget.call_timeout_ms = value;
+    }
   }
   if (raw.task_type !== undefined || raw.expected_milestone !== undefined || raw.milestone_due_at !== undefined) {
     if (raw.task_type !== undefined) {
@@ -328,9 +341,12 @@ export function validateInvestigationConfigInput(input: unknown): MonitorInvesti
   // Compatibility guard: optional aggregate budgets must never make the
   // contracted first check or cooldown unreachable (V2 §13.3).
   if (raw.daily_budget !== undefined) {
+    // F1: persisted and enforced as a rolling 24 h window on EXECUTED
+    // investigations (deferred runs never count).
     const daily = raw.daily_budget;
     if (typeof daily !== "number" || !Number.isSafeInteger(daily) || daily < Math.ceil(86_400 / next.config.cooldown_s))
       throw new Error(`investigation.daily_budget must be >= ceil(86400 / cooldown_s) = ${Math.ceil(86_400 / next.config.cooldown_s)}`);
+    next.config.budget.daily_budget = daily;
   }
   return next;
 }
@@ -374,6 +390,15 @@ export type MonitorInvestigationState = {
   episode: InvestigationEpisodeState | null;
   workers: InvestigationWorkerState[];
   counters: { investigations_total: number; inconclusive_total: number; anchor_unknown_total: number };
+  /** Rolling 24 h window of executed investigation times (epoch ms) for the
+   * optional daily budget; deferred (not executed) runs never append. */
+  recent_investigations?: number[];
+  /** Milestone tracking (V2 §13.3/F1): one overdue-triggered investigation
+   * PER deadline value; achievement via genuine A evidence only. */
+  milestone?: { overdue_handled_for: string | null; overdue_handled_at: string | null; achieved_at: string | null } | null;
+  /** Z1: throttle for the observer's bounded probe lane (epoch ms of the last
+   * probe batch). Probes run ONLY while a wake is in flight. */
+  observer_probe_at?: number | null;
   observer_lease?: InvestigationObserverLease | null;
 };
 
@@ -388,6 +413,9 @@ export function defaultInvestigationState(): MonitorInvestigationState {
     episode: null,
     workers: [],
     counters: { investigations_total: 0, inconclusive_total: 0, anchor_unknown_total: 0 },
+    recent_investigations: [],
+    milestone: { overdue_handled_for: null, overdue_handled_at: null, achieved_at: null },
+    observer_probe_at: null,
     observer_lease: null,
   };
 }
@@ -450,6 +478,22 @@ export function investigationShapeOk(value: unknown): boolean {
         typeof lease.lease_until !== "number" || !Number.isSafeInteger(lease.lease_until) ||
         typeof lease.generation !== "number" || !Number.isSafeInteger(lease.generation) || lease.generation < 0) return false;
   }
+  // V2 §13.3/F1: rolling daily-budget window + milestone tracking.
+  if (value.recent_investigations !== undefined && value.recent_investigations !== null) {
+    if (!Array.isArray(value.recent_investigations) || value.recent_investigations.length > 128) return false;
+    if (!value.recent_investigations.every((entry) => typeof entry === "number" && Number.isSafeInteger(entry) && entry >= 0)) return false;
+  }
+  if (value.milestone !== undefined && value.milestone !== null) {
+    const milestone = value.milestone;
+    if (!isRecord(milestone)) return false;
+    for (const field of ["overdue_handled_for", "overdue_handled_at", "achieved_at"] as const) {
+      if (milestone[field] !== null && typeof milestone[field] !== "string") return false;
+    }
+    if (milestone.overdue_handled_at !== null && !validIso(milestone.overdue_handled_at)) return false;
+    if (milestone.achieved_at !== null && !validIso(milestone.achieved_at)) return false;
+  }
+  if (value.observer_probe_at !== undefined && value.observer_probe_at !== null &&
+      (typeof value.observer_probe_at !== "number" || !Number.isSafeInteger(value.observer_probe_at))) return false;
   return true;
 }
 
@@ -729,6 +773,8 @@ function workersShapeOk(monitorId: string, workers: unknown): workers is Monitor
       const value = worker[field];
       if (value !== null && typeof value !== "string") return false;
     }
+    // V2 §13.2/F4: additive dispatch time basis, validated when present.
+    if (worker.dispatch_at !== undefined && worker.dispatch_at !== null && !validIso(worker.dispatch_at)) return false;
     // Additive Wave A error marker: unknown to older readers, validated only
     // when present so a hand-corrupted marker fails closed like every other field.
     if (worker.last_error !== undefined && worker.last_error !== null) {
@@ -1205,7 +1251,15 @@ async function rebindOwnWorker(
       const { monitor, worker } = findOwnedWorkerOrThrow(draft, monitorId, workerKey);
       if (!allowed.includes(worker.lifecycle)) throw new Error(`worker cannot be rebound from ${worker.lifecycle}`);
       worker.runtime_session_id = input.runtime_session_id;
-      if (input.dispatch_receipt !== undefined) worker.dispatch_receipt = input.dispatch_receipt;
+      if (input.dispatch_receipt !== undefined) {
+        // V2 §13.2/F4: a genuinely NEW dispatch receipt starts a fresh time
+        // basis (dispatch_at). Re-binding with the SAME receipt never resets
+        // the anchor; creation time remains the flagged legacy fallback only.
+        if (worker.dispatch_receipt !== input.dispatch_receipt) {
+          worker.dispatch_receipt = input.dispatch_receipt;
+          worker.dispatch_at = at;
+        }
+      }
       // QC-F1 (waveA-qc SHA765c4f03): reactivating starts a fresh episode — the
       // previous terminal failure marker must not render as the NEW dispatch's
       // current error. History keeps the audited observation; the record clears.

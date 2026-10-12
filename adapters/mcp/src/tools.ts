@@ -1048,6 +1048,7 @@ const investigationBudgetInput = z
     max_duration_ms: z.number().int().positive().optional(),
     max_calls: z.number().int().positive().optional(),
     max_bytes: z.number().int().positive().optional(),
+    call_timeout_ms: z.number().int().positive().optional(),
   })
   .strict();
 const investigationConfigInput = z
@@ -1198,6 +1199,7 @@ const monitorWorkerOutput = z
     runtime_session_id: z.string().nullable(),
     creation_receipt: z.string().nullable(),
     dispatch_receipt: z.string().nullable(),
+    dispatch_at: z.string().nullable().optional(),
     result_receipt: z.string().nullable(),
     last_synthesis_at: z.string().nullable(),
     updated_at: z.string(),
@@ -2177,6 +2179,7 @@ export function createMcpServer(
     runtime_session_id: worker.runtime_session_id,
     creation_receipt: worker.creation_receipt,
     dispatch_receipt: worker.dispatch_receipt,
+    ...(worker.dispatch_at !== undefined ? { dispatch_at: worker.dispatch_at ?? null } : {}),
     result_receipt: worker.result_receipt,
     last_synthesis_at: worker.last_synthesis_at,
     updated_at: worker.updated_at,

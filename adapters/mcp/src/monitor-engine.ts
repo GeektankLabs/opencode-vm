@@ -16,6 +16,7 @@ import type { RecoveryPolicyView } from "./agent-control.js";
 export { catalogAvailable, fallbackChain };
 import {
   appendRecoveryResolution,
+  defaultInvestigationConfig,
   defaultInvestigationState,
   digest,
   investigationWorkerFor,
@@ -70,6 +71,7 @@ import type {
 // V2 §13 (task_a234c341 / package task_e67c39cf) — investigation constants.
 const HEARTBEAT_FRESH_MS = 90_000; // 3× the 30 s heartbeat period
 const OBSERVER_LEASE_TTL_MS = 15_000;
+const OBSERVER_PROBE_THROTTLE_MS = 30_000; // Z1: one probe batch per monitor per window
 const CLAIM_STUCK_INTERVAL_FACTOR = 10;
 
 export type MonitorBoardTask = {
@@ -147,6 +149,7 @@ export type WakeOutcome =
   | "recovery-continued"
   | "recovery-parked"
   | "investigated"
+  | "investigation-deferred"
   | "expired"
   | "error";
 
@@ -751,9 +754,11 @@ export class MonitorEngine {
             workerState.cooldown_until = null;
             workerState.next_deep_check_at = now + cfg.first_check_s * 1000;
             if (workerState.anchored_at === null) {
-              workerState.anchored_at = record.created_at;
-              workerState.anchor_source = "creation";
+              workerState.anchored_at = record.dispatch_at ?? record.created_at;
+              workerState.anchor_source = record.dispatch_at ? "dispatch" : "creation";
             }
+            // V2 §13.3/F1: genuine A evidence achieves a declared milestone.
+            if (inv.milestone && inv.milestone.achieved_at === null) inv.milestone.achieved_at = iso(now);
             refreshInvestigationProjections(inv);
             monitorHistory(monitorRecord, "worker-observed-complete", {
               worker_key: record.worker_key,
@@ -947,16 +952,7 @@ export class MonitorEngine {
   // --------------------------------------------------- investigation (V2 §13)
 
   private effectiveInvestigationConfig(monitor: MonitorRecord): MonitorInvestigationConfig {
-    return monitor.investigation_config ?? {
-      schema: 1,
-      config: {
-        first_check_s: 3600,
-        cooldown_s: 3600,
-        ladder_s: [7200, 14400, 28800],
-        budget: { max_duration_ms: 300_000, max_calls: 10, max_bytes: 262_144 },
-      },
-      task: { task_type: "default", expected_milestone: null, milestone_due_at: null },
-    };
+    return monitor.investigation_config ?? defaultInvestigationConfig();
   }
 
   /**
@@ -977,7 +973,13 @@ export class MonitorEngine {
     for (const worker of withReceipt) {
       const state = investigationWorkerFor(inv, worker.worker_key, worker.dispatch_receipt);
       if (state.anchored_at === null) {
-        if (worker.created_at) {
+        // V2 §13.2/F4 anchor preference: the dispatch-correlated time basis
+        // captured at rebind; creation time only as the flagged legacy
+        // fallback (never resets without a genuinely new receipt).
+        if (worker.dispatch_at) {
+          state.anchored_at = worker.dispatch_at;
+          state.anchor_source = "dispatch";
+        } else if (worker.created_at) {
           state.anchored_at = worker.created_at;
           state.anchor_source = "creation";
         } else {
@@ -1009,9 +1011,24 @@ export class MonitorEngine {
     if (!inv || monitor.state.work !== "active" || monitor.recovery.active) return null;
     if (monitor.dispatch_wal && monitor.dispatch_wal.message_id === null) return null;
     if (inv.episode && inv.episode.finished_at === null) return null;
-    return inv.workers
-      .filter((worker) => worker.anchored_at !== null && (worker.next_deep_check_at ?? Number.MAX_SAFE_INTEGER) <= now)
-      .sort((a, b) => (a.next_deep_check_at ?? 0) - (b.next_deep_check_at ?? 0))[0] ?? null;
+    const anchored = inv.workers
+      .filter((worker) => worker.anchored_at !== null)
+      .sort((a, b) => (a.next_deep_check_at ?? Number.MAX_SAFE_INTEGER) - (b.next_deep_check_at ?? Number.MAX_SAFE_INTEGER));
+    const clockDue = anchored.filter((worker) => (worker.next_deep_check_at ?? Number.MAX_SAFE_INTEGER) <= now)[0] ?? null;
+    if (clockDue) return clockDue;
+    // V2 §13.3/F1: an UNACHIEVED, OVERDUE and not-yet-handled milestone on a
+    // `milestoned` contract pulls the earliest anchored worker forward ONCE
+    // per deadline value (no due loop — the handling is recorded and a
+    // CHANGED deadline may trigger again). Cheap checks are unaffected.
+    const task = this.effectiveInvestigationConfig(monitor).task;
+    if (task.task_type === "milestoned" && task.expected_milestone && task.milestone_due_at) {
+      const dueMs = Date.parse(task.milestone_due_at);
+      const milestone = inv.milestone ?? { overdue_handled_for: null, overdue_handled_at: null, achieved_at: null };
+      if (!Number.isNaN(dueMs) && dueMs <= now && milestone.achieved_at === null && milestone.overdue_handled_for !== task.milestone_due_at) {
+        return anchored[0] ?? null;
+      }
+    }
+    return null;
   }
 
   /**
@@ -1055,16 +1072,86 @@ export class MonitorEngine {
     let outcome: InvestigationEpisodeState["outcome"] = null;
     let waitReason: string | null = null;
     const worker = (monitor.workers ?? []).find((entry) => entry.worker_key === dueWorker.worker_key) ?? null;
+    const receipt = worker?.dispatch_receipt ?? null;
     const sessionId = worker?.runtime_session_id ?? null;
     let callsUsed = 0;
     let toolDigest: string | null = null;
     let episodeAdvanced = false;
+    let bytesUsed = 0;
+    const startedMs = now;
+    const invState = monitor.investigation!;
 
-    if (!worker || !worker.dispatch_receipt) {
+    // ---- F1: daily rolling budget (24 h window over EXECUTED runs). A run
+    // over the limit is DEFERRED — transparently, with the exact window end as
+    // the next due time; it never counts, never creates an episode, and the
+    // cheap checks continue unaffected.
+    const dailyLimit = config.budget.daily_budget;
+    const recentWindow = (invState.recent_investigations ?? []).filter((entry) => now - entry < 86_400_000);
+    if (recentWindow.length >= dailyLimit) {
+      const windowEnd = Math.min(...recentWindow) + 86_400_000;
+      await withRegistry(
+        this.project,
+        (registry) => {
+          const record = registry.monitors.find((entry) => entry.id === id);
+          if (!record) return registry;
+          const inv = record.investigation!;
+          const state = investigationWorkerFor(inv, dueWorker.worker_key, dueWorker.dispatch_receipt);
+          state.next_deep_check_at = windowEnd;
+          state.cooldown_until = null;
+          refreshInvestigationProjections(inv);
+          record.state.last_seen_digest = summary.digest;
+          record.state.worker_digest = workerDigest;
+          record.wake_request = null;
+          record.run = { active: false, started_at: null, action: "investigation-deferred" };
+          if (record.scheduler.enabled) record.scheduler.next_run_at = now + record.scheduler.interval_seconds * 1000;
+          monitorDecision(
+            record,
+            "investigation-deferred",
+            { reason: "daily-budget", window_used: recentWindow.length, limit: dailyLimit, next_check: iso(windowEnd) },
+            `investigation-deferred:${dueWorker.worker_key}:${(dueWorker.dispatch_receipt ?? "none").slice(0, 24)}:daily-budget`,
+            now,
+          );
+          return registry;
+        },
+        { now },
+      );
+      this.log("info", `investigation deferred (daily budget) monitor=${id} worker=${dueWorker.worker_key} next=${iso(windowEnd)}`);
+      return "investigation-deferred";
+    }
+
+    // ---- F2: budgeted, timeout-guarded read admission. Bytes are counted
+    // after each response (the endpoints are contractually bounded metadata
+    // snapshots — no raw content is requested) and admitted BEFORE the next
+    // call; the timeout bounds OUR wait per call, the backend keeps its own
+    // transport timeout. A blocked admission never issues the call.
+    let investigationAborted = false;
+    const callGate = async <T>(label: string, call: () => Promise<T>): Promise<T | null> => {
+      if (investigationAborted) return null;
+      if (this.now() - startedMs >= config.budget.max_duration_ms || callsUsed >= config.budget.max_calls || bytesUsed >= config.budget.max_bytes) {
+        investigationAborted = true;
+        outcome = "aborted_budget";
+        evidence.push({ kind: "budget_exhausted", source: "admission", at: iso(now), digest: `c${callsUsed}/b${bytesUsed}`.slice(0, 16) });
+        return null;
+      }
+      callsUsed += 1;
+      try {
+        const result = await withCallTimeout(call(), config.budget.call_timeout_ms, label);
+        bytesUsed += Buffer.byteLength(JSON.stringify(result) ?? "null");
+        return result;
+      } catch (error) {
+        const code = errorCode(error);
+        evidence.push({ kind: code === "CALL_TIMEOUT" ? "call_timeout" : "read_failed", source: label, at: iso(now), digest: (code ?? "unknown").slice(0, 16) });
+        outcome = "aborted_budget";
+        investigationAborted = true;
+        return null;
+      }
+    };
+
+    if (!worker || !receipt) {
       outcome = "no_progress_evidenced";
-    } else if (worker.dispatch_receipt !== dueWorker.dispatch_receipt) {
+    } else if (receipt !== dueWorker.dispatch_receipt) {
       // (c) new dispatch episode admitted after the previous investigation.
-      evidence.push({ kind: "new_dispatch_episode", source: "worker_registry", at: iso(now), digest: digest({ r: worker.dispatch_receipt }).slice(0, 16) });
+      evidence.push({ kind: "new_dispatch_episode", source: "worker_registry", at: iso(now), digest: digest({ r: receipt }).slice(0, 16) });
       outcome = "long_work_evidenced";
       waitReason = "worker re-dispatched after the previous investigation";
       episodeAdvanced = true;
@@ -1072,12 +1159,11 @@ export class MonitorEngine {
       evidence.push({ kind: "terminal_result_pending_synthesis", source: "worker_registry", at: iso(now), digest: digest({ r: worker.result_receipt }).slice(0, 16) });
       outcome = "long_work_evidenced";
       waitReason = "worker result awaiting manager synthesis";
-    } else if (worker.lifecycle === "active" && sessionId) {
+    } else if (worker.lifecycle === "active" && sessionId && receipt) {
       // (a) attributable tool progress via the optional progress capability.
       if (this.gateway.getSessionProgress) {
-        callsUsed += 1;
-        try {
-          const progress = await this.gateway.getSessionProgress(sessionId, worker.dispatch_receipt);
+        const progress = await callGate("get_session_progress", () => this.gateway.getSessionProgress!(sessionId!, receipt));
+        if (progress) {
           toolDigest = digest(progress.in_flight_tools.map((tool) => [tool.call_id, tool.status, tool.finished_at ?? null]));
           if (dueWorker.last_tool_digest !== null && toolDigest !== dueWorker.last_tool_digest) {
             evidence.push({ kind: "attributable_tool_progress", source: "get_session_progress", at: iso(now), digest: toolDigest.slice(0, 16) });
@@ -1087,31 +1173,51 @@ export class MonitorEngine {
           // First observation records the baseline only: a delta needs two
           // points, so this round stays inconclusive (stale running alone is
           // never long-work evidence, V2 §13.4).
-        } catch (error) {
-          evidence.push({ kind: "progress_read_failed", source: "get_session_progress", at: iso(now), digest: (errorCode(error) ?? "unknown").slice(0, 16) });
         }
       } else {
         evidence.push({ kind: "progress_telemetry_unavailable", source: "gateway", at: iso(now), digest: "none" });
       }
-      if (outcome === null && !this.gateway.getSessionProgress) {
+      if (outcome === null && !this.gateway.getSessionProgress && !investigationAborted) {
         // Attribution impossible without telemetry; a bounded status read
         // names the observed state honestly (one extra call, still in budget).
-        callsUsed += 1;
-        try {
-          const status = await this.gateway.getSessionStatus(sessionId, worker.dispatch_receipt);
+        const status = await callGate("get_session_status", () => this.gateway.getSessionStatus(sessionId!, receipt));
+        if (status) {
           evidence.push({ kind: `status_${status.backend_activity}`, source: "get_session_status", at: iso(now), digest: digest({ s: status.state }).slice(0, 16) });
-        } catch (error) {
-          evidence.push({ kind: "status_read_failed", source: "get_session_status", at: iso(now), digest: (errorCode(error) ?? "unknown").slice(0, 16) });
+        }
+      }
+      // (b) F1: receipt-correlated checkpoint evidence — a bounded scan of the
+      // task's recent management journal for the worker's own receipt tokens.
+      // Without text access this records the precise evidence boundary and
+      // claims nothing.
+      if (outcome === null && this.board && !investigationAborted && receipt) {
+        const page = await callGate("get_management_history", () =>
+          this.board!.getManagementHistory(monitor.anchor.task_id, { mode: "recent", limit: 20 }));
+        if (page) {
+          const entries = Array.isArray(page.entries) ? page.entries.slice(0, 20) : [];
+          const tokens = [receipt, worker.result_receipt].filter((token): token is string => typeof token === "string" && token.length > 0);
+          let matched = false;
+          let textSeen = false;
+          for (const entry of entries) {
+            const text = typeof entry.text === "string" ? entry.text.slice(0, 2_000) : "";
+            if (text.length > 0) textSeen = true;
+            if (text.length > 0 && tokens.some((token) => text.includes(token))) { matched = true; break; }
+          }
+          if (matched) {
+            evidence.push({ kind: "receipt_correlated_checkpoint", source: "management_journal", at: iso(now), digest: digest({ r: tokens[0] }).slice(0, 16) });
+            outcome = "long_work_evidenced";
+            waitReason = "receipt-correlated checkpoint in the management journal";
+          } else {
+            evidence.push({ kind: "checkpoint_evidence_unavailable", source: "management_journal", at: iso(now), digest: textSeen ? "no-match" : "no-text" });
+          }
         }
       }
     }
 
     if (outcome === null) {
       const attributionBlocked = evidence.some((entry) => entry.kind === "progress_read_failed" ||
-        entry.kind === "status_read_failed" || entry.kind === "progress_telemetry_unavailable");
+        entry.kind === "status_read_failed" || entry.kind === "progress_telemetry_unavailable" || entry.kind === "call_timeout");
       outcome = attributionBlocked || worker?.lifecycle === "active" ? "inconclusive" : "no_progress_evidenced";
     }
-    if (callsUsed > config.budget.max_calls) outcome = "aborted_budget";
 
     const finishedMs = this.now();
     const finished = iso(finishedMs);
@@ -1128,6 +1234,20 @@ export class MonitorEngine {
         record.state.worker_digest = workerDigest;
         record.wake_request = null;
         inv.last_investigation_at = finished;
+        inv.recent_investigations = [
+          ...(inv.recent_investigations ?? []).filter((entry) => finishedMs - entry < 86_400_000),
+          finishedMs,
+        ].slice(-128);
+        // F1: exactly ONE overdue-triggered investigation per deadline value —
+        // afterwards only the normal clocks (or a CHANGED deadline) fire again.
+        const milestone = inv.milestone ??= { overdue_handled_for: null, overdue_handled_at: null, achieved_at: null };
+        if (task.task_type === "milestoned" && task.expected_milestone && task.milestone_due_at) {
+          const dueMs = Date.parse(task.milestone_due_at);
+          if (!Number.isNaN(dueMs) && dueMs <= finishedMs && milestone.achieved_at === null) {
+            milestone.overdue_handled_for = task.milestone_due_at;
+            milestone.overdue_handled_at = finished;
+          }
+        }
         inv.counters.investigations_total += 1;
         if (outcome === "inconclusive") inv.counters.inconclusive_total += 1;
         const state = investigationWorkerFor(inv, dueWorker.worker_key, dueWorker.dispatch_receipt);
@@ -1195,16 +1315,28 @@ export class MonitorEngine {
   }
 
   /**
-   * V2 §13.7: minimal independent cheap observer. Registry-only (zero gateway
-   * calls): it stays observation-capable while a wake blocks on a tool call
-   * (`waking` does not protect it — the lease does). It evaluates due-ness,
-   * makes a stuck OWN claim visible, and hands a due investigation to the
-   * next regular wake via the existing `wake_request` mechanism. It never
-   * sends, recovers or releases a claim.
+   * V2 §13.7 (Z1-corrected): two-phase minimal independent observer.
+   *
+   * Phase 1 (registry-only): due evaluation, lease acquisition, stuck-own-
+   * claim visibility, and the `wake_request` handover of a due investigation.
+   *
+   * Phase 2 (bounded probe lane): while a wake is IN FLIGHT (`run.active`),
+   * perform tightly bounded, receipt-correlated status probes for the
+   * monitor's own active workers — at most 3 probes per run, throttled to one
+   * batch per 30 s per monitor (`observer_probe_at`), each call bounded by the
+   * configured `call_timeout_ms`. Probes are READ-ONLY status reads correlated
+   * by the worker's OWN dispatch receipt (no foreign sessions, no arguments,
+   * no content); they persist fresh evidence as merged decisions even while
+   * the previous wake blocks on its own await — without touching worker state
+   * machines, without marking progress, and without any send/recovery/abort/
+   * claim release. Execution still happens ONLY through the wake path; the
+   * probe lane documents, it does not act.
    */
   async observe(): Promise<void> {
     const now = this.now();
     const engineId = `${process.pid}:${this.engineGeneration}`;
+    type Probe = { workerKey: string; sessionId: string; receipt: string };
+    const probePlan: Array<{ monitorId: string; timeoutMs: number; probes: Probe[] }> = [];
     await withRegistry(
       this.project,
       (registry) => {
@@ -1240,11 +1372,66 @@ export class MonitorEngine {
               now,
             );
           }
+          // Z1 probe lane: only while a wake is in flight, throttled, bounded.
+          if (monitor.run.active && now - (inv.observer_probe_at ?? 0) >= OBSERVER_PROBE_THROTTLE_MS) {
+            const probes: Probe[] = (monitor.workers ?? [])
+              .filter((worker) => worker.lifecycle === "active" && worker.runtime_session_id && worker.dispatch_receipt)
+              .slice(0, 3)
+              .map((worker) => ({ workerKey: worker.worker_key, sessionId: worker.runtime_session_id as string, receipt: worker.dispatch_receipt as string }));
+            if (probes.length > 0) {
+              inv.observer_probe_at = now;
+              probePlan.push({
+                monitorId: monitor.id,
+                timeoutMs: this.effectiveInvestigationConfig(monitor).config.budget.call_timeout_ms,
+                probes,
+              });
+            }
+          }
         }
         return registry;
       },
       { now },
     );
+    for (const plan of probePlan) {
+      for (const probe of plan.probes) {
+        let activity = "unknown";
+        let state = "unknown";
+        let failure: string | null = null;
+        try {
+          const status = await withCallTimeout(
+            this.gateway.getSessionStatus(probe.sessionId, probe.receipt),
+            plan.timeoutMs,
+            "observer-probe",
+          );
+          activity = status.backend_activity;
+          state = status.state;
+        } catch (error) {
+          failure = (errorCode(error) ?? "unknown").slice(0, 24);
+        }
+        await withRegistry(
+          this.project,
+          (registry) => {
+            const monitor = registry.monitors.find((entry) => entry.id === plan.monitorId);
+            if (!monitor) return registry;
+            // Idempotent attribution: only the still-own active worker is named.
+            const worker = (monitor.workers ?? []).find((entry) => entry.worker_key === probe.workerKey);
+            if (!worker || worker.lifecycle !== "active" || worker.dispatch_receipt !== probe.receipt) return registry;
+            monitorDecision(
+              monitor,
+              "observer-probe",
+              failure
+                ? { worker_key: probe.workerKey, receipt: probe.receipt.slice(0, 24), error: failure }
+                : { worker_key: probe.workerKey, receipt: probe.receipt.slice(0, 24), activity, state },
+              `observer-probe:${monitor.id}:${probe.workerKey}:${probe.receipt.slice(0, 24)}`,
+              this.now(),
+            );
+            return registry;
+          },
+          { now: this.now() },
+        );
+        if (failure) this.log("warn", `observer probe failed monitor=${plan.monitorId} worker=${probe.workerKey} error=${failure}`);
+      }
+    }
   }
 
   /**
@@ -2097,6 +2284,19 @@ async function readEngineHeartbeat(project: string, nowMs: number): Promise<{ ge
   } catch {
     return null;
   }
+}
+
+/** F2: bounds OUR wait for one investigation read. The backend keeps its own
+ * transport timeout — this is the conservative engine-side guarantee. */
+function withCallTimeout<T>(call: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(Object.assign(new Error(`investigation call timed out: ${label}`), { code: "CALL_TIMEOUT" })), timeoutMs);
+  });
+  void call.catch(() => undefined); // the losing promise is never unhandled
+  return Promise.race([call, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
 }
 
 export function classifyEvidence(status: SessionStatusResult): { kind: "blocked"; fingerprint: string; category: string } | { kind: "none" } {
