@@ -34,7 +34,7 @@ OPENLIVE_PREVIOUS_COMMAND="$OPENLIVE_DIR/previous-command"
 OPENLIVE_AUTH_MARKER="__opencode_vm_openlive__"
 OPENLIVE_LOCK_PATH=""
 OPENLIVE_ADAPTER_VERSION="0.1.8"
-OPENLIVE_ADAPTER_TAG="v0.7.36"
+OPENLIVE_ADAPTER_TAG="v0.7.37"
 OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.8.tar"
 OPENLIVE_ADAPTER_SHA256="74b046b468f853660782d4c78c6e4859fddbfa4a54b167c5d185035dc9102f40"
 OPENLIVE_ACP_SDK_VERSION="1.2.1"
@@ -45,14 +45,14 @@ OPENLIVE_MANAGER_PROMPT="You manage an OpenLive voice call. The voice_sessions t
 MCP_CONNECTOR_DIR="$SHARE_ROOT/mcp-connector"
 MCP_ADAPTER_CACHE_ROOT="$MCP_CONNECTOR_DIR/adapters"
 MCP_ADAPTER_VERSION="0.1.45"
-MCP_ADAPTER_TAG="v0.7.36"
+MCP_ADAPTER_TAG="v0.7.37"
 MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.45.tar"
 MCP_ADAPTER_SHA256="fb80a8f710adc23bfb6f88d3ae07c2b62d551844682e07c8efa425bae4320bda"
 MCP_SDK_VERSION="1.30.1"
 MCP_OPENCODE_SDK_VERSION="1.18.21"
 MCP_TESTED_PROTOCOL_VERSION="2025-11-25"
 MCP_TUNNEL_DIR="$SHARE_ROOT/mcp-tunnel/openai"
-HUB_ASSET_TAG="v0.7.36"
+HUB_ASSET_TAG="v0.7.37"
 HUB_ASSET_FILENAME="opencode-vm-hub-1.tar"
 HUB_ASSET_SHA256="deaf12ef80599cd5fb603f0ab5491e799adc47a01ce7597cde19f8a494224368"
 
@@ -329,7 +329,7 @@ TASKBOARD_ARM64_SHA256="3749fb985f544fdb6788ba1dff69761e599ff82b3fe86d39ca54307c
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.7.36"
+OCVM_VERSION="0.7.37"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -17446,12 +17446,28 @@ _attach_legacy_prompt() {
 
 _ATTACH_TUNNEL_VM=""
 _ATTACH_TUNNEL_BASE=""
+_ATTACH_TUNNEL_SHARE=""
+# Minimal host-side lifecycle metadata log (attach/run session-command
+# failure, web-session end, tunnel cleanup). One bounded line per event:
+# UTC time, host role, pid, controller/session binding, event and exit
+# codes. Never prompts, arguments, tokens or environment dumps; plain
+# append into the per-session share, no new infrastructure or rotation.
+_host_session_log() {
+  local share="$1" event="$2" controller="$3" session="$4" detail="${5:-}"
+  [[ -n "$share" && -d "$share" ]] || return 0
+  printf '%s role=host pid=%s controller=%s session=%s event=%s%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$$" "$controller" "$session" "$event" \
+    "${detail:+ $detail}" >>"$share/host-session.log" 2>/dev/null || true
+}
 _attach_tunnel_cleanup() {
   stop_mcp_host_watcher || true
   [[ -n "$_ATTACH_TUNNEL_VM" && -n "$_ATTACH_TUNNEL_BASE" ]] || return 0
   echo ""
   echo "[opencode-vm] Web session ended — closing LAN tunnels..."
-  stop_web_tunnels "$_ATTACH_TUNNEL_VM" "$_ATTACH_TUNNEL_BASE"
+  _host_session_log "$_ATTACH_TUNNEL_SHARE" web_session_ended "${_ATTACH_TUNNEL_CONTROLLER:-unknown}" "$_ATTACH_TUNNEL_VM" "tunnel_base=$_ATTACH_TUNNEL_BASE"
+  local tunnel_stop_rc=0
+  stop_web_tunnels "$_ATTACH_TUNNEL_VM" "$_ATTACH_TUNNEL_BASE" || tunnel_stop_rc=$?
+  _host_session_log "$_ATTACH_TUNNEL_SHARE" tunnel_cleanup "${_ATTACH_TUNNEL_CONTROLLER:-unknown}" "$_ATTACH_TUNNEL_VM" "tunnel_base=$_ATTACH_TUNNEL_BASE stop_web_tunnels_rc=$tunnel_stop_rc"
   echo "[opencode-vm] Tunnels closed. Session paused — resume with: opencode-vm web"
   return 0
 }
@@ -17793,6 +17809,8 @@ attach_session() {
       # fires after attach_session's locals have gone out of scope.
       _ATTACH_TUNNEL_VM="$SESS_NAME"
       _ATTACH_TUNNEL_BASE="$effective_base"
+      _ATTACH_TUNNEL_SHARE="$(session_share_dir "$proj")"
+      _ATTACH_TUNNEL_CONTROLLER="$attach_controller"
       trap _attach_tunnel_cleanup EXIT HUP TERM
       probe_web_tunnel_async "$effective_base" "$host_lan_ip" "$sess_tls"
     else
@@ -18218,7 +18236,15 @@ attach_session() {
     ' "$proj" "$(session_share_dir "$proj")" "$sess_mode" "$effective_base" "$host_lan_ip" "${OC_WEB_TUI:-false}" "$sess_tls" "${SESSION_A2A:-${OCVM_A2A:-1}}" "${SESSION_REQUIRE_A2A:-0}" "$OCVM_A2A_DEFAULT_SECRET" "$lan_up" "$(proj_hash "$proj")" "$OCVM_VERSION" "$sess_mcp_enabled" "$sess_mcp_port" "$attach_controller" "$sess_editor_enabled" "$proj/.opencode-vm/taskboard/taskboard.db" "$sess_taskboard_enabled" "${SESSION_LAUNCHER_ENABLED:-1}" "$(project_state_dir "$proj")/taskboard/taskboard.db" "$(test -f "$(project_state_dir "$proj")/taskboard/taskboard.db" && printf 1 || printf 0)" "$sess_hub_enabled" "$hub_asset_dir" "$sess_journal_enabled" \
       "$attach_a2a_scope" \
       "$attach_ol_scope" || {
-    stop_mcp_host_watcher || true
+    # Capture the primary exit code BEFORE any cleanup can clobber it; it is
+    # used diagnostically only — exit/trap behavior is unchanged.
+    local attach_primary_rc=$?
+    _host_session_log "$(session_share_dir "$proj")" session_command_failed "$attach_controller" "${SESS_NAME:-unknown}" "primary_rc=$attach_primary_rc phase=vm_exec"
+    local attach_cleanup_rc=0
+    stop_mcp_host_watcher || attach_cleanup_rc=$?
+    if (( attach_cleanup_rc != 0 )); then
+      _host_session_log "$(session_share_dir "$proj")" cleanup_followup_failed "$attach_controller" "${SESS_NAME:-unknown}" "component=mcp_host_watcher rc=$attach_cleanup_rc primary_rc=$attach_primary_rc"
+    fi
     echo "[attach] Session command failed." >&2
     return 1
   }
@@ -20442,7 +20468,15 @@ EOF
       OC_SHELL_OK=1
     fi
   else
-    stop_mcp_host_watcher || true
+    # Capture the primary exit code BEFORE any cleanup can clobber it; it is
+    # used diagnostically only — exit/trap behavior is unchanged.
+    local run_primary_rc=$?
+    _host_session_log "$sess_share" session_command_failed "$controller_id" "$sess" "primary_rc=$run_primary_rc phase=vm_exec"
+    local run_cleanup_rc=0
+    stop_mcp_host_watcher || run_cleanup_rc=$?
+    if (( run_cleanup_rc != 0 )); then
+      _host_session_log "$sess_share" cleanup_followup_failed "$controller_id" "$sess" "component=mcp_host_watcher rc=$run_cleanup_rc primary_rc=$run_primary_rc"
+    fi
     echo "[run] Session command failed." >&2
     return 1
   fi
