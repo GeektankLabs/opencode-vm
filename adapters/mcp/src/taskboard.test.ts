@@ -299,6 +299,34 @@ test("journal uncertainty is reconciled from complete bytes; malformed history f
   } finally { board.restore(); await rm(directory, { recursive: true, force: true }); }
 });
 
+test("foreign-written journal files fail the private-file gate while valid journals stay readable", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ocvm-board-journal-foreign-"));
+  const board = fakeBoard([{ id: "backend-1", projectId: "backend-project", title: "Foreign writer", description: "",
+    status: "todo", priority: "medium" }]);
+  try {
+    const state = runtime(directory);
+    const service = new ProjectBoardService(state);
+    const id = (await service.listTasks())[0]!.task_id;
+    await service.addManagementNote(id, "committed entry");
+    const journalPath = join(directory, "management-journal", `${id}.jsonl`);
+    const originalJournal = await readFile(journalPath);
+
+    // A file that a shell-side writer (default umask 022) would leave behind:
+    // same task, deterministic path, but group/other permission bits set.
+    const { chmod } = await import("node:fs/promises");
+    await chmod(journalPath, 0o644);
+    await assert.rejects(service.getManagementHistory(id, { mode: "recent", limit: 10 }), { code: "TASK_MANAGEMENT_JOURNAL_ERROR" });
+    await assert.rejects(service.addManagementNote(id, "must not append onto a foreign file"), { code: "TASK_MANAGEMENT_JOURNAL_ERROR" });
+    assert.deepEqual(await readFile(journalPath), originalJournal, "the gate never rewrites or repairs the file itself");
+
+    // Restoring the private mode makes the unchanged, valid journal readable again.
+    await chmod(journalPath, 0o600);
+    const readable = await service.getManagementHistory(id, { mode: "recent", limit: 10 });
+    assert.deepEqual(readable.entries.map((entry) => entry.text), ["committed entry"]);
+    assert.equal(board.calls.some((call) => call.method === "PUT"), false);
+  } finally { board.restore(); await rm(directory, { recursive: true, force: true }); }
+});
+
 test("journal appends fail before creation when the cooperating-writer lock is unsafe", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ocvm-board-journal-lock-"));
   const board = fakeBoard([{ id: "backend-1", projectId: "backend-project", title: "Lock failure", description: "",
