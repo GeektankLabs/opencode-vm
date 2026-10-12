@@ -31,6 +31,24 @@ the former manual-session clause. Executable permissions remain unchanged.
   a normal follow-up to the same idle session.
 - Real independent security permissions remain separate pending operator input;
   the feature does not approve/reply to them or reinterpret them as business text.
+- `external_directory` (OpenCode's tool permission for paths outside the
+  workspace) is handled noninteractively since 0.7.36: adoption no longer copies
+  OpenCode's default interactive `external_directory "*": "ask"` or the generic
+  blanket `"*": "allow"` into the session rule set. Blanket-allow projects
+  therefore behave exactly as their configuration says for roots and native
+  children (the previous copy made children inherit the interactive ask while
+  dropping the parent's generic allow — the hidden-endless-wait incidents on
+  OpenCode 1.19.0). In restrictive projects an unauthorized external ask in a
+  managed session (root, new/reused child) is auto-rejected with corrective
+  feedback — mirroring `opencode run`'s noninteractive precedent — and the turn
+  ends with a stored terminal `INPUT_REQUIRED` permission blocker instead of
+  waiting forever on a UI approval. Explicit deny rules always win. An
+  operator-authorized directory scope can be declared per adoption
+  (`scope_dirs` on the plugin's `/adopt`; inherited by native children); it
+  installs narrow `external_directory <dir>/* allow` session rules unless an
+  explicit deny matches. Manual sessions keep the native interactive ask;
+  nothing approves or bypasses a real permission, and host/mount/remote-write
+  boundaries are untouched.
 
 ## Implementation and lifecycle
 

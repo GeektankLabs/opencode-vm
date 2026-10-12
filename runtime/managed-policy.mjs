@@ -1,17 +1,32 @@
 import { createServer } from "node:http";
 import { connect } from "node:net";
 import { mkdir, readFile, writeFile, rename, lstat, unlink, chmod } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, normalize as normalizePath, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { policyDelta, remoteWrite, tokens, handback, PRIMER, COMMIT_SENTENCE, LEGACY_VM_ASK, MANAGED_VM_ASK, protocol, questionInResponse, responseUsage, terminalResponse, REVISION } from "./managed-core.mjs";
+import { policyDelta, remoteWrite, tokens, handback, permissionBlocker, PRIMER, COMMIT_SENTENCE, LEGACY_VM_ASK, MANAGED_VM_ASK, protocol, questionInResponse, responseUsage, terminalResponse, matchesGlob, REVISION } from "./managed-core.mjs";
 
 const FETCH_STATE = Symbol.for("ocvm.managed.fetch.v1");
 const HEADER = "x-ocvm-managed-turn";
 const MAX_STEP_BYTES = 8 * 1024 * 1024;
 const SUPPORTED = /(?:openai|anthropic|azure|google|openrouter|xai|mistral|groq|deepinfra|cerebras|togetherai|perplexity|alibaba|venice|copilot|amazon-bedrock\/mantle)/;
 const exec = promisify(execFile);
+
+// Operator-authorized external directory scope, declared per session at
+// adoption. Bounded, absolute, normalized; never a blanket allow.
+function normalizeScopeDirs(dirs) {
+  if (!Array.isArray(dirs)) throw new Error("MANAGED_SCOPE_INVALID");
+  if (dirs.length > 16) throw new Error("MANAGED_SCOPE_LIMIT");
+  return dirs.map(dir => {
+    if (typeof dir !== "string" || dir.length > 512 || dir.includes("\0") || /[\r\n]/.test(dir)) throw new Error("MANAGED_SCOPE_INVALID");
+    if (!dir.startsWith("/")) throw new Error("MANAGED_SCOPE_INVALID");
+    const normalized = normalizePath(dir);
+    if (normalized === "/" || normalized.includes("..")) throw new Error("MANAGED_SCOPE_INVALID");
+    return normalized.replace(/\/+$/, "") || "/";
+  });
+}
+const authorizedFor = (entry, patterns) => (entry?.scopeDirs ?? []).some(dir => (patterns ?? []).every(pattern => matchesGlob(pattern, `${dir}/*`) || matchesGlob(pattern, dir)));
 
 // Gate one provider step before the SDK can dispatch a native Question. The
 // terminal stream is consumed/persisted/completed by the real OpenCode runner;
@@ -103,7 +118,7 @@ export default async ({ client, directory }) => {
     if ([...(questions ?? []), ...(permissions ?? [])].some(item => item.sessionID === id)) throw new Error("MANAGED_INPUT_PENDING");
     if (status?.[id]?.type && status[id].type !== "idle") throw new Error("MANAGED_SESSION_BUSY");
   };
-  const prepare = async (id, agentName, checkIdle = false) => {
+  const prepare = async (id, agentName, checkIdle = false, scopeDirs = []) => {
     const info = await getSession(id);
     if (checkIdle) await idle(id);
     const [agents, config] = await Promise.all([api("GET", "/agent"), api("GET", "/config")]);
@@ -111,8 +126,13 @@ export default async ({ client, directory }) => {
     if (!agent || agent.name === "openlive-manager") throw new Error("MANAGED_AGENT_INVALID");
     const current = info.permission ?? [];
     const previous = saved.sessions[id];
-    const entry = previous ? structuredClone(previous) : { revision: REVISION, adoptedAt: new Date().toISOString(), base: current, disabled: {}, lastNative: current };
+    const entry = previous ? structuredClone(previous) : { revision: REVISION, adoptedAt: new Date().toISOString(), base: current, disabled: {}, scopeDirs: [], lastNative: current };
     if (!Array.isArray(entry.base) || !Array.isArray(entry.lastNative)) throw new Error("MANAGED_STATE_REVISION_UNSUPPORTED");
+    if (previous && !Array.isArray(previous.scopeDirs)) throw new Error("MANAGED_STATE_REVISION_UNSUPPORTED");
+    // New native children inherit the managed parent's authorized external
+    // scope; reused children keep their own persisted scope.
+    if (!previous && info.parentID && saved.sessions[info.parentID]?.scopeDirs) entry.scopeDirs = [...saved.sessions[info.parentID].scopeDirs];
+    entry.scopeDirs = [...new Set([...(entry.scopeDirs ?? []), ...normalizeScopeDirs(scopeDirs)])].slice(0, 16);
     const prefix = entry.lastNative.every((r, i) => current[i]?.permission === r.permission && current[i]?.pattern === r.pattern && current[i]?.action === r.action);
     if (!prefix) throw new Error("MANAGED_POLICY_REPLACED_EXTERNALLY");
     // Actual external PATCH appends are preserved separately from our owned
@@ -120,11 +140,11 @@ export default async ({ client, directory }) => {
     // as new task restrictions and never accumulates on an unchanged readback.
     entry.base = [...entry.base, ...current.slice(entry.lastNative.length)];
     const scope = [...entry.base, ...Object.entries(entry.disabled).filter(([, value]) => value).map(([permission]) => ({ permission, pattern: "*", action: "deny" }))];
-    const delta = policyDelta(current, agent.permission ?? [], scope);
+    const delta = policyDelta(current, agent.permission ?? [], scope, entry.scopeDirs);
     if (delta.length) {
       await api("PATCH", `/session/${id}`, { permission: delta });
       const verified = await getSession(id);
-      if (policyDelta(verified.permission ?? [], agent.permission ?? [], scope).length) throw new Error("MANAGED_POLICY_READBACK_FAILED");
+      if (policyDelta(verified.permission ?? [], agent.permission ?? [], scope, entry.scopeDirs).length) throw new Error("MANAGED_POLICY_READBACK_FAILED");
       entry.lastNative = verified.permission ?? [];
     }
     if (!saved.sessions[id] || delta.length) {
@@ -195,14 +215,54 @@ export default async ({ client, directory }) => {
       for await (const chunk of req) { body += chunk; if (body.length > 4096) throw new Error("MANAGED_REQUEST_LIMIT"); }
       const input = JSON.parse(body);
       if (!["mcp", "openlive", "a2a"].includes(input.ingress)) throw new Error("MANAGED_INGRESS_INVALID");
-      const result = await serial(() => prepare(input.session_id, undefined, true));
+      const scopeDirs = input.scope_dirs === undefined ? [] : normalizeScopeDirs(input.scope_dirs);
+      const result = await serial(() => prepare(input.session_id, undefined, true, scopeDirs));
       res.setHeader("content-type", "application/json"); res.end(JSON.stringify(result));
     } catch (error) { res.statusCode = 409; res.end(JSON.stringify({ error: String(error.message).slice(0, 200) })); }
   });
   await new Promise((yes, no) => { server.once("error", no); server.listen(socket, yes); });
   await chmod(socket, 0o600);
+  // Native permission asks (e.g. external_directory) have no plugin hook and
+  // would wait forever on an interactive reply. Mirror `opencode run`'s
+  // noninteractive precedent (auto-reject via the reply API), add corrective
+  // feedback, and terminate the affected managed turn through the completion
+  // gate so the blocker is a stored terminal report — never a hidden UI wait.
+  // Manual sessions and non-external permissions stay interactive/unchanged.
+  const asked = new AbortController();
+  const watchAsks = (async () => {
+    for (;;) {
+      try {
+        const subscription = await client.event.subscribe({ directory }, { signal: asked.signal });
+        for await (const event of subscription.stream) {
+          if (event?.type !== "permission.asked") continue;
+          const info = event.properties?.info ?? event.properties;
+          if (info?.permission !== "external_directory" || typeof info.sessionID !== "string" || typeof info.id !== "string") continue;
+          let managed = true;
+          try { managed = await isManaged(info.sessionID); }
+          catch { managed = false; }
+          if (!managed || authorizedFor(saved.sessions[info.sessionID], info.patterns)) continue;
+          const patterns = Array.isArray(info.patterns) && info.patterns.length ? info.patterns : (info.metadata?.parentDir ? [`${info.metadata.parentDir}/*`] : []);
+          const report = permissionBlocker({ ...info, patterns });
+          // Arm the completion gate BEFORE replying: resolving the pending
+          // Deferred immediately unblocks the runner into its next provider
+          // step, which must already see the terminal report.
+          for (const key of turnKeys) {
+            const turn = fetchState.turns.get(key);
+            if (turn?.sessionID === info.sessionID) turn.report ??= report;
+          }
+          try {
+            await api("POST", `/permission/${encodeURIComponent(info.id)}/reply`, { reply: "reject", message: "External directory access is not authorized for this managed session; end the turn with a readable blocker." });
+          } catch { /* already answered or gone: the terminal report above still ends the turn */ }
+        }
+      } catch (error) {
+        if (asked.signal.aborted) return;
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
+  })();
   return {
     dispose: async () => {
+      asked.abort();
       for (const key of turnKeys) fetchState.turns.delete(key);
       await new Promise(res => server.close(res));
       await unlink(socket).catch(() => {});

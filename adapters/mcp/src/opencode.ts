@@ -53,6 +53,7 @@ import type {
   CreateSessionResult,
   ListSessionsResult,
   PendingInput,
+  PendingCoverage,
   ProjectIdentity,
   RuntimeDescriptor,
   SendMessageResult,
@@ -111,6 +112,8 @@ type ResultCursor = {
 type PendingDetails = PendingInput & {
   permissionsList: PermissionV2Request[];
   questionsList: QuestionV2Request[];
+  coverage?: "session" | "session+descendants" | "unknown";
+  descendantPermissions?: { session_id: string; permission: string }[];
 };
 
 type SessionCursor = {
@@ -1188,7 +1191,7 @@ export class OpenCodeGateway implements SessionGateway {
       session_id: value.id, title: value.title.slice(0, 240), parent_session_id: value.parentID ?? null,
       kind: value.parentID ? "child" : value.agent === OPENLIVE_MANAGER_AGENT || value.id === await this.managerSessionId() ? "manager" : "root",
       archived: Boolean(value.time.archived), backend_activity: activity,
-      pending_input: { ...pendingCounts(pending), scope: "session" },
+      pending_input: { ...pendingCounts(pending), scope: pending.coverage ?? "session" },
       observed_at: new Date().toISOString(), last_activity_at: value.time.updated,
       current_runtime: value.model ? { provider_id: value.model.providerID, model_id: value.model.id,
         variant: value.model.variant ?? null, source: "session_setting" } : null,
@@ -1335,7 +1338,7 @@ export class OpenCodeGateway implements SessionGateway {
       source: "backend_snapshot",
       backend_activity: activity,
       pending_input: pendingCounts(pending),
-      pending_input_scope: "session",
+      pending_input_scope: pending.coverage ?? "session",
       in_flight_tools: inFlight.slice(0, 10),
       ...(lastFinished ? { last_finished_tool: lastFinished } : {}),
       ...(lastActivity !== undefined ? { last_activity_at: lastActivity } : {}),
@@ -1371,7 +1374,7 @@ export class OpenCodeGateway implements SessionGateway {
       return {
         ...base,
         admission: this.admissionState(sessionId),
-        pending_input_scope: "session",
+        pending_input_scope: pending.coverage ?? "session",
         active_assistant_message_ids: [],
         observed_at: new Date().toISOString(),
         source: "backend",
@@ -1404,7 +1407,7 @@ export class OpenCodeGateway implements SessionGateway {
       ...result,
       admission: this.admissionState(sessionId),
       ...(receiptResolution ? { receipt_resolution: receiptResolution } : {}),
-      pending_input_scope: "session",
+      pending_input_scope: pending.coverage ?? "session",
       observed_at: new Date().toISOString(),
       source: "backend",
       ...(result.state === "unknown"
@@ -2396,12 +2399,12 @@ export class OpenCodeGateway implements SessionGateway {
    * paths combines both permission surfaces. Existing v2-only reads stay
    * untouched.
    */
-  async getCombinedPendingInput(sessionId: string): Promise<PendingInput> {
+  async getCombinedPendingInput(sessionId: string): Promise<PendingInput & Partial<PendingCoverage>> {
     await this.requireExposedSession(sessionId);
     return this.combinedPending(sessionId);
   }
 
-  private async combinedPending(sessionId: string): Promise<PendingInput> {
+  private async combinedPending(sessionId: string): Promise<PendingInput & Partial<PendingCoverage>> {
     const [pending, v1Permissions] = await Promise.all([
       this.pending(sessionId),
       this.pendingV1PermissionCount(sessionId),
@@ -2409,6 +2412,8 @@ export class OpenCodeGateway implements SessionGateway {
     return {
       permissions: pending.permissions + v1Permissions,
       questions: pending.questions,
+      ...(pending.coverage ? { coverage: pending.coverage } : {}),
+      ...(pending.descendantPermissions?.length ? { descendant_permissions: pending.descendantPermissions } : {}),
     };
   }
 
@@ -2867,11 +2872,65 @@ export class OpenCodeGateway implements SessionGateway {
     if (!Array.isArray(permissionsList) || !Array.isArray(questionsList)) {
       throw incompatible("OpenCode returned unsupported pending-input data.");
     }
+    // Additive descendant coverage: native child sessions (task subagents)
+    // are not exposed through the session API, but their pending permission
+    // asks block the parent's running tool call. A root must never report a
+    // clean zero while a managed child waits on an interactive approval.
+    let coverage: PendingDetails["coverage"] = "session";
+    let descendantPermissions: PendingDetails["descendantPermissions"] = [];
+    try {
+      const v1 = await this.backendCall(
+        () =>
+          this.client.permission.list(
+            { directory: this.runtime.project },
+            { signal: this.deadline() },
+          ),
+        "Could not read pending OpenCode permissions.",
+      );
+      const foreign = (Array.isArray(v1.data) ? v1.data : []).filter(
+        (entry) =>
+          isRecord(entry) && typeof entry.sessionID === "string" && entry.sessionID !== sessionId,
+      );
+      if (foreign.length === 0) {
+        coverage = "session+descendants";
+      } else {
+        const inventory = await this.readDashboardInventory();
+        if (!inventory.complete) {
+          coverage = "unknown";
+        } else {
+          const parents = new Map(inventory.sessions.map((item) => [item.id, item.parentID ?? null]));
+          const isDescendant = (id: string): boolean => {
+            const seen = new Set<string>();
+            let current: string | null | undefined = id;
+            while (current && !seen.has(current)) {
+              seen.add(current);
+              const parent = parents.get(current);
+              if (parent === undefined) return false;
+              if (parent === sessionId) return true;
+              current = parent;
+            }
+            return false;
+          };
+          descendantPermissions = foreign
+            .filter((entry) => isDescendant(entry.sessionID as string))
+            .map((entry) => ({
+              session_id: String(entry.sessionID),
+              permission: String((entry as { permission?: unknown }).permission ?? "unknown"),
+            }))
+            .slice(0, 20);
+          coverage = "session+descendants";
+        }
+      }
+    } catch {
+      coverage = "unknown";
+    }
     return {
-      permissions: permissionsList.length,
+      permissions: permissionsList.length + descendantPermissions.length,
       questions: questionsList.length,
       permissionsList,
       questionsList,
+      coverage,
+      ...(descendantPermissions.length ? { descendantPermissions } : {}),
     };
   }
 
@@ -3486,8 +3545,13 @@ function relationField(text: string, key: string): string | undefined {
   return match?.[1] ? sanitizeSummary(match[1]).slice(0, 160).trim() : undefined;
 }
 
-function pendingCounts(pending: PendingDetails): PendingInput {
-  return { permissions: pending.permissions, questions: pending.questions };
+function pendingCounts(pending: PendingDetails): PendingInput & Partial<PendingCoverage> {
+  return {
+    permissions: pending.permissions,
+    questions: pending.questions,
+    ...(pending.coverage ? { coverage: pending.coverage } : {}),
+    ...(pending.descendantPermissions?.length ? { descendant_permissions: pending.descendantPermissions } : {}),
+  };
 }
 
 function isActivity(value: unknown): value is SessionActivity {

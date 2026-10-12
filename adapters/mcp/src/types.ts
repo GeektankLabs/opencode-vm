@@ -1,7 +1,7 @@
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { dirname, isAbsolute } from "node:path";
 
-export const ADAPTER_VERSION = "0.1.44";
+export const ADAPTER_VERSION = "0.1.45";
 export const MCP_TRANSPORT = "streamable-http-stateless";
 
 export type RuntimeDescriptor = {
@@ -49,6 +49,15 @@ export type ProjectIdentity = {
 export type PendingInput = {
   permissions: number;
   questions: number;
+};
+
+/** Additive pending-input coverage over the session's descendant line.
+ * "session+descendants" means pending permissions of native child sessions
+ * are included in the counts; "unknown" means descendant coverage could not
+ * be verified and the counts must not be read as "no pending input". */
+export type PendingCoverage = {
+  coverage: "session" | "session+descendants" | "unknown";
+  descendant_permissions?: { session_id: string; permission: string }[];
 };
 
 export type SessionActivity = "idle" | "busy" | "retry";
@@ -140,7 +149,7 @@ export type SessionStatusResult = {
   pending_input: PendingInput;
   assistant_message_ids: string[];
   active_assistant_message_ids?: string[];
-  pending_input_scope?: "session";
+  pending_input_scope?: "session" | "session+descendants" | "unknown";
   admission?: AdmissionState;
   receipt_resolution?: ReceiptResolution;
   observed_at?: string;
@@ -171,7 +180,7 @@ export type SessionProgressResult = {
   source: "backend_snapshot";
   backend_activity: SessionActivity;
   pending_input: PendingInput;
-  pending_input_scope: "session";
+  pending_input_scope: "session" | "session+descendants" | "unknown";
   in_flight_tools: ToolObservation[];
   last_finished_tool?: ToolObservation;
   last_activity_at?: number;

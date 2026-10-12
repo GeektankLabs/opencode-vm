@@ -2096,6 +2096,9 @@ export class MonitorEngine {
       if (!pending || typeof pending.permissions !== "number" || typeof pending.questions !== "number") return null;
       if (!Number.isFinite(pending.permissions) || !Number.isFinite(pending.questions)) return null;
       if (pending.permissions < 0 || pending.questions < 0) return null;
+      // Descendant coverage that could not be verified must never be read as
+      // a clean zero: surface it through the existing fail-closed hold branch.
+      if ((pending as { coverage?: unknown }).coverage === "unknown") return null;
       return pending;
     } catch {
       return null;

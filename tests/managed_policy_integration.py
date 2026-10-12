@@ -135,8 +135,114 @@ def check(binary=None, sdk="@ai-sdk/openai-compatible"):
         wait(background_finished)
         assert not fixture.api("GET", "/question")
         print("PASS enabled native background child/continuation", flush=True)
+        # external_directory noninteractive regression (1.19.0 incidents
+        # Task88/E2E50). Under the incident configuration (project blanket
+        # "*" allow) the adoption must not leak the OpenCode default
+        # external ask into child sessions: the child's own agent rules decide.
+        dispatch = fixture.root / "bi-dispatch"
+        dispatch.mkdir(exist_ok=True)
+        (dispatch / "needle.txt").write_text("bi-dispatch needle\n")
+        archive = fixture.root / "bi-archive"
+        archive.mkdir(exist_ok=True)
+        (archive / "needle.txt").write_text("bi-archive needle\n")
+        (archive / "needle_test.py").write_text("def test_needle():\n    assert True\n")
+
+        def child_report(parent, case):
+            for info in fixture.api("GET", f"/session/{parent}/children"):
+                messages = fixture.api("GET", f"/session/{info['id']}/message")
+                if any(case in str(m["parts"]) for m in messages):
+                    terminal = [m for m in messages if m["info"].get("finish") == "stop"]
+                    assert terminal, "external ask must end the child turn terminally"
+                    return "\n".join(str(m["parts"]) for m in terminal)
+            return None
+
+        # F0: blanket-allow project (incident shape) — no ask at all anymore.
+        fixture.scripts["child-ext"] = [("bash", {"command": "grep -rn needle ../bi-dispatch ../bi-archive", "description": "External grep under project allow"}), "External child work complete"]
+        fixture.finish(fixture.prompt(managed, "ext-parent", [("task", {"description": "External directory regression", "subagent_type": "fixture-child", "prompt": "CASE:child-ext"}), "Parent continued"]), managed)
+        assert not fixture.pending_permissions()
+        print("PASS no inherited external ask under project blanket allow (F0, incident shape)", flush=True)
     finally:
         fixture.close()
+    # Restrictive-project phase: own disposable fixture outside the OpenCode
+    # tmp whitelist, without the project blanket "*" allow — an unauthorized
+    # external ask must end as a stored terminal blocker in that turn, never a
+    # hidden UI wait; operator-authorized scope runs without any ask; explicit
+    # denies keep winning; manual sessions stay interactive.
+    ext = Runtime(prefix="/tmp/opencode-ext")
+    try:
+        del ext.cfg["permission"]["*"]
+        ext.start()
+
+        def child_report(parent, case):
+            for info in ext.api("GET", f"/session/{parent}/children"):
+                messages = ext.api("GET", f"/session/{info['id']}/message")
+                if any(case in str(m["parts"]) for m in messages):
+                    terminal = [m for m in messages if m["info"].get("finish") == "stop"]
+                    assert terminal, "external ask must end the child turn terminally"
+                    return "\n".join(str(m["parts"]) for m in terminal)
+            return None
+
+        dispatch = ext.root / "bi-dispatch"
+        dispatch.mkdir()
+        (dispatch / "needle.txt").write_text("bi-dispatch needle\n")
+        archive = ext.root / "bi-archive"
+        archive.mkdir()
+        (archive / "needle.txt").write_text("bi-archive needle\n")
+        (archive / "needle_test.py").write_text("def test_needle():\n    assert True\n")
+        restricted_root = ext.session()
+        ext.adopt(restricted_root)
+        # Repro A (Task88): managed child greps sibling directories via the
+        # native grep tool (the actual incident path; bash grep is not in
+        # OpenCode's FILES set and does not trigger the directory ask).
+        ext.scripts["child-block"] = [("grep", {"pattern": "needle", "path": "../bi-dispatch"}), "child continuation"]
+        ext.finish(ext.prompt(restricted_root, "ext-parent", [("task", {"description": "External directory regression", "subagent_type": "fixture-child", "prompt": "CASE:child-block"}), "Parent continued after blocked child"]), restricted_root)
+        blocked = wait(lambda: child_report(restricted_root, "CASE:child-block"))
+        assert "INPUT_REQUIRED:" in blocked and "bi-dispatch" in blocked and "not approved automatically" in blocked, blocked
+        assert not any(item["permission"] == "external_directory" for item in ext.pending_permissions()), "rejected ask must not stay pending"
+        print("PASS repro A unauthorized child external grep ends terminal (Task88)", flush=True)
+        # Repro B (E2E50): task-owned stash/external pytest/stash-pop flow.
+        ext.scripts["child-stash"] = [("bash", {"command": "git stash -u >/dev/null; cd ../bi-archive && python3 -m pytest -q needle_test.py; cd - >/dev/null; git stash pop", "description": "Task stash and external pytest"}), "child stash continuation"]
+        ext.finish(ext.prompt(restricted_root, "stash-parent", [("task", {"description": "External stash regression", "subagent_type": "fixture-child", "prompt": "CASE:child-stash"}), "Parent continued after blocked stash child"]), restricted_root)
+        blocked = wait(lambda: child_report(restricted_root, "CASE:child-stash"))
+        assert "INPUT_REQUIRED:" in blocked and "bi-archive" in blocked, blocked
+        assert not any(item["permission"] == "external_directory" for item in ext.pending_permissions())
+        print("PASS repro B stash/external pytest/pop ends terminal (E2E50)", flush=True)
+        # Operator-authorized scope: same flows run without any ask, including
+        # fresh and reused children; active authorized children finish normally.
+        scoped = ext.session()
+        ext.adopt(scoped, scope_dirs=[str(ext.root)])
+        ext.scripts["child-scope"] = [("grep", {"pattern": "needle", "path": "../bi-dispatch"}), "Authorized child work complete"]
+        ext.finish(ext.prompt(scoped, "scope-parent", [("task", {"description": "Authorized external scope", "subagent_type": "fixture-child", "prompt": "CASE:child-scope"}), "Authorized child returned"]), scoped)
+        assert not ext.pending_permissions()
+        reused_child = None
+        for info in ext.api("GET", f"/session/{scoped}/children"):
+            if any("CASE:child-scope" in str(m["parts"]) for m in ext.api("GET", f"/session/{info['id']}/message")):
+                reused_child = info["id"]
+        assert reused_child, "authorized child must exist"
+        ext.scripts["child-scope-reuse"] = [("grep", {"pattern": "needle", "path": "../bi-archive"}), "Reused authorized child complete"]
+        ext.finish(ext.prompt(scoped, "scope-reuse", [("task", {"description": "Authorized reuse", "subagent_type": "fixture-child", "prompt": "CASE:child-scope-reuse", "task_id": reused_child}), "Reused child returned"]), scoped)
+        assert not ext.pending_permissions()
+        print("PASS authorized scope without ask for fresh and reused children", flush=True)
+        # Explicit agent deny still wins: denied tool error, no ask, no blocker.
+        ext.cfg["agent"]["fixture-denied-child"] = {"description": "External-denied child", "mode": "subagent", "permission": {"question": "allow", "external_directory": {f"{ext.root}/bi-*": "deny"}}}
+        ext.start()
+        scoped = ext.session()
+        ext.adopt(scoped, scope_dirs=[str(ext.root)])
+        ext.scripts["child-deny"] = [("grep", {"pattern": "needle", "path": "../bi-archive"}), "Denied child complete"]
+        ext.finish(ext.prompt(scoped, "deny-parent", [("task", {"description": "External deny regression", "subagent_type": "fixture-denied-child", "prompt": "CASE:child-deny"}), "Denied child returned"]), scoped)
+        assert not ext.pending_permissions()
+        denied = wait(lambda: child_report(scoped, "CASE:child-deny"))
+        assert "INPUT_REQUIRED" not in denied and "not approved automatically" not in denied, "explicit deny must not be converted into a permission blocker report"
+        print("PASS explicit external deny wins over authorized scope", flush=True)
+        # Manual sessions keep the native interactive ask; nothing is answered.
+        manual_ext = ext.session()
+        future = ext.prompt(manual_ext, "manual-ext", [("grep", {"pattern": "needle", "path": "../bi-archive"}), "manual continuation"])
+        pending = wait(lambda: [item for item in ext.pending_permissions() if item["sessionID"] == manual_ext and item["permission"] == "external_directory"])
+        ext.reject_permission(pending[0]["id"])
+        future.result(timeout=15)
+        print("PASS manual session external ask stays interactive", flush=True)
+    finally:
+        ext.close()
 
 
 if __name__ == "__main__":

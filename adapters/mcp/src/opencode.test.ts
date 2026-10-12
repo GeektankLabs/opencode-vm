@@ -125,6 +125,9 @@ function fakeClient(state: FakeState) {
       async current() {
         return { data: { id: "project-id", worktree: project } };
       },
+      async directories() {
+        return { data: [] };
+      },
     },
     permission: {
       async list() {
@@ -520,7 +523,7 @@ test("Delivery B: progress exposes only observed tool metadata and exact task co
   assert.equal(progress.last_finished_tool?.finished_at, 25);
   assert.equal(progress.last_activity_at, 30);
   assert.equal(progress.pending_input.questions, 1);
-  assert.equal(progress.pending_input_scope, "session");
+  assert.equal(progress.pending_input_scope, "session+descendants");
   assert.equal(progress.idle_with_in_flight_tools, false);
   assert.equal(progress.coverage.metadata_incomplete, false);
   assert.doesNotMatch(
@@ -1476,7 +1479,7 @@ test("a visible user receipt alone does not become running or input_required fro
   const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
   const result = await gateway.getSessionStatus("ses_work", "user");
   assert.equal(result.state, "submitted");
-  assert.equal(result.pending_input_scope, "session");
+  assert.equal(result.pending_input_scope, "session+descendants");
   assert.equal(result.pending_input.questions, 1);
   assert.deepEqual(result.active_assistant_message_ids, []);
 });
@@ -2459,6 +2462,7 @@ test("E-I: activity correlates parallel receipts, pending input and restart with
     "unattributed session input must not claim a task binding",
   );
   assert.deepEqual(blocked.events[0]?.pending_input, {
+    coverage: "session+descendants",
     permissions: 1,
     questions: 0,
   });
@@ -2477,6 +2481,7 @@ test("E-I: activity correlates parallel receipts, pending input and restart with
   });
   assert.equal(question.events.length, 1);
   assert.deepEqual(question.events[0]?.pending_input, {
+    coverage: "session+descendants",
     permissions: 0,
     questions: 1,
   });
@@ -2858,11 +2863,11 @@ test("correlated status requires terminal assistant evidence", async () => {
     message_id: "msg_user",
     backend_activity: "idle",
     state: "completed",
-    pending_input: { permissions: 0, questions: 0 },
+    pending_input: { permissions: 0, questions: 0, coverage: "session+descendants" },
     assistant_message_ids: ["msg_assistant"],
     active_assistant_message_ids: [],
     admission: { write_in_progress: false },
-    pending_input_scope: "session",
+    pending_input_scope: "session+descendants",
     observed_at: observed.observed_at,
     source: "backend",
   });
@@ -3545,7 +3550,7 @@ test("W1: abort on an idle session is a non-destructive no_active_turn without a
   assert.equal(result.state, "no_active_turn");
   assert.equal(result.aborted_message_id, undefined);
   assert.equal(result.activity_after, "idle");
-  assert.deepEqual(result.pending_input_after, { permissions: 0, questions: 0 });
+  assert.deepEqual(result.pending_input_after, { permissions: 0, questions: 0, coverage: "session+descendants" });
   assert.match(result.guidance ?? "", /non-destructive/u);
   assert.equal(state.abortCalls.length, 0);
 });
@@ -3567,7 +3572,7 @@ test("W1: abort is allowed while a v1 permission is pending and reports it clear
   t.after(() => gateway.close());
   const result = await gateway.abortSessionTurn("ses_work");
   assert.equal(result.state, "aborted");
-  assert.deepEqual(result.pending_input_after, { permissions: 0, questions: 0 });
+  assert.deepEqual(result.pending_input_after, { permissions: 0, questions: 0, coverage: "session+descendants" });
 });
 
 test("W1: abort racing a self-completing turn stays abort_uncertain", async (t) => {
@@ -3650,4 +3655,40 @@ test("W1: send_message keeps its exact SESSION_BUSY semantics on a busy session"
     reason: "backend_active",
   });
   assert.equal(state.promptCalls.length, 0);
+});
+
+test("descendant pending permissions are counted and attributed in root pending input", async () => {
+  const state = baseState();
+  state.sessions.push(
+    session("ses_child", { parentID: "ses_work" }),
+    session("ses_other_root"),
+  );
+  state.statuses.ses_child = { type: "busy" };
+  state.v1Permissions = [
+    { id: "per_child", sessionID: "ses_child", permission: "external_directory" },
+    { id: "per_other", sessionID: "ses_other_root", permission: "external_directory" },
+  ];
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  const pending = await gateway.getCombinedPendingInput("ses_work");
+  assert.equal(pending.permissions, 1);
+  assert.equal(pending.coverage, "session+descendants");
+  assert.deepEqual(pending.descendant_permissions, [
+    { session_id: "ses_child", permission: "external_directory" },
+  ]);
+  const status = await gateway.getSessionStatus("ses_work");
+  assert.equal(status.pending_input.permissions, 1);
+  assert.equal(status.pending_input_scope, "session+descendants");
+});
+
+test("unverifiable descendant coverage is reported as unknown, never as a clean zero verdict", async () => {
+  const state = baseState();
+  state.v1Permissions = [
+    { id: "per_child", sessionID: "ses_child", permission: "external_directory" },
+  ];
+  const client = fakeClient(state) as { project: Record<string, unknown> };
+  delete client.project.directories;
+  const gateway = new OpenCodeGateway(runtime(), client as never);
+  const pending = await gateway.getCombinedPendingInput("ses_work");
+  assert.equal(pending.coverage, "unknown");
+  assert.equal(pending.descendant_permissions, undefined);
 });

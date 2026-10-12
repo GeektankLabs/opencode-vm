@@ -34,10 +34,11 @@ def wait(callback, seconds=30):
 
 
 class Runtime:
-    def __init__(self, binary=None, sdk="@ai-sdk/openai-compatible"):
+    def __init__(self, binary=None, sdk="@ai-sdk/openai-compatible", prefix="/tmp/opencode"):
         self.binary = binary or shutil.which("opencode")
         self.git = shutil.which("git")
-        self.root = Path(tempfile.mkdtemp(prefix="ocvm-managed-", dir="/tmp/opencode"))
+        Path(prefix).mkdir(parents=True, exist_ok=True)
+        self.root = Path(tempfile.mkdtemp(prefix="ocvm-managed-", dir=prefix))
         self.project = self.root / "project"
         self.project.mkdir()
         self.config = self.root / "config" / "opencode"
@@ -152,16 +153,25 @@ os.execv({self.git!r}, [{self.git!r}] + sys.argv[1:])
             value = response.read()
             return json.loads(value) if value else None
 
-    def adopt(self, sid, ingress="mcp"):
+    def adopt(self, sid, ingress="mcp", scope_dirs=None):
         connection = http.client.HTTPConnection("localhost", timeout=10)
         connection.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         connection.sock.connect(self.socket)
-        connection.request("POST", "/adopt", json.dumps({"session_id": sid, "ingress": ingress}), {"Content-Type": "application/json"})
+        payload = {"session_id": sid, "ingress": ingress}
+        if scope_dirs is not None:
+            payload["scope_dirs"] = scope_dirs
+        connection.request("POST", "/adopt", json.dumps(payload), {"Content-Type": "application/json"})
         response = connection.getresponse()
         data = json.loads(response.read())
         connection.close()
         assert response.status == 200, data
         return data
+
+    def pending_permissions(self):
+        return self.api("GET", "/permission")
+
+    def reject_permission(self, request_id):
+        self.api("POST", f"/permission/{request_id}/reply", {"reply": "reject"})
 
     def session(self, **changes):
         return self.api("POST", "/session", {"title": "Managed regression", **changes})["id"]

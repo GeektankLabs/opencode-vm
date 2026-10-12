@@ -10,15 +10,50 @@ export const MANAGED_VM_ASK = "This is backend agent-managed work: document safe
 
 const same = (a, b) => a.permission === b.permission && a.pattern === b.pattern && a.action === b.action;
 const remoteRules = ["git push", "git push *", "git send-pack *", "git http-push *", "git receive-pack *", "git lfs push *", "git lfs upload *"].map(pattern => ({ permission: "bash", pattern, action: "deny" }));
+
+// Mirrors OpenCode's Wildcard.match (packages/opencode/src/util/wildcard.ts):
+// backslashes become "/", "*" any span, "?" one char, a trailing " *" may be
+// absent; the match is anchored. Used only to reason about rule precedence.
+export function matchesGlob(str, pattern) {
+  const value = String(str ?? "").replaceAll("\\", "/");
+  let escaped = String(pattern ?? "").replaceAll("\\", "/")
+    .replace(/[.+^${}()|[\]]/g, "\\$&")
+    .replace(/\*/g, ".*")
+    .replace(/\?/g, ".");
+  if (escaped.endsWith(" .*")) escaped = escaped.slice(0, -3) + "( .*)?";
+  return new RegExp(`^${escaped}$`, "s").test(value);
+}
+
+// OpenCode's built-in agent defaults carry a generic "*": "allow" and an
+// interactive external_directory "*": "ask". Copying agent rules into session
+// rules would (a) propagate that ask into deriveSubagentSessionPermission,
+// where the child keeps the inherited ask but drops the parent's generic allow
+// (1.19.0 agent/subagent-permissions.ts), and (b) turn the copied generic
+// allow into a LATER session-level rule that silently overrides the agent's
+// own remaining asks (external, doom_loop, .env reads). Dropping exactly the
+// generic blanket allow and the default external ask from the COPY keeps the
+// agent rules themselves, explicit user rules and all denies intact.
+const copyableAgentRules = rules => rules.filter(rule => !((rule.permission === "*" && rule.pattern === "*" && rule.action === "allow") || (rule.permission === "external_directory" && rule.action === "ask" && rule.pattern === "*")));
+
+// Explicit denies (external_directory or "*", matching the directory itself or
+// its allow pattern) always win over an authorized scope allow.
+export function scopeAllowRules(agentRules = [], scope = [], dirs = []) {
+  const denies = [...agentRules, ...scope].filter(rule => rule.action === "deny");
+  return dirs
+    .filter(dir => !denies.some(rule => matchesGlob("external_directory", rule.permission) && (matchesGlob(dir, rule.pattern) || matchesGlob(`${dir}/*`, rule.pattern))))
+    .map(dir => ({ permission: "external_directory", pattern: `${dir}/*`, action: "allow" }));
+}
+
 export function restrictions(rules) {
   const independent = rules.filter(r => r.permission !== "question" && !remoteRules.some(remote => same(r, remote)));
   const denied = new Set(independent.filter(r => r.action === "deny").map(r => r.permission));
   return independent.filter(r => r.action === "deny" || r.permission !== "*" && (denied.has(r.permission) || denied.has("*")));
 }
-export function policyDelta(current, agentRules = [], scope = []) {
+export function policyDelta(current, agentRules = [], scope = [], scopeDirs = []) {
   const desired = [
-    ...agentRules,
+    ...copyableAgentRules(agentRules),
     ...scope,
+    ...scopeAllowRules(agentRules, scope, scopeDirs),
     { permission: "bash", pattern: "git *", action: "allow" },
     { permission: "bash", pattern: "/usr/bin/git *", action: "allow" },
     { permission: "bash", pattern: "/bin/git *", action: "allow" },
@@ -105,6 +140,16 @@ export function handback(questions) {
   const decisions = items.map(q => text(q.question)).filter(Boolean);
   const options = items.flatMap(q => Array.isArray(q.options) ? q.options.slice(0, 8).map(o => `${text(o.label)}: ${text(o.description)}`) : []);
   return `INPUT_REQUIRED:\n- decision: ${decisions.join("; ") || "A business decision is required; inspect the attempted question in this turn."}\n- context: The agent requested information needed to continue this work. Native end-user dialogs are disabled for agent-managed sessions.\n- safe_options: ${options.join("; ") || "Supply the missing decision, or keep the dependent work paused."}\n- completed: Work already stored in this session remains available for review.\n- paused: Decision-dependent work; reply through the orchestrator as a normal follow-up in this same session.`;
+}
+
+// Terminal report for an unauthorized external_directory permission ask in a
+// managed session. The pending ask is rejected with corrective feedback and
+// the next provider step of the turn is replaced by this report, so the turn
+// ends stored/terminal instead of waiting forever on a UI approval.
+export function permissionBlocker(info) {
+  const text = value => String(value ?? "").replace(/\r/g, "").slice(0, 500);
+  const patterns = (Array.isArray(info?.patterns) ? info.patterns : []).slice(0, 4).map(text).join("; ");
+  return `INPUT_REQUIRED:\n- decision: External directory access is not authorized for this managed session and was not approved automatically. Requested scope: ${patterns || "unknown"}.\n- context: A tool needed paths outside the workspace directory; interactive permission dialogs cannot be answered in agent-managed noninteractive work, so the request was rejected and this turn ends with a readable blocker instead of waiting for approval.\n- safe_options: Have the orchestrator authorize the exact directory scope for this session and send a normal follow-up in this same session; or continue with in-scope paths only.\n- completed: Work already stored in this session remains available for review; nothing was approved or bypassed.\n- paused: All work depending on the unauthorized external paths.`;
 }
 
 export function protocol(body, url, family = "") {

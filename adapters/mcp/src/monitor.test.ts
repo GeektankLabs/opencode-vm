@@ -94,7 +94,7 @@ type FakeState = {
   history: Array<{ id: string; role: string; text: string }>;
   runtime: { provider_id: string; model_id: string; variant?: string };
   dropVariant: boolean;
-  combinedPending: { permissions: number; questions: number } | null;
+  combinedPending: { permissions: number; questions: number; coverage?: "session" | "session+descendants" | "unknown" } | null;
   combinedQueue: Array<{ permissions: number; questions: number } | null>;
   combinedThrows: boolean;
   abortPendingAfter: { permissions: number; questions: number } | null;
@@ -698,6 +698,29 @@ test("engine: operator abort request performs a verified native abort without a 
     assert.equal(snapshot.registry.monitors[0]!.abort_request, null);
     assert.ok(snapshot.registry.monitors[0]!.history.some((entry) => entry.type === "run-aborted"));
     assert.equal(snapshot.registry.monitors[0]!.scheduler.enabled, true);
+  } finally {
+    await cleanup();
+  }
+});
+test("engine: unverifiable descendant pending coverage holds instead of a clean zero", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    state.status = okStatus({ pending_input: { permissions: 0, questions: 0 } });
+    state.combinedPending = { permissions: 0, questions: 0, coverage: "unknown" };
+    const { gateway, board } = fakes(state);
+    const engine = new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => 100_000 });
+    await withRegistry(project, (registry) => {
+      const monitor = defaultMonitorRecord("M", TASK, {}, 100_000);
+      monitor.scheduler.next_run_at = 0;
+      registry.monitors.push(monitor);
+      return registry;
+    });
+    assert.equal(await engine.tick(), "busy-held");
+    assert.equal(state.sends.length, 0, "unknown coverage must not be read as no pending input");
+    const snapshot = await readRegistrySnapshot(project);
+    assert.ok(snapshot.registry.monitors[0]!.history.some(
+      (entry) => entry.type === "busy-held" && (entry.detail as { reason?: string } | undefined)?.reason === "pending-coverage-unavailable"));
   } finally {
     await cleanup();
   }
