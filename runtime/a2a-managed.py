@@ -6,17 +6,41 @@ import os
 import socket
 
 
+def scope_dirs():
+    """Operator-authorized external directories (OCVM_A2A_SCOPE_DIRS, os-path
+    separated). Validated like the plugin contract; empty/absent means none.
+    The plugin revalidates and stays the authority (deny precedence)."""
+    raw = os.environ.get("OCVM_A2A_SCOPE_DIRS", "").strip()
+    if not raw:
+        return []
+    dirs = []
+    for item in raw.split(os.pathsep):
+        item = item.strip().rstrip("/") or "/"
+        if not item.startswith("/") or len(item) > 512 or any(c in item for c in "\x00\r\n"):
+            raise RuntimeError("MANAGED_SCOPE_INVALID")
+        if item == "/" or "/../" in item or item.endswith("/..") or "/./" in item:
+            raise RuntimeError("MANAGED_SCOPE_INVALID")
+        dirs.append(item)
+    if len(dirs) > 16:
+        raise RuntimeError("MANAGED_SCOPE_LIMIT")
+    return dirs
+
+
 def adopt(session_id):
     path = os.environ.get("OCVM_MANAGED_POLICY_SOCKET")
     if not path:
         raise RuntimeError("MANAGED_POLICY_UNAVAILABLE")
+    dirs = scope_dirs()
+    payload = {"session_id": session_id, "ingress": "a2a"}
+    if dirs:
+        payload["scope_dirs"] = dirs
     connection = http.client.HTTPConnection("localhost", timeout=8)
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(8)
     sock.connect(path)
     connection.sock = sock
     try:
-        connection.request("POST", "/adopt", json.dumps({"session_id": session_id, "ingress": "a2a"}), {"Content-Type": "application/json"})
+        connection.request("POST", "/adopt", json.dumps(payload), {"Content-Type": "application/json"})
         response = connection.getresponse()
         result = json.loads(response.read())
         if response.status != 200 or result.get("session_id") != session_id or result.get("agent_managed") is not True:

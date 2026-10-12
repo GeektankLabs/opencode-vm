@@ -188,10 +188,10 @@ Added in adapter 0.1.1 / opencode-vm 0.5.65. Write-capable, additive (non-destru
 Input:
 
 ```json
-{"title":"Investigate the import error"}
+{"title":"Investigate the import error","scope_dirs":["/Users/admin/Documents/lan-data"]}
 ```
 
-`title` is optional; omitted titles become `MCP Work Session`. Supplied titles are trimmed and must contain 1–160 characters without control characters. No directory, parent session, agent, model, permission, or workspace overrides are accepted.
+`title` is optional; omitted titles become `MCP Work Session`. Supplied titles are trimmed and must contain 1–160 characters without control characters. `scope_dirs` (since adapter 0.1.45) is an optional explicit operator authorization: absolute, normalized directories (at most 16, no trailing slash, no `.`/`..`, never the filesystem root) installed as narrow `external_directory <dir>/* allow` session rules at managed adoption. Explicit deny rules always win; there is no blanket approval and no scope derived from prompt text. Over-limit or otherwise invalid declarations fail with `INVALID_ARGUMENT` before any session write; unions with an existing session scope are atomic (rejected, never truncated). No directory, parent session, agent, model, permission, or workspace overrides are accepted.
 
 Output:
 

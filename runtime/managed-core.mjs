@@ -35,13 +35,31 @@ export function matchesGlob(str, pattern) {
 // agent rules themselves, explicit user rules and all denies intact.
 const copyableAgentRules = rules => rules.filter(rule => !((rule.permission === "*" && rule.pattern === "*" && rule.action === "allow") || (rule.permission === "external_directory" && rule.action === "ask" && rule.pattern === "*")));
 
-// Explicit denies (external_directory or "*", matching the directory itself or
-// its allow pattern) always win over an authorized scope allow.
+// Explicit deny rules (external_directory or "*", matching the directory
+// itself or its allow pattern) always win over an authorized scope allow.
 export function scopeAllowRules(agentRules = [], scope = [], dirs = []) {
   const denies = [...agentRules, ...scope].filter(rule => rule.action === "deny");
   return dirs
     .filter(dir => !denies.some(rule => matchesGlob("external_directory", rule.permission) && (matchesGlob(dir, rule.pattern) || matchesGlob(`${dir}/*`, rule.pattern))))
     .map(dir => ({ permission: "external_directory", pattern: `${dir}/*`, action: "allow" }));
+}
+
+// An ask is authorized only when it carries patterns and every pattern is
+// covered by an explicitly authorized scope directory. Empty/absent patterns
+// are NEVER authorized (they must end in the terminal blocker, not a hidden
+// wait); exact-directory patterns are accepted as a defensive superset.
+export function authorizedFor(dirs, patterns) {
+  if (!Array.isArray(patterns) || patterns.length === 0) return false;
+  return (dirs ?? []).some(dir => patterns.every(pattern => matchesGlob(pattern, `${dir}/*`) || matchesGlob(pattern, dir)));
+}
+
+// Merge inherited and newly declared scope directories atomically: the
+// operator's explicit declaration is either fully adopted or rejected — never
+// silently truncated to a partial scope.
+export function mergeScopeDirs(existing = [], incoming = []) {
+  const merged = [...new Set([...existing, ...incoming])];
+  if (merged.length > 16) throw new Error("MANAGED_SCOPE_LIMIT");
+  return merged;
 }
 
 export function restrictions(rules) {

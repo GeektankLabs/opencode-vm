@@ -66,6 +66,30 @@ export class OpenCodeGateway {
   protected async adoptManagedSession(sessionId: string): Promise<void> {
     const socketPath = process.env.OCVM_MANAGED_POLICY_SOCKET;
     if (!socketPath) throw new Error("Agent-managed backend policy is unavailable; start or attach with current opencode-vm before work.");
+    // Operator-authorized external scope (OCVM_OPENLIVE_SCOPE_DIRS, colon
+    // separated), validated like the plugin contract; the plugin remains the
+    // authority. Empty/absent means no scope declaration.
+    let scopeDirs: string[] | undefined;
+    const raw = (process.env.OCVM_OPENLIVE_SCOPE_DIRS ?? "").trim();
+    if (raw) {
+      scopeDirs = raw.split(":").map((dir) => {
+        const normalized = dir.trim().replace(/\/+$/u, "");
+        if (
+          normalized === "" ||
+          normalized === "/" ||
+          !normalized.startsWith("/") ||
+          normalized.length > 512 ||
+          /[\x00-\x1f\x7f]/u.test(normalized) ||
+          normalized.includes("/../") ||
+          normalized.endsWith("/..") ||
+          normalized.includes("/./")
+        ) {
+          throw new Error("Managed scope declaration is invalid; no work prompt was sent.");
+        }
+        return normalized;
+      });
+      if (scopeDirs.length > 16) throw new Error("Managed scope declaration exceeds its limit; no work prompt was sent.");
+    }
     await new Promise<void>((resolve, reject) => {
       const request = httpRequest({ socketPath, path: "/adopt", method: "POST", headers: { "content-type": "application/json" }, timeout: 8_000 }, response => {
         let text = "";
@@ -73,6 +97,7 @@ export class OpenCodeGateway {
         response.on("end", () => {
           try {
             const result = JSON.parse(text);
+            if (result.error === "MANAGED_SCOPE_INVALID" || result.error === "MANAGED_SCOPE_LIMIT") throw new Error("Managed scope declaration was rejected by the policy; no work prompt was sent.");
             if (response.statusCode !== 200 || result.session_id !== sessionId || result.agent_managed !== true || result.revision !== 1) throw new Error("Agent-managed adoption could not be verified; no work prompt was sent.");
             resolve();
           } catch (error) { reject(error); }
@@ -80,7 +105,7 @@ export class OpenCodeGateway {
       });
       request.on("timeout", () => request.destroy(new Error("Managed policy timeout")));
       request.on("error", reject);
-      request.end(JSON.stringify({ session_id: sessionId, ingress: "openlive" }));
+      request.end(JSON.stringify({ session_id: sessionId, ingress: "openlive", ...(scopeDirs?.length ? { scope_dirs: scopeDirs } : {}) }));
     });
   }
 

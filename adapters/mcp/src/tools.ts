@@ -383,6 +383,11 @@ export const sendMessageInputSchema = z
     session_id: sessionId,
     message: z.string().min(1).max(32_000),
     attachments: z.array(z.string().min(1).max(256)).max(32).optional(),
+    scope_dirs: z
+      .array(z.string().min(1).max(512))
+      .min(1)
+      .max(16)
+      .optional(),
   })
   .strict();
 const supersedeSubmissionInputSchema = z
@@ -433,6 +438,11 @@ export const createSessionInputSchema = z
       .min(1)
       .max(160)
       .regex(/^[^\x00-\x1f\x7f]+$/u)
+      .optional(),
+    scope_dirs: z
+      .array(z.string().min(1).max(512))
+      .min(1)
+      .max(16)
       .optional(),
   })
   .strict();
@@ -1749,11 +1759,13 @@ export function createMcpServer(
       session_id,
       message,
       attachments,
+      scope_dirs,
     }: z.output<typeof sendMessageInputSchema>) => {
       const result = await gateway.sendMessage(
         session_id,
         message,
         attachments,
+        scope_dirs,
       );
       return success(
         result,
@@ -2369,8 +2381,8 @@ export function createMcpServer(
   );
 
   const createSessionHandler = safeHandler(
-    async ({ title }: z.output<typeof createSessionInputSchema>) => {
-      const result = await gateway.createSession(title);
+    async ({ title, scope_dirs }: z.output<typeof createSessionInputSchema>) => {
+      const result = await gateway.createSession(title, scope_dirs);
       return success(
         result,
         `Created session ${result.session_id} (${result.title}) for ${result.project.name} using ${result.agent} and ${result.provider_id}/${result.model_id}. Use send_message with this session_id to start work.`,
@@ -2584,7 +2596,7 @@ export function createMcpServer(
     {
       title: "Create OpenCode Session",
       description:
-        "Create an empty root work session in this configured project using OpenCode's default work agent/model. Backend work creation automatically adopts agent-managed policy; no client flag is needed. Reads and pure management do not adopt manual sessions. Returns session_id; call send_message separately to start work. Non-idempotent: do not retry automatically if creation is uncertain.",
+        "Create an empty root work session in this configured project using OpenCode's default work agent/model. Backend work creation automatically adopts agent-managed policy; no client flag is needed. Reads and pure management do not adopt manual sessions. Optional scope_dirs: explicit operator-authorized external directories (absolute, normalized, at most 16) installed as narrow external_directory allows at adoption; explicit denies still win and no blanket approval happens. Returns session_id; call send_message separately to start work. Non-idempotent: do not retry automatically if creation is uncertain.",
       inputSchema: createSessionInputSchema,
       outputSchema: createSessionOutputSchema,
       annotations: {
@@ -2701,7 +2713,7 @@ export function createMcpServer(
     {
       title: "Send OpenCode Message",
       description:
-        "Submit one asynchronous prompt; this can run commands and change project files. Backend work admission automatically adopts agent-managed policy without a client flag. Missing business decisions return ordinary terminal INPUT_REQUIRED text for a normal same-session follow-up; independent real security permissions remain separate. Optional attachments are one-use attachment_id values returned by upload_attachment, never paths. Non-idempotent: do not blindly retry an uncertain request. SESSION_BUSY means active backend work, pending input, or a concurrent MCP write. Historical receipt uncertainty does not block a technically idle session; inspect old receipts separately with get_task_result. SUBMISSION_UNCERTAIN means delivery may already have occurred; the exact same immediate retry is protected, while a different authorized follow-up may proceed when the backend is idle. Associated attachment references are consumed.",
+        "Submit one asynchronous prompt; this can run commands and change project files. Backend work admission automatically adopts agent-managed policy without a client flag. Missing business decisions return ordinary terminal INPUT_REQUIRED text for a normal same-session follow-up; independent real security permissions remain separate. Optional scope_dirs declares the operator-authorized external directory scope (absolute, normalized, at most 16; merged atomically with the session's existing scope - over-limit unions are rejected, never truncated). Optional attachments are one-use attachment_id values returned by upload_attachment, never paths. Non-idempotent: do not blindly retry an uncertain request. SESSION_BUSY means active backend work, pending input, or a concurrent MCP write. Historical receipt uncertainty does not block a technically idle session; inspect old receipts separately with get_task_result. SUBMISSION_UNCERTAIN means delivery may already have occurred; the exact same immediate retry is protected, while a different authorized follow-up may proceed when the backend is idle. Associated attachment references are consumed.",
       inputSchema: sendMessageInputSchema,
       outputSchema: sendMessageOutputSchema,
       annotations: writeAnnotations,

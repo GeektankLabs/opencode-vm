@@ -46,7 +46,16 @@ the former manual-session clause. Executable permissions remain unchanged.
   operator-authorized directory scope can be declared per adoption
   (`scope_dirs` on the plugin's `/adopt`; inherited by native children); it
   installs narrow `external_directory <dir>/* allow` session rules unless an
-  explicit deny matches. Manual sessions keep the native interactive ask;
+  explicit deny matches. The declaration is carried by the real ingress paths:
+  the MCP tools `create_session`/`send_message` accept an explicit
+  `scope_dirs` parameter (validated fail-fast, forwarded over the admission
+  socket, atomic union — never truncated), and the A2A/OpenLive launchers read
+  an operator-side `OCVM_A2A_SCOPE_DIRS`/`OCVM_OPENLIVE_SCOPE_DIRS`
+  environment declaration (path-separated). Scope is never derived from prompt
+  text; reads and pure management never adopt or extend a scope. A missed
+  `permission.asked` event (subscription gap or transient lineage-check error)
+  is covered by a bounded pending-list reconciliation sweep on every
+  (re)subscribe that applies the same reject+terminal-blocker handling. Manual sessions keep the native interactive ask;
   nothing approves or bypasses a real permission, and host/mount/remote-write
   boundaries are untouched.
 

@@ -10,7 +10,8 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { McpHttpServer } from "./http.js";
 import { READ_RESPONSE_BYTES, READ_PAYLOAD_BYTES } from "./content.js";
 import type { SessionV2Info } from "@opencode-ai/sdk/v2";
-import { OpenCodeGateway as ProductionGateway } from "./opencode.js";
+import { OpenCodeGateway as ProductionGateway, validateScopeDirs } from "./opencode.js";
+import { createServer as unixServer } from "node:net";
 import { AdapterError } from "./types.js";
 import type { RuntimeDescriptor, TaskResult } from "./types.js";
 import type { SubmissionGuardOverrideInput } from "./types.js";
@@ -3691,4 +3692,49 @@ test("unverifiable descendant coverage is reported as unknown, never as a clean 
   const pending = await gateway.getCombinedPendingInput("ses_work");
   assert.equal(pending.coverage, "unknown");
   assert.equal(pending.descendant_permissions, undefined);
+});
+
+test("validateScopeDirs enforces the managed plugin contract fail-fast", () => {
+  assert.deepEqual(validateScopeDirs(["/srv/data", "/srv/data/"]), ["/srv/data", "/srv/data"]);
+  assert.throws(() => validateScopeDirs([]), /non-empty/u);
+  assert.throws(() => validateScopeDirs(Array.from({ length: 17 }, (_, i) => `/d/${i}`)), /at most 16/u);
+  assert.throws(() => validateScopeDirs(["relative/path"]), /absolute/u);
+  assert.throws(() => validateScopeDirs(["/"]), /normalized/u);
+  assert.throws(() => validateScopeDirs(["/a/../b"]), /normalized/u);
+  assert.throws(() => validateScopeDirs(["/a\0b"]), /absolute/u);
+  assert.throws(() => validateScopeDirs(["no-string" as never]), /absolute/u);
+});
+
+test("adoptManagedSession forwards authorized scope_dirs over the managed socket", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ocvm-adopt-"));
+  const socketPath = join(dir, "managed.sock");
+  const received: unknown[] = [];
+  const server = unixServer((socket) => {
+    let buffer = "";
+    socket.on("data", (chunk) => {
+      buffer += String(chunk);
+      const split = buffer.indexOf("\r\n\r\n");
+      if (split < 0) return;
+      received.push(JSON.parse(buffer.slice(split + 4)));
+      const body = JSON.stringify({ session_id: "ses_work", agent_managed: true, revision: 1 });
+      socket.end(`HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: ${body.length}\r\nconnection: close\r\n\r\n${body}`);
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+  const previous = process.env.OCVM_MANAGED_POLICY_SOCKET;
+  process.env.OCVM_MANAGED_POLICY_SOCKET = socketPath;
+  try {
+    const gateway = new OpenCodeGateway(runtime(), fakeClient(baseState()) as never);
+    await (ProductionGateway.prototype as unknown as { adoptManagedSession(id: string, dirs?: string[]): Promise<void> }).adoptManagedSession.call(gateway, "ses_work", ["/srv/data"]);
+    await (ProductionGateway.prototype as unknown as { adoptManagedSession(id: string, dirs?: string[]): Promise<void> }).adoptManagedSession.call(gateway, "ses_work");
+    await gateway.close();
+    assert.equal(received.length, 2);
+    assert.deepEqual(received[0], { session_id: "ses_work", ingress: "mcp", scope_dirs: ["/srv/data"] });
+    assert.deepEqual(received[1], { session_id: "ses_work", ingress: "mcp" });
+  } finally {
+    if (previous === undefined) delete process.env.OCVM_MANAGED_POLICY_SOCKET;
+    else process.env.OCVM_MANAGED_POLICY_SOCKET = previous;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(dir, { recursive: true, force: true });
+  }
 });

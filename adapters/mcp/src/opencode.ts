@@ -160,7 +160,7 @@ export interface SessionGateway {
   waitForProjectActivity(
     query: ActivityQuery & { after_cursor: string; timeout_ms?: number },
   ): Promise<ActivityResult & { timeout: boolean }>;
-  createSession(title?: string): Promise<CreateSessionResult>;
+  createSession(title?: string, scopeDirs?: string[]): Promise<CreateSessionResult>;
   listSessions(limit?: number, cursor?: string): Promise<ListSessionsResult>;
   getSessionDetails(
     sessionId: string,
@@ -186,6 +186,7 @@ export interface SessionGateway {
     sessionId: string,
     message: string,
     attachmentIds?: string[],
+    scopeDirs?: string[],
   ): Promise<SendMessageResult>;
   sendFollowup?(
     sessionId: string,
@@ -271,7 +272,7 @@ export class OpenCodeGateway implements SessionGateway {
     return this.compatibilityPromise;
   }
 
-  protected async adoptManagedSession(sessionId: string): Promise<void> {
+  protected async adoptManagedSession(sessionId: string, scopeDirs?: string[]): Promise<void> {
     const socketPath = process.env.OCVM_MANAGED_POLICY_SOCKET;
     if (!socketPath) throw new AdapterError("BACKEND_INCOMPATIBLE", "The agent-managed backend policy is not installed. Start or attach with the current opencode-vm before submitting work.");
     await new Promise<void>((resolve, reject) => {
@@ -283,6 +284,7 @@ export class OpenCodeGateway implements SessionGateway {
             const result = JSON.parse(text);
             if (result.error === "MANAGED_SESSION_BUSY") throw new AdapterError("SESSION_BUSY", "The session became busy before managed work admission.", undefined, "backend_active");
             if (result.error === "MANAGED_INPUT_PENDING") throw new AdapterError("INPUT_REQUIRED", "The session has pending operator input; no work was admitted.", undefined, "pending_input");
+            if (result.error === "MANAGED_SCOPE_INVALID" || result.error === "MANAGED_SCOPE_LIMIT") throw new AdapterError("INVALID_ARGUMENT", `The managed policy rejected the authorized scope: ${String(result.error).slice(0, 120)}.`);
             if (response.statusCode !== 200 || result.session_id !== sessionId || result.agent_managed !== true || result.revision !== 1) throw new Error("Managed policy adoption was not confirmed");
             resolve();
           } catch (error) { reject(error); }
@@ -290,7 +292,7 @@ export class OpenCodeGateway implements SessionGateway {
       });
       request.on("timeout", () => request.destroy(new Error("Managed policy admission timed out")));
       request.on("error", reject);
-      request.end(JSON.stringify({ session_id: sessionId, ingress: "mcp" }));
+      request.end(JSON.stringify({ session_id: sessionId, ingress: "mcp", ...(scopeDirs?.length ? { scope_dirs: scopeDirs } : {}) }));
     }).catch(error => { if (error instanceof AdapterError) throw error; throw new AdapterError("BACKEND_INCOMPATIBLE", "Agent-managed policy adoption could not be verified; no work prompt was submitted."); });
   }
 
@@ -841,7 +843,7 @@ export class OpenCodeGateway implements SessionGateway {
     return { ...result, timeout: result.events.length === 0 };
   }
 
-  async createSession(title?: string): Promise<CreateSessionResult> {
+  async createSession(title?: string, scopeDirs?: string[]): Promise<CreateSessionResult> {
     const name = title === undefined ? "MCP Work Session" : title.trim();
     if (!name || name.length > 160 || /[\x00-\x1f\x7f]/u.test(name)) {
       throw new AdapterError(
@@ -849,6 +851,9 @@ export class OpenCodeGateway implements SessionGateway {
         "title must contain 1 to 160 characters without control characters.",
       );
     }
+    // Validate the operator-authorized external scope BEFORE any session
+    // write: an invalid declaration must not leave a created session behind.
+    const scope = scopeDirs === undefined ? undefined : validateScopeDirs(scopeDirs);
     await this.compatibilityCheck();
     await this.managerSessionId();
     const settings = await this.newSessionSettings();
@@ -879,7 +884,7 @@ export class OpenCodeGateway implements SessionGateway {
       ) {
         throw new Error("Session settings were not persisted.");
       }
-      await this.adoptManagedSession(id);
+      await this.adoptManagedSession(id, scope);
       return {
         project: this.projectIdentity(),
         session_id: session.id,
@@ -1991,6 +1996,7 @@ export class OpenCodeGateway implements SessionGateway {
     sessionId: string,
     message: string,
     attachmentIds: string[] = [],
+    scopeDirs?: string[],
   ): Promise<SendMessageResult> {
     if (message.length < 1 || message.length > 32_000) {
       throw new AdapterError(
@@ -2041,8 +2047,11 @@ export class OpenCodeGateway implements SessionGateway {
       // Runtime lookup can race another frontend. Recheck before admission;
       // this is still not a cross-client backend transaction.
       await this.requireIdle(sessionId);
+      // Scope validation before the admission attempt; the plugin remains the
+      // authoritative validator (deny precedence, bounded union).
+      const scope = scopeDirs === undefined ? undefined : validateScopeDirs(scopeDirs);
       const attachments = this.attachments.resolve(sessionId, attachmentIds);
-      await this.adoptManagedSession(sessionId);
+      await this.adoptManagedSession(sessionId, scope);
       const parts: Array<TextPartInput | FilePartInput> = [
         { type: "text", text: message },
       ];
@@ -3552,6 +3561,47 @@ function pendingCounts(pending: PendingDetails): PendingInput & Partial<PendingC
     ...(pending.coverage ? { coverage: pending.coverage } : {}),
     ...(pending.descendantPermissions?.length ? { descendant_permissions: pending.descendantPermissions } : {}),
   };
+}
+
+// Operator-authorized external directory scope, mirrored from the managed
+// plugin contract (runtime/managed-policy.mjs normalizeScopeDirs). The plugin
+// remains the validating authority; this caller-side check fails fast before
+// any session write. Same rules: bounded, absolute, normalized, never "/".
+export function validateScopeDirs(input: unknown): string[] {
+  if (!Array.isArray(input) || input.length === 0) {
+    throw new AdapterError(
+      "INVALID_ARGUMENT",
+      "scope_dirs must be a non-empty array of absolute directory paths (at most 16).",
+    );
+  }
+  if (input.length > 16) {
+    throw new AdapterError(
+      "INVALID_ARGUMENT",
+      "scope_dirs accepts at most 16 directories.",
+    );
+  }
+  return input.map((dir) => {
+    if (
+      typeof dir !== "string" ||
+      dir.length === 0 ||
+      dir.length > 512 ||
+      !dir.startsWith("/") ||
+      /[\x00-\x1f\x7f]/u.test(dir)
+    ) {
+      throw new AdapterError(
+        "INVALID_ARGUMENT",
+        "scope_dirs entries must be absolute paths of at most 512 characters without control characters.",
+      );
+    }
+    const normalized = dir.replace(/\/+$/u, "");
+    if (normalized === "" || normalized === "/" || normalized.endsWith("/..") || normalized.includes("/../") || normalized.includes("/./")) {
+      throw new AdapterError(
+        "INVALID_ARGUMENT",
+        "scope_dirs entries must be normalized absolute directories without '.', '..' or a trailing slash; the filesystem root is not a scope.",
+      );
+    }
+    return normalized;
+  });
 }
 
 function isActivity(value: unknown): value is SessionActivity {

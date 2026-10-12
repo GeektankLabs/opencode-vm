@@ -1,5 +1,7 @@
 """Maintained real-runner regression; no origin, credentials or real publishing."""
 import argparse
+import json
+from pathlib import Path
 import urllib.error
 from helpers.managed_runtime import Runtime, run, wait
 
@@ -241,6 +243,30 @@ def check(binary=None, sdk="@ai-sdk/openai-compatible"):
         ext.reject_permission(pending[0]["id"])
         future.result(timeout=15)
         print("PASS manual session external ask stays interactive", flush=True)
+        # B1 real-ingress proof: the operator-authorized scope flows through the
+        # actual MCP admission path (tool schema -> gateway validation -> managed
+        # socket /adopt -> plugin rules -> native child) — not a mock and not a
+        # direct /adopt call. The gateway talks to the same live fixture server.
+        ingress = ext.root / "ingress.mjs"
+        ingress.write_text("import assert from 'node:assert/strict';\n"
+                           "import { OpenCodeGateway } from " + json.dumps((Path(__file__).resolve().parents[1] / "adapters/mcp/dist/opencode.js").as_uri()) + ";\n"
+                           "const runtime = {schema:1,project:" + json.dumps(str(ext.project)) + ",projectHash:'fixture',projectName:'fixture',backendUrl:" + json.dumps(ext.url) + ",generation:'fixture',opencodeVersion:'1.19.0',listenHost:'127.0.0.1',listenPort:40960,credentialFile:'/not-used'};\n"
+                           "const gateway = new OpenCodeGateway(runtime);\n"
+                           "const created = await gateway.createSession('Scoped ingress work', [" + json.dumps(str(ext.root)) + "]);\n"
+                           "const receipt = await gateway.sendMessage(created.session_id, 'CASE:ingress-scope');\n"
+                           "for (let i = 0; i < 200; i++) { const status = await gateway.getSessionStatus(created.session_id, receipt.message_id); if (status.state === 'completed') break; await new Promise(r => setTimeout(r, 50)); }\n"
+                           "const result = await gateway.getTaskResult(created.session_id, receipt.message_id);\n"
+                           "assert.equal(result.state, 'completed');\n"
+                           "assert.doesNotMatch(JSON.stringify(result), /INPUT_REQUIRED/);\n"
+                           "await gateway.close();\n"
+                           "console.log('INGRESS-SCOPE-OK');\n")
+        ext.scripts["ingress-scope"] = [("task", {"description": "Authorized ingress child", "subagent_type": "fixture-child", "prompt": "CASE:ingress-child"}), "Ingress parent continued"]
+        ext.scripts["ingress-child"] = [("grep", {"pattern": "needle", "path": "../bi-archive"}), "Ingress child authorized work complete"]
+        import subprocess as sp
+        outcome = sp.check_output(["node", str(ingress)], env=ext.env, text=True)
+        assert "INGRESS-SCOPE-OK" in outcome, outcome
+        assert not ext.pending_permissions()
+        print("PASS real MCP ingress scope_dirs admission (authorized child, no ask)", flush=True)
     finally:
         ext.close()
 

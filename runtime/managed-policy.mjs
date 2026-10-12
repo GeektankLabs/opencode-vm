@@ -5,7 +5,7 @@ import { dirname, join, normalize as normalizePath, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { policyDelta, remoteWrite, tokens, handback, permissionBlocker, PRIMER, COMMIT_SENTENCE, LEGACY_VM_ASK, MANAGED_VM_ASK, protocol, questionInResponse, responseUsage, terminalResponse, matchesGlob, REVISION } from "./managed-core.mjs";
+import { policyDelta, remoteWrite, tokens, handback, permissionBlocker, PRIMER, COMMIT_SENTENCE, LEGACY_VM_ASK, MANAGED_VM_ASK, protocol, questionInResponse, responseUsage, terminalResponse, matchesGlob, mergeScopeDirs, authorizedFor, REVISION } from "./managed-core.mjs";
 
 const FETCH_STATE = Symbol.for("ocvm.managed.fetch.v1");
 const HEADER = "x-ocvm-managed-turn";
@@ -26,7 +26,6 @@ function normalizeScopeDirs(dirs) {
     return normalized.replace(/\/+$/, "") || "/";
   });
 }
-const authorizedFor = (entry, patterns) => (entry?.scopeDirs ?? []).some(dir => (patterns ?? []).every(pattern => matchesGlob(pattern, `${dir}/*`) || matchesGlob(pattern, dir)));
 
 // Gate one provider step before the SDK can dispatch a native Question. The
 // terminal stream is consumed/persisted/completed by the real OpenCode runner;
@@ -132,7 +131,7 @@ export default async ({ client, directory }) => {
     // New native children inherit the managed parent's authorized external
     // scope; reused children keep their own persisted scope.
     if (!previous && info.parentID && saved.sessions[info.parentID]?.scopeDirs) entry.scopeDirs = [...saved.sessions[info.parentID].scopeDirs];
-    entry.scopeDirs = [...new Set([...(entry.scopeDirs ?? []), ...normalizeScopeDirs(scopeDirs)])].slice(0, 16);
+    entry.scopeDirs = mergeScopeDirs(entry.scopeDirs ?? [], normalizeScopeDirs(scopeDirs));
     const prefix = entry.lastNative.every((r, i) => current[i]?.permission === r.permission && current[i]?.pattern === r.pattern && current[i]?.action === r.action);
     if (!prefix) throw new Error("MANAGED_POLICY_REPLACED_EXTERNALLY");
     // Actual external PATCH appends are preserved separately from our owned
@@ -229,30 +228,50 @@ export default async ({ client, directory }) => {
   // gate so the blocker is a stored terminal report — never a hidden UI wait.
   // Manual sessions and non-external permissions stay interactive/unchanged.
   const asked = new AbortController();
+  // Shared reject+terminal-report handling for one pending external ask.
+  // Empty/absent ask patterns are NEVER authorized (fail closed into the
+  // terminal blocker instead of a hidden wait); isManaged API errors leave
+  // the ask untouched here — the bounded sweep below retries them.
+  const rejectUnauthorizedAsk = async info => {
+    if (info?.permission !== "external_directory" || typeof info.sessionID !== "string" || typeof info.id !== "string") return false;
+    let managed = true;
+    try { managed = await isManaged(info.sessionID); }
+    catch { return false; }
+    if (!managed) return false;
+    const patterns = Array.isArray(info.patterns) && info.patterns.length ? info.patterns : (info.metadata?.parentDir ? [`${info.metadata.parentDir}/*`] : []);
+    if (authorizedFor(saved.sessions[info.sessionID]?.scopeDirs ?? [], patterns)) return false;
+    const report = permissionBlocker({ ...info, patterns });
+    // Arm the completion gate BEFORE replying: resolving the pending
+    // Deferred immediately unblocks the runner into its next provider
+    // step, which must already see the terminal report.
+    for (const key of turnKeys) {
+      const turn = fetchState.turns.get(key);
+      if (turn?.sessionID === info.sessionID) turn.report ??= report;
+    }
+    try {
+      await api("POST", `/permission/${encodeURIComponent(info.id)}/reply`, { reply: "reject", message: "External directory access is not authorized for this managed session; end the turn with a readable blocker." });
+    } catch { /* already answered or gone: the terminal report above still ends the turn */ }
+    return true;
+  };
+  // Bounded fail-open reconciliation: asks that appeared while the event
+  // subscription was down (or whose lineage check hit a transient API error)
+  // are swept once per (re)subscribe from the pending list. No scheduling
+  // architecture, no automatic allow, no touch of manual sessions.
+  const sweepPendingAsks = async () => {
+    try {
+      const pending = await api("GET", "/permission");
+      if (!Array.isArray(pending)) return;
+      for (const info of pending.slice(0, 64)) await rejectUnauthorizedAsk(info);
+    } catch { /* transient backend read: the next (re)subscribe sweeps again */ }
+  };
   const watchAsks = (async () => {
     for (;;) {
       try {
         const subscription = await client.event.subscribe({ directory }, { signal: asked.signal });
+        await sweepPendingAsks();
         for await (const event of subscription.stream) {
           if (event?.type !== "permission.asked") continue;
-          const info = event.properties?.info ?? event.properties;
-          if (info?.permission !== "external_directory" || typeof info.sessionID !== "string" || typeof info.id !== "string") continue;
-          let managed = true;
-          try { managed = await isManaged(info.sessionID); }
-          catch { managed = false; }
-          if (!managed || authorizedFor(saved.sessions[info.sessionID], info.patterns)) continue;
-          const patterns = Array.isArray(info.patterns) && info.patterns.length ? info.patterns : (info.metadata?.parentDir ? [`${info.metadata.parentDir}/*`] : []);
-          const report = permissionBlocker({ ...info, patterns });
-          // Arm the completion gate BEFORE replying: resolving the pending
-          // Deferred immediately unblocks the runner into its next provider
-          // step, which must already see the terminal report.
-          for (const key of turnKeys) {
-            const turn = fetchState.turns.get(key);
-            if (turn?.sessionID === info.sessionID) turn.report ??= report;
-          }
-          try {
-            await api("POST", `/permission/${encodeURIComponent(info.id)}/reply`, { reply: "reject", message: "External directory access is not authorized for this managed session; end the turn with a readable blocker." });
-          } catch { /* already answered or gone: the terminal report above still ends the turn */ }
+          await rejectUnauthorizedAsk(event.properties?.info ?? event.properties);
         }
       } catch (error) {
         if (asked.signal.aborted) return;

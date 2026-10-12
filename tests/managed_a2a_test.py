@@ -1,5 +1,6 @@
 """Process-local A2A admission hooks: work writes adopt; reads stay neutral."""
 import asyncio
+import os
 import importlib.util
 from pathlib import Path
 import unittest
@@ -48,6 +49,31 @@ class A2ATest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "unavailable"):
             await client.send_message("ses_existing")
         self.assertFalse(hasattr(client, "called"))
+
+
+class ScopeDirsTest(unittest.TestCase):
+    def test_scope_dirs_env_parsing_matches_plugin_contract(self):
+        saved = {k: os.environ.get(k) for k in ("OCVM_A2A_SCOPE_DIRS",)}
+        try:
+            os.environ.pop("OCVM_A2A_SCOPE_DIRS", None)
+            self.assertEqual(managed.scope_dirs(), [])
+            os.environ["OCVM_A2A_SCOPE_DIRS"] = "/srv/data:/srv/other/"
+            self.assertEqual(managed.scope_dirs(), ["/srv/data", "/srv/other"])
+            os.environ["OCVM_A2A_SCOPE_DIRS"] = "relative"
+            with self.assertRaises(RuntimeError):
+                managed.scope_dirs()
+            os.environ["OCVM_A2A_SCOPE_DIRS"] = "/"
+            with self.assertRaises(RuntimeError):
+                managed.scope_dirs()
+            os.environ["OCVM_A2A_SCOPE_DIRS"] = ":".join(f"/d/{i}" for i in range(17))
+            with self.assertRaises(RuntimeError):
+                managed.scope_dirs()
+        finally:
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
 
 
 if __name__ == "__main__": unittest.main()

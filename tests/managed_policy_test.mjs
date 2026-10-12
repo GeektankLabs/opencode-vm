@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { policyDelta, remoteWrite, questionInResponse, terminalResponse, handback, permissionBlocker, matchesGlob, scopeAllowRules } from "../runtime/managed-core.mjs";
+import { policyDelta, remoteWrite, questionInResponse, terminalResponse, handback, permissionBlocker, matchesGlob, scopeAllowRules, authorizedFor, mergeScopeDirs } from "../runtime/managed-core.mjs";
 
 test("policy composition is idempotent and preserves independent agent/session denies", () => {
   const scope = [{ permission: "read", pattern: "secret*", action: "deny" }, { permission: "bash", pattern: "git commit *", action: "deny" }];
@@ -95,4 +95,28 @@ test("permission blocker is a bounded terminal INPUT_REQUIRED report", () => {
     assert.match(text, /finish_reason":"stop/);
     assert.doesNotMatch(text, /tool_calls/);
   });
+});
+
+// F2-a regression: a pattern-less (or unknown-pattern) external ask is never
+// authorized — it must end in the terminal blocker, not a hidden wait.
+test("authorized scope never authorizes empty or uncovered ask patterns", () => {
+  const dirs = ["/srv/data"];
+  assert.equal(authorizedFor(dirs, ["/srv/data/*"]), true);
+  assert.equal(authorizedFor(dirs, ["/srv/data"]), true);
+  assert.equal(authorizedFor(dirs, []), false, "empty patterns must fail closed");
+  assert.equal(authorizedFor(dirs, undefined), false);
+  assert.equal(authorizedFor(dirs, ["/srv/other/*"]), false);
+  assert.equal(authorizedFor([], ["/srv/data/*"]), false);
+  assert.equal(authorizedFor(undefined, []), false);
+});
+
+// F1-a regression: merging scope directories is atomic — an over-limit union
+// is rejected, never silently truncated to a partial operator declaration.
+test("scope directory merges are atomic and never silently truncated", () => {
+  assert.deepEqual(mergeScopeDirs([], ["/a", "/a"]), ["/a"]);
+  assert.deepEqual(mergeScopeDirs(["/a"], ["/a", "/b"]), ["/a", "/b"]);
+  const sixteen = Array.from({ length: 16 }, (_, i) => `/d/${i}`);
+  assert.deepEqual(mergeScopeDirs(sixteen, ["/d/0"]), sixteen);
+  assert.throws(() => mergeScopeDirs(sixteen, ["/new"]), /MANAGED_SCOPE_LIMIT/);
+  assert.throws(() => mergeScopeDirs([], Array.from({ length: 17 }, (_, i) => `/d/${i}`)), /MANAGED_SCOPE_LIMIT/);
 });
