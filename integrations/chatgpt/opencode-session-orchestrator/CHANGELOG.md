@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-12-r52
+
+- Consolidate the scattered follow-up/monitoring wording rules into one shared vocabulary reference (new `references/communication-states.md`, task_4ae1d182 remainder + task_e67c39cf): the three states `CURRENT_TURN_WAIT` / `ON_DEMAND_STATUS` / `PROACTIVE_MONITORING` with verified-hops-only notification chain — engine-side monitor decisions and investigation outcomes are readable on demand (`get_monitor`/`get_monitor_history`) but never pushed, and the prepared attention queue is derived from backend activity events, not engine decisions. German Voice/Text example wording included; no runtime, scheduler, or notification channel added.
+- SKILL.md now points monitoring promises at the consolidated reference; regression-scenarios.md adds the six dedicated monitoring rows (long run, current-turn wait, manual status check, input/permission pending, missing monitoring refusal, confirmed external monitoring) plus an investigation-state row; monitor-reporting.md learns the 0.7.35 adaptive investigation states (inconclusive / longwork with wait_reason / no_progress / anchor-unknown / park and claim-recovery entries) with honest non-progress wording.
+
 ## 2026-10-10-r51
 
 - Align the two journal-default references with the opencode-vm 0.7.31 contract change (Activity Journal defaults ON for journal-capable fresh sessions, `--no-journal` opts out, attach retains the stored mode in both directions, journal-incapable fresh sessions downgrade transparently): SKILL.md journal-mode branch and monitor-reporting.md's disabled-state note now describe the new default without rewriting the r47 history; the journal-free fallback branch itself is unchanged and remains the operative contract whenever `activity_journal.enabled:false`.

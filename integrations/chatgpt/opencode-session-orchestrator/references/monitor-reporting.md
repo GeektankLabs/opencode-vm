@@ -33,3 +33,17 @@ With `activity_journal.state:disabled` (an opencode-vm startup choice: journal-c
 ## Shape
 
 Keep the existing [Morning Handoff](monitor-tasks.md) fields and compactness: lifecycle and substantive outcome first, then one line per evidenced error class, then receipts/results with their coverage, then open questions and exact pointers — never raw dumps. A completed turn or tool is still not business PASS; terminal originals decide.
+
+## Adaptive progress/investigation states (0.7.35 contract, task_a234c341 V2)
+
+The engine keeps per-worker progress clocks and bounded read-only investigations
+(`get_monitor.investigation`, `get_monitor_history` decision entries). Report them
+as observations, never as progress:
+
+- `investigation-inconclusive`: running/unattributable without positive evidence — say "läuft, belegter Fortschritt nicht erkennbar; nächste begrenzte Prüfung <Zeit>" and nothing stronger.
+- `investigation-longwork` with a `wait_reason` (attributable tool progress on the worker's own receipt, receipt-correlated checkpoint, or a re-dispatch): legitimate long work is positively evidenced; report the wait reason and the next check time from the 2 h/4 h/8 h ladder.
+- `investigation-no_progress_evidenced`: no progress evidence and no attributable activity — report visibly as a stall observation with the cooldown time; escalation/parking stays with the manager session, never claimed as done here.
+- `investigation-anchor-unknown`: the restart anchor could not be derived from a dispatch; one bounded reconciliation happened. Do not invent a start time.
+- Park reasons (`dispatch-uncertain`, `recovery-chain-exhausted`, …) and `wake-claim-recovered`/`wake-claim-stuck` entries: report the visible reason verbatim; a recovered claim is engine hygiene, not a business event.
+
+An investigation result never resets or represents progress: only a receipt-correlated terminal worker result does (`worker-observed-complete` in history plus the worker's `result_receipt`). These fields are readable on demand; none of them is a push channel (see [communication states](communication-states.md)).

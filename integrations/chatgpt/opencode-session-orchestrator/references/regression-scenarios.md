@@ -217,6 +217,12 @@ Instruction-contract cases only. Hosted duration/cadence, multi-step continuatio
 | Post-send checkpoint interrupted or SUBMISSION_UNCERTAIN | Reconcile exact stored action/receipt before any next admission; observe already-admitted work, no blind resend or second session. |
 | Queue hierarchy unlinked but receipt identifies exact task | Use established connector/task/session/submitted-message binding, never title heuristic or unlinked-as-proven-failure-cause. |
 | User asks for automatic notice without independent mechanism | State CURRENT_TURN_WAIT only during actual active execution, then ON_DEMAND_STATUS; PROACTIVE_MONITORING needs named verified surface/runtime mechanism. |
+| Long MCP run, user goes silent, no monitoring in place | ON_DEMAND_STATUS at submission; no unprompted later message; a fresh read on the next user ask (get_session_progress, get_monitor/get_monitor_history). |
+| Bounded current-turn wait ends without a final result | State becomes ON_DEMAND_STATUS in the same turn's closing line; never derive a later push from the wait. |
+| Manual status check after hours | One fresh read (progress/monitor history/attention), report verified state only; no background polling claimed, no simulated continuity. |
+| Input/permission pending on the host | Name the on-screen/host control; monitoring and queued attention never replace or answer it. |
+| User asks "halte mich auf dem Laufenden" with no mechanism | Refuse explicitly, offer the on-demand pattern with the exact read tool; no invented scheduler. |
+| Engine investigation reported inconclusive/longwork in monitor history | Report as observation, never as progress ("läuft, belegter Fortschritt nicht erkennbar, nächste Prüfung <Zeit>"); no PROACTIVE_MONITORING promise from engine decisions alone. |
 | Two same-error no-progress repairs or restored run budget | Park dependent work; preserve fingerprint/reservations/counters, no reset from Resume/new message/model/time or a third repair. |
 | Newer cancel or scope decision appears during active polling | Re-read canonical head before action; stop affected continuation, retain receipt and original evidence, no automatic worker abort or subscription deletion. |
 | Offered receipt missing before discussed | Present once and verify offered before discussed when required; lost ACK reconciled by readback, never treated as a send receipt. |
