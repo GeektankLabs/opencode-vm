@@ -2253,6 +2253,7 @@ export class MonitorEngine {
       `Delta: checkpoint ${summary.checkpoint ?? "none"}; newest decision ${summary.newest_decision ?? "none"}; decisions since last wake ${decisionsSince}; documents ${summary.documents.length ? summary.documents.map((doc) => `${doc.role}@${doc.revision ?? "unversioned"}`).join(",") : "none"} (coverage ${summary.coverage}).`,
       `Worker index: ${this.workerIndexLine(monitor)}`,
       `Mission: 1) verify progress of this master/work package, 2) read the current worker and receipt results, 3) decide and execute exactly ONE next permitted step, delegating implementation/tests to a worker session, 4) analyse blockers and resolve or escalate them within the existing grants, 5) if nothing relevant changed, end briefly (bounded no-op) without duplicate orders.`,
+      `Blocked park: reconcile originals and try 2–3 already-authorized viable alternatives first; never synthesize YOLO/reset/delete/security approvals.`,
       `Reads: journal checkpoint/tail first; open canonical C/P only when a listed revision changed. Report INPUT_REQUIRED only for a real missing decision; keep state, journal and compact context updated.`,
     ];
     return prime ? `${this.buildPrimingBlock(monitor, summary)}\n\n${mission.join("\n")}` : mission.join("\n");

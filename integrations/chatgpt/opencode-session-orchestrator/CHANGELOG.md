@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-13-r53
+
+- Add the bounded authorized-alternatives check before a total park (task_68085480 part 4): optimistic-mvp.md states the rule (2–3 already-authorized plausible ways, first viable, no YOLO/reset/delete/security approvals from synthesized options, a single narrow reviewer negative finding is not a global impossibility judgement) and mirrors the Monitor Engine recovery prompt's bounded alternative check.
+
 ## 2026-10-12-r52
 
 - Consolidate the scattered follow-up/monitoring wording rules into one shared vocabulary reference (new `references/communication-states.md`, task_4ae1d182 remainder + task_e67c39cf): the three states `CURRENT_TURN_WAIT` / `ON_DEMAND_STATUS` / `PROACTIVE_MONITORING` with verified-hops-only notification chain — engine-side monitor decisions and investigation outcomes are readable on demand (`get_monitor`/`get_monitor_history`) but never pushed, and the prepared attention queue is derived from backend activity events, not engine decisions. German Voice/Text example wording included; no runtime, scheduler, or notification channel added.

@@ -995,7 +995,8 @@ test("engine: wake prompt stays inside its token budget and names the bounded mi
     // never per tick.
     assert.ok(mission.length <= 1100, `mission text grew to ${mission.length} characters`);
     assert.ok(primedWake.length - mission.length <= 5400, `priming block grew to ${primedWake.length - mission.length} characters`);
-    for (const marker of ["Mission: 1) verify progress", "exactly ONE next permitted step", "bounded no-op", "INPUT_REQUIRED only for a real missing decision"]) {
+    for (const marker of ["Mission: 1) verify progress", "exactly ONE next permitted step", "bounded no-op", "INPUT_REQUIRED only for a real missing decision",
+      "already-authorized viable alternatives", "never synthesize YOLO/reset/delete/security approvals"]) {
       assert.ok(mission.includes(marker), `mission marker missing: ${marker}`);
     }
   } finally {
@@ -3749,6 +3750,46 @@ test("task_68085480 sticky final: an exhausted unattended monitor retries exactl
     assert.equal(record.state.work, "parked_input_required");
     assert.ok(record.recovery_resolution?.at(-1)!.candidates.some((entry) => entry.label === "final.main" && entry.status === "skipped_disabled"),
       "the paused final stage is skipped, never dispatched");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("task_68085480 sticky final guards: unavailable final is skipped without dispatch; busy/unknown blocks a duplicate", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    // (b) final configured but catalog-unavailable -> skipped_unavailable, no dispatch, honest park.
+    const state = baseState(); state.status = blockedStatus("provider_timeout");
+    const { gateway, board } = fakes(state);
+    const unavailable = perProfileView({ deep: { provider_id: "deep-provider", model_id: "deep-model" }, standard: null },
+      { strategies: { degrading: false, providerSkip: true },
+        finalFallback: { mode: "total", selection: { provider_id: "fallback-provider", model_id: "fallback-gone" } } });
+    await seededFailedMonitor(project);
+    const engine = new MonitorEngine({ project, gateway, board, readPolicy: async () => unavailable, now: () => 200_000, log: () => undefined });
+    assert.equal(await engine.tick(), "recovery-parked");
+    assert.equal(state.sends.length, 0, "an unavailable final is never dispatched");
+    let record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.ok(record.recovery_resolution?.at(-1)!.candidates.some((entry) => entry.label === "final.main" && entry.status === "skipped_unavailable"));
+
+    // (a) busy / unknown receipt must not produce a duplicate final dispatch.
+    const ok = perProfileView({ deep: { provider_id: "deep-provider", model_id: "deep-model" }, standard: null },
+      { strategies: { degrading: false, providerSkip: true },
+        finalFallback: { mode: "total", selection: { provider_id: "fallback-provider", model_id: "fallback-model" } } });
+    await withRegistry(project, (registry) => {
+      const m = registry.monitors[0]!; m.state.work = "active"; m.state.parked_reason = undefined;
+      m.scheduler.next_run_at = 0; m.state.last_seen_digest = "c"; return registry;
+    });
+    const engine2 = new MonitorEngine({ project, gateway, board, readPolicy: async () => ok, now: () => 300_000, log: () => undefined });
+    assert.equal(await engine2.tick(), "recovery-continued", "the final is dispatched once");
+    const afterFirst = state.sends.length;
+    state.status = okStatus({ state: "running", backend_activity: "busy" });
+    await withRegistry(project, (registry) => {
+      const m = registry.monitors[0]!; m.scheduler.next_run_at = 0; m.state.last_seen_digest = "d"; return registry;
+    });
+    const engine3 = new MonitorEngine({ project, gateway, board, readPolicy: async () => ok, now: () => 400_000, log: () => undefined });
+    const outcome = await engine3.tick();
+    assert.ok(["busy-held", "noop-unchanged", "activity-observed"].includes(outcome), `busy blocks a duplicate final: got ${outcome}`);
+    assert.equal(state.sends.length, afterFirst, "no duplicate final dispatch while the worker is busy/unknown");
   } finally {
     await cleanup();
   }
