@@ -34,7 +34,7 @@ OPENLIVE_PREVIOUS_COMMAND="$OPENLIVE_DIR/previous-command"
 OPENLIVE_AUTH_MARKER="__opencode_vm_openlive__"
 OPENLIVE_LOCK_PATH=""
 OPENLIVE_ADAPTER_VERSION="0.1.8"
-OPENLIVE_ADAPTER_TAG="v0.7.48"
+OPENLIVE_ADAPTER_TAG="v0.7.49"
 OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.8.tar"
 OPENLIVE_ADAPTER_SHA256="74b046b468f853660782d4c78c6e4859fddbfa4a54b167c5d185035dc9102f40"
 OPENLIVE_ACP_SDK_VERSION="1.2.1"
@@ -45,14 +45,14 @@ OPENLIVE_MANAGER_PROMPT="You manage an OpenLive voice call. The voice_sessions t
 MCP_CONNECTOR_DIR="$SHARE_ROOT/mcp-connector"
 MCP_ADAPTER_CACHE_ROOT="$MCP_CONNECTOR_DIR/adapters"
 MCP_ADAPTER_VERSION="0.1.52"
-MCP_ADAPTER_TAG="v0.7.48"
+MCP_ADAPTER_TAG="v0.7.49"
 MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.52.tar"
 MCP_ADAPTER_SHA256="6bd2752b3d7e7b582d8aa2cc0e5905a358752173b10db83a33a24bf581e243ed"
 MCP_SDK_VERSION="1.30.1"
 MCP_OPENCODE_SDK_VERSION="1.18.21"
 MCP_TESTED_PROTOCOL_VERSION="2025-11-25"
 MCP_TUNNEL_DIR="$SHARE_ROOT/mcp-tunnel/openai"
-HUB_ASSET_TAG="v0.7.48"
+HUB_ASSET_TAG="v0.7.49"
 HUB_ASSET_FILENAME="opencode-vm-hub-1.tar"
 HUB_ASSET_SHA256="58a3f875b0da43e1ea4d1717c146543d47ce2d80d4cfc0bdb812e27c9723f04b"
 
@@ -332,7 +332,7 @@ TASKBOARD_ARM64_SHA256="3749fb985f544fdb6788ba1dff69761e599ff82b3fe86d39ca54307c
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.7.48"
+OCVM_VERSION="0.7.49"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -15867,10 +15867,18 @@ start_mcp_adapter() {
     adapter="$1"; runtime="$2"; log="$3"; child_marker="$4"; writer="$5"
     export OCVM_MCP_RUNTIME="$runtime"
     exec 9>&-
+    # Ownership: background the listener inside the brace group (the left side of
+    # the pipe) so `$!` is the real node PID and is written to run.pid with the
+    # ocvm-mcp-child marker stop_mcp_adapter verifies. A plain `( node | writer ) &`
+    # records the pipeline-subshell PID instead: killing it ends only the wrapper,
+    # the orphaned node keeps the LISTEN socket, and the residual listener check
+    # fails on every stop. No process group is killed; the writer ends on EOF when
+    # node exits.
     while true; do
-      ( aa-exec -p opencode-sandbox -- node "$adapter/dist/main.js" "$child_marker" 2>&1 | python3 -u -c "$writer" "$log" ) &
-      echo $! > /tmp/ocvm-mcp.run.pid
-      wait $! || true
+      { aa-exec -p opencode-sandbox -- node "$adapter/dist/main.js" "$child_marker" 2>&1 &
+        echo $! > /tmp/ocvm-mcp.run.pid
+        wait $! || true
+      } | python3 -u -c "$writer" "$log"
       sleep 2
     done' "$marker" "$adapter" "$OCVM_MCP_RUNTIME" "$SESS_SHARE/mcp/adapter.log" "$child_marker" "$OC_MCP_LOG_WRITER_PY" \
     </dev/null >/dev/null 2>&1 9>&- &
