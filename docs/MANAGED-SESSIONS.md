@@ -75,7 +75,13 @@ the existing project history. Native policy writes are idempotent; explicit tool
 disables are preserved without allowing V1's tools replacement to erase policy.
 New and reused Managed-workstream children are prepared synchronously before
 their work prompt, including previously manual child lineage. Enabled background
-continuations retain the same state.
+continuations retain the same state. Entries persisted by plugin versions
+before the `scopeDirs` field existed are lazily normalized, per queried session
+only, to an empty scope at adoption/prepare: the field is added only when it is
+genuinely absent on a strictly validated same-revision entry, all stored rules,
+denies, disables and `adoptedAt` stay verbatim, no external access is granted,
+and the migrated entry is persisted atomically even when the policy delta is
+empty. Present-but-invalid field values still fail closed.
 
 The completion gate correlates the actual model request with its stored user
 turn. It checks one bounded provider step before SDK tool dispatch. A Question
@@ -116,7 +122,8 @@ the host/guest credential-origin contract; real macOS/Lima/operator acceptance i
 reported separately from local disposable regression evidence.
 
 Maintained gates: `tests/managed_policy_test.mjs`, `tests/managed_a2a_test.py`,
-`tests/managed_policy_integration.py`, `tests/managed_ingress_integration.py`,
+`tests/managed_policy_integration.py`, `tests/managed_legacy_migration_test.py`,
+`tests/managed_ingress_integration.py`,
 MCP/OpenLive package suites and lifecycle/standalone checks. Historical V1 spike
 evidence remains under `tests/agent-managed-v1-spike/`; its old external-G3 model
 selection interpretation is superseded by this task's canonical operator plan.

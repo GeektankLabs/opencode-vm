@@ -127,7 +127,19 @@ export default async ({ client, directory }) => {
     const previous = saved.sessions[id];
     const entry = previous ? structuredClone(previous) : { revision: REVISION, adoptedAt: new Date().toISOString(), base: current, disabled: {}, scopeDirs: [], lastNative: current };
     if (!Array.isArray(entry.base) || !Array.isArray(entry.lastNative)) throw new Error("MANAGED_STATE_REVISION_UNSUPPORTED");
-    if (previous && !Array.isArray(previous.scopeDirs)) throw new Error("MANAGED_STATE_REVISION_UNSUPPORTED");
+    // Writers before the scopeDirs field persisted otherwise-valid entries
+    // without it. Normalize ONLY a genuinely absent field on a strictly
+    // validated same-revision entry to an empty scope — no external access is
+    // granted, all stored rules/denies/disables stay verbatim. A present-but-
+    // invalid value still fails closed. The migrated entry is persisted even
+    // when the policy delta is empty, so the lazy one-time normalization
+    // survives a restart instead of re-failing every adoption.
+    let migrated = false;
+    if (previous && previous.scopeDirs === undefined) {
+      if (entry.revision !== REVISION || typeof entry.disabled !== "object" || entry.disabled === null || Array.isArray(entry.disabled)) throw new Error("MANAGED_STATE_REVISION_UNSUPPORTED");
+      entry.scopeDirs = [];
+      migrated = true;
+    } else if (previous && !Array.isArray(previous.scopeDirs)) throw new Error("MANAGED_STATE_REVISION_UNSUPPORTED");
     // New native children inherit the managed parent's authorized external
     // scope; reused children keep their own persisted scope.
     if (!previous && info.parentID && saved.sessions[info.parentID]?.scopeDirs) entry.scopeDirs = [...saved.sessions[info.parentID].scopeDirs];
@@ -146,7 +158,7 @@ export default async ({ client, directory }) => {
       if (policyDelta(verified.permission ?? [], agent.permission ?? [], scope, entry.scopeDirs).length) throw new Error("MANAGED_POLICY_READBACK_FAILED");
       entry.lastNative = verified.permission ?? [];
     }
-    if (!saved.sessions[id] || delta.length) {
+    if (!saved.sessions[id] || delta.length || migrated) {
       saved.sessions[id] = entry;
       try { await persist(); }
       catch (error) { if (previous) saved.sessions[id] = previous; else delete saved.sessions[id]; throw error; }
