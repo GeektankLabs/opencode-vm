@@ -40,14 +40,15 @@ cp -p "$ROOT/runtime/managed-core.mjs" "$ROOT/runtime/managed-policy.mjs" "$ROOT
 
 cp -p "$ADAPTER/package.json" "$ADAPTER/package-lock.json" "$STAGE/"
 cp -p "$ROOT/LICENSE" "$STAGE/LICENSE"
-cp -p "$ADAPTER/dist/main.js" "$ADAPTER/dist/types.js" \
-  "$ADAPTER/dist/opencode.js" "$ADAPTER/dist/tools.js" \
-  "$ADAPTER/dist/http.js" "$ADAPTER/dist/taskboard.js" "$ADAPTER/dist/management-journal.js" "$ADAPTER/dist/agent-control.js" \
-  "$ADAPTER/dist/policy-commit.js" "$ADAPTER/dist/attachments.js" "$STAGE/dist/"
-cp -p "$ADAPTER/dist/activity.js" "$ADAPTER/dist/attention.js" "$ADAPTER/dist/events.js" \
-  "$ADAPTER/dist/content.js" "$ADAPTER/dist/diagnostics.js" "$STAGE/dist/"
-cp -p "$ADAPTER/dist/monitor.js" "$ADAPTER/dist/monitor-engine.js" "$ADAPTER/dist/monitor-main.js" "$STAGE/dist/"
-cp -p "$ADAPTER/dist/dashboard.js" "$ADAPTER/dist/dashboard-http.js" "$ADAPTER/dist/dashboard-main.js" "$STAGE/dist/"
+# Canonical runtime module list: ship every compiled module except compiled tests.
+# A hardcoded per-file list silently shipped an incomplete adapter (a required
+# sibling module was omitted); the archive import-closure regression
+# (tests/mcp_adapter_archive_test.sh) extracts the tar and loads the real
+# entrypoint so a missing runtime module fails the build instead of production.
+for module in "$ADAPTER"/dist/*.js; do
+  case "$module" in *.test.js) continue ;; esac
+  cp -p "$module" "$STAGE/dist/"
+done
 cp -Rp "$ADAPTER/dashboard" "$STAGE/dashboard"
 
 jq -n \
