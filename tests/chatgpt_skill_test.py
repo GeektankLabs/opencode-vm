@@ -514,7 +514,7 @@ class SkillPackageTest(unittest.TestCase):
         tasks = (source / "references/monitor-tasks.md").read_text()
         changelog = (source / "CHANGELOG.md").read_text()
         manifest, _ = BUILDER.package_content(ROOT)
-        self.assertEqual(manifest["revision"], "2026-10-13-r55")
+        self.assertEqual(manifest["revision"], "2026-10-13-r56")
         self.assertIn("references/monitor-manager-rules.md", manifest["files"])
         self.assertIn("## 2026-10-09-r47\n", changelog)
         self.assertIn("Monitor-manager rules](references/monitor-manager-rules.md)", skill)
@@ -568,9 +568,9 @@ class SkillPackageTest(unittest.TestCase):
         routing = (source / "references/fallback-routing.md").read_text()
         changelog = (source / "CHANGELOG.md").read_text()
         manifest, _ = BUILDER.package_content(ROOT)
-        self.assertEqual(manifest["revision"], "2026-10-13-r55")
+        self.assertEqual(manifest["revision"], "2026-10-13-r56")
         self.assertIn("## 2026-10-08-r45\n", changelog)
-        self.assertIn("**2026-10-13-r55**", skill)
+        self.assertIn("**2026-10-13-r56**", skill)
         self.assertIn("references/fallback-routing.md", skill)
         self.assertIn("routing.regime: per_profile", skill)
         section = routing.split("## Per-profile fallback mode (additive schema 4)\n", 1)[1] \
@@ -3257,7 +3257,7 @@ class TaskDoneArchiveTraceTest(unittest.TestCase):
         monitor = (source / "references/monitor-tasks.md").read_text()
         content = (source / "references/content-protocol.md").read_text()
         scenarios = (source / "references/regression-scenarios.md").read_text()
-        self.assertIn("2026-10-13-r55", skill)
+        self.assertIn("2026-10-13-r56", skill)
         self.assertIn("## Cooperative Pause and Weiter/Go", skill)
         self.assertIn("references/pause-go.md", skill)
         for required in ("next safe Tool/Receipt return",
@@ -3483,7 +3483,7 @@ class TaskDoneArchiveTraceTest(unittest.TestCase):
         monitor = (source / "references/monitor-tasks.md").read_text()
         packages = (source / "references/work-packages.md").read_text()
         mvp = (source / "references/optimistic-mvp.md").read_text()
-        self.assertIn("2026-10-13-r55", skill)
+        self.assertIn("2026-10-13-r56", skill)
         self.assertIn("## 2026-10-08-r44", (source / "CHANGELOG.md").read_text())
         # Production-Code-Only cap with excluded classes, progress and no-reset.
         for required in ("at most two autonomous PRODUCTION-CODE repair cycles",
@@ -3604,6 +3604,22 @@ class TaskDoneArchiveTraceTest(unittest.TestCase):
         self.assertEqual(model.uncertain_write(reconciled=True), "send")
         for state in ("ACTIVE", "PARKED_INPUT_REQUIRED", "COMPLETE_PASS", "STOPPED"):
             self.assertEqual(model.scheduler(state), "enabled")
+
+
+    def test_r56_pack_unpack_protocol_is_offer_only_and_source_aware(self):
+        """Guard the lean pack/unpack protocol: offer-only, source-aware, staged results."""
+        source = ROOT / BUILDER.PACKAGE / "opencode-session-orchestrator"
+        skill = (source / "SKILL.md").read_text()
+        doc = (source / "references" / "pack-unpack-protocol.md").read_text()
+        manifest, _ = BUILDER.package_content(ROOT)
+        self.assertIn("references/pack-unpack-protocol.md", manifest["files"])
+        self.assertIn("references/pack-unpack-protocol.md", skill)
+        flat = " ".join(doc.split())
+        for marker in ("offer-only", "never derives an autonomous",
+                       "Scheduler restart is the very last resume question",
+                       "controlled reattach", "installed `~/bin`",
+                       "model-readable", "CODE_RESTORED"):
+            self.assertIn(marker, flat)
 
 
 if __name__ == "__main__":
