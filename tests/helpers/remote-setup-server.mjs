@@ -30,6 +30,7 @@ execFileSync(
   { stdio: "ignore" },
 );
 const { WebSocketServer } = await import(pathToFileURL(wsModule));
+const adapterVersion = process.argv[7] ?? "0.1.8";
 const expected = `Basic ${Buffer.from("opencode:remote-password-42").toString("base64")}`;
 const server = https.createServer(
   { cert: readFileSync(certFile), key: readFileSync(keyFile) },
@@ -51,7 +52,7 @@ const server = https.createServer(
       schema: 1,
       protocol: "ocvm-openlive.v1",
       scriptVersion: "0.5.49",
-      adapterVersion: "0.1.7",
+      adapterVersion: adapterVersion,
       projectId: "setup-project-id",
       displayName: "Setup Remote",
       ready: true,

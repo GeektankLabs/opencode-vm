@@ -28,9 +28,10 @@ count_openlive_stage_lines() {
   ' "$SCRIPT"
 }
 
-ARTIFACT="$TMP/opencode-vm-openlive-adapter-0.1.7.tar"
-"$ROOT/scripts/build-openlive-adapter.sh" "$ARTIFACT" >/dev/null
 ADAPTER_SHA="$(awk -F'"' '/^OPENLIVE_ADAPTER_SHA256=/ { print $2; exit }' "$SCRIPT")"
+OPENLIVE_VERSION="$(awk -F'"' '/^OPENLIVE_ADAPTER_VERSION=/ { print $2; exit }' "$SCRIPT")"
+ARTIFACT="$TMP/opencode-vm-openlive-adapter-$OPENLIVE_VERSION.tar"
+"$ROOT/scripts/build-openlive-adapter.sh" "$ARTIFACT" >/dev/null
 assert_eq "$(sha256sum "$ARTIFACT" | awk '{ print $1 }')" "$ADAPTER_SHA"
 
 RELEASE_WORKFLOW="$ROOT/.github/workflows/release.yml"
@@ -140,16 +141,16 @@ cp -R "$ROOT/skills" "$STANDALONE_DIR/skills"
 export MOCK_ADAPTER_ASSET="$ARTIFACT"
 HOME="$HOME_STANDALONE" bash "$STANDALONE_DIR/opencode-vm" openlive install \
   >"$TMP/standalone-install.out" 2>"$TMP/standalone-install.err"
-STANDALONE_CACHE="$HOME_STANDALONE/.opencode-vm/openlive/adapters/0.1.7-$ADAPTER_SHA"
+STANDALONE_CACHE="$HOME_STANDALONE/.opencode-vm/openlive/adapters/$OPENLIVE_VERSION-$ADAPTER_SHA"
 assert_file "$STANDALONE_CACHE/dist/main.js"
 assert_file "$STANDALONE_CACHE/dist/remote/client.js"
 assert_file "$STANDALONE_CACHE/dist/remote/server.js"
 assert_file "$STANDALONE_CACHE/manager/tool.mjs"
-jq -e '.schema == 1 and .adapterVersion == "0.1.7" and .remoteProtocol == "ocvm-openlive.v1"' "$STANDALONE_CACHE/manifest.json" >/dev/null ||
+jq -e --arg version "$OPENLIVE_VERSION" '.schema == 1 and .adapterVersion == $version and .remoteProtocol == "ocvm-openlive.v1"' "$STANDALONE_CACHE/manifest.json" >/dev/null ||
   fail "standalone adapter manifest is missing or invalid"
 HOME="$HOME_STANDALONE" bash "$STANDALONE_DIR/opencode-vm" openlive status \
   >"$TMP/standalone-status.out" || true
-grep -q '0.1.7 (installed release)' "$TMP/standalone-status.out" ||
+grep -q "$OPENLIVE_VERSION (installed release)" "$TMP/standalone-status.out" ||
   fail "standalone adapter status is not reported"
 HOME="$HOME_STANDALONE" bash "$STANDALONE_DIR/opencode-vm" openlive install \
   >"$TMP/standalone-reinstall.out" 2>"$TMP/standalone-reinstall.err"
@@ -177,7 +178,7 @@ assert_file "$STANDALONE_CACHE/dist/main.js"
 grep -q 'Updating remote OpenLive runtimes' "$TMP/standalone-migrate.out" ||
   fail "script update did not refresh remote OpenLive runtimes"
 for migrated in "$STANDALONE_REMOTE/openlive-remote.json" "$STANDALONE_REMOTE_TWO/openlive-remote.json"; do
-  jq -e --arg version "0.1.7" --arg sha "$ADAPTER_SHA" \
+  jq -e --arg version "$OPENLIVE_VERSION" --arg sha "$ADAPTER_SHA" \
     '.adapterVersion == $version and .adapterSha256 == $sha and
      .projectId == "migration-project" and .password == "test-only-password" and
      (.nodePath | type == "string" and length > 0) and (.clientPath | endswith("/dist/remote/client.js"))' \
@@ -207,7 +208,7 @@ if PATH="$MOCK_BIN:$(dirname "$NODE_BIN"):/usr/local/bin:/usr/bin:/bin" HOME="$H
   >"$TMP/mixed-migrate.out" 2>"$TMP/mixed-migrate.err"; then
   fail "migration with an invalid mapping should report failure"
 fi
-jq -e --arg version "0.1.7" --arg sha "$ADAPTER_SHA" \
+jq -e --arg version "$OPENLIVE_VERSION" --arg sha "$ADAPTER_SHA" \
   '.adapterVersion == $version and .adapterSha256 == $sha' \
   "$MIGRATION_GOOD/openlive-remote.json" >/dev/null ||
   fail "an invalid mapping blocked migration of a later healthy mapping"
@@ -247,8 +248,8 @@ UNSAFE_ARTIFACT="$TMP/unsafe-openlive-adapter.tar"
 UNSAFE_SCRIPT="$STANDALONE_DIR/opencode-vm-unsafe"
 mkdir -p "$UNSAFE_STAGE"
 tar -xf "$ARTIFACT" -C "$UNSAFE_STAGE"
-ln -s /tmp/not-allowed "$UNSAFE_STAGE/opencode-vm-openlive-adapter-0.1.7/unsafe-link"
-tar -cf "$UNSAFE_ARTIFACT" -C "$UNSAFE_STAGE" opencode-vm-openlive-adapter-0.1.7
+ln -s /tmp/not-allowed "$UNSAFE_STAGE/opencode-vm-openlive-adapter-$OPENLIVE_VERSION/unsafe-link"
+tar -cf "$UNSAFE_ARTIFACT" -C "$UNSAFE_STAGE" "opencode-vm-openlive-adapter-$OPENLIVE_VERSION"
 UNSAFE_SHA="$(sha256sum "$UNSAFE_ARTIFACT" | awk '{ print $1 }')"
 perl -pe "s/$ADAPTER_SHA/$UNSAFE_SHA/g" "$STANDALONE_DIR/opencode-vm" > "$UNSAFE_SCRIPT"
 chmod +x "$UNSAFE_SCRIPT"
@@ -269,14 +270,14 @@ pass "adapter archives containing links are rejected before extraction"
 HOME_ACTIVATE="$TMP/home-activate-failure"
 mkdir -p "$HOME_ACTIVATE"
 export MOCK_ADAPTER_ASSET="$ARTIFACT"
-export MOCK_MV_FAIL_PATTERN="/openlive/adapters/0.1.7-$ADAPTER_SHA"
+export MOCK_MV_FAIL_PATTERN="/openlive/adapters/$OPENLIVE_VERSION-$ADAPTER_SHA"
 if HOME="$HOME_ACTIVATE" bash "$STANDALONE_DIR/opencode-vm" openlive install \
   >"$TMP/activate-install.out" 2>"$TMP/activate-install.err"; then
   fail "adapter activation failure should fail installation"
 fi
 [[ ! -e "$HOME_ACTIVATE/.opencode-vm/openlive/bin/opencode" ]] ||
   fail "activation failure left an OpenLive shim"
-[[ ! -e "$HOME_ACTIVATE/.opencode-vm/openlive/adapters/0.1.7-$ADAPTER_SHA" ]] ||
+[[ ! -e "$HOME_ACTIVATE/.opencode-vm/openlive/adapters/$OPENLIVE_VERSION-$ADAPTER_SHA" ]] ||
   fail "activation failure left an adapter cache"
 grep -q 'Could not activate the downloaded adapter' "$TMP/activate-install.err" ||
   fail "activation failure is not actionable"
@@ -488,10 +489,10 @@ printf '%s\n' "$line"
 EOF
 chmod +x "$REMOTE_NODE"
 jq -n --arg localProject "$REMOTE_STUB" --arg nodePath "$REMOTE_NODE" \
-  --arg clientPath "$REMOTE_CLIENT" --arg adapterSha "$ADAPTER_SHA" '{schema:1,protocol:"ocvm-openlive.v1",
+  --arg clientPath "$REMOTE_CLIENT" --arg adapterSha "$ADAPTER_SHA" --arg openliveVersion "$OPENLIVE_VERSION" '{schema:1,protocol:"ocvm-openlive.v1",
     localProject:$localProject,origin:"https://remote.example:4096",projectId:"remote-project",
     displayName:"Remote project",username:"opencode",password:"secret",
-    nodePath:$nodePath,clientPath:$clientPath,adapterVersion:"0.1.7",
+    nodePath:$nodePath,clientPath:$clientPath,adapterVersion:$openliveVersion,
     adapterSha256:$adapterSha}' > "$REMOTE_STATE/openlive-remote.json"
 chmod 600 "$REMOTE_STATE/openlive-remote.json"
 export MOCK_REMOTE_NODE_LOG="$TMP/remote-node.log"
@@ -561,7 +562,7 @@ exec /usr/bin/openssl "$@"
 EOF
 chmod +x "$SETUP_BIN/openssl"
 "$NODE_BIN" "$ROOT/tests/helpers/remote-setup-server.mjs" "$SETUP_CERT" "$SETUP_KEY" "$SETUP_STATE" \
-  "$ROOT/adapters/openlive-acp/node_modules/ws/wrapper.mjs" >"$TMP/setup-server.out" 2>"$TMP/setup-server.err" &
+  "$ROOT/adapters/openlive-acp/node_modules/ws/wrapper.mjs" "$OPENLIVE_VERSION" >"$TMP/setup-server.out" 2>"$TMP/setup-server.err" &
 SETUP_SERVER_PID=$!
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
   [[ -s "$SETUP_STATE" ]] && break
@@ -584,10 +585,10 @@ kill "$SETUP_SERVER_PID" 2>/dev/null || true
 wait "$SETUP_SERVER_PID" 2>/dev/null || true
 SETUP_MAPPING="$SETUP_HOME/.opencode-vm/project-state/openlive-test-hash/openlive-remote.json"
 assert_file "$SETUP_MAPPING"
-jq -e --arg project "$SETUP_STUB" --arg fingerprint "$SETUP_FINGERPRINT" '
+jq -e --arg project "$SETUP_STUB" --arg fingerprint "$SETUP_FINGERPRINT" --arg openliveVersion "$OPENLIVE_VERSION" '
   .localProject == $project and .projectId == "setup-project-id" and
   .displayName == "Setup Remote" and .tlsFingerprint == $fingerprint and
-  .password == "remote-password-42" and .adapterVersion == "0.1.7"
+  .password == "remote-password-42" and .adapterVersion == $openliveVersion
 ' "$SETUP_MAPPING" >/dev/null || fail "remote setup persisted the wrong mapping"
 assert_eq "$(stat -c '%a' "$SETUP_MAPPING")" "600"
 assert_eq "$(stat -c '%a' "$(dirname "$SETUP_MAPPING")")" "700"
@@ -609,7 +610,7 @@ NOAUTH_CERT="$TMP/no-auth-cert.pem"
 NOAUTH_KEY="$TMP/no-auth-key.pem"
 mkdir -p "$NOAUTH_HOME" "$NOAUTH_STUB"
 "$NODE_BIN" "$ROOT/tests/helpers/remote-setup-server.mjs" "$NOAUTH_CERT" "$NOAUTH_KEY" "$NOAUTH_STATE" \
-  "$ROOT/adapters/openlive-acp/node_modules/ws/wrapper.mjs" --no-auth \
+  "$ROOT/adapters/openlive-acp/node_modules/ws/wrapper.mjs" --no-auth "$OPENLIVE_VERSION" \
   >"$TMP/no-auth-server.out" 2>"$TMP/no-auth-server.err" &
 NOAUTH_SERVER_PID=$!
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
@@ -644,7 +645,7 @@ PIN_STATE="$TMP/pin-server.state"
 PIN_CERT="$TMP/pin-cert.pem"
 PIN_KEY="$TMP/pin-key.pem"
 "$NODE_BIN" "$ROOT/tests/helpers/remote-setup-server.mjs" "$PIN_CERT" "$PIN_KEY" "$PIN_STATE" \
-  "$ROOT/adapters/openlive-acp/node_modules/ws/wrapper.mjs" >"$TMP/pin-server.out" 2>"$TMP/pin-server.err" &
+  "$ROOT/adapters/openlive-acp/node_modules/ws/wrapper.mjs" "$OPENLIVE_VERSION" >"$TMP/pin-server.out" 2>"$TMP/pin-server.err" &
 PIN_SERVER_PID=$!
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
   [[ -s "$PIN_STATE" ]] && break
