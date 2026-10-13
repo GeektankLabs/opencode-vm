@@ -25,6 +25,10 @@ export type RecoveryOrder = {
   session_id: string;
   message_id: string;
   profile: string | null;
+  /** The session runtime identity at admission / first recovery (the ORIGINAL
+   * runtime that failed). Persisted once so later calls never mistake an
+   * already-switched recovery candidate for the entry runtime (task_68085480 F1). */
+  entry_identity: string | null;
   created_at: string;
   updated_at: string;
   status: RecoveryOrderStatus;
@@ -64,6 +68,7 @@ function validOrder(value: unknown): value is RecoveryOrder {
   const v = value as Record<string, unknown>;
   if (typeof v.session_id !== "string" || typeof v.message_id !== "string") return false;
   if (v.profile !== null && typeof v.profile !== "string") return false;
+  if (v.entry_identity !== null && typeof v.entry_identity !== "string") return false;
   if (typeof v.created_at !== "string" || typeof v.updated_at !== "string") return false;
   if (!["pending", "final_attempted", "escalated", "completed"].includes(v.status as string)) return false;
   if (typeof v.final_attempted !== "boolean") return false;
@@ -196,6 +201,7 @@ export async function recordAdmission(
       session_id: input.session_id,
       message_id: input.message_id,
       profile: input.profile,
+      entry_identity: null,
       created_at: input.now,
       updated_at: input.now,
       status: "pending",
@@ -204,6 +210,24 @@ export async function recordAdmission(
       attempts: [],
     };
   });
+}
+
+/**
+ * Process-local, per-key submission lock for recovery (task_68085480 F2). The
+ * durable store flock serializes individual store writes, but the whole
+ * revalidate → claim → dispatch sequence must be mutually exclusive so two
+ * concurrent recovery calls cannot both pass admission and dispatch the same
+ * regular candidate twice. Chained promises make this race-free in the single
+ * adapter process; no global lock and no scheduler are introduced.
+ */
+const submissionTails = new Map<string, Promise<void>>();
+export function withRecoverySubmissionLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prior = submissionTails.get(key) ?? Promise.resolve();
+  const run = prior.then(fn, fn);
+  const tail = run.then(() => undefined, () => undefined);
+  submissionTails.set(key, tail);
+  void tail.finally(() => { if (submissionTails.get(key) === tail) submissionTails.delete(key); });
+  return run;
 }
 
 export function nextOrder(order: RecoveryOrder, patch: Partial<RecoveryOrder>, now: string): RecoveryOrder {
