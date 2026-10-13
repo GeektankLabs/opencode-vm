@@ -8,11 +8,15 @@ Autorisierte **Nacharbeitung** unter Paketanker `task_68085480-3223-5cea-ad30-f8
 
 ## Basis / Pins
 Basis-HEAD `3dfb71a`; Branch `task/68085480-routing-selfheal`; Main `39dab8f`
-unverändert. Ergebnis: OCVM `0.7.50`, MCP-Adapter `0.1.53` (Tags v0.7.50),
-Skill `2026-10-13-r55`; Archiv `dist/opencode-vm-mcp-adapter-0.1.53.tar`
-SHA256 `8552b133961520c2eb484dde5ccbe821b1651f3089687ca9638e3db662391aca`.
+unverändert. Ergebnis: OCVM `0.7.51`, MCP-Adapter `0.1.54` (Tags v0.7.51),
+Skill `2026-10-13-r55`; Archiv `dist/opencode-vm-mcp-adapter-0.1.54.tar`
+SHA256 `ca65208366f399e4e3d5083249766e0c78ddeec8e1843b531e319c9d1ac481be`.
 
 ## Umfang
+- Folgefix (nach Impl-QC_PASS): `get_project_model_policy` / `get_recommended_runtime` /
+  `update_session_runtime` spiegeln kompakte nicht-geheime Kernmetadaten in
+  `content[0].text` (Revision/Profil/ProviderID/ModellID/Variant/Enabled-/Auflösestatus/
+  SessionID, Slots+Fallbacks+Strategie); `structuredContent` unverändert, keine Secrets.
 - `monitor-engine.ts` `buildPrimingBlock` + `PRIMING_CONTRACT` `mgmt-v3`→`mgmt-v4`
   (Digest enthält Contract → einmaliges Repriming).
 - Skill: `agent-preparation.md` (Pre-dispatch runtime gate), `fallback-routing.md`

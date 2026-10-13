@@ -14,10 +14,10 @@ Selfheal), freigegeben durch den Nutzerauftrag vom 13.10.2026.
 - Branch `task/68085480-routing-selfheal`, Worktree
   `.opencode-vm/worktrees/task-68085480-routing-selfheal`.
 - Main unverändert `39dab8f`; Shutdown-Worktree unverändert.
-- Ergebnis-Versionen: OCVM `0.7.50`, MCP-Adapter `0.1.53` (Tags v0.7.50),
+- Ergebnis-Versionen: OCVM `0.7.51`, MCP-Adapter `0.1.54` (Tags v0.7.51),
   Skill-Revision `2026-10-13-r55`.
-- Adapter-Archiv `dist/opencode-vm-mcp-adapter-0.1.53.tar`, SHA256
-  `8552b133961520c2eb484dde5ccbe821b1651f3089687ca9638e3db662391aca`.
+- Adapter-Archiv `dist/opencode-vm-mcp-adapter-0.1.54.tar`, SHA256
+  `ca65208366f399e4e3d5083249766e0c78ddeec8e1843b531e319c9d1ac481be`.
 
 ## 2. Umfang (implementiert)
 - **Priming (real):** `adapters/mcp/src/monitor-engine.ts` `buildPrimingBlock`
@@ -30,6 +30,22 @@ Selfheal), freigegeben durch den Nutzerauftrag vom 13.10.2026.
   - `references/monitor-manager-rules.md`: Wake-Duty-Loop Schritt 5.
   - `references/monitor-tasks.md` (runtime-Primerfeld), `references/monitor-reporting.md` (busy≠stall / unknown≠retry).
   - `SKILL.md` (Marker r55 + Verweis), `CHANGELOG.md` (r55), `bundle.json` (r55); ZIP + sha256 + latest.json neu gebaut.
+
+## 2b. Nacharbeit-Folgefix (autorisierter technischer Responsefix) — nach Implementierungs-QC_PASS
+Nach `msg_136e2e66d001Vi04ehfJ5JfrPh` (Implementierungs-QC_PASS `8c453691`, 311
+Adapter / 87 Skill reproduziert, **kein LivePASS**) eng autorisierter Folgefix im
+selben Worktree:
+- Kritische Routing-Tools `get_project_model_policy`, `get_recommended_runtime`,
+  `update_session_runtime` spiegeln jetzt sinnvolle **kompakte, nicht geheime**
+  Kernmetadaten in `content[0].text` (Revision/Profil/ProviderID/ModellID/Variant/
+  Enabled-/Auflösestatus/SessionID, Policy-Slots + Fallbacks + Strategierelevanz).
+  `structuredContent` und API-Vertrag **unverändert**; keine Secrets/Prompts/Auth/
+  Endpoint-Credentials; `null`/`unconfigured`/`unavailable` ehrlich.
+- Kein harter Runtime-Guard/keine neue API; externer Send-Gate bleibt kooperativ.
+- Unit-Nachweis: neuer Wire-Test
+  `routing tool content text mirrors compact non-secret core metadata (crosschecks
+  structuredContent)` (normal/disabled/unconfigured + Crosscheck + Leak-Check).
+- Version/Pins: Adapter `0.1.54`, OCVM `0.7.51` (Tags v0.7.51); Archiv-SHA siehe §1.
 
 ## 3. Encodierte Regeln (Kern)
 - Vor **jedem** neuen Dispatch (auch Follow-up): passendes **enabled** Profil frisch

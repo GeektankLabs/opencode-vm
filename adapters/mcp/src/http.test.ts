@@ -87,6 +87,78 @@ test("profile MCP reads resolve an exact configured runtime without mutating the
   }
 });
 
+test("routing tool content text mirrors compact non-secret core metadata (crosschecks structuredContent)", async () => {
+  const project = await mkdtemp(join(tmpdir(), "ocvm-policy-content-"));
+  await mkdir(join(project, ".opencode-vm"));
+  const selection = { provider_id: "provider", model_id: "model", variant: "high" };
+  const ownFallback = { provider_id: "provider", model_id: "model", variant: "default" };
+  await writeFile(join(project, ".opencode-vm", "agent-control.json"), JSON.stringify({
+    schemaVersion: 5, revision: 3, updatedAt: "2026-10-13T00:00:00Z",
+    profiles: { deep: selection, standard: null, execution: null, design: null, review: null },
+    finalFallback: { mode: "total", selection: ownFallback },
+    profileFallbacks: { deep: ownFallback, standard: null, execution: null, design: null, review: null },
+    strategies: { degrading: true, providerSkip: false },
+    disabled: { profiles: { deep: true, standard: false, execution: false, design: false, review: false },
+      profileFallbacks: { deep: false, standard: false, execution: false, design: false, review: false },
+      finalFallback: false },
+  }));
+  const gateway = new FakeGateway();
+  const adapter = new McpHttpServer({ ...runtime(), project }, token, gateway);
+  const port = await adapter.start();
+  const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`),
+    { requestInit: { headers: { "X-OCVM-MCP-Token": token } } });
+  const client = new Client({ name: "policy-content", version: "1.0.0" });
+  const text = (result: unknown): string => {
+    const content = (result as { content?: Array<{ type?: string; text?: string }> } | undefined)?.content;
+    return Array.isArray(content) ? content.filter((part) => part.type === "text").map((part) => part.text ?? "").join("\n") : "";
+  };
+  try {
+    await client.connect(transport);
+    const policy = await client.callTool({ name: "get_project_model_policy", arguments: {} });
+    const policyText = text(policy);
+    const policyData = policy.structuredContent as { revision: number; schema_version: number; profiles: { deep: { status: string; disabled: boolean } } };
+    assert.equal(policyData.revision, 3);
+    assert.equal(policyData.schema_version, 5);
+    assert.match(policyText, /schema=5 revision=3/);
+    assert.match(policyText, /deep=provider\/model\/high\[available,disabled\]/, "the disabled primary slot is mirrored honestly");
+    assert.match(policyText, /regime=per_profile/);
+    assert.match(policyText, /degrading=true/);
+    assert.match(policyText, /Final fallback: provider\/model\/default\[available,mode=total\]/);
+    assert.match(policyText, /deep\.fallback/);
+    // No secrets, endpoints, credential paths or auth tokens in the model-readable text.
+    for (const forbidden of [token, "/credential", "127.0.0.1", "http://"]) {
+      assert.ok(!policyText.includes(forbidden), `policy content leaked ${forbidden}`);
+    }
+    // Crosscheck: the mirrored tuple equals the structuredContent selection.
+    assert.ok(policyText.includes(`${selection.provider_id}/${selection.model_id}/${selection.variant}`));
+
+    const recommended = await client.callTool({ name: "get_recommended_runtime", arguments: { profile: "deep" } });
+    const recText = text(recommended);
+    const recData = recommended.structuredContent as { profile: string; status: string; resolved_label?: string; runtime?: { provider_id: string; model_id: string; variant: string } };
+    assert.equal(recData.status, "available");
+    assert.equal(recData.resolved_label, "deep.fallback");
+    assert.match(recText, /profile=deep revision=3 status=available/);
+    assert.match(recText, /Resolved: label=deep\.fallback/);
+    assert.match(recText, /Candidates: deep\.main\[disabled\] deep\.fallback\[available\]/);
+    assert.ok(recText.includes(`${recData.runtime!.provider_id}/${recData.runtime!.model_id}/${recData.runtime!.variant}`),
+      "recommended text mirrors the resolved runtime tuple");
+
+    const unconfigured = await client.callTool({ name: "get_recommended_runtime", arguments: { profile: "execution" } });
+    assert.equal((unconfigured.structuredContent as { status: string }).status, "unconfigured");
+    assert.match(text(unconfigured), /status=unconfigured/);
+
+    const updated = await client.callTool({ name: "update_session_runtime", arguments: { session_id: "ses", provider_id: "provider", model_id: "model", variant: "high" } });
+    const updText = text(updated);
+    const updData = updated.structuredContent as { session_id: string; current: { provider_id: string; model_id: string; variant: string } };
+    assert.equal(updData.session_id, "ses");
+    assert.match(updText, /session ses \(state=updated\)/);
+    assert.ok(updText.includes(`Current: ${updData.current.provider_id}/${updData.current.model_id}/${updData.current.variant}`),
+      "update text mirrors the confirmed current runtime");
+  } finally {
+    await client.close(); await adapter.close(); await rm(project, { recursive: true, force: true });
+  }
+});
+
 function runtime(): RuntimeDescriptor {
   return {
     schema: 1,

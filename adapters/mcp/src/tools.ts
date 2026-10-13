@@ -11,7 +11,7 @@ import { CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod/v4";
 import type { SessionGateway } from "./opencode.js";
 import type { DashboardControl } from "./dashboard.js";
-import type { RuntimeDescriptor } from "./types.js";
+import type { RuntimeDescriptor, RuntimeUpdateResult } from "./types.js";
 import { ProjectBoardService, MAX_TASK_DESCRIPTION_LENGTH } from "./taskboard.js";
 import type { DocumentRole } from "./taskboard.js";
 import { traceToolCall } from "./diagnostics.js";
@@ -2471,6 +2471,36 @@ export function createMcpServer(
       ),
   );
 
+  // task_68085480 rework: compact, non-secret core metadata mirrored into the
+  // model-readable content text for the critical routing tools. structuredContent
+  // and the API contract stay unchanged; no prompts, auth, endpoints or secrets;
+  // null/unconfigured/unavailable are reported honestly.
+  const fmtTuple = (r: { provider_id?: string; model_id?: string; variant?: string; agent?: string }): string =>
+    `${r.provider_id ?? "?"}/${r.model_id ?? "?"}/${r.variant ?? "none"}${r.agent ? ` agent=${r.agent}` : ""}`;
+  const fmtSlot = (entry: { selection: { provider_id: string; model_id: string; variant: string } | null; status: string; disabled: boolean }): string =>
+    entry.selection ? `${fmtTuple(entry.selection)}[${entry.status}${entry.disabled ? ",disabled" : ""}]`
+      : `unconfigured${entry.disabled ? "[disabled]" : ""}`;
+  const policyText = (value: ReturnType<typeof describePolicy>): string => [
+    `Project policy: project=${value.project_id} schema=${value.schema_version} revision=${value.revision} catalog=${value.catalog_status} updated=${value.updated_at ?? "none"}`,
+    `Routing: regime=${value.routing.regime} legacy_final_stage_applies=${value.routing.legacy_final_stage_applies} strategies(degrading=${value.strategies.degrading ?? "unset"},provider_skip=${value.strategies.provider_skip ?? "unset"}) effective(degrading=${value.routing.strategies_effective.degrading},provider_skip=${value.routing.strategies_effective.provider_skip})`,
+    `Profiles: ${PROFILE_NAMES.map((p) => `${p}=${fmtSlot(value.profiles[p]!)}`).join(" ")}`,
+    `Profile fallbacks: ${PROFILE_NAMES.map((p) => `${p}=${fmtSlot(value.profile_fallbacks[p]!)}`).join(" ")}`,
+    `Final fallback: ${value.final_fallback ? `${fmtTuple(value.final_fallback.selection)}[${value.final_fallback.status}${value.final_fallback.disabled ? ",disabled" : ""},mode=${value.final_fallback.mode}]` : "unconfigured"}`,
+    `Resolution: ${PROFILE_NAMES.map((p) => { const r = value.resolution[p]!; return `${p}=${r.status}${r.resolved_label ? `->${r.resolved_label}` : ""}${r.runtime ? `(${fmtTuple(r.runtime)})` : ""}`; }).join(" ")}`,
+    `Candidate order: ${value.routing.candidate_order ? PROFILE_NAMES.map((p) => `${p}:${(value.routing.candidate_order![p] ?? []).join(">") || "none"}`).join(" ") : "legacy"}`,
+  ].join("\n");
+  const recommendedText = (value: ReturnType<typeof resolveProfile>): string => [
+    `Recommended runtime: profile=${value.profile} revision=${value.policy_revision} status=${value.status}`,
+    `Resolved: label=${value.resolved_label ?? "none"}${value.resolved_profile ? ` profile=${value.resolved_profile}` : ""} runtime=${value.runtime ? fmtTuple(value.runtime) : "none"}`,
+    `Resolution path: ${value.resolution_path.join(">") || "none"}`,
+    `Candidates: ${value.candidates.map((c) => `${c.label}[${c.disabled ? "disabled" : c.status}]`).join(" ") || "none"}`,
+  ].join("\n");
+  const updateText = (value: RuntimeUpdateResult): string => [
+    `Updated runtime settings for session ${value.session_id} (state=${value.state}).`,
+    `Previous: ${fmtTuple(value.previous)}`,
+    `Current: ${fmtTuple(value.current)}`,
+  ].join("\n");
+
   const optionsHandler = safeHandler(
     async ({ session_id }: z.output<typeof runtimeOptionsInput>) =>
       success(
@@ -2479,11 +2509,10 @@ export function createMcpServer(
       ),
   );
   const updateHandler = safeHandler(
-    async ({ session_id, ...patch }: z.output<typeof runtimeUpdateInput>) =>
-      success(
-        await gateway.updateSessionRuntime(session_id, patch),
-        `Updated runtime settings for session ${session_id}.`,
-      ),
+    async ({ session_id, ...patch }: z.output<typeof runtimeUpdateInput>) => {
+      const result = await gateway.updateSessionRuntime(session_id, patch);
+      return success(result, updateText(result));
+    },
   );
   const activityHandler = safeHandler(
     async (query: z.output<typeof activityInput>) => {
@@ -2546,15 +2575,15 @@ export function createMcpServer(
     if (!runtime) throw new AdapterError("UNSUPPORTED_CONFIGURATION", "Project runtime is unavailable.");
     const policy = await readPolicy(runtime);
     const catalog = await gateway.getSessionRuntimeOptions().catch(() => undefined);
-    return success(describePolicy(runtime, policy, catalog), "Project runtime profile policy and validation.");
+    const value = describePolicy(runtime, policy, catalog);
+    return success(value, policyText(value));
   });
   const recommendedHandler = safeHandler(async ({ profile }: z.output<typeof recommendedInput>) => {
     if (!runtime) throw new AdapterError("UNSUPPORTED_CONFIGURATION", "Project runtime is unavailable.");
     const policy = await readPolicy(runtime);
     const catalog = await gateway.getSessionRuntimeOptions().catch(() => undefined);
     const result = resolveProfile(policy, profile, catalog);
-    return success(result,
-      result.status === "available" ? "The configured runtime is currently listed." : "No runtime was selected; inspect the status before submitting work.");
+    return success(result, recommendedText(result));
   });
   server.registerTool(
     "get_project_model_policy",
