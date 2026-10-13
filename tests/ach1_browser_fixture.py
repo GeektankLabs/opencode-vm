@@ -4,6 +4,7 @@ from pathlib import Path
 import tempfile
 
 import hub.server as server
+import hub.catalog as catalog
 
 # Deliberately unsorted, mixed-case and with duplicate display names: every model
 # picker must sort alphabetically by displayed name (case-insensitive, stable, with
@@ -28,6 +29,40 @@ CATALOG = {"providers": [{"provider_id": "fixture", "name": "Fixture Provider"},
                       {"provider_id": "other", "model_id": "other/alpha", "name": "alpha model",
                        "variants": ["default"]}], "truncated": False}
 
+# Static tools/list schema in the shape the MCP SDK actually serializes (nested
+# `properties`, `anyOf` schema_version, `oneOf` slot selector). The Hub's REAL
+# capability detection (`hub.catalog._supports_*`) runs against this instead of
+# patched capability functions, so the browser flow exercises detection and UI
+# together (task_68085480).
+def _profile_entry():
+    return {"type": "object", "properties": {"selection": {"type": "object"}, "status": {"type": "string"}, "disabled": {"type": "boolean"}}}
+
+
+STATIC_TOOLS = {
+    "get_recommended_runtime": {
+        "inputSchema": {"properties": {"profile": {"enum": ["deep", "standard", "execution", "design", "review"]}}},
+        "outputSchema": {"properties": {"resolution_path": {"type": "array"}, "resolved_profile": {"type": "string"}, "resolved_label": {"type": "string"}}},
+    },
+    "get_project_model_policy": {"outputSchema": {"properties": {
+        "schema_version": {"anyOf": [{"type": "number", "const": n} for n in (1, 2, 3, 4, 5)]},
+        "resolution": {"type": "object", "properties": {}},
+        "profiles": {"type": "object", "properties": {name: _profile_entry() for name in ("deep", "standard", "execution", "design", "review")}},
+        "profile_fallbacks": {"type": "object", "properties": {}},
+        "strategies": {"type": "object", "properties": {"degrading": {"type": "boolean"}, "provider_skip": {"type": "boolean"}}},
+        "routing": {"type": "object", "properties": {"regime": {"type": "string"}, "legacy_final_stage_applies": {"type": "boolean"},
+                                                     "strategies_effective": {"type": "object"}, "candidate_order": {"type": "object"}}},
+    }}},
+    "set_project_model_policy_profile_fallback": {"inputSchema": {"properties": {"revision": {"type": "number"}, "profile": {"type": "string"}, "fallback": {"type": "object"}}}},
+    "set_project_model_policy_strategies": {"inputSchema": {"properties": {"revision": {"type": "number"},
+        "strategies": {"type": "object", "properties": {"degrading": {"type": "boolean"}, "provider_skip": {"type": "boolean"}}}}}},
+    "set_project_model_policy_slot_disabled": {"inputSchema": {"properties": {"revision": {"type": "number"},
+        "slot": {"oneOf": [{"type": "object", "properties": {"kind": {"const": "profile"}}},
+                           {"type": "object", "properties": {"kind": {"const": "profile_fallback"}}},
+                           {"type": "object", "properties": {"kind": {"const": "final_fallback"}}}]},
+        "disabled": {"type": "boolean"}}}},
+}
+
+
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory(prefix="ach1-fixture-") as temporary:
         root = Path(temporary)
@@ -43,10 +78,9 @@ if __name__ == "__main__":
         server.AUTH_CREDENTIALS = None
         server.REQUEST_SCHEME = "http"
         server.read_catalog = lambda *args, **kwargs: CATALOG
-        server.read_capabilities = lambda *args: True
-        server.read_policy_capabilities = lambda *args: {"optionalProfiles": True, "profileFallbacks": True, "slotDisabled": True}
-        server.read_schema4_capabilities = lambda *args: True
-        server.read_slot_disabled_capabilities = lambda *args: True
+        # Capability discovery runs for real against ONE static tools/list schema
+        # (see STATIC_TOOLS) instead of patching the capability functions.
+        catalog._tools_list = lambda connection: STATIC_TOOLS
         http = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
         print(json.dumps({"port": http.server_port, "project": str(server.PROJECT)}), flush=True)
         try:
