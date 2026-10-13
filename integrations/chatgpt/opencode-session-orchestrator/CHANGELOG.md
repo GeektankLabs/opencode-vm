@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-13-r54
+
+- Document the explicit single-order recovery contract (task_68085480 F7a): `recover_session_order` continues exactly one adapter-admitted original order after a confirmed eligible provider error — remaining regular candidates first, then the configured global final stage exactly once, one verified switch + one resend, terminal escalation. It is never triggered by a read and never resumes foreign/manual/aborted/archived/monitor-bound work; the exact original message_id is mandatory; no automatic order resumption is implied.
+
 ## 2026-10-13-r53
 
 - Add the bounded authorized-alternatives check before a total park (task_68085480 part 4): optimistic-mvp.md states the rule (2–3 already-authorized plausible ways, first viable, no YOLO/reset/delete/security approvals from synthesized options, a single narrow reviewer negative finding is not a global impossibility judgement) and mirrors the Monitor Engine recovery prompt's bounded alternative check.

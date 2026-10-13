@@ -785,7 +785,7 @@ const attentionReceiptInput = z.object({ event_id: z.string().min(1).max(256), s
   lifecycle: z.enum(["offered", "discussed"]) }).strict();
 const attentionReceiptOutput = z.object({ event_id: z.string(), source_revision: z.string(), lifecycle: z.enum(["new", "ready", "offered", "discussed", "superseded"]) }).strict();
 
-const journalCapabilitySchema = z.object({ enabled: z.boolean(), state: z.enum(["disabled", "ready", "unavailable"]) }).strict();
+const journalCapabilitySchema = z.object({ enabled: z.boolean(), state: z.enum(["disabled", "ready", "degraded", "unavailable"]) }).strict();
 const JOURNAL_TOOLS = new Set(["get_project_activity", "wait_for_project_activity", "get_project_attention",
   "acknowledge_project_attention", "supersede_unresolved_submission"]);
 

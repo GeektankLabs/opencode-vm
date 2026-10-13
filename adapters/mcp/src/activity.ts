@@ -145,6 +145,12 @@ export class ActivityJournal {
 
   get available(): boolean { return !this.failed && !this.closed; }
 
+  /** True once a commit failure latched the journal closed for further event
+   * persistence. This is an honest state, not a reset: the latch is never
+   * cleared here, and optional event coverage is reported as degraded while
+   * the rest of the adapter (auth, scope, admission, receipts) keeps working. */
+  get degraded(): boolean { return this.failed; }
+
   private constructor(
     private readonly path: string,
     private store: Store,

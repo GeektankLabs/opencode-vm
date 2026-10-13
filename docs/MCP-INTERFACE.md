@@ -61,7 +61,10 @@ not advertise `events`; `events/list` is empty, subscribe/unsubscribe return
 Unsupported with `error.data.code=ACTIVITY_DISABLED` and make no callback.
 
 Ordinary `list_sessions`/`get_session` reads add `activity_journal:{enabled,state}`
-(`disabled`, `ready`, `unavailable`), also exposed in `/healthz.granularity`.
+(`disabled`, `ready`, `degraded`, `unavailable`), also exposed in `/healthz.granularity`.
+`degraded` is an enabled optional journal whose commit latched it closed for event
+persistence: it reports honest lost event coverage (no FakeReady, no PersistACK, the latch is
+never auto-reset) while admission, receipts and monitor dispatch keep working.
 An enabled journal that fails remains `unavailable`; it never silently falls
 back to journal-free writes. Journal-free status/result reads omit only the
 optional persistent `receipt_resolution`. Sends/follow-ups still return native

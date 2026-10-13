@@ -54,6 +54,21 @@ Configuration writes: use the discovered per-profile write tools (`set_project_m
 
 Roles and per-step return are unchanged: technical stages never change the business role (design requirements stay design requirements, a reviewer stays independent with no self-implementation or self-acceptance), and the next separately started order resolves its regular profile fresh from the current policy with exact readback. Context/input-length errors stay on their separate compaction path below and are never a routing trigger.
 
+## Single-order explicit recovery
+
+An operator may explicitly continue exactly ONE adapter-admitted single order — never a monitor
+and never foreign, manual, aborted, archived or monitor-bound work — by calling
+`recover_session_order({session_id, message_id})`. It is a deliberate write: a `get_session_status`
+or any other read never triggers it, and there is no poller, timer or scheduler behind it. It
+requires the exact original `message_id` (mandatory receipt provenance) and a confirmed eligible
+terminal provider error, then continues the same order through the current policy's chain:
+remaining regular candidates first, and only then the configured global final stage — attempted
+exactly once even when Provider-Skip is active or the identical runtime already failed. Exactly
+one runtime switch is verified and exactly one resend is admitted, after which the result is a
+terminal escalation; unknown or uncertain delivery fails closed. Do not infer automatic order
+resumption from this tool: the client must decide and call it explicitly, and after the single
+final attempt escalate instead of retrying.
+
 ## Context-error recovery (class 3, separate)
 
 - After the request completed and the class-3 finding is confirmed, rely on the installed backend's **native compaction**; verify the behavior against the actually installed version and claim no unsupported compaction capability without evidence. Do not build a second general compaction mechanism, and do not immediately resubmit the same rejected request.

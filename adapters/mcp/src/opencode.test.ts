@@ -473,17 +473,39 @@ test("explicit journal-free mode avoids journal state and preserves reads, write
     await assert.rejects(read(), { code: "ACTIVITY_DISABLED" });
 });
 
-test("enabled journal failure is unavailable, never silently downgraded to journal-free", async t => {
+test("enabled journal failure is degraded, never silently downgraded to journal-free", async t => {
   const state = baseState(), gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
   const path = await enableTestJournal(t, gateway);
   assert.deepEqual(gateway.activityJournalStatus(), { enabled: true, state: "ready" });
   await rm(path.substring(0, path.lastIndexOf("/")), { recursive: true, force: true });
   state.statuses.ses_work = { type: "busy" };
   await assert.rejects(gateway.captureActivity("ses_work"), { code: "ACTIVITY_UNAVAILABLE" });
-  assert.deepEqual(gateway.activityJournalStatus(), { enabled: true, state: "unavailable" });
+  assert.deepEqual(gateway.activityJournalStatus(), { enabled: true, state: "degraded" });
   state.messages = [stored("user_failedjournal", "request"), stored("assistant_failedjournal", "result", "user_failedjournal")];
   await assert.rejects(gateway.getSessionStatus("ses_work", "user_failedjournal"), { code: "ACTIVITY_UNAVAILABLE" });
   assert.equal((await gateway.getSessionDetails("ses_work")).activity, "busy");
+});
+
+test("a failed optional journal does not block admission; coverage is reported degraded", async t => {
+  const state = baseState();
+  state.promptAsync = async (parameters) => {
+    const user = stored(parameters.messageID as string, "degraded send");
+    user.info.sessionID = parameters.sessionID;
+    state.messages.push(user);
+  };
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  const path = await enableTestJournal(t, gateway);
+  assert.deepEqual(gateway.activityJournalStatus(), { enabled: true, state: "ready" });
+  // Break the write target; the next commit latches the optional journal closed.
+  await rm(path.substring(0, path.lastIndexOf("/")), { recursive: true, force: true });
+  state.statuses.ses_work = { type: "busy" };
+  await assert.rejects(gateway.captureActivity("ses_work"), { code: "ACTIVITY_UNAVAILABLE" });
+  assert.deepEqual(gateway.activityJournalStatus(), { enabled: true, state: "degraded" });
+  // Admission with the degraded optional journal still succeeds (never blocked).
+  state.statuses.ses_work = { type: "idle" };
+  const receipt = await gateway.sendMessage("ses_work", "degraded send");
+  assert.equal(receipt.state, "submitted");
+  assert.ok(receipt.message_id.length > 0);
 });
 
 test("Delivery B: progress exposes only observed tool metadata and exact task correlation", async () => {

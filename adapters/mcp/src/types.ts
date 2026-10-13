@@ -1,7 +1,7 @@
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { dirname, isAbsolute } from "node:path";
 
-export const ADAPTER_VERSION = "0.1.49";
+export const ADAPTER_VERSION = "0.1.50";
 export const MCP_TRANSPORT = "streamable-http-stateless";
 
 export type RuntimeDescriptor = {
@@ -24,7 +24,7 @@ export type RuntimeDescriptor = {
 
 export type ActivityJournalCapability = {
   enabled: boolean;
-  state: "disabled" | "ready" | "unavailable";
+  state: "disabled" | "ready" | "degraded" | "unavailable";
 };
 
 export type ReadyDescriptor = {

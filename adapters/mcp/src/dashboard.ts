@@ -186,6 +186,11 @@ export class DashboardCollector {
       } else if (journal?.state === "unavailable") {
         this.recent = null;
         this.sources.activity = { ...this.sources.activity, complete: false, error: "ACTIVITY_UNAVAILABLE" };
+      } else if (journal?.state === "degraded") {
+        // Optional journal latched closed: report lost event coverage honestly and
+        // keep the direct session/board/activity slices working (no blocking).
+        this.recent = null;
+        this.sources.activity = { ...this.sources.activity, complete: false, error: "ACTIVITY_DEGRADED" };
       } else {
         await this.read("activity", async () => {
           const recent = await this.reader.activity(new Set(this.sessions.map(s => s.session_id)));

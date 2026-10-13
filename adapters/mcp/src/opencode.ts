@@ -122,6 +122,19 @@ type SessionCursor = {
   offset: number;
 };
 
+/** Honest activity-journal capability for the status/coverage surface (task_68085480
+ * part 3). `disabled` is the explicit opt-out, `ready` is a healthy optional
+ * journal, `degraded` is an enabled journal whose commit latched it closed for
+ * event persistence, and `unavailable` is an enabled journal that is not loaded
+ * yet. A degraded journal is truthful about lost event coverage and never blocks
+ * legitimate orders or monitors. */
+export function computeJournalState(enabled: boolean, available: boolean, degraded: boolean): ActivityJournalCapability {
+  if (!enabled) return { enabled: false, state: "disabled" };
+  if (available) return { enabled: true, state: "ready" };
+  if (degraded) return { enabled: true, state: "degraded" };
+  return { enabled: true, state: "unavailable" };
+}
+
 export interface SessionGateway {
   activityJournalStatus?(): ActivityJournalCapability;
   getSessionProgress(
@@ -304,7 +317,7 @@ export class OpenCodeGateway implements SessionGateway {
 
   activityJournalStatus(): ActivityJournalCapability {
     const enabled = this.runtime.activityJournalEnabled !== false;
-    return { enabled, state: !enabled ? "disabled" : this.journal?.available ? "ready" : "unavailable" };
+    return computeJournalState(enabled, this.journal?.available === true, this.journal?.degraded === true);
   }
 
   startActivityCollection(): void {
@@ -2071,7 +2084,12 @@ export class OpenCodeGateway implements SessionGateway {
         }
       }
       const messageId = `msg_${randomUUID().replaceAll("-", "")}`;
-      const activityCursor = await this.journal?.track(sessionId, messageId);
+      // Optional event coverage only: a failed optional journal must never block
+      // admission. The essential receipt (message_id + unresolved guard below) is
+      // unaffected; degraded coverage is reported separately.
+      const activityCursor = this.journal
+        ? await this.journal.track(sessionId, messageId).catch(() => { this.tracking.partial = true; return undefined; })
+        : undefined;
       const submittedAt = new Date().toISOString();
       const submittedAttachments = attachments.map(submittedAttachment);
       this.attachments.consume(sessionId, attachments);
@@ -2223,7 +2241,12 @@ export class OpenCodeGateway implements SessionGateway {
         }
       }
       const messageId = `msg_${randomUUID().replaceAll("-", "")}`;
-      const activityCursor = await this.journal?.track(sessionId, messageId);
+      // Optional event coverage only: a failed optional journal must never block
+      // admission. The essential receipt (message_id + unresolved guard below) is
+      // unaffected; degraded coverage is reported separately.
+      const activityCursor = this.journal
+        ? await this.journal.track(sessionId, messageId).catch(() => { this.tracking.partial = true; return undefined; })
+        : undefined;
       const submittedAt = new Date().toISOString();
       const submittedAttachments = attachments.map(submittedAttachment);
       this.attachments.consume(sessionId, attachments);
