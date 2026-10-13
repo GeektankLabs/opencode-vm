@@ -54,6 +54,14 @@ Configuration writes: use the discovered per-profile write tools (`set_project_m
 
 Roles and per-step return are unchanged: technical stages never change the business role (design requirements stay design requirements, a reviewer stays independent with no self-implementation or self-acceptance), and the next separately started order resolves its regular profile fresh from the current policy with exact readback. Context/input-length errors stay on their separate compaction path below and are never a routing trigger.
 
+## Before a recovery: correlate, then continue the same order
+
+- Establish the current correlated evidence first: the exact receipt (submitted user message ID with its correlated assistant/terminal result), the visible output/safe error detail and the activity/status read. Never classify from busy alone, empty text or remembered context — **busy alone is not a stall** and `unknown` is never a reason for a blind retry.
+- Only a confirmed terminal timeout/quota (classes 1–2) triggers routing. Re-read the **current** policy and continue the **same authorized order** through the currently allowed fallback chain with a verified runtime readback — one switch, one correlated resend, and no duplicated side effects. A context/input-length rejection keeps its separate native-compaction path.
+- Respect real security permissions and genuine business `input_required` parks: a pending security permission is never answered or bypassed, and a real operator decision is escalated as `INPUT_REQUIRED`, not routed.
+- Do not mutate a healthy worker that is actively working: when the desired runtime differs from a busy session, wait for a controlled idle boundary rather than a mid-turn send or an unsupported mid-turn switch.
+- Final semantics stay separate: the global final stage is **sticky across later regular monitor wakes**, while the explicit single-order interactive recovery keeps its existing **final-once** path. No hot loop, no invented final, and no budget or right change.
+
 ## Single-order explicit recovery
 
 An operator may explicitly continue exactly ONE adapter-admitted single order — never a monitor

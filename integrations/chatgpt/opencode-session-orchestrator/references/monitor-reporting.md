@@ -22,7 +22,7 @@ Every section of the report names its source and read coverage (`complete`, `par
 
 ## Evidenced errors stay visible — briefly
 
-Scan everything actually read for evidenced errors (safe error categories such as provider timeout/quota/auth, recovery/fallback/park decision entries). Name each distinct evidenced class in one short sentence **even when the run later reached PASS or completion**: automatic recovery continuing the work is working-as-designed context, not a hidden failure, and it is not a reason to reopen or re-run anything. No mandatory error chapter, no log dump, no speculation beyond the evidence; give details on request or point at one verified location (exact history entry/ID or document path with revision).
+Scan everything actually read for evidenced errors (safe error categories such as provider timeout/quota/auth, recovery/fallback/park decision entries). Name each distinct evidenced class in one short sentence **even when the run later reached PASS or completion**: automatic recovery continuing the work is working-as-designed context, not a hidden failure, and it is not a reason to reopen or re-run anything. Busy alone is not a stall and an `unknown`/unresolved receipt is not a retry signal — report what was verified, not an inferred retry. No mandatory error chapter, no log dump, no speculation beyond the evidence; give details on request or point at one verified location (exact history entry/ID or document path with revision).
 
 Example wording — only when the evidence actually shows it:
 

@@ -23,6 +23,15 @@ Five-role provider/model/variant selection remains separate: explicit tuple/prof
 
 Preserve the established Build+tuple on normal same-work-item follow-ups, rechecking idle/pending/receipt gates where required; don't change runtime for every status/poll/result read. Agent switching doesn't authorize new workers, session archive, Board Done, integration, release or deploy. Explicit user conflicts and true security/host controls remain operator handback, not native Question/permission autoanswer.
 
+## Pre-dispatch runtime gate (every new dispatch, including follow-ups)
+
+Treat the session's current runtime as **never proof** of the intended profile. Before every new task dispatch — a fresh order and equally a follow-up turn — resolve the matching **enabled** project model profile fresh from the **current** project policy (`get_recommended_runtime` / `get_project_model_policy`), then explicitly set the session runtime with `update_session_runtime` and require a full provider/model/variant readback **before** `send_message`. A cached, historical or remembered policy revision is never evidence; re-read the live policy on each dispatch.
+
+- Do not mutate a healthy session that is actively working. When the desired runtime differs from a busy session, never issue a mid-turn send or an unsupported mid-turn switch; wait for a controlled idle boundary (verified idle/no-pending) and apply the runtime there.
+- An unconfigured profile keeps the existing suitable session tuple; a configured-but-unavailable or incomplete mapping is a named blocker, never a silent substitute.
+- A generic or inconclusive answer earns at most the bounded supported read-retry (see [Pause and Go](pause-go.md)); beyond that, report a blocker instead of re-asking or re-sending.
+- Correct an evidenced wrong inherited default explicitly after a failed start; never build on an unverified inherited runtime, and never rely on a historical revision of the policy.
+
 ## Checks and external acceptance
 
 The regression catalogue and source-bound scripted tool-call traces cover configured Plan creation then Build, existing Build reuse, explicit Plan/persistence conflict, deliberate read-only Plan and authorized scope growth, provider/model/variant preservation, busy/questions/permissions, missing catalog/Build/update/readback, uncertain/partial updates and profile-unavailable stop. Synthetic fake-connector traces check order/actions/gate failures, not live ChatGPT agent behavior or permission enforcement; packaged instructions must be separately accepted on the actual connected surface.

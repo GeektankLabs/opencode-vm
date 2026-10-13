@@ -17,7 +17,7 @@ Before schedule configuration, establish a fixed primer with these fields (clien
 | monitored work | task/member IDs, session ownership or explicit not-yet-assigned, exact recovery rules, wave order/integration target |
 | actions | approved diagnosis/repair/test/resume/fresh surfaces; prohibited product/schema/security/acceptance changes, production and remote publishing |
 | limits | same-fingerprint **production-code** repair cap (default two; excluded work never counts/parks), progress rules (evidenced progress ends the series; no reset), transient retry cap, bounded read-episode backoff, bounded active-run budget |
-| runtime | operator-confirmed Work supervisor model separate from OpenCode worker profile/runtime policy; no silent substitution |
+| runtime | operator-confirmed Work supervisor model separate from OpenCode worker profile/runtime policy; no silent substitution; the OpenCode profile is resolved **fresh** from the current project policy before every dispatch with explicit provider/model/variant readback — the session default is never proof, and a healthy active worker is never switched mid-turn (controlled idle boundary instead) |
 | setup | requested recurrence/time zone/start/end, required apps/MCP connection, single-flight owner, setup receipt reference |
 | persistence | note size and remaining description/output budget, checkpoint and operator handoff rules |
 

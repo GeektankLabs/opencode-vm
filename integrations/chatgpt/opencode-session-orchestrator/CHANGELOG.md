@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-13-r55
+
+- Sharpen routing/self-heal (task_68085480 rework): every new dispatch — a fresh order and equally a follow-up turn — resolves the matching **enabled** profile fresh from the **current** project policy and sets the runtime explicitly with full provider/model/variant readback **before** the send (the session's current runtime is never proof; a cached/historical revision is never evidence). A healthy, actively working session is never switched mid-turn — when the desired runtime differs, act only at a controlled idle boundary. A generic/inconclusive answer earns at most the bounded supported read-retry, otherwise a named blocker. Pre-recovery classification is receipt/output/activity-correlated and continues the SAME authorized order through the current fallback chain with runtime readback and no duplicate effects (`unknown` is never a blind retry; busy alone is not a stall; real security/business parks are respected). The global final stage stays sticky across later regular monitor wakes, while the explicit single-order interactive recovery keeps its existing final-once path. Mirrored in `agent-preparation.md`, `fallback-routing.md`, `monitor-manager-rules.md`, `monitor-tasks.md` and `monitor-reporting.md`, and in the Monitor Engine priming contract `mgmt-v4` (one-time re-prime of existing monitors).
+
 ## 2026-10-13-r54
 
 - Document the explicit single-order recovery contract (task_68085480 F7a): `recover_session_order` continues exactly one adapter-admitted original order after a confirmed eligible provider error — remaining regular candidates first, then the configured global final stage exactly once, one verified switch + one resend, terminal escalation. It is never triggered by a read and never resumes foreign/manual/aborted/archived/monitor-bound work; the exact original message_id is mandatory; no automatic order resumption is implied.

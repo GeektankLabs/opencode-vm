@@ -875,7 +875,7 @@ test("engine: MANAGEMENT priming is sent once, later wakes stay short and single
     assert.equal(await engine.tick(), "dispatched");
     assert.equal(state.sends.length, 1, "priming plus mission is one admitted message, never two");
     const first = state.sends[0]!;
-    assert.match(first, /\[MANAGEMENT-PRIMING mgmt-v3\]/);
+    assert.match(first, /\[MANAGEMENT-PRIMING mgmt-v4\]/);
     assert.match(first, /Role: MANAGEMENT/);
     assert.match(first, /coordinate, never implement/);
     assert.match(first, /drive the commissioned development actively to the agreed result/);
@@ -906,11 +906,21 @@ test("engine: MANAGEMENT priming is sent once, later wakes stay short and single
     // The optimized mission no longer forces a full canonical re-read each wake.
     assert.ok(!first.includes("read the actual canonical C/P"), "no per-tick full-document read instruction");
     assert.match(first, /open canonical C\/P only when a listed revision changed/);
+    // task_68085480 rework: the mgmt-v4 routing/self-heal discipline is part of the real priming text.
+    assert.match(first, /resolve the matching enabled model profile fresh from the current project policy/);
+    assert.match(first, /set the target runtime explicitly with full provider\/model\/variant readback BEFORE the send/);
+    assert.match(first, /never proof of the desired profile/);
+    assert.match(first, /controlled idle boundary, never a busy send or an unsupported mid-turn switch/);
+    assert.match(first, /unknown is never a blind retry and busy alone is not a stall/);
+    assert.match(first, /sticky only across later regular monitor wakes/);
+    assert.match(first, /existing final-once path/);
 
     const primed = await readRegistrySnapshot(project);
     const digestValue = primed.registry.monitors[0]!.session.priming_digest;
     assert.equal(typeof digestValue, "string");
     assert.ok(primed.registry.monitors[0]!.history.some((entry) => entry.type === "manager-primed"));
+    assert.match(JSON.stringify(primed.registry.monitors[0]!.history.find((entry) => entry.type === "manager-primed")!.detail),
+      /mgmt-v4/, "the recorded priming contract version is mgmt-v4");
 
     // Changed canonical state, unchanged priming context: short wake, no priming.
     state.taskUpdated = "2026-10-08T00:00:00.000Z";
@@ -936,7 +946,7 @@ test("engine: MANAGEMENT priming is sent once, later wakes stay short and single
     });
     state.taskUpdated = "2026-10-09T00:00:00.000Z";
     assert.equal(await engine.tick(), "dispatched");
-    assert.match(state.sends[2]!, /\[MANAGEMENT-PRIMING mgmt-v3\]/);
+    assert.match(state.sends[2]!, /\[MANAGEMENT-PRIMING mgmt-v4\]/);
     assert.match(state.sends[2]!, /Autonomy profile sandbox: apply its operator-contract scope/);
     const reprime = await readRegistrySnapshot(project);
     assert.notEqual(reprime.registry.monitors[0]!.session.priming_digest, digestValue);
@@ -963,7 +973,7 @@ test("engine: compaction continuation repeats the MANAGEMENT role block once", a
     });
     assert.equal(await engine.tick(), "compaction-continued");
     assert.equal(state.sends.length, 1, "exactly one admitted continuation");
-    assert.match(state.sends[0]!, /\[MANAGEMENT-PRIMING mgmt-v3\]/);
+    assert.match(state.sends[0]!, /\[MANAGEMENT-PRIMING mgmt-v4\]/);
     assert.match(state.sends[0]!, /\[MONITOR-COMPACT /);
     const snapshot = await readRegistrySnapshot(project);
     assert.equal(typeof snapshot.registry.monitors[0]!.session.priming_digest, "string");
@@ -990,11 +1000,11 @@ test("engine: wake prompt stays inside its token budget and names the bounded mi
     const mission = primedWake.slice(primedWake.indexOf("[MONITOR-ACTION"));
     // Budget guard: the recurring mission text stays small (~150 tokens). The one-time
     // priming block grew with the W1 mission/ownership/wake-duty rules (Contract
-    // EFBE-MVP-IMPLEMENTATION-20261009-R1, decision W1-D2) and the mgmt-v3
-    // journal-writer rule: bounded at ~1150 tokens, sent once per priming digest,
-    // never per tick.
+    // EFBE-MVP-IMPLEMENTATION-20261009-R1, decision W1-D2), the mgmt-v3
+    // journal-writer rule and the mgmt-v4 routing/self-heal line: bounded at
+    // ~1400 tokens, sent once per priming digest, never per tick.
     assert.ok(mission.length <= 1100, `mission text grew to ${mission.length} characters`);
-    assert.ok(primedWake.length - mission.length <= 5400, `priming block grew to ${primedWake.length - mission.length} characters`);
+    assert.ok(primedWake.length - mission.length <= 6800, `priming block grew to ${primedWake.length - mission.length} characters`);
     for (const marker of ["Mission: 1) verify progress", "exactly ONE next permitted step", "bounded no-op", "INPUT_REQUIRED only for a real missing decision",
       "already-authorized viable alternatives", "never synthesize YOLO/reset/delete/security approvals"]) {
       assert.ok(mission.includes(marker), `mission marker missing: ${marker}`);
@@ -1019,7 +1029,7 @@ test("engine: a session rebind inside the same wake primes the brand-new session
     // First wake: session is created and primed in one admitted message.
     assert.equal(await engine.tick(), "dispatched");
     assert.equal(state.sends.length, 1);
-    assert.match(state.sends[0]!, /\[MANAGEMENT-PRIMING mgmt-v3\]/);
+    assert.match(state.sends[0]!, /\[MANAGEMENT-PRIMING mgmt-v4\]/);
     const primed = await readRegistrySnapshot(project);
     assert.equal(primed.registry.monitors[0]!.session.session_id, "ses_monitor");
     assert.equal(typeof primed.registry.monitors[0]!.session.priming_digest, "string");
@@ -1034,7 +1044,7 @@ test("engine: a session rebind inside the same wake primes the brand-new session
     });
     assert.equal(await engine.tick(), "dispatched");
     assert.equal(state.sends.length, 2, "the rebind wake admits exactly one message");
-    assert.match(state.sends[1]!, /\[MANAGEMENT-PRIMING mgmt-v3\]/,
+    assert.match(state.sends[1]!, /\[MANAGEMENT-PRIMING mgmt-v4\]/,
       "the brand-new empty session receives the role block in the same wake, not one interval later");
     assert.match(state.sends[1]!, /\[MONITOR-ACTION wake_/);
     const rebound = await readRegistrySnapshot(project);
