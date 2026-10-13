@@ -69,6 +69,62 @@ export function persistErrorClass(error: unknown): string {
   return "unknown";
 }
 
+/** Allowlisted commit phases for the bounded first-failure diagnostic. The value
+ * always comes from code constants; the allowlist is defence-in-depth so a
+ * future misuse can never widen the field. */
+const COMMIT_PHASES = new Set(["open", "write", "sync", "close", "rename"]);
+/** Allowlisted fs syscall names; anything else is reported as "unknown". */
+const SAFE_SYSCALLS = new Set(["open", "write", "writev", "fsync", "fdatasync",
+  "close", "rename", "unlink", "link", "mkdir", "read", "stat", "lstat"]);
+/** Logical path roles only — never an absolute or private path. */
+const SAFE_PATH_ROLES = new Set(["journal", "journal-temp"]);
+
+export function safeCommitSyscall(error: unknown): string {
+  const syscall = (error as NodeJS.ErrnoException | null | undefined)?.syscall;
+  return typeof syscall === "string" && SAFE_SYSCALLS.has(syscall) ? syscall : "unknown";
+}
+export function safeCommitErrno(error: unknown): string {
+  const errno = (error as NodeJS.ErrnoException | null | undefined)?.errno;
+  return typeof errno === "number" && Number.isInteger(errno) ? String(errno) : "unknown";
+}
+/** Best-effort, zero-FD resource datum. Under resource pressure it degrades to
+ * "unknown" instead of adding an extra probe. */
+function bestEffortRssKb(): string {
+  try {
+    const rss = process.memoryUsage().rss;
+    return Number.isFinite(rss) && rss >= 0 ? String(Math.round(rss / 1024)) : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+/** One bounded, metadata-only first-failure line. Pure (no I/O) so tests assert
+ * the exact bytes. Contains only allowlisted fields — never a raw error string,
+ * path, payload, environment variable, argument or secret. */
+export function commitFailureLine(
+  phase: string,
+  error: unknown,
+  pathRole: string,
+  options: { now?: Date; pid?: number; rssKb?: string } = {},
+): string {
+  const safePhase = COMMIT_PHASES.has(phase) ? phase : "unknown";
+  const safeRole = SAFE_PATH_ROLES.has(pathRole) ? pathRole : "unknown";
+  const now = options.now ?? new Date();
+  const pid = options.pid ?? process.pid;
+  const rssKb = options.rssKb ?? bestEffortRssKb();
+  return `[mcp] activity-commit-failed phase=${safePhase} class=${persistErrorClass(error)} syscall=${safeCommitSyscall(error)} errno=${safeCommitErrno(error)} path=${safeRole} rss_kb=${rssKb} at=${now.toISOString()} pid=${pid}\n`;
+}
+
+/** Emits the diagnostic without ever throwing, so it can never mask the primary
+ * commit error. */
+function logCommitFailure(phase: string, error: unknown, pathRole: string): void {
+  try {
+    process.stderr.write(commitFailureLine(phase, error, pathRole));
+  } catch {
+    /* diagnostics must never mask or replace the original failure */
+  }
+}
+
 /** One owned adapter is the writer. Commits serialize observation + event state
  * in one atomic file; reads never perform backend polling or copy history. */
 export class ActivityJournal {
@@ -1081,31 +1137,53 @@ export class ActivityJournal {
         retainedAttention.splice(retainedAttention.indexOf(removable), 1);
       }
       const temporary = `${this.path}.${randomUUID()}.tmp`;
+      // Phase-tracked persist with primary-error preservation: a cleanup/close
+      // fault may never mask the real first error, and exactly one bounded
+      // diagnostic is emitted per latch (the pre-check rejects later commits).
+      let phase = "open";
+      let primary: unknown = null;
+      let handle: Awaited<ReturnType<typeof open>> | null = null;
       try {
-        const file = await open(temporary, "wx", 0o600);
-        try {
-          await file.writeFile(JSON.stringify(draft) + "\n");
-          await file.sync();
-        } finally {
-          await file.close();
-        }
-        await rename(temporary, this.path);
-        this.store = draft;
-        for (const wake of this.waiters) wake();
+        handle = await open(temporary, "wx", 0o600);
+        phase = "write";
+        await handle.writeFile(JSON.stringify(draft) + "\n");
+        phase = "sync";
+        await handle.sync();
       } catch (error) {
+        primary = error;
+      } finally {
+        if (handle) {
+          try {
+            await handle.close();
+          } catch (closeError) {
+            if (primary === null) { phase = "close"; primary = closeError; }
+          }
+        }
+      }
+      if (primary === null) {
+        phase = "rename";
+        try {
+          await rename(temporary, this.path);
+        } catch (error) {
+          primary = error;
+        }
+      }
+      if (primary !== null) {
         this.failed = true;
-        // Metadata only: a bounded error class for the adapter log, never a
-        // path, payload or secret. The latch stays fail-closed — no reset, no
-        // retry and no reopen from here; the ACTIVITY_UNAVAILABLE contract is
-        // unchanged and keeps pointing at this log line.
-        process.stderr.write(`[mcp] activity-commit-failed class=${persistErrorClass(error)}\n`);
+        // Metadata only: allowlisted phase/code/syscall/errno and a logical path
+        // role — never a path, payload or secret. The latch stays fail-closed —
+        // no reset, no retry and no reopen; the original cause is not claimed
+        // fixed. Cleanup below is best-effort and can never mask this error.
+        logCommitFailure(phase, primary, "journal-temp");
+        await unlink(temporary).catch(() => undefined);
         throw new AdapterError(
           "ACTIVITY_UNAVAILABLE",
           "Could not persist activity; the journal was not reset.",
         );
-      } finally {
-        await unlink(temporary).catch(() => undefined);
       }
+      this.store = draft;
+      for (const wake of this.waiters) wake();
+      await unlink(temporary).catch(() => undefined);
     });
     this.tail = operation.catch(() => undefined);
     return operation;

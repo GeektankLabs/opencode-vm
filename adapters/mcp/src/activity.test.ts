@@ -11,7 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { ActivityJournal, persistErrorClass } from "./activity.js";
+import { ActivityJournal, commitFailureLine, persistErrorClass, safeCommitErrno, safeCommitSyscall } from "./activity.js";
 import { AdapterError } from "./types.js";
 import type { ActivitySnapshot } from "./types.js";
 
@@ -213,8 +213,11 @@ test("a failed commit logs a bounded metadata class and keeps the fail-closed la
     );
     const logged = lines.filter((line) => line.startsWith("[mcp] activity-commit-failed"));
     assert.equal(logged.length, 1, "exactly one bounded diagnostic line per failed commit");
-    assert.match(logged[0]!, /^\[mcp\] activity-commit-failed class=[A-Za-z0-9_]{1,40}\n$/u);
-    assert.equal(logged[0]!.trim(), "[mcp] activity-commit-failed class=ENOENT");
+    // Field order and allowlists are fixed; the open phase fails with ENOENT here.
+    assert.match(logged[0]!,
+      /^\[mcp\] activity-commit-failed phase=(open|write|sync|close|rename) class=[A-Za-z0-9_]{1,40} syscall=[a-z0-9_]+ errno=-?[0-9a-z]+ path=(journal|journal-temp) rss_kb=[0-9a-z]+ at=\d{4}-\d{2}-\d{2}T[\d:.]+Z pid=\d+\n$/u);
+    assert.ok(logged[0]!.includes("phase=open class=ENOENT"), "the real first-failure phase and code are reported");
+    assert.ok(logged[0]!.includes("path=journal-temp"), "only a logical path role is emitted");
     assert.ok(!logged[0]!.includes(directory), "no path reaches the log");
 
     // The latch stays closed: further commits fail on the pre-check without a
@@ -244,6 +247,45 @@ test("a failed commit logs a bounded metadata class and keeps the fail-closed la
     "an uppercase non-errno code is not emitted verbatim");
   assert.equal(persistErrorClass(Object.assign(new Error("boom"), { code: "ERR_FS_EISDIR" })), "ERR_FS_EISDIR");
   assert.equal(persistErrorClass(undefined), "unknown");
+});
+
+test("commit first-failure diagnostics are allowlisted, redacted and bounded", () => {
+  const fixed = { now: new Date("2026-10-13T00:00:00.000Z"), pid: 4242, rssKb: "1234" };
+  const err = (extra: Record<string, unknown>) => Object.assign(new Error("raw /etc/passwd Bearer TOKEN prompt"), extra);
+
+  // A benign open failure: allowlisted phase/code/syscall, logical path role only.
+  const line = commitFailureLine("open", err({ code: "ENOENT", syscall: "open", errno: -2 }), "journal-temp", fixed);
+  assert.equal(line,
+    "[mcp] activity-commit-failed phase=open class=ENOENT syscall=open errno=-2 path=journal-temp rss_kb=1234 at=2026-10-13T00:00:00.000Z pid=4242\n");
+
+  // Unknown/unlisted phase, path role, syscall and errno degrade to "unknown".
+  const odd = commitFailureLine("frobnicate", err({ code: "ENFILE", syscall: "/secret/bin", errno: "x" }), "/Users/private/mcp", fixed);
+  assert.equal(odd,
+    "[mcp] activity-commit-failed phase=unknown class=ENFILE syscall=unknown errno=unknown path=unknown rss_kb=1234 at=2026-10-13T00:00:00.000Z pid=4242\n");
+
+  // Dangerous/raw codes never appear verbatim; the raw message never leaks.
+  for (const bad of ["/etc/passwd", "BEARER_TOKEN_VALUE", "secret-token", "sk-abcdefghijklmnopqrstuv"]) {
+    const rendered = commitFailureLine("write", err({ code: bad }), "journal-temp", fixed);
+    assert.ok(!rendered.includes(bad), `dangerous code not emitted: ${bad}`);
+    assert.ok(rendered.includes(`class=${persistErrorClass(err({ code: bad }))}`));
+  }
+  for (const rendered of [line, odd]) {
+    assert.ok(!rendered.includes("passwd") && !rendered.includes("Bearer") && !rendered.includes("TOKEN")
+      && !rendered.includes("prompt") && !rendered.includes("/Users"), "no raw error string, path or secret leaks");
+    assert.ok(!rendered.includes("\n\n") && rendered.endsWith("\n"), "exactly one terminated line");
+  }
+
+  // Best-effort resource metadata degrades to "unknown" without an extra probe.
+  assert.ok(commitFailureLine("close", err({ code: "EMFILE" }), "journal-temp", { ...fixed, rssKb: "unknown" })
+    .includes("rss_kb=unknown"));
+
+  // Helper allowlists.
+  assert.equal(safeCommitSyscall({ syscall: "fsync" }), "fsync");
+  assert.equal(safeCommitSyscall({ syscall: "execve" }), "unknown");
+  assert.equal(safeCommitSyscall({}), "unknown");
+  assert.equal(safeCommitErrno({ errno: 28 }), "28");
+  assert.equal(safeCommitErrno({ errno: 1.5 }), "unknown");
+  assert.equal(safeCommitErrno({}), "unknown");
 });
 
 test("filters advance over skipped events, recheck visibility and support bounded waits", async (t) => {
