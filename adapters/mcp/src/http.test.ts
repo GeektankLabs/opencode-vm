@@ -551,7 +551,7 @@ test("final fallback write is callable on both protocol paths with commit, CAS a
   assert.deepEqual(await readFile(policyPath), beforeStale, "an unavailable catalog selection never writes");
 });
 
-test("official MCP client discovers forty-five stateless HTTP tools and invokes session tools by ID", async () => {
+test("official MCP client discovers forty-six stateless HTTP tools and invokes session tools by ID", async () => {
   const gateway = new FakeGateway();
   const server = new McpHttpServer(runtime(), token, gateway);
   const port = await server.start();
@@ -594,6 +594,7 @@ test("official MCP client discovers forty-five stateless HTTP tools and invokes 
       "list_sessions",
       "open_repo_live",
       "read_message_content",
+      "recover_session_order",
       "refresh_repo_live",
       "rename_session",
       "send_message",

@@ -16,8 +16,9 @@ import { ProjectBoardService, MAX_TASK_DESCRIPTION_LENGTH } from "./taskboard.js
 import type { DocumentRole } from "./taskboard.js";
 import { traceToolCall } from "./diagnostics.js";
 import { SUPPORTED_ATTACHMENT_TYPES } from "./attachments.js";
-import { PROFILE_NAMES, describePolicy, profileState, readPolicy, resolveProfile, type PolicySelection } from "./agent-control.js";
+import { PROFILE_NAMES, describePolicy, isRecoveryProviderAdmission, profileState, readPolicy, resolveProfile, resolveRecoveryChain, runtimeIdentityKey, type PolicySelection, type ProfileName } from "./agent-control.js";
 import { commitFinalFallback, commitProfileFallback, commitSlotDisabled, commitStrategies } from "./policy-commit.js";
+import { getOrder, mutateRecoveryOrder, nextOrder, readRecoveryStore, recordAdmission, MAX_RECOVERY_ATTEMPTS } from "./order-recovery.js";
 import {
   confirmWorkerCreation,
   defaultMonitorRecord,
@@ -588,6 +589,12 @@ const policySlotDisabledInput = z.object({
   revision: z.number().int().nonnegative(),
   slot: slotSelector,
   disabled: z.boolean(),
+}).strict();
+const recoverOrderInput = z.object({ session_id: sessionId, message_id: sessionId }).strict();
+const recoverOrderOutput = z.object({
+  session_id: z.string(), message_id: z.string(),
+  attempted_identity: z.string(), final_attempt: z.boolean(),
+  new_receipt: z.string(), status: z.enum(["continued", "escalated"]),
 }).strict();
 const runtimeUpdateOutput = z
   .object({
@@ -1819,6 +1826,14 @@ export function createMcpServer(
         attachments,
         scope_dirs,
       );
+      // Durable provenance for a later explicit recover_session_order. Best effort
+      // so a store fault never turns an already-admitted send into a false failure;
+      // a missing entry makes recovery fail closed rather than act on an unknown order.
+      if (runtime) {
+        await recordAdmission(runtime, {
+          session_id: result.session_id, message_id: result.message_id, profile: null, now: new Date().toISOString(),
+        }).catch(() => undefined);
+      }
       return success(
         result,
         `Submitted message ${result.message_id} to session ${result.session_id}${result.attachments?.length ? ` with ${result.attachments.length} attachment${result.attachments.length === 1 ? "" : "s"}` : ""}. Poll get_session_status before sending another message.`,
@@ -2623,6 +2638,111 @@ export function createMcpServer(
       inputSchema: policySlotDisabledInput, outputSchema: modelPolicyOutput, annotations: { ...writeAnnotations, openWorldHint: false } },
     setSlotDisabledHandler,
   );
+  const recoverSessionOrderHandler = safeHandler(async ({ session_id, message_id }: z.output<typeof recoverOrderInput>) => {
+    if (!runtime) throw new AdapterError("UNSUPPORTED_CONFIGURATION", "Project runtime is unavailable.");
+    // Exposed, not archived (getSessionDetails enforces exposure).
+    const details = await gateway.getSessionDetails(session_id);
+    if (details.archived_at !== undefined) throw new AdapterError("RECOVERY_ORDER_REJECTED", "Archived sessions are not recoverable here.");
+    // Monitor-bound and monitor-worker sessions are out of scope; fail closed if unverifiable.
+    try {
+      const snapshot = await readRegistrySnapshot(runtime.project);
+      const bound = snapshot.registry.monitors.some((m) => m.session?.session_id === session_id
+        || (m.workers ?? []).some((w) => w.runtime_session_id === session_id));
+      if (bound) throw new AdapterError("RECOVERY_ORDER_REJECTED", "Monitor-bound or monitor-worker sessions are not recovered here.");
+    } catch (error) {
+      if (error instanceof AdapterError) throw error;
+      throw new AdapterError("RECOVERY_ORDER_REJECTED", "Monitor ownership could not be verified; refusing to recover.");
+    }
+    // Provenance: only an adapter-admitted original order from the durable store.
+    const store = await readRecoveryStore(runtime);
+    const order = getOrder(store, session_id, message_id);
+    if (!order) throw new AdapterError("RECOVERY_ORDER_UNKNOWN", "No adapter-admitted order with this session and message id.");
+    if (order.status === "completed" || order.status === "escalated")
+      throw new AdapterError("RECOVERY_ORDER_REJECTED", "This order already concluded; no further recovery is permitted.");
+    // Admission / busy: fail closed on pending input or an in-progress write.
+    const status = await gateway.getSessionStatus(session_id, message_id);
+    if (status.pending_input.permissions + status.pending_input.questions > 0)
+      throw new AdapterError("SESSION_BUSY", "Pending input must be resolved before any recovery.", undefined, "pending_input");
+    if (status.admission?.write_in_progress)
+      throw new AdapterError("SESSION_BUSY", "A write is in progress; recovery is refused.", undefined, "write_in_progress");
+    if (status.state !== "failed")
+      throw new AdapterError("RECOVERY_ORDER_REJECTED", "Only a terminal failed turn is recoverable.");
+    const detail = (status.error_details ?? []).find((d) => d.attribution === "exact_parent") ?? (status.error_details ?? [])[0];
+    const category = detail?.category;
+    if (!category || !isRecoveryProviderAdmission(category))
+      throw new AdapterError("RECOVERY_ORDER_REJECTED", "The terminal error is not an eligible provider error.");
+    // Shared canonical resolver under the current policy.
+    const policy = await readPolicy(runtime);
+    const catalog = await gateway.getSessionRuntimeOptions(session_id);
+    const currentIdentity = details.provider_id !== undefined && details.model_id !== undefined
+      ? runtimeIdentityKey({ provider_id: details.provider_id, model_id: details.model_id, ...(details.variant !== undefined ? { variant: details.variant } : {}) })
+      : null;
+    const entryProfile: ProfileName | null = (order.profile !== null && (PROFILE_NAMES as readonly string[]).includes(order.profile))
+      ? order.profile as ProfileName
+      : PROFILE_NAMES.find((p) => { const s = policy.profiles[p]; return s !== null && runtimeIdentityKey(s) === currentIdentity; }) ?? null;
+    if (entryProfile === null)
+      throw new AdapterError("RECOVERY_ORDER_REJECTED", "The failed runtime does not map to a configured profile; there is no authorized recovery chain.");
+    const chain = resolveRecoveryChain(policy, {
+      entryProfile, catalog, evidenceCategory: category,
+      evidenceProviderId: details.provider_id ?? null,
+      attempted: order.attempts.map((a) => a.identity), currentIdentity,
+    });
+    if (chain.selected === null) throw new AdapterError("RECOVERY_ORDER_REJECTED", `No allowed recovery candidate (${chain.reason}).`);
+    const candidate = chain.candidates.find((c) => c.identity === chain.selected_identity)!;
+    const isFinal = candidate.label === "final.main";
+    if (isFinal && order.final_attempted)
+      throw new AdapterError("RECOVERY_ORDER_REJECTED", "The single permitted final attempt was already used; escalate to the operator.");
+    const identity = runtimeIdentityKey(chain.selected);
+    const now = new Date().toISOString();
+    // Write-ahead BEFORE any side effect: the attempt (and final flag) is durable
+    // first, so a crash/replay can never dispatch the final twice.
+    await mutateRecoveryOrder(runtime, session_id, message_id, (cur) => {
+      if (!cur) return null;
+      if (isFinal && cur.final_attempted) throw new AdapterError("RECOVERY_ORDER_REJECTED", "The final attempt was already consumed.");
+      return nextOrder(cur, {
+        status: isFinal ? "final_attempted" : "pending",
+        final_attempted: cur.final_attempted || isFinal,
+        attempts: [...cur.attempts, { at: now, identity, outcome: "dispatch" }].slice(-MAX_RECOVERY_ATTEMPTS),
+      }, now);
+    });
+    // Exactly one runtime switch, verified.
+    const updated = await gateway.updateSessionRuntime(session_id, {
+      provider_id: chain.selected.provider_id, model_id: chain.selected.model_id,
+      ...(chain.selected.variant !== undefined ? { variant: chain.selected.variant } : {}),
+    });
+    const verified = await gateway.getSessionDetails(session_id);
+    if (updated.state !== "updated" || verified.provider_id !== chain.selected.provider_id
+      || verified.model_id !== chain.selected.model_id || (chain.selected.variant !== undefined && verified.variant !== chain.selected.variant)) {
+      await mutateRecoveryOrder(runtime, session_id, message_id, (cur) => cur
+        ? nextOrder(cur, { attempts: [...cur.attempts, { at: new Date().toISOString(), identity, outcome: "update_unverified" }].slice(-MAX_RECOVERY_ATTEMPTS) }, new Date().toISOString()) : null);
+      throw new AdapterError("RECOVERY_DISPATCH_UNVERIFIED", "The runtime switch could not be verified; no retry was performed.");
+    }
+    const prompt = `[RECOVER-ORDER] Continue the original admitted order (message ${message_id}) in this session after an evidenced provider error (${category}); do not duplicate already admitted work. Report a precise INPUT_REQUIRED if a real business decision is needed.`;
+    let receipt;
+    try {
+      receipt = await gateway.sendMessage(session_id, prompt);
+    } catch (error) {
+      const code = error instanceof AdapterError ? error.code : "SUBMISSION_UNCERTAIN";
+      await mutateRecoveryOrder(runtime, session_id, message_id, (cur) => cur
+        ? nextOrder(cur, { attempts: [...cur.attempts, { at: new Date().toISOString(), identity, outcome: code === "SUBMISSION_UNCERTAIN" ? "dispatch_uncertain" : "dispatch_failed" }].slice(-MAX_RECOVERY_ATTEMPTS) }, new Date().toISOString()) : null);
+      throw error;
+    }
+    await mutateRecoveryOrder(runtime, session_id, message_id, (cur) => cur
+      ? nextOrder(cur, { new_receipt: receipt.message_id, status: isFinal ? "escalated" : "pending" }, new Date().toISOString()) : null);
+    return success({
+      session_id, message_id, attempted_identity: identity, final_attempt: isFinal,
+      new_receipt: receipt.message_id, status: isFinal ? "escalated" : "continued",
+    }, isFinal
+      ? `Final recovery attempt dispatched (${identity}). Exactly one final attempt per order; escalate to the operator for the next decision.`
+      : `Regular recovery candidate ${identity} dispatched. Call again only if this too ends in a terminal provider error.`);
+  });
+  server.registerTool(
+    "recover_session_order",
+    { title: "Recover Session Order",
+      description: "Explicit, operator-requested recovery of ONE adapter-admitted single order (not a monitor, not a foreign/archived/aborted order): after a confirmed terminal eligible provider error, resolve the current policy's candidate chain (remaining regular candidates first, then the configured global final stage — exactly once per order) and continue that same original order with exactly one verified runtime switch and one resend, using a durable per-order store with write-ahead before the final dispatch. Read-only GET/status calls never trigger it. A completed or already-escalated order is refused; a further identical call never resets a consumed final attempt. Fail-closed on unknown/uncertain delivery, pending input or an in-progress write. Never automatically resumes foreign, manual, aborted or monitor-bound orders.",
+      inputSchema: recoverOrderInput, outputSchema: recoverOrderOutput, annotations: { ...writeAnnotations, openWorldHint: false } },
+    recoverSessionOrderHandler,
+  );
   if (journalEnabled) {
   server.registerTool(
     "get_project_activity",
@@ -3116,6 +3236,8 @@ export function createMcpServer(
             return validatedToolCall(policyProfileFallbackInput, modelPolicyOutput, input, setProfileFallbackHandler);
           case "set_project_model_policy_strategies":
             return validatedToolCall(policyStrategiesInput, modelPolicyOutput, input, setStrategiesHandler);
+          case "recover_session_order":
+            return validatedToolCall(recoverOrderInput, recoverOrderOutput, input, recoverSessionOrderHandler);
           case "get_project_activity":
             return validatedToolCall(
               activityInput,
