@@ -3693,3 +3693,60 @@ test("slot disabled: a recovery chain exhausted only by paused slots parks as re
     await cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// task_68085480 part 3: sticky final — after the regular chain is exhausted an
+// existing unattended monitor keeps dispatching exactly the configured global
+// final stage on every suitable regular wake (no full-chain rerun, no permanent
+// recovery-chain-exhausted park, no new timer/cadence).
+// ---------------------------------------------------------------------------
+
+test("task_68085480 sticky final: an exhausted unattended monitor retries exactly the global final stage on each suitable wake", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    state.status = blockedStatus("provider_timeout");
+    const { gateway, board } = fakes(state);
+    const policy = perProfileView(
+      { deep: { provider_id: "deep-provider", model_id: "deep-model" }, standard: null },
+      { strategies: { degrading: false, providerSkip: true },
+        finalFallback: { mode: "total", selection: { provider_id: "fallback-provider", model_id: "fallback-model" } } });
+    await seededFailedMonitor(project);
+    const engine = new MonitorEngine({ project, gateway, board, readPolicy: async () => policy, now: () => 200_000, log: () => undefined });
+    // First wake: the regular primary is the failed current runtime; the final stage is dispatched.
+    assert.equal(await engine.tick(), "recovery-continued");
+    assert.equal(state.updates.length, 1);
+    assert.equal(state.updates[0]!.model_id, "fallback-model");
+    assert.equal(state.sends.length, 1);
+    let record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    const resolution = record.recovery_resolution?.at(-1)!;
+    assert.equal(resolution.selected_identity, "fallback-provider/fallback-model");
+    assert.equal(resolution.candidates.at(-1)!.label, "final.main");
+    assert.equal(record.state.work, "active", "no permanent park after chain exhaustion");
+    // Second suitable wake, still failing: the final stage is retried directly —
+    // the failed regular chain is NOT rerun and no recovery-chain-exhausted park appears.
+    await withRegistry(project, (registry) => { registry.monitors[0]!.scheduler.next_run_at = 0; registry.monitors[0]!.state.last_seen_digest = "changed"; return registry; });
+    const engine2 = new MonitorEngine({ project, gateway, board, readPolicy: async () => policy, now: () => 300_000, log: () => undefined });
+    assert.equal(await engine2.tick(), "recovery-continued", "final is retried on the next suitable wake");
+    assert.equal(state.sends.length, 2, "exactly one additional bounded dispatch per wake — no hot loop");
+    record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(record.state.work, "active");
+    assert.notEqual(record.state.parked_reason, "recovery-chain-exhausted", "no permanent chain-exhausted park");
+    assert.ok(!record.history.some((entry) => entry.type === "recovery-chain-exhausted"), "chain exhaustion never parks while a final stage is configured");
+    // The final stage remains gated by a real disable (F5 exception does not bypass a manual pause).
+    const paused = perProfileView(
+      { deep: { provider_id: "deep-provider", model_id: "deep-model" }, standard: null },
+      { strategies: { degrading: false, providerSkip: true },
+        disabled: { finalFallback: true },
+        finalFallback: { mode: "total", selection: { provider_id: "fallback-provider", model_id: "fallback-model" } } });
+    await withRegistry(project, (registry) => { registry.monitors[0]!.scheduler.next_run_at = 0; registry.monitors[0]!.state.last_seen_digest = "changed2"; return registry; });
+    const engine3 = new MonitorEngine({ project, gateway, board, readPolicy: async () => paused, now: () => 400_000, log: () => undefined });
+    assert.equal(await engine3.tick(), "recovery-parked", "a manually disabled final stage is respected");
+    record = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(record.state.work, "parked_input_required");
+    assert.ok(record.recovery_resolution?.at(-1)!.candidates.some((entry) => entry.label === "final.main" && entry.status === "skipped_disabled"),
+      "the paused final stage is skipped, never dispatched");
+  } finally {
+    await cleanup();
+  }
+});
