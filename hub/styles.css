@@ -14,3 +14,6 @@
 .slot-off select,.slot-off .profile-actions button{opacity:.45}
 .slot-off .profile-fallback-editor select{opacity:.45}
 .slot-off summary{color:var(--muted)}
+
+/* task_68085480: compact technical IDs at each entry (replaces the removed disclosure block) */
+.profile-ids{font-size:13px;color:var(--muted);margin:2px 0 6px;overflow-wrap:anywhere}

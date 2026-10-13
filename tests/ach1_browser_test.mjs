@@ -153,7 +153,6 @@ try {
     // Final error fallback: schema 3 upgrade with backup, readback, explicit refusal and reset.
     assert.match(await page.locator("#profile-final-fallback .profile-summary").innerText(), /Nicht konfiguriert/);
     await page.locator("#profile-final-fallback .profile-editor summary").click();
-    await page.locator("#fallback-mode").selectOption("degrading");
     await page.locator("#fallback-provider_id").selectOption("fixture");
     await page.locator("#fallback-model_id").selectOption("family/model");
     await page.locator("#fallback-variant").selectOption("high");
@@ -161,13 +160,14 @@ try {
     await page.waitForFunction(() => document.querySelector("#profile-final-fallback .profile-feedback").textContent.includes("gespeichert · Revision"));
     let storedPolicy = JSON.parse(await readFile(`${project}/.opencode-vm/agent-control.json`));
     assert.equal(storedPolicy.schemaVersion, 3);
-    assert.deepEqual(storedPolicy.finalFallback, { mode: "degrading", selection: tuple });
+    assert.deepEqual(storedPolicy.finalFallback, { mode: "total", selection: tuple });
     assert.ok((await readdir(`${project}/.opencode-vm`)).some(name => /^agent-control\.schema2-rev\d+\.backup\.json$/u.test(name)),
       "the schema 2 original must be backed up before the schema 3 upgrade");
     await page.locator("#refresh-control").click();
-    await page.waitForFunction(() => document.querySelector("#profile-final-fallback .profile-summary").textContent.includes("Degrading Fallback"));
+    await page.waitForFunction(() => document.querySelector("#profile-final-fallback .profile-summary").textContent.includes("Letzte Rückfallstufe"));
     assert.match(await page.locator("#profile-final-fallback .profile-summary").innerText(), /Im aktuellen Katalog verfügbar/);
-    assert.equal(await page.locator("#fallback-mode").inputValue(), "degrading");
+    // task_68085480: the own Total/Degrading control is gone from the final card.
+    assert.equal(await page.locator("#fallback-mode").count(), 0, "no own strategy dropdown in the final card");
     assert.equal(await page.locator("#fallback-variant").inputValue(), "high");
     await page.locator("#fallback-variant").selectOption("default");
     const beforeRefusal = await readFile(`${project}/.opencode-vm/agent-control.json`, "utf8");
@@ -232,8 +232,8 @@ try {
     assert.match(await page.locator("#fallback-strategies .strategies-summary").innerText(),
       /Degrading nicht gesetzt · Provider-Skip nicht gesetzt · wirksam: Degrading aus, Provider-Skip aus/,
       "unset switches are shown as not activated instead of a hidden default");
-    assert.match(await page.locator("#profile-final-fallback .profile-editor").innerText(), /nicht Teil der neuen Kette/,
-      "the legacy global final stage relationship stays explicit");
+    assert.match(await page.locator("#profile-final-fallback .profile-editor").innerText(), /letzte Stufe nach allen regulären Alternativen/i,
+      "the global final stage relationship is stated correctly (old 'not part of the chain' wording removed)");
 
     // Two independent switches: saving writes both explicitly, reset writes null.
     await openDetails("#fallback-strategies .strategies-editor");

@@ -228,6 +228,9 @@ export function candidateOrder(policy: Policy, profile: ProfileName): string[] |
     if (policy.profiles[stage] !== null) order.push(`${stage}.main`);
     if (policy.profileFallbacks[stage] !== null) order.push(`${stage}.fallback`);
   }
+  // task_68085480: the configured global final stage is the guaranteed last
+  // recovery step after the regular alternatives — also in the per_profile regime.
+  if (policy.finalFallback !== null) order.push("final.main");
   return order;
 }
 
@@ -460,7 +463,17 @@ export function recoveryCandidates(policy: RecoveryPolicyView, entryProfile: str
     if (!tuple) return;
     out.push({ label, ref, tuple: { ...tuple }, disabled: slotDisabled(policy, ref) });
   };
-  if (effectiveRegime(policy) === "per_profile") return newStartCandidates(policy, entryProfile);
+  if (effectiveRegime(policy) === "per_profile") {
+    const regular = newStartCandidates(policy, entryProfile);
+    // task_68085480: the configured, activated, available global final stage is
+    // the guaranteed LAST recovery stage after the regular alternatives — also
+    // in the per_profile regime. It is no longer excluded there.
+    if (policy.finalFallback) {
+      regular.push({ label: "final.main", ref: { kind: "finalFallback" },
+        tuple: { ...policy.finalFallback.selection }, disabled: slotDisabled(policy, { kind: "finalFallback" }) });
+    }
+    return regular;
+  }
   if (policy.finalFallback && policy.finalFallback.mode === "degrading") {
     const order: string[] =
       entryProfile === "design" || entryProfile === "review"
@@ -582,15 +595,23 @@ export function resolveRecoveryChain(
   let selectedIdentity: string | null = null;
   for (let index = 0; index < candidates.length; index++) {
     const candidate = candidates[index]!;
+    // task_68085480: the global final stage is the guaranteed LAST recovery step.
+    // It deliberately bypasses the current-failure and already-attempted identity
+    // dedup (one conscious final attempt even for an identical tuple that failed
+    // in the regular chain) and the Provider-Skip gate (F5 exception) — it is
+    // gated only by a manual disable and catalog availability. Exactly one bounded
+    // action per wake is enforced by the engine, so this does not hot-loop;
+    // across wakes it yields the operator-mandated sticky final retry.
+    const isFinal = raw[index]!.ref.kind === "finalFallback";
     if (selectedIdentity !== null) {
       candidate.status = "skipped_attempted";
       continue;
     }
-    if (params.currentIdentity && candidate.identity === params.currentIdentity) {
+    if (!isFinal && params.currentIdentity && candidate.identity === params.currentIdentity) {
       candidate.status = "skipped_current_failure";
       continue;
     }
-    if (attempted.has(candidate.identity)) {
+    if (!isFinal && attempted.has(candidate.identity)) {
       candidate.status = "skipped_attempted";
       continue;
     }
@@ -602,7 +623,7 @@ export function resolveRecoveryChain(
       candidate.status = "skipped_unavailable";
       continue;
     }
-    if (providerSkip && accountScope && params.evidenceProviderId && candidate.tuple.provider_id === params.evidenceProviderId) {
+    if (!isFinal && providerSkip && accountScope && params.evidenceProviderId && candidate.tuple.provider_id === params.evidenceProviderId) {
       candidate.status = "skipped_provider_scope";
       continue;
     }

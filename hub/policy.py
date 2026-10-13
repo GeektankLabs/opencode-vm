@@ -226,6 +226,10 @@ def candidate_order(policy, profile):
             order.append(f"{stage}.main")
         if fallbacks.get(stage) is not None:
             order.append(f"{stage}.fallback")
+    # task_68085480: the configured global final stage is the guaranteed last
+    # recovery step after the regular alternatives — also in the per_profile regime.
+    if policy.get("finalFallback") is not None:
+        order.append("final.main")
     return order
 
 

@@ -298,12 +298,24 @@ test("Welle B resolver: per_profile stage tuples resolve main then own fallback,
     profileFallbacks: { deep: fbT }, strategies: { degrading: false, providerSkip: null },
   }), { entryProfile: "deep", catalog: fullCatalog, evidenceCategory: "provider_quota", currentIdentity: "p/m" });
   assert.deepEqual(noDegrade.candidates.map((entry) => entry.label), ["deep.main", "deep.fallback"]);
-  // The legacy global final stage is NEVER silently appended to a per-profile chain.
+  // task_68085480: the configured global final stage IS the guaranteed LAST step
+  // of a per-profile chain now (operator-authorized change from #20).
   const appended = resolveRecoveryChain(recoveryView({ deep: deepT }, {
     profileFallbacks: { deep: fbT },
     finalFallback: { mode: "total", selection: qT },
   }), { entryProfile: "deep", catalog: fullCatalog, evidenceCategory: "provider_quota", currentIdentity: "p/m" });
-  assert.ok(!appended.candidates.some((entry) => entry.label.startsWith("final")));
+  assert.deepEqual(appended.candidates.map((entry) => entry.label), ["deep.main", "deep.fallback", "final.main"]);
+  assert.equal(appended.candidates.at(-1)!.status, "skipped_attempted", "the final is appended last; not reached when a regular candidate already won");
+  // ... and it IS reached (and selected) when the regular alternatives fail —
+  // including an identical already-failed tuple and active provider-skip.
+  const exhausted = resolveRecoveryChain(recoveryView({ deep: deepT, standard: qT }, {
+    strategies: { degrading: false, providerSkip: true },
+    finalFallback: { mode: "total", selection: deepT },
+  }), { entryProfile: "deep", catalog: fullCatalog, evidenceCategory: "provider_quota",
+       evidenceProviderId: "p", attempted: ["p/m", "q/m"], currentIdentity: "p/m" });
+  assert.equal(exhausted.selected_identity, "p/m", "identical final tuple is still attempted once despite provider-skip");
+  assert.equal(exhausted.candidates.at(-1)!.label, "final.main");
+  assert.equal(exhausted.candidates.at(-1)!.status, "selected");
 });
 
 test("Welle B resolver: availability and catalog honesty — missing provider/model/variant skips, absent catalog skips everything", () => {

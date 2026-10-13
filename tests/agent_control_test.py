@@ -12,7 +12,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 import hub.server as server
-from hub.catalog import read_catalog, mcp_connection, read_capabilities, read_schema4_capabilities, read_policy_capabilities
+from hub.catalog import read_catalog, mcp_connection, read_capabilities, read_schema4_capabilities, read_policy_capabilities, _supports_slot_disabled
 from hub.policy import PolicyStore, PolicyConflict, PolicyError, PolicyCapabilityError, PROFILES, BASE_PROFILES, STRATEGY_KEYS, check_selection, resolve_profile, routing_regime, candidate_order, profile_fallbacks_view, strategies_view, validate_final_fallback, validate_policy, validate_profile_fallbacks, validate_strategies
 
 
@@ -787,6 +787,61 @@ process.on("SIGTERM",()=>{void server.close().then(()=>process.exit(0));});'''
             self.assertTrue(read_capabilities(mcp_connection(runtime, root, "project-hash")))
         finally:
             process.terminate(); process.communicate(timeout=5)
+
+
+class SlotCapabilityDetectionTest(unittest.TestCase):
+    """task_68085480: real-schema detection regression.
+
+    The greyed-out slot checkboxes were caused by `_supports_slot_disabled`
+    reading the wrong schema level (`set(deep_entry)` instead of the entry's
+    `properties`). This test runs the detection against the schema SHAPE the MCP
+    SDK actually serializes (nested `properties`, `anyOf` schema_version, `oneOf`
+    slot selector) and would have failed before the fix. Fixtures that patch
+    `read_policy_capabilities` never exercised this path — that was the gap.
+    """
+
+    def _tools(self):
+        return {
+            "get_project_model_policy": {"outputSchema": {"properties": {
+                "schema_version": {"anyOf": [{"type": "number", "const": n} for n in (1, 2, 3, 4, 5)]},
+                "resolution": {"type": "object", "properties": {}},
+                "profiles": {"type": "object", "properties": {
+                    "deep": {"type": "object", "properties": {
+                        "selection": {}, "status": {}, "disabled": {"type": "boolean"}}},
+                }},
+            }}},
+            "set_project_model_policy_slot_disabled": {"inputSchema": {"properties": {
+                "revision": {"type": "number"},
+                "slot": {"oneOf": [
+                    {"type": "object", "properties": {"kind": {"const": "profile"}}},
+                    {"type": "object", "properties": {"kind": {"const": "profile_fallback"}}},
+                    {"type": "object", "properties": {"kind": {"const": "final_fallback"}}},
+                ]},
+                "disabled": {"type": "boolean"},
+            }}},
+        }
+
+    def test_nested_schema_shape_is_detected(self):
+        self.assertTrue(_supports_slot_disabled(self._tools()),
+                        "the SDK-serialized (nested) schema must be detected")
+
+    def test_inline_property_shape_is_also_tolerated(self):
+        tools = self._tools()
+        # Some serializers place field names directly on the entry object.
+        tools["get_project_model_policy"]["outputSchema"]["properties"]["profiles"]["properties"]["deep"] = \
+            {"selection": {}, "status": {}, "disabled": {"type": "boolean"}}
+        self.assertTrue(_supports_slot_disabled(tools))
+
+    def test_missing_tool_or_field_is_false(self):
+        tools = self._tools()
+        del tools["set_project_model_policy_slot_disabled"]
+        self.assertFalse(_supports_slot_disabled(tools), "without the write tool the capability is honestly false")
+        tools = self._tools()
+        del tools["get_project_model_policy"]["outputSchema"]["properties"]["profiles"]["properties"]["deep"]["properties"]["disabled"]
+        self.assertFalse(_supports_slot_disabled(tools), "without the readback disabled flag the capability is false")
+        tools = self._tools()
+        tools["set_project_model_policy_slot_disabled"]["inputSchema"]["properties"]["disabled"] = {"type": "string"}
+        self.assertFalse(_supports_slot_disabled(tools), "a non-boolean disabled field is rejected")
 
 
 if __name__ == "__main__":

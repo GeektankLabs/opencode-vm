@@ -10,7 +10,6 @@
     catalog_unavailable: "Gespeichert · derzeit nicht prüfbar", catalog_incomplete: "Gespeichert · Katalog unvollständig",
     provider_unavailable: "Provider nicht verfügbar", model_unavailable: "Modell nicht verfügbar", variant_unavailable: "Variante nicht verfügbar" };
   const fields = { provider_id: "Provider", model_id: "Modell", variant: "Variante / Effort" };
-  const fallbackModes = { total: "Total Fallback (Standard)", degrading: "Degrading Fallback (Option)" };
   const $ = id => document.getElementById(id);
   const equal = (a, b) => !a || !b ? a === b : Object.keys(fields).every(field => a[field] === b[field]);
   const tuple = selection => selection ? `${selection.provider_id} / ${selection.model_id} · ${selection.variant}` : "Keine eigene Zuordnung";
@@ -119,7 +118,9 @@
     head.append(slotToggle.label);
     card.append(head, node("p", roles[profile][1], "muted"));
     const summary = node("p", "", "profile-summary"), effective = node("p", "", "profile-effective"); card.append(summary, effective);
-    const ids = node("details", "", "technical-ids"), idText = node("p", "", "muted"); ids.append(node("summary", "Technische IDs"), idText); card.append(ids);
+    // task_68085480: compact technical IDs directly at the entry — the separate
+    // redundant "Technische IDs" disclosure block is removed.
+    const idText = node("p", "", "profile-ids muted"); const ids = idText; card.append(idText);
     if (profile === "review") card.append(node("p", "Review bewertet; eigene Findings werden nicht automatisch umgesetzt.", "muted"));
     const details = node("details", "", "profile-editor"), disclosure = node("summary", "Bearbeiten / Konfigurieren"); details.append(disclosure);
     const form = node("form"); form.noValidate = true;
@@ -174,6 +175,7 @@
     card.querySelector(".profile-effective").after(summary);
     const ownToggle = makeSlotToggle("own", profile);
     summary.after(ownToggle.label);
+    const ownIds = node("p", "", "profile-ids muted"); ownToggle.label.after(ownIds);
     const details = node("details", "", "profile-fallback-editor");
     details.append(node("summary", "Eigenes Fallback (optional)"));
     // Deliberately not a second <form> and not type=submit: the existing card
@@ -204,7 +206,7 @@
     const draftPreview = node("p", "", "muted");
     form.append(errors, fieldset, draftPreview, hint, actions, feedback, recovery);
     details.append(form); card.append(details);
-    const c = own[profile] = { summary, details, form, fieldset, controls, save, cancel, remove, hint, feedback, errors, recovery, draftPreview, ownToggle,
+    const c = own[profile] = { summary, details, form, fieldset, controls, save, cancel, remove, hint, feedback, errors, recovery, draftPreview, ownToggle, ownIds,
       draft: blank(), baseline: null, dirty: false, conflict: false, compared: false, saving: false };
     save.addEventListener("click", () => void saveOwnFallback(profile, c.draft));
     remove.addEventListener("click", () => void saveOwnFallback(profile, null));
@@ -249,9 +251,11 @@
       ? `Eigenes Fallback: ${friendlyTuple(stored)} · ${states[snapshot.profileFallbackValidation?.[profile]] || "unconfigured"}${off ? " · pausiert" : ""}`
       : "Kein eigenes Fallback — ohne Degrading endet die Kette nach dem Hauptmodell mit einer auslesbaren INPUT_REQUIRED-Meldung.";
     c.summary.className = `profile-fallback-summary ${stored && !["available", "unconfigured"].includes(snapshot.profileFallbackValidation?.[profile]) ? "warning" : "muted"}`;
+    c.ownIds.textContent = stored ? `ID: ${tuple(stored)}` : "";
+    c.ownIds.hidden = !stored;
     c.ownToggle.label.hidden = !stored;
     c.ownToggle.input.checked = stored && !off;
-    c.ownToggle.input.disabled = noWriteWindow() || !slotDisabledCapable() || !!c.conflict;
+    c.ownToggle.input.disabled = writing || pendingUncertain() || formatBlocked || !!c.conflict || !slotDisabledCapable();
     c.details.classList.toggle("slot-off", off);
     c.draftPreview.textContent = c.dirty ? `Entwurf: ${tuple(c.draft)}` : "";
     populate(c.controls.provider_id, (snapshot.catalog?.providers || []).map(p => [p.provider_id, p.name]), c.draft.provider_id);
@@ -491,26 +495,23 @@
     if (!a || !b) return a === b;
     return a.mode === b.mode && Object.keys(fields).every(field => a[field] === b[field]);
   };
-  function fillModes(select, value) {
-    select.replaceChildren(...Object.entries(fallbackModes).map(([id, name]) => new Option(name, id)));
-    select.value = value in fallbackModes ? value : "total";
-  }
   function createFallbackCard() {
     const card = node("article", "", "card fallback-card"); card.id = "profile-final-fallback";
     card.append(node("h3", "Finales Fehler-Fallback"), node("p",
-      "Abschließende Runtime bei bestätigtem Provider-Timeout/-Quota (Total oder Degrading). Strikt getrennt von der regulären Design-/Review-Auflösung; nicht konfiguriert bedeutet eine präzise INPUT_REQUIRED-Meldung statt automatischer Providerwahl.",
+      "Letzte Rückfallstufe, wenn alle regulären Alternativen scheitern. Wird auch bei aktiviertem Provider-Skip versucht. Laufende Monitore versuchen diese Stufe bei späteren regulären Läufen erneut. Nicht konfiguriert bedeutet eine präzise INPUT_REQUIRED-Meldung statt automatischer Providerwahl.",
       "muted"));
     const summary = node("p", "", "profile-summary"); card.append(summary);
     const finalToggle = makeSlotToggle("final", null);
     summary.after(finalToggle.label);
+    const finalIds = node("p", "", "profile-ids muted"); finalToggle.label.after(finalIds);
     const details = node("details", "", "profile-editor");
     details.append(node("summary", "Fallback konfigurieren"));
     const form = node("form"); form.noValidate = true;
-    const fieldset = node("fieldset"); fieldset.append(node("legend", "Strategie und Runtime"));
+    const fieldset = node("fieldset"); fieldset.append(node("legend", "Runtime"));
     const hint = node("p", "", "muted"); hint.id = "fallback-hint";
     const errors = node("div", "", "error-summary"); errors.tabIndex = -1; errors.hidden = true;
     const controls = {};
-    for (const [field, caption] of [["mode", "Strategie"], ["provider_id", "Provider"], ["model_id", "Modell"], ["variant", "Variante / Effort"]]) {
+    for (const [field, caption] of [["provider_id", "Provider"], ["model_id", "Modell"], ["variant", "Variante / Effort"]]) {
       const label = node("label", caption); label.htmlFor = `fallback-${field}`;
       const select = node("select"); select.id = label.htmlFor; select.name = field;
       select.setAttribute("aria-describedby", hint.id);
@@ -524,7 +525,7 @@
     const recovery = node("button", "Speicherstand zurücklesen", "button secondary"); recovery.type = "button"; recovery.hidden = true;
     form.append(errors, fieldset, hint, actions, feedback, recovery);
     details.append(form); card.append(details); $("control-profiles").append(card);
-    fallbackCard = { card, summary, form, fieldset, controls, save, clear, hint, feedback, errors, recovery, finalToggle,
+    fallbackCard = { card, summary, form, fieldset, controls, save, clear, hint, feedback, errors, recovery, finalToggle, finalIds,
       draft: blankFallback(), baseline: null, dirty: false, conflict: false, compared: false, saving: false };
     for (const [field, select] of Object.entries(controls)) {
       select.addEventListener("change", () => {
@@ -548,7 +549,7 @@
         if (wasUncertain && !fallbackCard.conflict) return;
         fallbackCard.compared = true; fallbackCard.conflict = true;
         const stored = storedFallback();
-        fallbackCard.feedback.textContent = `Aktuell gespeichert: ${stored ? `${fallbackModes[stored.mode]} · ${tuple(stored)}` : "Kein Fallback"}. Dein Entwurf: ${sameFallback(fallbackCard.draft, blankFallback()) ? "Kein Fallback" : `${fallbackModes[fallbackCard.draft.mode]} · ${tuple(fallbackCard.draft)}`}. Vor erneutem Speichern bewusst abgleichen.`;
+        fallbackCard.feedback.textContent = `Aktuell gespeichert: ${stored ? tuple(stored) : "Kein Fallback"}. Dein Entwurf: ${sameFallback(fallbackCard.draft, blankFallback()) ? "Kein Fallback" : tuple(fallbackCard.draft)}. Vor erneutem Speichern bewusst abgleichen.`;
         recovery.textContent = "Entwurf nach Abgleich freigeben"; updateAll();
       }
     });
@@ -576,16 +577,17 @@
     const stored = storedFallback();
     const off = stored ? isSlotOff("final") : false;
     c.summary.textContent = stored
-      ? `${fallbackModes[stored.mode] || stored.mode} · ${friendlyTuple(stored)} · ${states[snapshot.finalFallbackStatus || "unconfigured"]}${off ? " · pausiert" : ""}`
+      ? `Letzte Rückfallstufe · ${friendlyTuple(stored)} · ${states[snapshot.finalFallbackStatus || "unconfigured"]}${off ? " · pausiert" : ""}`
       : "Nicht konfiguriert — das Management-Routing meldet eine präzise INPUT_REQUIRED-Anweisung; keine automatische Providerwahl.";
+    c.finalIds.textContent = stored ? `ID: ${tuple(stored)}` : "";
+    c.finalIds.hidden = !stored;
     c.card.classList.toggle("slot-off", off);
     c.finalToggle.label.hidden = !stored;
     c.finalToggle.input.checked = stored && !off;
-    c.finalToggle.input.disabled = noWriteWindow() || !slotDisabledCapable() || !!c.conflict;
+    c.finalToggle.input.disabled = writing || pendingUncertain() || formatBlocked || !!c.conflict || !slotDisabledCapable();
     const upgradeNeeded = snapshot.policy.schemaVersion === 1;
     const compatible = snapshot.capabilities.optionalProfiles || !upgradeNeeded;
-    c.hint.textContent = `${c.dirty ? "Ungespeicherte Änderungen. " : ""}${snapshot.catalogStatus !== "complete" ? "Kein vollständiger Katalog; eine neue Fallback-Zuordnung kann nicht gespeichert werden (Entfernen bleibt möglich). " : ""}${upgradeNeeded && !snapshot.capabilities.optionalProfiles ? "Aktiver MCP-Adapter bestätigt die Erweiterung auf Format 3 nicht. Normalen autorisierten Reconnect und Tooldiscovery prüfen. " : ""}${upgradeNeeded ? "Beim ersten Fallback-Save wird die Policy auf Format 3 erweitert; das vorhandene Original wird gesichert. Ältere Connectoren können Format 3 nicht lesen. " : ""}${perProfileRegime() ? "Profilbezogener Modus aktiv: Diese globale Endstufe ist nicht Teil der neuen Kette, bleibt aber gespeichert und lesbar und wird nicht still angehängt. " : ""}${stored && !slotDisabledCapable() ? "Aktiver MCP-Adapter bestätigt das Slot-Pausieren (Format 5) nicht; der Schalter bleibt gesperrt. " : ""}`;
-    fillModes(c.controls.mode, c.draft.mode);
+    c.hint.textContent = `${c.dirty ? "Ungespeicherte Änderungen. " : ""}${snapshot.catalogStatus !== "complete" ? "Kein vollständiger Katalog; eine neue Fallback-Zuordnung kann nicht gespeichert werden (Entfernen bleibt möglich). " : ""}${upgradeNeeded && !snapshot.capabilities.optionalProfiles ? "Aktiver MCP-Adapter bestätigt die Erweiterung auf Format 3 nicht. Normalen autorisierten Reconnect und Tooldiscovery prüfen. " : ""}${upgradeNeeded ? "Beim ersten Fallback-Save wird die Policy auf Format 3 erweitert; das vorhandene Original wird gesichert. Ältere Connectoren können Format 3 nicht lesen. " : ""}Der globale finale Fallback ist die letzte Stufe nach allen regulären Alternativen (auch im profilbezogenen Modus) und wird bei aktiviertem Provider-Skip für genau diese Stufe nicht wegen desselben Providers übersprungen.${stored && !slotDisabledCapable() ? " Aktiver MCP-Adapter bestätigt das Slot-Pausieren (Format 5) nicht; der Schalter bleibt gesperrt." : ""}`;
     populate(c.controls.provider_id, (snapshot.catalog?.providers || []).map(p => [p.provider_id, p.name]), c.draft.provider_id);
     const models = sortedModels((snapshot.catalog?.models || []).filter(m => m.provider_id === c.draft.provider_id));
     populate(c.controls.model_id, models.map(m => [m.model_id, m.name]), c.draft.model_id);
@@ -628,7 +630,7 @@
         snapshot.finalFallbackStatus = result.policy.finalFallback ? "available" : "unconfigured";
         c.feedback.textContent = kind === "clear"
           ? `Fallback entfernt · Revision ${result.policy.revision}. Das Management-Routing meldet bis zur Neukonfiguration INPUT_REQUIRED.`
-          : `Fallback gespeichert · Revision ${result.policy.revision}. Strategie: ${fallbackModes[result.policy.finalFallback.mode]}.`;
+          : `Fallback gespeichert · Revision ${result.policy.revision}. Letzte Rückfallstufe nach den regulären Alternativen.`;
       }
     } catch {
       fallbackUncertain = { submitted, revision };

@@ -174,6 +174,19 @@ def read_schema4_capabilities(connection):
     return _supports_profile_fallbacks(tools) if tools is not None else False
 
 
+def _entry_property_names(entry):
+    """Property names of a JSON-schema object entry, tolerating both the inline
+    shape (fields directly on the entry) and the nested shape the MCP SDK emits
+    (`{"type":"object","properties":{...}}`). Returns an empty set when neither
+    is present."""
+    if not isinstance(entry, dict):
+        return set()
+    nested = entry.get("properties")
+    if isinstance(nested, dict):
+        return set(nested)
+    return set(entry)
+
+
 def _supports_slot_disabled(tools):
     """Schema-5 contract (task_f2d0ccc6): additive disabled readback fields plus
     the per-slot write tool with the discriminated slot selector."""
@@ -181,15 +194,16 @@ def _supports_slot_disabled(tools):
         output = tools["get_project_model_policy"]["outputSchema"]["properties"]
         write = tools["set_project_model_policy_slot_disabled"]["inputSchema"]["properties"]
         slot = write["slot"]
-        one_of = slot.get("oneOf", [])
+        variants = slot.get("oneOf") or slot.get("anyOf") or []
         kinds = set()
-        for variant in one_of:
-            kind = variant.get("properties", {}).get("kind", {}).get("const")
+        for variant in variants:
+            kind = (variant.get("properties", {}) or {}).get("kind", {}).get("const")
             if kind:
                 kinds.add(kind)
+        deep_disabled = "disabled" in _entry_property_names(output["profiles"]["properties"]["deep"])
         return bool(_version_supported(output["schema_version"], 5)
                     and "resolution" in output
-                    and {"disabled"} <= set(output["profiles"]["properties"]["deep"])
+                    and deep_disabled
                     and {"revision", "slot", "disabled"} <= set(write)
                     and isinstance(write["disabled"], dict)
                     and write["disabled"].get("type") == "boolean"
