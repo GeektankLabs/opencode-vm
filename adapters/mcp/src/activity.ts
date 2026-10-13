@@ -125,6 +125,16 @@ function logCommitFailure(phase: string, error: unknown, pathRole: string): void
   }
 }
 
+/** Test-only seam: overrides the file operations used by the atomic commit so
+ * fault injection can exercise the real open/write/sync/close/rename/cleanup
+ * sequence without exhausting file descriptors. Production never calls the
+ * setter (it is used only by the isolated commit-fault tests). */
+type CommitFs = { open: typeof open; rename: typeof rename; unlink: typeof unlink };
+let commitFs: CommitFs = { open, rename, unlink };
+export function __setCommitFsForTest(next: { open?: typeof open; rename?: typeof rename; unlink?: typeof unlink } | null): void {
+  commitFs = next === null ? { open, rename, unlink } : { open, rename, unlink, ...next };
+}
+
 /** One owned adapter is the writer. Commits serialize observation + event state
  * in one atomic file; reads never perform backend polling or copy history. */
 export class ActivityJournal {
@@ -1144,7 +1154,7 @@ export class ActivityJournal {
       let primary: unknown = null;
       let handle: Awaited<ReturnType<typeof open>> | null = null;
       try {
-        handle = await open(temporary, "wx", 0o600);
+        handle = await commitFs.open(temporary, "wx", 0o600);
         phase = "write";
         await handle.writeFile(JSON.stringify(draft) + "\n");
         phase = "sync";
@@ -1163,7 +1173,7 @@ export class ActivityJournal {
       if (primary === null) {
         phase = "rename";
         try {
-          await rename(temporary, this.path);
+          await commitFs.rename(temporary, this.path);
         } catch (error) {
           primary = error;
         }
@@ -1175,7 +1185,7 @@ export class ActivityJournal {
         // no reset, no retry and no reopen; the original cause is not claimed
         // fixed. Cleanup below is best-effort and can never mask this error.
         logCommitFailure(phase, primary, "journal-temp");
-        await unlink(temporary).catch(() => undefined);
+        await commitFs.unlink(temporary).catch(() => undefined);
         throw new AdapterError(
           "ACTIVITY_UNAVAILABLE",
           "Could not persist activity; the journal was not reset.",
@@ -1183,7 +1193,7 @@ export class ActivityJournal {
       }
       this.store = draft;
       for (const wake of this.waiters) wake();
-      await unlink(temporary).catch(() => undefined);
+      await commitFs.unlink(temporary).catch(() => undefined);
     });
     this.tail = operation.catch(() => undefined);
     return operation;

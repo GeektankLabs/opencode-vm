@@ -34,7 +34,7 @@ OPENLIVE_PREVIOUS_COMMAND="$OPENLIVE_DIR/previous-command"
 OPENLIVE_AUTH_MARKER="__opencode_vm_openlive__"
 OPENLIVE_LOCK_PATH=""
 OPENLIVE_ADAPTER_VERSION="0.1.8"
-OPENLIVE_ADAPTER_TAG="v0.7.43"
+OPENLIVE_ADAPTER_TAG="v0.7.44"
 OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.8.tar"
 OPENLIVE_ADAPTER_SHA256="74b046b468f853660782d4c78c6e4859fddbfa4a54b167c5d185035dc9102f40"
 OPENLIVE_ACP_SDK_VERSION="1.2.1"
@@ -45,14 +45,14 @@ OPENLIVE_MANAGER_PROMPT="You manage an OpenLive voice call. The voice_sessions t
 MCP_CONNECTOR_DIR="$SHARE_ROOT/mcp-connector"
 MCP_ADAPTER_CACHE_ROOT="$MCP_CONNECTOR_DIR/adapters"
 MCP_ADAPTER_VERSION="0.1.49"
-MCP_ADAPTER_TAG="v0.7.43"
+MCP_ADAPTER_TAG="v0.7.44"
 MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.49.tar"
 MCP_ADAPTER_SHA256="efd14ce4e7e25548feb145d0ac53fd9986adcc3a5ac1ee8ccfe6d285b98dff42"
 MCP_SDK_VERSION="1.30.1"
 MCP_OPENCODE_SDK_VERSION="1.18.21"
 MCP_TESTED_PROTOCOL_VERSION="2025-11-25"
 MCP_TUNNEL_DIR="$SHARE_ROOT/mcp-tunnel/openai"
-HUB_ASSET_TAG="v0.7.43"
+HUB_ASSET_TAG="v0.7.44"
 HUB_ASSET_FILENAME="opencode-vm-hub-1.tar"
 HUB_ASSET_SHA256="58a3f875b0da43e1ea4d1717c146543d47ce2d80d4cfc0bdb812e27c9723f04b"
 
@@ -332,7 +332,7 @@ TASKBOARD_ARM64_SHA256="3749fb985f544fdb6788ba1dff69761e599ff82b3fe86d39ca54307c
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.7.43"
+OCVM_VERSION="0.7.44"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -15764,6 +15764,41 @@ mcp_self_register() {
   echo "[mcp] Monitor self-connection registered for the internal management surface."
 }
 
+# Bounded, rotating writer for the adapter log (same convention as the taskboard
+# log: 1 MiB limit, one `.1` backup, symlink-safe, atomic tail-keep). The journal
+# diagnostic line is already one-per-latch; this keeps the whole adapter log from
+# growing without limit across a long session.
+read -r -d '' OC_MCP_LOG_WRITER_PY <<'MCP_LOG' || true
+import os, pathlib, sys
+log = pathlib.Path(sys.argv[1])
+old = log.with_name(log.name + ".1")
+limit = 1024 * 1024
+def rotate(force=False):
+    if log.exists() and (force or log.stat().st_size >= limit):
+        if old.is_symlink() or log.is_symlink():
+            raise RuntimeError("Unsafe MCP adapter log")
+        with log.open("rb") as source:
+            source.seek(max(0, log.stat().st_size - limit))
+            content = source.read(limit)
+        with old.open("wb") as target:
+            target.write(content)
+        old.chmod(0o600)
+        log.unlink()
+rotate()
+with log.open("ab", buffering=0) as target:
+    os.chmod(log, 0o600)
+    while True:
+        chunk = sys.stdin.buffer.read1(4096)
+        if not chunk:
+            break
+        if target.tell() + len(chunk) > limit:
+            target.close()
+            rotate(True)
+            target = log.open("ab", buffering=0)
+            os.chmod(log, 0o600)
+        target.write(chunk)
+MCP_LOG
+
 start_mcp_adapter() {
   [ "${OC_MCP_ENABLED:-0}" = "1" ] || return 0
   local adapter="$SESS_SHARE/mcp/adapter" marker="ocvm-mcp-supervisor-$OC_MCP_GENERATION"
@@ -15774,15 +15809,15 @@ start_mcp_adapter() {
   chmod 600 "$SESS_SHARE/mcp/adapter.log" || return 1
   export OCVM_MCP_RUNTIME="$SESS_SHARE/mcp/runtime.json"
   setsid bash -c '
-    adapter="$1"; runtime="$2"; log="$3"
+    adapter="$1"; runtime="$2"; log="$3"; child_marker="$4"; writer="$5"
     export OCVM_MCP_RUNTIME="$runtime"
     exec 9>&-
     while true; do
-      aa-exec -p opencode-sandbox -- node "$adapter/dist/main.js" "$4" >>"$log" 2>&1 &
+      ( aa-exec -p opencode-sandbox -- node "$adapter/dist/main.js" "$child_marker" 2>&1 | python3 -u -c "$writer" "$log" ) &
       echo $! > /tmp/ocvm-mcp.run.pid
       wait $! || true
       sleep 2
-    done' "$marker" "$adapter" "$OCVM_MCP_RUNTIME" "$SESS_SHARE/mcp/adapter.log" "$child_marker" \
+    done' "$marker" "$adapter" "$OCVM_MCP_RUNTIME" "$SESS_SHARE/mcp/adapter.log" "$child_marker" "$OC_MCP_LOG_WRITER_PY" \
     </dev/null >/dev/null 2>&1 9>&- &
   echo $! > /tmp/ocvm-mcp.sup.pid
   mcp_self_register || true

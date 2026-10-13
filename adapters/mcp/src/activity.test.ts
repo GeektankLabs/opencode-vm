@@ -11,7 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { ActivityJournal, commitFailureLine, persistErrorClass, safeCommitErrno, safeCommitSyscall } from "./activity.js";
+import { ActivityJournal, __setCommitFsForTest, commitFailureLine, persistErrorClass, safeCommitErrno, safeCommitSyscall } from "./activity.js";
 import { AdapterError } from "./types.js";
 import type { ActivitySnapshot } from "./types.js";
 
@@ -288,8 +288,91 @@ test("commit first-failure diagnostics are allowlisted, redacted and bounded", (
   assert.equal(safeCommitErrno({}), "unknown");
 });
 
-test("filters advance over skipped events, recheck visibility and support bounded waits", async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), "ocvm-journal-filter-"));
+test("commit fault injection: real open/write/sync/close/rename/cleanup phases keep one bounded log and the primary error", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "ocvm-journal-fault-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = join(directory, "mcp"); await mkdir(store, { mode: 0o700 });
+  const path = join(store, "activity.json");
+
+  const lines: string[] = [];
+  const originalWrite = process.stderr.write.bind(process.stderr);
+  (process.stderr as unknown as { write: (chunk: unknown) => boolean }).write = (chunk: unknown) => { lines.push(String(chunk)); return true; };
+  t.after(() => { (process.stderr as unknown as { write: unknown }).write = originalWrite; __setCommitFsForTest(null); });
+
+  const commitErr = (code: string, syscall: string) => Object.assign(new Error("raw /etc/passwd Bearer TOKEN payload"), { code, syscall, errno: 2 });
+
+  // Each case gets a fresh journal (the latch is per instance) and one injected
+  // phase failure; secondary failures must never mask the primary or add a log.
+  const runCase = async (opts: { openErr?: unknown; writeErr?: unknown; syncErr?: unknown; closeErr?: unknown; renameErr?: unknown; unlinkErr?: unknown; loggerErr?: boolean }, expectedPhase: string, expectedClass: string) => {
+    const journal = await ActivityJournal.open(path, "project");
+    await journal.observe(snapshot("seed", "idle"), "observed"); // real fs: establish a valid journal
+    let closed = 0;
+    const handle = {
+      writeFile: async () => { if (opts.writeErr) throw opts.writeErr; },
+      sync: async () => { if (opts.syncErr) throw opts.syncErr; },
+      close: async () => { closed += 1; if (opts.closeErr) throw opts.closeErr; },
+    };
+    __setCommitFsForTest({
+      open: (async () => { if (opts.openErr) throw opts.openErr; return handle; }) as unknown as typeof import("node:fs/promises").open,
+      rename: (async () => { if (opts.renameErr) throw opts.renameErr; }) as unknown as typeof import("node:fs/promises").rename,
+      unlink: (async () => { if (opts.unlinkErr) throw opts.unlinkErr; }) as unknown as typeof import("node:fs/promises").unlink,
+    });
+    const before = lines.length;
+    if (opts.loggerErr) (process.stderr as unknown as { write: () => boolean }).write = () => { throw new Error("logger ENOSPC"); };
+    await assert.rejects(
+      journal.observe(snapshot("next", "busy"), "observed"),
+      (error) => error instanceof AdapterError && error.code === "ACTIVITY_UNAVAILABLE",
+      `${expectedPhase}: fail-closed`,
+    );
+    if (opts.loggerErr) (process.stderr as unknown as { write: (c: unknown) => boolean }).write = (chunk: unknown) => { lines.push(String(chunk)); return true; };
+    const produced = lines.slice(before).filter((line) => line.startsWith("[mcp] activity-commit-failed"));
+    if (opts.loggerErr) {
+      assert.equal(produced.length, 0, "a failing logger must not crash and must not surface a raw error");
+    } else {
+      assert.equal(produced.length, 1, `${expectedPhase}: exactly one bounded log per latch`);
+      assert.ok(produced[0]!.includes(`phase=${expectedPhase}`), `${expectedPhase}: phase reported`);
+      assert.ok(produced[0]!.includes(`class=${expectedClass}`), `${expectedPhase}: primary class reported`);
+      assert.ok(!produced[0]!.includes(directory) && !produced[0]!.includes("passwd") && !produced[0]!.includes("TOKEN"), `${expectedPhase}: redacted`);
+    }
+    assert.ok(closed <= 1, `${expectedPhase}: no file-descriptor leak (close at most once)`);
+    // Latch stays closed: a further commit neither retries nor re-logs.
+    const after = lines.length;
+    await assert.rejects(journal.observe(snapshot("later", "idle"), "observed"),
+      (error) => error instanceof AdapterError && error.code === "ACTIVITY_UNAVAILABLE");
+    assert.equal(lines.length, after, `${expectedPhase}: latched journal never retries or reopens`);
+    __setCommitFsForTest(null);
+    await journal.close().catch(() => undefined);
+  };
+
+  await runCase({ openErr: commitErr("ENOENT", "open") }, "open", "ENOENT");
+  await runCase({ writeErr: commitErr("ENOSPC", "write") }, "write", "ENOSPC");
+  await runCase({ syncErr: commitErr("ENFILE", "fsync") }, "sync", "ENFILE");
+  await runCase({ closeErr: commitErr("EIO", "close") }, "close", "EIO");
+  await runCase({ renameErr: commitErr("EXDEV", "rename") }, "rename", "EXDEV");
+  // Secondary close failure after a primary write failure: primary preserved.
+  await runCase({ writeErr: commitErr("ENOSPC", "write"), closeErr: commitErr("EIO", "close") }, "write", "ENOSPC");
+  // Secondary cleanup (unlink) failure must not mask the primary.
+  await runCase({ writeErr: commitErr("ENOSPC", "write"), unlinkErr: commitErr("EACCES", "unlink") }, "write", "ENOSPC");
+  // Explicit logger failure: no crash, fail-closed unchanged, no raw error.
+  await runCase({ writeErr: commitErr("ENOSPC", "write"), loggerErr: true }, "write", "ENOSPC");
+
+  // A fully successful commit with the seam active still flips the store and
+  // closes the descriptor exactly once.
+  const okJournal = await ActivityJournal.open(path, "project");
+  let okClosed = 0;
+  __setCommitFsForTest({
+    open: (async () => ({ writeFile: async () => {}, sync: async () => {}, close: async () => { okClosed += 1; } })) as unknown as typeof import("node:fs/promises").open,
+    rename: (async () => {}) as unknown as typeof import("node:fs/promises").rename,
+    unlink: (async () => {}) as unknown as typeof import("node:fs/promises").unlink,
+  });
+  await okJournal.observe(snapshot("ok", "idle"), "observed");
+  assert.equal(okClosed, 1, "exactly one descriptor closed on the success path");
+  assert.equal(okJournal.available, true);
+  __setCommitFsForTest(null);
+  await okJournal.close().catch(() => undefined);
+});
+
+test("filters advance over skipped events, recheck visibility and support bounded waits", async (t) => {  const directory = await mkdtemp(join(tmpdir(), "ocvm-journal-filter-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const journal = await ActivityJournal.open(
     join(directory, "activity.json"),
