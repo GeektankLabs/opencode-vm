@@ -9008,7 +9008,24 @@ update_cmd() {
   fi
 
   chmod +x "$remote_tmp_file"
-  mv "$remote_tmp_file" "$script_path"
+  # Stage the new script in the SAME directory as the target and swap it in with
+  # a same-filesystem rename. A bare `mv` from a /tmp download can cross a
+  # filesystem boundary, where the replace degrades to copy+unlink and a
+  # concurrent read/exec of the installed script can observe a partial file
+  # (arbitrary parse errors). This mirrors install_cmd's atomic staging.
+  local script_dir staged
+  script_dir="$(dirname "$script_path")"
+  if ! staged="$(mktemp "$script_dir/.opencode-vm.XXXXXX")"; then
+    rm -f "$remote_tmp_file"
+    echo "Cannot stage the update next to '$script_path' (directory not writable)." >&2
+    exit 1
+  fi
+  if ! cp "$remote_tmp_file" "$staged" || ! chmod 755 "$staged" || ! mv -f "$staged" "$script_path"; then
+    rm -f "$staged" "$remote_tmp_file"
+    echo "Could not replace '$script_path'; the existing script is unchanged." >&2
+    exit 1
+  fi
+  rm -f "$remote_tmp_file"
   echo "Updated opencode-vm from version $current_version to $remote_version."
 
   if OCVM_DISABLE_UPDATE_CHECK=1 "$script_path" --post-update-migrate "$current_version" "$remote_version"; then
