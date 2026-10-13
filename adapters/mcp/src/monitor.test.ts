@@ -595,6 +595,9 @@ test("engine: configured total fallback switches runtime with readback and conti
     assert.equal(state.updates[0]!.provider_id, "fallback-provider");
     assert.equal(state.sends.length, 1);
     assert.match(state.sends[0]!, /\[MONITOR-RECOVERY/);
+    // task_68085480 part 4: bounded authorized-alternatives check before a total park.
+    assert.match(state.sends[0]!, /already-authorized plausible alternative ways within the existing authorized scope/);
+    assert.match(state.sends[0]!, /global impossibility judgement/);
     const snapshot = await readRegistrySnapshot(project);
     assert.equal(snapshot.registry.monitors[0]!.recovery.active, false);
     assert.equal(snapshot.registry.monitors[0]!.state.work, "active", "operational recovery does not park work");

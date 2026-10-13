@@ -2273,6 +2273,7 @@ export class MonitorEngine {
         : `A turn stopped with an evidenced blocked error (${evidence.fingerprint}; category ${evidence.category}). Continue the same management context in this session; delegate the actual work again instead of executing it here, and do not duplicate already admitted work.`,
       summary ? `Canonical anchor task: ${summary.task.id}; checkpoint: ${summary.checkpoint ?? "unknown"}.` : `Canonical anchor task: ${monitor.anchor.task_id}.`,
       "Re-establish the state from the canonical C/P references, the journal checkpoint and the worker receipts before the next bounded step; report a precise INPUT_REQUIRED if a real decision is needed. Already executed changes remain; no rollback is claimed.",
+      "Before declaring a total blocked park, reconcile the original references and evaluate 2–3 already-authorized plausible alternative ways within the existing authorized scope; choose and pursue the first viable one instead of running an exhaustive checklist. Never derive YOLO/reset/delete/security approvals from synthesized options, and do not treat a single narrow reviewer negative finding as a global impossibility judgement.",
     ];
     const body = parts.join("\n");
     return prime && summary ? `${this.buildPrimingBlock(monitor, summary)}\n\n${body}` : body;
