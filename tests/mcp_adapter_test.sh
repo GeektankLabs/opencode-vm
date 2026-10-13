@@ -422,12 +422,13 @@ HARNESS
   for tool in list_monitors create_monitor create_monitor_worker list_monitor_workers update_monitor_worker; do
     grep -qxF "$tool" <<<"$tools_out" || fail "doctor tools/list framing did not return $tool"
   done
-  # 45 = the doctor preflight surface incl. core management and the schema-5
-  # slot-disable policy write (task_f2d0ccc6); strict inventory check stays.
-  assert_eq "$(grep -c . <<<"$tools_out")" "45"
+  # 46 = the doctor preflight surface incl. core management, the schema-5
+  # slot-disable policy write (task_f2d0ccc6) and the explicit recover_session_order
+  # write (task_68085480 F7a); strict inventory check stays.
+  assert_eq "$(grep -c . <<<"$tools_out")" "46"
   cleanup_harness
   harness_pid=""
-  pass "doctor preflight framing conforms to the real adapter (old framing 400, real tools/list returns 45 incl. core management)"
+  pass "doctor preflight framing conforms to the real adapter (old framing 400, real tools/list returns 46 incl. core management)"
 else
   pass "doctor preflight conformance skipped (node or built adapter unavailable)"
 fi
