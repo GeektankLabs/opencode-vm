@@ -42,7 +42,7 @@ EOF, harte Rest-LIstenerpruefung erhalten (fremder Listener -> fail-closed).
 `tests/mcp_shutdown_test.sh` (neu, Linux, isoliert):
 - treibt echtes start/stop_mcp_adapter aus der eingebetteten web-Library mit
   gefaktem aa-exec/node, das einen Port bindet;
-- 20 Checks: run.pid = echter Listener-PID mit Child-Marker/Port gebunden;
+- 18 Checks: run.pid = echter Listener-PID mit Child-Marker/Port gebunden;
   stop: Port frei, pidfiles weg, kein node/writer-Waise; wiederholter Stop;
   Stop->Restart; fremder Listener wird NICHT getoetet und nicht als Erfolg
   gewertet; markerloser PID wird nicht signalisiert.
@@ -61,3 +61,15 @@ MCP_ADAPTER_TAG, HUB_ASSET_TAG -> v0.7.49; Adapterversionen/-SHA256 unveraendert
 Kein Live-Repro am alten BI-MC-Socket; Kausalitaet aus Source + neuer
 OCVM-Prozessbeobachtung. Host-seitige Shutdown-Ursache (VM absichtlich running
 fuer ReAttach) bleibt Host-Verhalten. Unabhaengige QC am fertigen Pin offen.
+
+## Herkunft / Uebernahme (2026-10-13)
+Dieser Compact stammt aus dem Vorgängerstand und bleibt unveraendert erhalten
+(ausser der belegten Zahlkorrektur 20 Checks -> 18 Checks). Uebernommen als
+Task `task_b3f49fc7-16d2-544e-ab06-52396a1ac66a` durch den neuen einzigen
+regulaeren Buildowner; Vorgänger-Owner `ses_ec9b33941ffeLlGwQzfixJCLOx` frisch
+idle/0 pending, Rechte unveraendert. Reviewer
+`ses_ec99d7dcfffexkQU3WtN1rOQPE` reine Herkunftsanalyse/terminal, kein
+Parallelwriter. Reviewergebnis `msg_136a3d8a90020kpH1LYWmL0Zb0`: 18/18 PASS,
+Basis `39dab8f` FAIL (6), isolierte Namespaces, kein Gesamt-QC-PASS.
+Task-C/P: `.opencode/tasks/task-task_b3f49fc7-16d2-544e-ab06-52396a1ac66a.compact.md`
+und `planning/task-concepts/task_b3f49fc7-16d2-544e-ab06-52396a1ac66a-concept-plan.md`.
