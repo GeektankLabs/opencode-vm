@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -22,10 +23,10 @@ class OpenCodeGateway extends ProductionGateway {
   protected override async adoptManagedSession(id: string): Promise<void> { managedCalls.push(id); }
 }
 
-function runtime(managerFile?: string): RuntimeDescriptor {
+function runtime(managerFile?: string, projectDir: string = project): RuntimeDescriptor {
   return {
     schema: 1,
-    project,
+    project: projectDir,
     projectHash: "project-hash",
     projectName: "project-name",
     backendUrl: "http://127.0.0.1:4095",
@@ -41,6 +42,7 @@ function runtime(managerFile?: string): RuntimeDescriptor {
 function session(
   id: string,
   changes: Partial<SessionV2Info> = {},
+  projectDir: string = project,
 ): SessionV2Info {
   return {
     id,
@@ -54,7 +56,7 @@ function session(
     },
     time: { created: 1, updated: 2 },
     title: id,
-    location: { directory: project },
+    location: { directory: projectDir },
     agent: "build",
     model: { providerID: "provider", id: "model", variant: "high" },
     ...changes,
@@ -100,7 +102,7 @@ type FakeState = {
   ) => Promise<unknown>;
 };
 
-function fakeClient(state: FakeState) {
+function fakeClient(state: FakeState, projectDir: string = project) {
   return {
     config: {
       async get() {
@@ -267,7 +269,7 @@ function fakeClient(state: FakeState) {
           title: parameters.title as string,
           agent: parameters.agent as string,
           model: { ...model, variant: model.variant ?? "default" },
-        });
+        }, projectDir);
         state.sessions.push(created);
         return { data: { id: created.id } };
       },
@@ -3756,6 +3758,168 @@ test("adoptManagedSession forwards authorized scope_dirs over the managed socket
   } finally {
     if (previous === undefined) delete process.env.OCVM_MANAGED_POLICY_SOCKET;
     else process.env.OCVM_MANAGED_POLICY_SOCKET = previous;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("createSession derives guest worktree scope and creates checkout when no explicit scope_dirs provided", async () => {
+  // This test calls the REAL createSession product function and verifies:
+  // 1. The guest-native worktree root is included in scope_dirs.
+  // 2. A real git worktree checkout is created at the guest path.
+  // If the product integration is missing, either assertion fails.
+  const dir = await mkdtemp(join(tmpdir(), "ocvm-guest-scope-"));
+  const projectDir = join(dir, "project");
+  await mkdir(projectDir, { recursive: true });
+  execFileSync("git", ["init", "-b", "main", projectDir], { stdio: "pipe" });
+  execFileSync("git", ["-C", projectDir, "-c", "user.name=t", "-c", "user.email=t@e.invalid", "commit", "--allow-empty", "-m", "base"], { stdio: "pipe" });
+  const socketPath = join(dir, "managed.sock");
+  const guestRoot = join(dir, "guest-wt-root");
+  const received: unknown[] = [];
+  const server = unixServer((socket) => {
+    let buffer = "";
+    socket.on("data", (chunk) => {
+      buffer += String(chunk);
+      const split = buffer.indexOf("\r\n\r\n");
+      if (split < 0) return;
+      received.push(JSON.parse(buffer.slice(split + 4)));
+      const body = JSON.stringify({ session_id: "ses_created", agent_managed: true, revision: 1 });
+      socket.end(`HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: ${body.length}\r\nconnection: close\r\n\r\n${body}`);
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+  const prevSocket = process.env.OCVM_MANAGED_POLICY_SOCKET;
+  const prevRoot = process.env.OCVM_WORKTREE_ROOT;
+  process.env.OCVM_MANAGED_POLICY_SOCKET = socketPath;
+  process.env.OCVM_WORKTREE_ROOT = guestRoot;
+  try {
+    const state = baseState();
+    const gateway = new ProductionGateway(runtime(undefined, projectDir), fakeClient(state, projectDir) as never);
+    let createError: Error | undefined;
+    try {
+      await gateway.createSession("guest-scope-test");
+    } catch (e) {
+      createError = e as Error;
+    }
+    await gateway.close();
+    if (createError) {
+      assert.fail(`createSession failed: ${createError.message}`);
+    }
+    // 1. Scope must include guest root.
+    assert.ok(received.length >= 1, `adoptManagedSession must be called (received=${received.length})`);
+    const first = received[0] as Record<string, unknown>;
+    assert.ok("scope_dirs" in first, "scope_dirs must be present (guest root integration)");
+    assert.ok(Array.isArray(first.scope_dirs), "scope_dirs must be an array");
+    const dirs = first.scope_dirs as string[];
+    assert.ok(dirs.some((d) => d.startsWith(guestRoot)), `scope_dirs must contain guest root ${guestRoot}, got: ${JSON.stringify(dirs)}`);
+    // 2. Real worktree checkout must exist at guest path.
+    const hash = runtime().projectHash;
+    const checkoutPath = join(guestRoot, hash, "ses_created");
+    const gitFile = join(checkoutPath, ".git");
+    const st = await lstat(gitFile).catch(() => undefined);
+    assert.ok(st, `worktree checkout must exist at ${checkoutPath} (found .git: ${st !== undefined})`);
+  } finally {
+    if (prevSocket === undefined) delete process.env.OCVM_MANAGED_POLICY_SOCKET;
+    else process.env.OCVM_MANAGED_POLICY_SOCKET = prevSocket;
+    if (prevRoot === undefined) delete process.env.OCVM_WORKTREE_ROOT;
+    else process.env.OCVM_WORKTREE_ROOT = prevRoot;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("createSession uses explicit scope_dirs and does not override with guest root", async () => {
+  // Explicit scope_dirs must win over the derived guest root.
+  const dir = await mkdtemp(join(tmpdir(), "ocvm-explicit-scope-"));
+  const projectDir = join(dir, "project");
+  await mkdir(projectDir, { recursive: true });
+  execFileSync("git", ["init", "-b", "main", projectDir], { stdio: "pipe" });
+  execFileSync("git", ["-C", projectDir, "-c", "user.name=t", "-c", "user.email=t@e.invalid", "commit", "--allow-empty", "-m", "base"], { stdio: "pipe" });
+  const socketPath = join(dir, "managed.sock");
+  const guestRoot = join(dir, "guest-wt-root");
+  const received: unknown[] = [];
+  const server = unixServer((socket) => {
+    let buffer = "";
+    socket.on("data", (chunk) => {
+      buffer += String(chunk);
+      const split = buffer.indexOf("\r\n\r\n");
+      if (split < 0) return;
+      received.push(JSON.parse(buffer.slice(split + 4)));
+      const body = JSON.stringify({ session_id: "ses_created", agent_managed: true, revision: 1 });
+      socket.end(`HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: ${body.length}\r\nconnection: close\r\n\r\n${body}`);
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+  const prevSocket = process.env.OCVM_MANAGED_POLICY_SOCKET;
+  const prevRoot = process.env.OCVM_WORKTREE_ROOT;
+  process.env.OCVM_MANAGED_POLICY_SOCKET = socketPath;
+  process.env.OCVM_WORKTREE_ROOT = guestRoot;
+  try {
+    const state = baseState();
+    const gateway = new ProductionGateway(runtime(undefined, projectDir), fakeClient(state, projectDir) as never);
+    // Explicit scope_dirs must NOT be overridden by guest root.
+    await gateway.createSession("explicit-scope-test", ["/srv/data"]);
+    await gateway.close();
+    const first = received[0] as Record<string, unknown>;
+    assert.ok("scope_dirs" in first, "scope_dirs must be present");
+    assert.deepEqual(first.scope_dirs, ["/srv/data"], "explicit scope_dirs must be preserved");
+  } finally {
+    if (prevSocket === undefined) delete process.env.OCVM_MANAGED_POLICY_SOCKET;
+    else process.env.OCVM_MANAGED_POLICY_SOCKET = prevSocket;
+    if (prevRoot === undefined) delete process.env.OCVM_WORKTREE_ROOT;
+    else process.env.OCVM_WORKTREE_ROOT = prevRoot;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("createSession reports CREATION_UNCERTAIN when guest worktree creation fails", async () => {
+  // When OCVM_WORKTREE_ROOT is configured and git worktree add fails,
+  // createSession must NOT silently swallow the error and report state=created.
+  // The session already exists, so the error is CREATION_UNCERTAIN (inspect
+  // before retrying).  This is the honest visible failure for activated
+  // guest placement.
+  const dir = await mkdtemp(join(tmpdir(), "ocvm-guest-fail-"));
+  const projectDir = join(dir, "project");
+  await mkdir(projectDir, { recursive: true });
+  // No git init — worktree add will fail because there is no repository.
+  const socketPath = join(dir, "managed.sock");
+  const guestRoot = join(dir, "guest-wt-root");
+  const received: unknown[] = [];
+  const server = unixServer((socket) => {
+    let buffer = "";
+    socket.on("data", (chunk) => {
+      buffer += String(chunk);
+      const split = buffer.indexOf("\r\n\r\n");
+      if (split < 0) return;
+      received.push(JSON.parse(buffer.slice(split + 4)));
+      const body = JSON.stringify({ session_id: "ses_created", agent_managed: true, revision: 1 });
+      socket.end(`HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: ${body.length}\r\nconnection: close\r\n\r\n${body}`);
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+  const prevSocket = process.env.OCVM_MANAGED_POLICY_SOCKET;
+  const prevRoot = process.env.OCVM_WORKTREE_ROOT;
+  process.env.OCVM_MANAGED_POLICY_SOCKET = socketPath;
+  process.env.OCVM_WORKTREE_ROOT = guestRoot;
+  try {
+    const state = baseState();
+    const gateway = new ProductionGateway(runtime(undefined, projectDir), fakeClient(state, projectDir) as never);
+    let createError: Error | undefined;
+    try {
+      await gateway.createSession("guest-fail-test");
+    } catch (e) {
+      createError = e as Error;
+    }
+    await gateway.close();
+    // Must throw CREATION_UNCERTAIN — not silently return state=created.
+    assert.ok(createError, "createSession must fail when guest worktree creation fails");
+    assert.match(createError.message, /could not be confirmed/i, `error must be CREATION_UNCERTAIN, got: ${createError.message}`);
+  } finally {
+    if (prevSocket === undefined) delete process.env.OCVM_MANAGED_POLICY_SOCKET;
+    else process.env.OCVM_MANAGED_POLICY_SOCKET = prevSocket;
+    if (prevRoot === undefined) delete process.env.OCVM_WORKTREE_ROOT;
+    else process.env.OCVM_WORKTREE_ROOT = prevRoot;
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await rm(dir, { recursive: true, force: true });
   }

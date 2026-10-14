@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { request as httpRequest } from "node:http";
-import { lstat, readFile } from "node:fs/promises";
+import { lstat, mkdir, readFile } from "node:fs/promises";
 import { createOpencodeClient } from "@opencode-ai/sdk/v2";
 import type { FilePartInput, TextPartInput } from "@opencode-ai/sdk/v2";
 import { ActivityJournal } from "./activity.js";
@@ -856,6 +857,58 @@ export class OpenCodeGateway implements SessionGateway {
     return { ...result, timeout: result.events.length === 0 };
   }
 
+  /**
+   * Derive the guest-native worktree scope for the current project.
+   * Returns the directory to install as an external_directory allow rule so
+   * that Read/Edit/Write tools can address guest-native task checkouts.
+   * Uses OCVM_WORKTREE_ROOT if set, otherwise $HOME/.opencode-vm/worktrees.
+   * Returns undefined when no guest root can be resolved (host fallback is
+   * never silent — the caller simply installs no automatic scope).
+   */
+  private deriveGuestWorktreeScope(): string | undefined {
+    // Narrow: only when the launcher explicitly sets OCVM_WORKTREE_ROOT.
+    // No silent auto-derivation from $HOME — that would add scope to every
+    // session, including read-only/foreign ones.
+    const base = process.env.OCVM_WORKTREE_ROOT;
+    if (!base || !base.startsWith("/") || base.includes("..") || base === "/") {
+      return undefined;
+    }
+    const hash = this.runtime.projectHash;
+    if (!hash || hash.includes("/") || hash.includes("\\") || hash.includes("..") || hash === ".") {
+      return undefined;
+    }
+    return `${base.replace(/\/+$/u, "")}/${hash}`;
+  }
+
+  /**
+   * Create a guest-native worktree checkout for the given session.
+   * Returns the checkout path, or undefined when guest worktrees are not
+   * configured (OCVM_WORKTREE_ROOT not set).  When configured, a failure
+   * to create the checkout is a real error — never silently swallowed —
+   * because the caller reports state=created and must not claim a working
+   * checkout that does not exist.  Uses `git worktree add` via execFileSync
+   * (argument list, no shell interpolation).  The project's common Git
+   * directory and per-worktree metadata remain on the host (Variante A).
+   */
+  private async createGuestWorktree(sessionId: string): Promise<string | undefined> {
+    const scopeRoot = this.deriveGuestWorktreeScope();
+    if (!scopeRoot) return undefined; // guest placement not activated
+    // Session ID becomes a path segment — validate strictly.
+    if (!sessionId || sessionId === "." || sessionId === ".." ||
+        sessionId.includes("/") || sessionId.includes("\\") ||
+        /[\x00-\x1f\x7f]/.test(sessionId)) {
+      throw new AdapterError("INVALID_ARGUMENT", "session id is not a safe path segment");
+    }
+    const checkoutPath = `${scopeRoot}/${sessionId}`;
+    const projectDir = this.runtime.project;
+    await mkdir(scopeRoot, { recursive: true });
+    execFileSync("git", [
+      "-C", projectDir,
+      "worktree", "add", "--detach", checkoutPath, "HEAD",
+    ], { stdio: "pipe", timeout: 30_000 });
+    return checkoutPath;
+  }
+
   async createSession(title?: string, scopeDirs?: string[]): Promise<CreateSessionResult> {
     const name = title === undefined ? "MCP Work Session" : title.trim();
     if (!name || name.length > 160 || /[\x00-\x1f\x7f]/u.test(name)) {
@@ -866,7 +919,22 @@ export class OpenCodeGateway implements SessionGateway {
     }
     // Validate the operator-authorized external scope BEFORE any session
     // write: an invalid declaration must not leave a created session behind.
-    const scope = scopeDirs === undefined ? undefined : validateScopeDirs(scopeDirs);
+    // When no explicit scope_dirs is provided, derive the guest-native
+    // worktree root so Read/Edit/Write tools can address the checkout.
+    // Explicit scope_dirs always wins (existing allow/deny rules preserved).
+    let scope: string[] | undefined;
+    if (scopeDirs !== undefined) {
+      scope = validateScopeDirs(scopeDirs);
+    } else {
+      const guestScope = this.deriveGuestWorktreeScope();
+      if (guestScope !== undefined) {
+        try {
+          scope = validateScopeDirs([guestScope]);
+        } catch {
+          scope = undefined;
+        }
+      }
+    }
     await this.compatibilityCheck();
     await this.managerSessionId();
     const settings = await this.newSessionSettings();
@@ -897,6 +965,11 @@ export class OpenCodeGateway implements SessionGateway {
       ) {
         throw new Error("Session settings were not persisted.");
       }
+      // Guest worktree creation is NOT best-effort when activated: a failure
+      // must be visible so the caller never sees state=created without a
+      // working checkout.  The error propagates to the outer catch which
+      // reports CREATION_UNCERTAIN (session exists, worktree does not).
+      await this.createGuestWorktree(id);
       await this.adoptManagedSession(id, scope);
       return {
         project: this.projectIdentity(),
@@ -2062,7 +2135,21 @@ export class OpenCodeGateway implements SessionGateway {
       await this.requireIdle(sessionId);
       // Scope validation before the admission attempt; the plugin remains the
       // authoritative validator (deny precedence, bounded union).
-      const scope = scopeDirs === undefined ? undefined : validateScopeDirs(scopeDirs);
+      // When no explicit scope_dirs is provided, derive the guest-native
+      // worktree root so Read/Edit/Write tools can address the checkout.
+      let scope: string[] | undefined;
+      if (scopeDirs !== undefined) {
+        scope = validateScopeDirs(scopeDirs);
+      } else {
+        const guestScope = this.deriveGuestWorktreeScope();
+        if (guestScope !== undefined) {
+          try {
+            scope = validateScopeDirs([guestScope]);
+          } catch {
+            scope = undefined;
+          }
+        }
+      }
       const attachments = this.attachments.resolve(sessionId, attachmentIds);
       await this.adoptManagedSession(sessionId, scope);
       const parts: Array<TextPartInput | FilePartInput> = [
