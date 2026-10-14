@@ -885,28 +885,42 @@ export class OpenCodeGateway implements SessionGateway {
     // Narrow: only when the launcher explicitly sets OCVM_WORKTREE_ROOT.
     // No silent auto-derivation from $HOME — that would add scope to every
     // session, including read-only/foreign ones.
-    const base = process.env.OCVM_WORKTREE_ROOT;
-    if (!base || !base.startsWith("/") || base.includes("..") || base === "/") {
-      return undefined;
+    const rawBase = process.env.OCVM_WORKTREE_ROOT;
+    if (rawBase === undefined) return undefined; // not activated
+    // SET but invalid: this is a real error, not "not activated".
+    if (!rawBase.startsWith("/") || rawBase.includes("..") || rawBase === "/") {
+      throw new AdapterError("INVALID_ARGUMENT",
+        `OCVM_WORKTREE_ROOT is set but not an absolute normalized path: ${rawBase.slice(0, 120)}`);
     }
     const hash = this.runtime.projectHash;
     if (!hash || hash.includes("/") || hash.includes("\\") || hash.includes("..") || hash === ".") {
-      return undefined;
+      throw new AdapterError("INVALID_ARGUMENT", "projectHash is not a safe path segment");
     }
-    const scopeRoot = `${base.replace(/\/+$/u, "")}/${hash}`;
-    // Native mount check: reject host virtiofs/fuseblk and missing roots.
-    // Probe the nearest existing ancestor so a not-yet-created root can still
-    // be validated against its filesystem.
+    const scopeRoot = `${rawBase.replace(/\/+$/u, "")}/${hash}`;
+    // Native mount check: walk up ONLY over MISSING entries to the first
+    // existing ancestor.  If an existing entry is on a fuse/host mount,
+    // reject immediately — do not escape to "/" via a native parent.
     let probe = scopeRoot;
-    while (probe !== "/" && !this.isGuestNativePath(probe)) {
+    while (probe !== "/" && !this.pathExists(probe)) {
       const parent = probe.replace(/\/[^/]+$/u, "");
       if (parent === probe) break;
       probe = parent;
     }
     if (!this.isGuestNativePath(probe)) {
-      return undefined; // host mount or missing — not a valid guest root
+      throw new AdapterError("INVALID_ARGUMENT",
+        `OCVM_WORKTREE_ROOT resolves to a host/unmounted filesystem (probe: ${probe.slice(0, 120)}). Refusing host fallback.`);
     }
     return scopeRoot;
+  }
+
+  /** Check whether a path exists (following symlinks). */
+  private pathExists(path: string): boolean {
+    try {
+      execFileSync("stat", ["-L", path], { stdio: "pipe", timeout: 5_000 });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -1014,7 +1028,10 @@ export class OpenCodeGateway implements SessionGateway {
         ...(worktreePath ? { worktree_path: worktreePath } : {}),
         state: "created",
       };
-    } catch {
+    } catch (error) {
+      // Config errors (INVALID_ARGUMENT) propagate unchanged: they are not
+      // uncertain creation — the session may not exist at all.
+      if (error instanceof AdapterError && error.code === "INVALID_ARGUMENT") throw error;
       throw new AdapterError(
         "CREATION_UNCERTAIN",
         verifiedId

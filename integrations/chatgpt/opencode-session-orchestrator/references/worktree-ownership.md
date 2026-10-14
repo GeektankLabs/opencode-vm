@@ -40,8 +40,12 @@ For opencode-vm, `.opencode-vm/` is already ignored. Prefer the **guest-native**
 location when available (offloads the virtiofs share):
 
 ```text
-<gast-root>/<proj-hash>/<full-task_id>
+<gast-root>/<proj-hash>/<sessionId>/
 ```
+
+Where `<gast-root>` is the base configured via `OCVM_WORKTREE_ROOT`, `<proj-hash>`
+is the project hash, and `<sessionId>` is the OpenCode session identifier. The
+checkout is created automatically by the adapter when `OCVM_WORKTREE_ROOT` is set.
 
 Resolve the root with `ocvm_worktree_root <project-dir>` (validates guest-native
 filesystem, refuses silent host fallback) or use the legacy project-mounted

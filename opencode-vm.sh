@@ -18944,11 +18944,25 @@ attach_session() {
     # Guest-native worktree root: base path for task checkouts.  The adapter
     # appends /<projectHash>/<sessionId> to create the checkout.  Only set
     # when the base is on a guest-native filesystem — never silently fall
-    # back to a host path.
+    # back to a host path.  Walk up ONLY over missing path components to
+    # the first EXISTING parent, then check its real filesystem there.
+    # Existing symlinked/fuse subpaths must not pass via a native parent.
     if [ -n "${OCVM_WORKTREE_ROOT:-}" ]; then
       : # explicit override already set
-    elif stat -f -c %T "${HOME}/.opencode-vm" 2>/dev/null | grep -qv '^fuse'; then
-      export OCVM_WORKTREE_ROOT="${HOME}/.opencode-vm/worktrees"
+    else
+      _ocvm_wt_probe="${HOME}/.opencode-vm/worktrees"
+      while [ ! -e "$_ocvm_wt_probe" ] && [ "$_ocvm_wt_probe" != "/" ]; do
+        _ocvm_wt_probe="$(dirname "$_ocvm_wt_probe")"
+      done
+      _ocvm_wt_fstype="$(stat -f -c %T "$_ocvm_wt_probe" 2>/dev/null || echo unknown)"
+      case "$_ocvm_wt_fstype" in
+        fuse*|unknown) : ;;  # host mount or unresolvable — do not export
+        *)
+          mkdir -p "${HOME}/.opencode-vm/worktrees" 2>/dev/null || true
+          export OCVM_WORKTREE_ROOT="${HOME}/.opencode-vm/worktrees"
+          ;;
+      esac
+      unset _ocvm_wt_probe _ocvm_wt_fstype
     fi
     prepare_openlive_adapter() {
       [ "$OC_MODE" = "web" ] || return 0
@@ -21176,11 +21190,25 @@ start_session() {
     export OCVM_MANAGED_POLICY_SOCKET="/tmp/ocvm-managed/$(printf %s "$PROJ_DIR" | sha256sum | cut -c1-40).sock"
     # Guest-native worktree root: base path for task checkouts.  Only set
     # when the base is on a guest-native filesystem — never silently fall
-    # back to a host path.
+    # back to a host path.  Walk up ONLY over missing path components to
+    # the first EXISTING parent, then check its real filesystem there.
+    # Existing symlinked/fuse subpaths must not pass via a native parent.
     if [ -n "${OCVM_WORKTREE_ROOT:-}" ]; then
       : # explicit override already set
-    elif stat -f -c %T "${HOME}/.opencode-vm" 2>/dev/null | grep -qv '^fuse'; then
-      export OCVM_WORKTREE_ROOT="${HOME}/.opencode-vm/worktrees"
+    else
+      _ocvm_wt_probe="${HOME}/.opencode-vm/worktrees"
+      while [ ! -e "$_ocvm_wt_probe" ] && [ "$_ocvm_wt_probe" != "/" ]; do
+        _ocvm_wt_probe="$(dirname "$_ocvm_wt_probe")"
+      done
+      _ocvm_wt_fstype="$(stat -f -c %T "$_ocvm_wt_probe" 2>/dev/null || echo unknown)"
+      case "$_ocvm_wt_fstype" in
+        fuse*|unknown) : ;;  # host mount or unresolvable — do not export
+        *)
+          mkdir -p "${HOME}/.opencode-vm/worktrees" 2>/dev/null || true
+          export OCVM_WORKTREE_ROOT="${HOME}/.opencode-vm/worktrees"
+          ;;
+      esac
+      unset _ocvm_wt_probe _ocvm_wt_fstype
     fi
     prepare_openlive_adapter() {
       [ "$OC_MODE" = "web" ] || return 0

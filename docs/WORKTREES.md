@@ -13,8 +13,14 @@ Task checkouts can live in two places:
 **Guest-native location** (recommended for new worktrees):
 
 ```text
-<guest-worktree-root>/<proj-hash>/<task-name>/
+<guest-worktree-root>/<proj-hash>/<sessionId>/
 ```
+
+Where `<guest-worktree-root>` is the base configured via `OCVM_WORKTREE_ROOT`
+(or derived from guest home), `<proj-hash>` is the project hash, and
+`<sessionId>` is the OpenCode session identifier. The checkout is created
+automatically by the adapter's `createGuestWorktree` when `OCVM_WORKTREE_ROOT`
+is set.
 
 The guest root defaults to `/home/lima.guest/.opencode-vm/worktrees` inside
 the VM and is configurable via `OCVM_WORKTREE_ROOT`. Use

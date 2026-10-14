@@ -3924,3 +3924,98 @@ test("createSession reports CREATION_UNCERTAIN when guest worktree creation fail
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("deriveGuestWorktreeScope rejects relative and traversal paths", async () => {
+  // SET-but-invalid OCVM_WORKTREE_ROOT must throw INVALID_ARGUMENT, not
+  // silently return undefined (which would mean "not activated").
+  const dir = await mkdtemp(join(tmpdir(), "ocvm-invalid-root-"));
+  const projectDir = join(dir, "project");
+  await mkdir(projectDir, { recursive: true });
+  execFileSync("git", ["init", "-b", "main", projectDir], { stdio: "pipe" });
+  execFileSync("git", ["-C", projectDir, "-c", "user.name=t", "-c", "user.email=t@e.invalid", "commit", "--allow-empty", "-m", "base"], { stdio: "pipe" });
+  const socketPath = join(dir, "managed.sock");
+  const received: unknown[] = [];
+  const server = unixServer((socket) => {
+    let buffer = "";
+    socket.on("data", (chunk) => {
+      buffer += String(chunk);
+      const split = buffer.indexOf("\r\n\r\n");
+      if (split < 0) return;
+      received.push(JSON.parse(buffer.slice(split + 4)));
+      const body = JSON.stringify({ session_id: "ses_created", agent_managed: true, revision: 1 });
+      socket.end(`HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: ${body.length}\r\nconnection: close\r\n\r\n${body}`);
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+  const prevSocket = process.env.OCVM_MANAGED_POLICY_SOCKET;
+  const prevRoot = process.env.OCVM_WORKTREE_ROOT;
+  process.env.OCVM_MANAGED_POLICY_SOCKET = socketPath;
+  for (const bad of ["relative/path", "/tmp/foo/../bar", "/"]) {
+    process.env.OCVM_WORKTREE_ROOT = bad;
+    try {
+      const state = baseState();
+      const gateway = new ProductionGateway(runtime(undefined, projectDir), fakeClient(state, projectDir) as never);
+      let createError: Error | undefined;
+      try {
+        await gateway.createSession("invalid-root-test");
+      } catch (e) {
+        createError = e as Error;
+      }
+      await gateway.close();
+      assert.ok(createError, `must throw for OCVM_WORKTREE_ROOT=${JSON.stringify(bad)}`);
+    } finally { /* per-iteration */ }
+  }
+  if (prevSocket === undefined) delete process.env.OCVM_MANAGED_POLICY_SOCKET;
+  else process.env.OCVM_MANAGED_POLICY_SOCKET = prevSocket;
+  if (prevRoot === undefined) delete process.env.OCVM_WORKTREE_ROOT;
+  else process.env.OCVM_WORKTREE_ROOT = prevRoot;
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  await rm(dir, { recursive: true, force: true });
+});
+
+test("createGuestWorktree rejects unsafe session ID segments", async () => {
+  // Session IDs that could escape the guest root must be rejected.
+  const dir = await mkdtemp(join(tmpdir(), "ocvm-session-seg-"));
+  const projectDir = join(dir, "project");
+  await mkdir(projectDir, { recursive: true });
+  execFileSync("git", ["init", "-b", "main", projectDir], { stdio: "pipe" });
+  execFileSync("git", ["-C", projectDir, "-c", "user.name=t", "-c", "user.email=t@e.invalid", "commit", "--allow-empty", "-m", "base"], { stdio: "pipe" });
+  const socketPath = join(dir, "managed.sock");
+  const received: unknown[] = [];
+  const server = unixServer((socket) => {
+    let buffer = "";
+    socket.on("data", (chunk) => {
+      buffer += String(chunk);
+      const split = buffer.indexOf("\r\n\r\n");
+      if (split < 0) return;
+      received.push(JSON.parse(buffer.slice(split + 4)));
+      const body = JSON.stringify({ session_id: "ses_created", agent_managed: true, revision: 1 });
+      socket.end(`HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: ${body.length}\r\nconnection: close\r\n\r\n${body}`);
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+  const prevSocket = process.env.OCVM_MANAGED_POLICY_SOCKET;
+  const prevRoot = process.env.OCVM_WORKTREE_ROOT;
+  process.env.OCVM_MANAGED_POLICY_SOCKET = socketPath;
+  process.env.OCVM_WORKTREE_ROOT = join(dir, "guest-root");
+  try {
+    const state = baseState();
+    state.create = async () => ({ data: { id: "../../etc/passwd" } });
+    const gateway = new ProductionGateway(runtime(undefined, projectDir), fakeClient(state, projectDir) as never);
+    let createError: Error | undefined;
+    try {
+      await gateway.createSession("unsafe-seg-test");
+    } catch (e) {
+      createError = e as Error;
+    }
+    await gateway.close();
+    assert.ok(createError, "createSession must reject unsafe session ID");
+  } finally {
+    if (prevSocket === undefined) delete process.env.OCVM_MANAGED_POLICY_SOCKET;
+    else process.env.OCVM_MANAGED_POLICY_SOCKET = prevSocket;
+    if (prevRoot === undefined) delete process.env.OCVM_WORKTREE_ROOT;
+    else process.env.OCVM_WORKTREE_ROOT = prevRoot;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
