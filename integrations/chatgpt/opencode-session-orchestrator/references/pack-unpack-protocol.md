@@ -33,6 +33,56 @@ Two covered situations (same protocol, different urgency):
   then a separately authorised re-enable. A worker rebind is **not** a monitor-root rebind;
   never edit monitor state directly.
 
+## Shutdown, doctor and state checks (current tooling)
+
+A secure worker boundary (above) is not yet a *verified stop*. Pack only from a state whose
+ownership-guarded teardown actually completed, or whose failure was read and recorded:
+
+- The incoming-MCP adapter stop refuses to run **without its ownership generation**. When
+  pidfiles are missing or stale (a legacy/pipe start or corrupted state), it recovers the
+  real process by the listening-socket owner, verified by generation marker **and** adapter
+  path **and** UID **and** start time, and fails closed on any foreign or ambiguous process.
+  It reports success only after confirming **no listener remains on the port**, and only then
+  releases the staged `mcp/ready.json` / `mcp/runtime.json` descriptors.
+- The resource sampler (`resmon`) is stopped **cooperatively** through its stop sentinel —
+  never a signal or kill. A still-live sampler keeps its ownership markers and is reported;
+  that is an honest incomplete stop, not a clean one.
+- Provider-auth and chat-history sync runs on the session **exit trap**; a forced kill of the
+  session shell skips it. A killed session is therefore not a secured stop, and auth state
+  must come from a **verified host-retained final snapshot**, never from a share seed copied
+  while the VM was still running.
+
+Doctor evidence is read-only; use the shipped commands, never an invented one:
+
+- Host: `opencode-vm doctor [show]` — host sync/auth/model/db, skills, MCPs, connector, plus a
+  **"Resources (ENFILE time protocol)"** section (host file-table/FD/watcher history).
+- Guest (inside the session VM): `doctor` (or `doctor show|tunnel|mcp|services|resources|help`)
+  — identity first, each service split into `config | process | readiness | last-success`, a
+  *completed* adapter tool trace as the only proven roundtrip, bounded redacted excerpts, and
+  `PASS/FAIL/UNVERIFIED` counts (exit codes `0`..`4`).
+
+Run the host doctor **before packing** (pre-discontinuity evidence) and again **after unpack**
+(compare the same sections). `doctor resources` / the Resources section shows the ENFILE time
+series: a low current value never clears a historical peak and is **not** a PASS, and a
+missing/unknown guest probe is reported as **not healthy**.
+
+Secure state by persistence class:
+
+- **Host-persistent** (survives a VM rebuild): the per-project state under
+  `~/.opencode-vm/project-state/<hash>/` (including the resmon host history
+  `resmon/host.jsonl`), the per-session working copy under `~/.opencode-vm/sessions/<hash>/`,
+  the project's `.opencode-vm/monitor/` and `.opencode-vm/taskboard/` state, the registered
+  C/P and task documents, the provider-auth baseline, and host worktrees (by reference).
+- **Guest-volatile** (do not blindly copy): `/proc`-derived data, adapter pidfiles, proxy
+  markers, in-VM caches and the guest resmon history are VM-local.
+
+Reassign and re-verify after unpack: the controlled reattach (below) *is* the session
+boundary. Re-run the host and guest doctors and compare with the pre-pack record, and
+reconcile the sampler's **guest-probe record** — it is host-project-persistent and
+deliberately blocks a new probe while a hung transport's record is live, so a live or unknown
+record is reported, never silently treated as a fresh sample. Existing worktree-restore and
+monitor-resume gates remain unchanged.
+
 ## Local unpublished update + controlled reattach
 
 - A **local, unpublished** update needs the matching **local assets** and a **controlled
