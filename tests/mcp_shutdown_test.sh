@@ -243,5 +243,70 @@ set +e; stop_mcp_adapter; rc=$?; set -e
 check "f1: second stop is idempotent success" "[ $rc -eq 0 ]"
 kill -KILL "$WRONG_PID" 2>/dev/null || true; wait "$WRONG_PID" 2>/dev/null || true; WRONG_PID=""
 
+# --- 12) D4: missing pidfiles + real respawn loop → permanent stop ----------
+PORT="$(free_port)"; export MCP_TEST_PORT="$PORT"; OC_MCP_PORT="$PORT"; export OC_MCP_PORT
+write_runtime "$PORT"
+rm -f /tmp/ocvm-mcp.sup.pid /tmp/ocvm-mcp.run.pid
+start_mcp_adapter
+wait_node || true
+for _ in $(seq 1 60); do listening "$PORT" && break; sleep 0.1; done
+check "d4-missing: listener is bound" "listening '$PORT'"
+SUP_PID="$(cat /tmp/ocvm-mcp.sup.pid 2>/dev/null || true)"
+NODE_PID="$(cat /tmp/ocvm-mcp.run.pid 2>/dev/null || true)"
+FOREIGN_PORT="$(free_port)"
+python3 -c 'import socket,sys,time
+s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+s.bind(("127.0.0.1",int(sys.argv[1]))); s.listen(1)
+time.sleep(120)' "$FOREIGN_PORT" &
+FOREIGN_PID=$!
+for _ in $(seq 1 50); do listening "$FOREIGN_PORT" && break; sleep 0.1; done
+rm -f /tmp/ocvm-mcp.sup.pid /tmp/ocvm-mcp.run.pid
+set +e; stop_mcp_adapter; rc=$?; set -e
+check "d4-missing: first stop succeeds" "[ $rc -eq 0 ]"
+check "d4-missing: port released immediately" "! listening '$PORT'"
+check "d4-missing: foreign listener survives" "kill -0 '$FOREIGN_PID' 2>/dev/null && listening '$FOREIGN_PORT'"
+sleep 3
+check "d4-missing: port still free after respawn window" "! listening '$PORT'"
+check "d4-missing: supervisor gone" "[ -n '$SUP_PID' ] && ! kill -0 '$SUP_PID' 2>/dev/null"
+check "d4-missing: node gone" "[ -n '$NODE_PID' ] && ! kill -0 '$NODE_PID' 2>/dev/null"
+set +e; stop_mcp_adapter; rc=$?; set -e
+check "d4-missing: second stop idempotent success" "[ $rc -eq 0 ]"
+kill -KILL "$FOREIGN_PID" 2>/dev/null || true; wait "$FOREIGN_PID" 2>/dev/null || true; FOREIGN_PID=""
+
+# --- 13) D4: live wrong PID + real respawn loop → permanent stop ------------
+PORT="$(free_port)"; export MCP_TEST_PORT="$PORT"; OC_MCP_PORT="$PORT"; export OC_MCP_PORT
+write_runtime "$PORT"
+rm -f /tmp/ocvm-mcp.sup.pid /tmp/ocvm-mcp.run.pid
+start_mcp_adapter
+wait_node || true
+for _ in $(seq 1 60); do listening "$PORT" && break; sleep 0.1; done
+check "d4-wrong: listener is bound" "listening '$PORT'"
+SUP_PID="$(cat /tmp/ocvm-mcp.sup.pid 2>/dev/null || true)"
+NODE_PID="$(cat /tmp/ocvm-mcp.run.pid 2>/dev/null || true)"
+sleep 300 & WRONG_PID=$!
+printf '%s\n' "$WRONG_PID" > /tmp/ocvm-mcp.run.pid
+rm -f /tmp/ocvm-mcp.sup.pid
+FOREIGN_PORT="$(free_port)"
+python3 -c 'import socket,sys,time
+s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+s.bind(("127.0.0.1",int(sys.argv[1]))); s.listen(1)
+time.sleep(120)' "$FOREIGN_PORT" &
+FOREIGN_PID=$!
+for _ in $(seq 1 50); do listening "$FOREIGN_PORT" && break; sleep 0.1; done
+set +e; stop_mcp_adapter; rc=$?; set -e
+check "d4-wrong: first stop succeeds" "[ $rc -eq 0 ]"
+check "d4-wrong: port released immediately" "! listening '$PORT'"
+check "d4-wrong: foreign PID survives" "kill -0 '$WRONG_PID' 2>/dev/null"
+check "d4-wrong: foreign listener survives" "kill -0 '$FOREIGN_PID' 2>/dev/null && listening '$FOREIGN_PORT'"
+sleep 3
+check "d4-wrong: port still free after respawn window" "! listening '$PORT'"
+check "d4-wrong: supervisor gone" "[ -n '$SUP_PID' ] && ! kill -0 '$SUP_PID' 2>/dev/null"
+check "d4-wrong: node gone" "[ -n '$NODE_PID' ] && ! kill -0 '$NODE_PID' 2>/dev/null"
+check "d4-wrong: stale run.pid removed" "[ ! -e /tmp/ocvm-mcp.run.pid ]"
+set +e; stop_mcp_adapter; rc=$?; set -e
+check "d4-wrong: second stop idempotent success" "[ $rc -eq 0 ]"
+kill -KILL "$WRONG_PID" 2>/dev/null || true; wait "$WRONG_PID" 2>/dev/null || true; WRONG_PID=""
+kill -KILL "$FOREIGN_PID" 2>/dev/null || true; wait "$FOREIGN_PID" 2>/dev/null || true; FOREIGN_PID=""
+
 echo
 if [ "$fails" -eq 0 ]; then echo "PASS mcp shutdown ownership"; else echo "FAIL ($fails)"; exit 1; fi

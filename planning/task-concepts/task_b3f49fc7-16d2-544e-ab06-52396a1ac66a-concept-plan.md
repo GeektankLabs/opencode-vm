@@ -115,29 +115,43 @@ erhalten und wird nur um die belegte Zahlkorrektur `20 Checks → 18 Checks`
 sowie einen Provenienz-Hinweis ergänzt. Er ist nicht der Task-ID-Benennung
 zugeordnet und wird nicht gelöscht oder überschrieben.
 
-## 8. Phase 3 — F1 Pidfile-Cleanup (dieser Turn, isolierter Kandidat)
+## 8. Phase 3 — F1 Pidfile-Cleanup (isoliert, QC_PASS)
 
-Unabhängige QC (ses_ec9358393ffeJvFrWodNF5TqnC; Original msg_13a584d9a001xCbxs9WN5avf2c,
-lokaler QC_PASS auf `88db8a1`) fand genau eine echte Restlücke F1 (LOW): bei
-Ownership-Mismatch blieb eine lebende falsche `run.pid` erhalten; der
-erfolgreiche `recovery_ok`-Pfad setzte nur `failed=0`. Der zweite Stop scheiterte
-dann spurios.
+Unabhängige QC (ses_ec9358393ffeJvFrWodNF5TqnC; Original msg_13a762f70001By3C9nDuS3gj4B,
+lokaler F1-spezifisch QC_PASS): **41/41** (34+7), Negativkontrolle `88db8a1`
+exakt 2 Fehler. F1-Korrektur: Mismatch-Zweig merkt sich stale PIDdatei+PID;
+nach `recovery_ok` werden nur taskeigene PIDdateien entfernt, nur bei
+unverändertem Inhalt (Compare-before-delete D1b, kein Cleanup ohne bewiesene
+Recovery D3).
 
-**Kleinste Korrektur** (`stop_mcp_adapter`, `opencode-vm.sh`):
-- Der Mismatch-Zweig merkt sich PIDdatei + PID (`stale_sup_pid`/`stale_run_pid`).
-- Nach nachgewiesenem `recovery_ok` werden nur die taskeigenen
-  `/tmp/ocvm-mcp.{sup,run}.pid` entfernt — und nur, solange ihr Inhalt unverändert
-  dem gemerkten (fremden) PID entspricht, damit ein neuer Adapterstart (eigener
-  Marker-PID) nie eine frisch geschriebene Datei verliert.
-- Keine Änderung an Prozessidentitäts-/UID-/Startzeit-/Port-/Residualprüfungen,
-  kein PGID-/Portblindkill, `/proc`-Scanverfahren unverändert.
+## 9. Phase 4 — D4 Respawn-Supervisor dauerhaft stoppen (dieser Turn)
 
-**Regression** (`tests/mcp_shutdown_test.sh`, Sektion 11): lebende falsche
-`run.pid` → erster Stop rc=0, eigener Adapter tot/Port frei, fremde PID lebend,
-stale `run.pid` entfernt, zweiter Stop idempotent rc=0. Gesamtsuite **40 Checks
-PASS**; Negativkontrolle Basis `88db8a1` **FAIL (2)** (genau die zwei F1-Checks).
+Restlücke D4 (QC): Bei fehlender/alter `sup.pid` bleibt der Respawn-Supervisor
+lebend. Socket-Owner-Recovery stoppte nur den Node; ~2s später respawned der
+Supervisor einen neuen Node → Port wieder belegt. Bestand schon auf `88db8a1`.
 
-**Basis/Pin:** `88db8a101f38580379198873fe4dd0226d7e98dc` (OCVM 0.7.53) →
-Kandidat OCVM 0.7.54 (Tags v0.7.54); MCP-Adapter 0.1.54 unverändert.
+**Minimale Korrektur** (`opencode-vm.sh`):
+- `_mcp_find_respawn_supervisor`: PPID-Kette vom Node aufwärts (max. 5 Stufen),
+  findet den **höchsten** Vorfahren mit `ocvm-mcp-supervisor-$generation`
+  (Pipe-Subshell erbt Cmdline → Marker; Supervisor ist der höchste).
+  Kein FD-Scan, nur `/proc/$pid/status` + `/proc/$pid/cmdline`.
+- Socket-Owner-Recovery: Supervisor **zuerst** killen (vor Node), mit
+  Identity-Checks (Marker + Adapterpfad + UID) und Startzeit-Re-Verification
+  vor jedem Signal. Dann Node killen. `recovery_ok` nur wenn Node weg.
+- F1-Schutz erhalten (stale PIDdateien werden nach Recovery entfernt).
+- Keine pauschalen Kills, keine Listenerumgehung, kein neues Framework,
+  kein zusätzlicher FD-Massenscan. Alle Prozesse individuell identifiziert.
+
+**Regression** (`tests/mcp_shutdown_test.sh`, Sektionen 12+13): fehlende und
+lebend-falsche PIDdateien + echte Respawn-Schleife; nach 3s (über Respawnfenster)
+Port dauerhaft frei, Supervisor+Node tot, fremde PID/Generation/Listener lebend,
+wiederholter Stop idempotent. Gesamtsuite **59 Checks PASS**;
+Negativkontrolle Basis `7c31702` (F1 ohne D4) **FAIL (5)** — genau die
+D4-Dauerhaftigkeitsfehler (Port nicht dauerhaft frei ×2, Supervisor lebend ×2,
+stale run.pid nicht entfernt); 54 weitere grün.
+
+**Basis/Pin:** `7c41b5525490f94f214d0fc4d898b0cb464b8e0e` (Pack-r57, OCVM 0.7.53)
+→ Kandidat OCVM 0.7.54 (Tags v0.7.54); MCP-Adapter 0.1.54 unverändert.
+F1-Pin `7c317026a589d9a1d32b6ea58d932ba889459225` als Vergleich.
 Branch/Worktree `task/b3f49fc7-f1-pidfile-cleanup`. Keine Main-Integration in
 diesem Turn; erneute unabhängige QC und Main-Integration koordiniert der Operator.

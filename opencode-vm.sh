@@ -14327,6 +14327,26 @@ _mcp_socket_owner() {
   printf '%s' "$pid"
 }
 
+# Walk up the PPID chain from a known child PID to find the respawn supervisor
+# that owns the adapter generation. The pipe subshell inherits the supervisor's
+# cmdline (so it also carries the marker); the supervisor is the highest
+# ancestor with the marker. The caller must verify UID/adapter-path/starttime
+# before signaling. No FD scan — only /proc/$pid/status and /proc/$pid/cmdline.
+_mcp_find_respawn_supervisor() {
+  local node_pid="$1" marker="$2" pid="$1" ppid depth=0 found=""
+  while [ "$depth" -lt 5 ] && [ -n "$pid" ]; do
+    ppid="$(awk '/^PPid:/{print $2}' "/proc/$pid/status" 2>/dev/null)"
+    [ -n "$ppid" ] && [ "$ppid" != "0" ] || break
+    if _pid_has_marker "$ppid" "$marker"; then
+      found="$ppid"
+    fi
+    pid="$ppid"
+    depth=$((depth + 1))
+  done
+  [ -n "$found" ] || return 1
+  printf '%s' "$found"
+}
+
 # TLS terminates in the proxy so the browser origin is a secure context: the
 # opencode web UI hashes attachments through crypto.subtle, which browsers
 # withhold from insecure origins, so over a LAN IP attaching files fails
@@ -15700,7 +15720,7 @@ stop_mcp_adapter() (
   exec 7>/tmp/ocvm-mcp-tunnel.lock
   flock -w 180 7 || return 1
   stop_mcp_tunnel || return 1
-  local pid pidf marker item waited failed=0 recovery_ok=0 stale_sup_pid="" stale_run_pid="" generation runtime="$SESS_SHARE/mcp/runtime.json" port="${OC_MCP_PORT:-}"
+  local pid pidf marker item waited failed=0 recovery_ok=0 stale_sup_pid="" stale_run_pid="" sup_pid="" sup_start="" generation runtime="$SESS_SHARE/mcp/runtime.json" port="${OC_MCP_PORT:-}"
   generation="${OC_MCP_GENERATION:-}"
   if [ -f "$runtime" ]; then
     [ -n "$generation" ] || generation="$(jq -r '.generation // empty' "$runtime" 2>/dev/null || true)"
@@ -15748,6 +15768,26 @@ stop_mcp_adapter() (
     sock_pid="$(_mcp_socket_owner "$port" 2>/dev/null || true)"
     if [ -n "$sock_pid" ] && { _pid_has_marker "$sock_pid" "ocvm-mcp-child-$generation" || _pid_has_marker "$sock_pid" "ocvm-mcp-supervisor-$generation"; } && \
        grep -qsF "$SESS_SHARE/mcp/adapter" "/proc/$sock_pid/cmdline"; then
+      # D4: find and stop the respawn supervisor first so it cannot respawn a
+      # new node after the socket-holding process is killed (~2s window).
+      sup_pid="$(_mcp_find_respawn_supervisor "$sock_pid" "ocvm-mcp-supervisor-$generation" 2>/dev/null || true)"
+      if [ -n "$sup_pid" ] && _pid_has_marker "$sup_pid" "ocvm-mcp-supervisor-$generation" && \
+         grep -qsF "$SESS_SHARE/mcp/adapter" "/proc/$sup_pid/cmdline" && \
+         [ "$(ps -o uid= -p "$sup_pid" 2>/dev/null | tr -d ' ')" = "$(id -u)" ]; then
+        sup_start="$(ps -o lstart= -p "$sup_pid" 2>/dev/null | tr -d ' ')"
+        if [ -n "$sup_start" ]; then
+          kill "$sup_pid" 2>/dev/null || true
+          waited=0
+          while kill -0 "$sup_pid" 2>/dev/null && [ "$(ps -o lstart= -p "$sup_pid" 2>/dev/null | tr -d ' ')" = "$sup_start" ] && [ "$waited" -lt 50 ]; do
+            sleep 0.1
+            waited=$(( waited + 1 ))
+          done
+          if kill -0 "$sup_pid" 2>/dev/null && [ "$(ps -o lstart= -p "$sup_pid" 2>/dev/null | tr -d ' ')" = "$sup_start" ]; then
+            kill -KILL "$sup_pid" 2>/dev/null || true
+            sleep 0.2
+          fi
+        fi
+      fi
       sock_start="$(ps -o lstart= -p "$sock_pid" 2>/dev/null | tr -d ' ')"
       if [ -n "$sock_start" ]; then
         kill "$sock_pid" 2>/dev/null || true
