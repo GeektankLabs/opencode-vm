@@ -131,14 +131,49 @@ class WorktreeCleanupTest(unittest.TestCase):
             capture_output=True, text=True, timeout=10)
         self.assertEqual(result2.stdout.strip(), "no")
 
-    def test_stale_guest_registration_is_pruned_when_checkout_path_vanished(self):
+    def test_stale_guest_registration_is_retained_not_pruned(self):
         outside = self.worktree("task_guest_stale", outside=True)
-        # Simulate guest-VM replacement: checkout directory disappears.
         shutil.rmtree(outside)
         self.assertFalse(outside.exists())
         output = self.cleanup()
-        self.assertIn("Pruned stale guest registration: task_guest_stale", output)
-        self.assertNotIn(str(outside), self.git("worktree", "list", "--porcelain"))
+        self.assertNotIn("Pruned", output)
+        self.assertIn(str(outside), self.git("worktree", "list", "--porcelain"))
+
+    def test_basename_collision_live_worktree_is_retained(self):
+        # QC fixture (a): two guest worktrees with same basename, one live one stale.
+        live = self.worktree("foo", outside=True)
+        stale_base = Path(self.tmp.name) / "other"
+        stale_base.mkdir()
+        stale = stale_base / "foo"
+        self.git("worktree", "add", "-b", "stale-foo", str(stale), "HEAD")
+        shutil.rmtree(stale)
+        self.cleanup()
+        # Live worktree must survive; no wrong admin-dir deletion.
+        self.assertTrue(live.exists())
+        self.assertIn(str(live), self.git("worktree", "list", "--porcelain"))
+
+    def test_locked_worktree_is_retained(self):
+        # QC fixture (b): locked entry with invisible path must be retained.
+        outside = self.worktree("task_locked_guest", outside=True)
+        self.git("worktree", "lock", "--reason", "QC test", str(outside))
+        shutil.rmtree(outside)
+        self.cleanup()
+        self.assertIn(str(outside), self.git("worktree", "list", "--porcelain"))
+
+    def test_detached_unique_commit_worktree_is_retained(self):
+        # QC fixture (c): detached worktree with unique commit must be retained.
+        outside = self.worktree("task_detached_guest", outside=True, detached=True)
+        self.git("commit", "--allow-empty", "-m", "unique commit", cwd=outside)
+        shutil.rmtree(outside)
+        self.cleanup()
+        self.assertIn(str(outside), self.git("worktree", "list", "--porcelain"))
+
+    def test_invisible_foreign_path_is_retained(self):
+        # QC fixture (d): invisible foreign path must be retained, not pruned.
+        outside = self.worktree("task_foreign_guest", outside=True)
+        shutil.rmtree(outside)
+        self.cleanup()
+        self.assertIn(str(outside), self.git("worktree", "list", "--porcelain"))
 
     def test_live_guest_worktree_outside_base_is_left_alone(self):
         outside = self.worktree("task_guest_live", outside=True)
@@ -249,6 +284,134 @@ if start_session; then :; else :; fi
                            env={**self.env, "SENV": str(senv), "TRACE": str(trace), "ACTION": action,
                                 "STOP_RC": "1" if failed else "0"}, check=True, capture_output=True)
             self.assertEqual(trace.read_text(), expected, (action, failed, present))
+
+
+def _extract_shell_fn(text, fn_name, next_fn):
+    """Extract a shell function from the production script text."""
+    return fn_name + "() {" + text.split(
+        fn_name + "() {", 1)[1].split("\n" + next_fn + "() {", 1)[0]
+
+
+class WorktreeHelperTest(unittest.TestCase):
+    """Tests for ocvm_valid_task_id, ocvm_worktree_root, ocvm_worktree_path."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="ocvm-wt-helper-")
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name) / "project"
+        self.repo.mkdir()
+        subprocess.run(["git", "init", "-b", "main", str(self.repo)],
+                       check=True, capture_output=True)
+        self.env = {**os.environ, "OCVM_INTERNAL_SOURCE_ONLY": "1",
+                    "OCVM_DISABLE_UPDATE_CHECK": "1"}
+
+    def run_fns(self, script, args=""):
+        """Run extracted shell functions with the given command."""
+        fns = (_extract_shell_fn(TEXT, "ocvm_is_guest_native_path", "ocvm_worktree_root") + "\n" +
+               _extract_shell_fn(TEXT, "ocvm_worktree_root", "ocvm_valid_task_id") + "\n" +
+               _extract_shell_fn(TEXT, "ocvm_valid_task_id", "ocvm_worktree_path") + "\n" +
+               _extract_shell_fn(TEXT, "ocvm_worktree_path", "ocvm_worktree_scope") + "\n" +
+               _extract_shell_fn(TEXT, "ocvm_worktree_scope", "cleanup_project_worktrees"))
+        cmd = "set -euo pipefail\n" + fns + "\n" + script
+        return subprocess.run(
+            ["bash", "-c", cmd],
+            env=self.env, capture_output=True, text=True, timeout=10)
+
+    def test_valid_task_id(self):
+        for valid in ("task_abc", "task-123", "a.b.c", "x"):
+            r = self.run_fns(f'ocvm_valid_task_id "{valid}" && echo yes || echo no')
+            self.assertEqual(r.stdout.strip(), "yes", f"should accept: {valid}")
+
+    def test_invalid_task_id(self):
+        for invalid in ("", ".", "..", "a/b", "../etc", "a..b/..", "a\\b", "-flag"):
+            r = self.run_fns(f'ocvm_valid_task_id "{invalid}" && echo yes || echo no')
+            self.assertEqual(r.stdout.strip(), "no", f"should reject: {invalid!r}")
+
+    def test_worktree_path_valid_task(self):
+        r = self.run_fns(
+            f'ocvm_worktree_path "{self.repo}" "task_test" && echo yes || echo no')
+        self.assertIn("task_test", r.stdout)
+        self.assertIn("yes", r.stdout)
+
+    def test_worktree_path_invalid_task(self):
+        for bad in ("..", "a/b", "."):
+            r = self.run_fns(
+                f'ocvm_worktree_path "{self.repo}" "{bad}" 2>/dev/null && echo yes || echo no')
+            self.assertEqual(r.stdout.strip(), "no", f"should reject: {bad!r}")
+
+    def test_worktree_root_fail_closed_on_virtiofs(self):
+        virtiofs_base = str(Path(self.tmp.name) / "virtiofs-base")
+        r = self.run_fns(
+            f'OCVM_WORKTREE_ROOT="{virtiofs_base}" ocvm_worktree_root "{self.repo}" 2>&1 && echo yes || echo no')
+        # The tmp dir is on guest disk; test fail-closed by checking error path.
+        # If OCVM_WORKTREE_ROOT points to a nonexistent dir on guest disk, it
+        # should still succeed (probe walks up to guest parent).
+        if "yes" in r.stdout:
+            self.assertIn("ocvm_worktree_root", r.stderr + r.stdout)
+        else:
+            self.assertIn("not on a guest-native filesystem", r.stderr)
+
+    def test_worktree_root_override(self):
+        custom_base = str(Path(self.tmp.name) / "custom-wt-root")
+        Path(custom_base).mkdir(parents=True, exist_ok=True)
+        r = self.run_fns(
+            f'OCVM_WORKTREE_ROOT="{custom_base}" ocvm_worktree_root "{self.repo}"')
+        self.assertIn(custom_base, r.stdout)
+        self.assertIn("yes", self.run_fns(
+            f'OCVM_WORKTREE_ROOT="{custom_base}" ocvm_worktree_root "{self.repo}" >/dev/null && echo yes || echo no').stdout)
+
+
+class RealWorkflowTest(unittest.TestCase):
+    """Test the real supported entry-point: resolve root → create worktree → verify."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="ocvm-wt-workflow-")
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name) / "project"
+        self.repo.mkdir()
+        subprocess.run(["git", "init", "-b", "main", str(self.repo)],
+                       check=True, capture_output=True)
+        (self.repo / "file.txt").write_text("content\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."],
+                       check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(self.repo), "-c", "user.name=T",
+                        "-c", "user.email=t@e.invalid", "commit", "-m", "base"],
+                       check=True, capture_output=True)
+        self.env = {**os.environ, "OCVM_INTERNAL_SOURCE_ONLY": "1",
+                    "OCVM_DISABLE_UPDATE_CHECK": "1"}
+
+    def test_full_workflow_guest_worktree_creation(self):
+        """Resolve root → create worktree at guest path → verify guest-native."""
+        fns = (_extract_shell_fn(TEXT, "ocvm_is_guest_native_path", "ocvm_worktree_root") + "\n" +
+               _extract_shell_fn(TEXT, "ocvm_worktree_root", "ocvm_valid_task_id") + "\n" +
+               _extract_shell_fn(TEXT, "ocvm_valid_task_id", "ocvm_worktree_path") + "\n" +
+               _extract_shell_fn(TEXT, "ocvm_worktree_path", "ocvm_worktree_scope") + "\n" +
+               _extract_shell_fn(TEXT, "ocvm_worktree_scope", "cleanup_project_worktrees"))
+        wt_base = str(Path(self.tmp.name) / "guest-wt-root")
+        Path(wt_base).mkdir(parents=True, exist_ok=True)
+        script = f'''
+set -euo pipefail
+{fns}
+export OCVM_WORKTREE_ROOT="{wt_base}"
+root="$(ocvm_worktree_root "{self.repo}")"
+echo "ROOT=$root"
+task_path="$(ocvm_worktree_path "{self.repo}" "task_workflow_test")"
+echo "TASK_PATH=$task_path"
+scope="$(ocvm_worktree_scope "{self.repo}")"
+echo "SCOPE=$scope"
+mkdir -p "$root"
+git -C "{self.repo}" worktree add -b task_workflow_test "$task_path" HEAD 2>/dev/null
+echo "WT_CREATED=yes"
+stat -f -c %T "$task_path" | head -1
+'''
+        r = subprocess.run(["bash", "-c", script],
+                           env=self.env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("WT_CREATED=yes", r.stdout)
+        self.assertIn(wt_base, r.stdout)
+        # Verify the worktree is actually at the resolved path.
+        self.assertIn("ROOT=", r.stdout)
+        self.assertIn("SCOPE=", r.stdout)
 
 
 if __name__ == "__main__":

@@ -20014,47 +20014,95 @@ ocvm_is_guest_native_path() {
   [[ -n "$path" ]] || return 1
   fstype="$(stat -f -c %T "$path" 2>/dev/null)" || return 1
   case "$fstype" in
-    fuseblk|fuse.*) return 1 ;;   # virtiofs / host share
+    fuse*) return 1 ;;            # fuseblk, fuse.sshfs, fuse.* — virtiofs / host share
     *) return 0 ;;                # ext4, tmpfs, overlay …
   esac
 }
 
 # Resolve the guest-native worktree root for a project directory.
 # Layout:  <base>/<proj-hash>/<task-id>
-#   base       – OCVM_WORKTREE_ROOT or OCVM_GUEST_WORKTREE_BASE
+#   base       – OCVM_WORKTREE_ROOT, or derived from guest home
 #   proj-hash  – same hash that names project-state and session-share dirs
 # The base must be guest-native; otherwise the function fails clearly instead
 # of silently returning a host path.  Prints the resolved root on stdout.
 ocvm_worktree_root() {
-  local project="$1" base phash
+  local project="$1" base phash norm
   [[ -n "$project" ]] || { echo "ocvm_worktree_root: project required" >&2; return 1; }
-  base="${OCVM_WORKTREE_ROOT:-$OCVM_GUEST_WORKTREE_BASE}"
+  # Normalise the project path so that the hash matches proj_hash(1) used for
+  # project-state / session-share naming (same string → same hash).
+  norm="$(cd "$project" 2>/dev/null && pwd -P)" || norm="$project"
+  # Derive base: explicit override > guest-home default.
+  if [[ -n "${OCVM_WORKTREE_ROOT:-}" ]]; then
+    base="$OCVM_WORKTREE_ROOT"
+  else
+    local guest_home=""
+    guest_home="${HOME:-}"
+    [[ "$guest_home" == /home/* ]] || guest_home=""
+    if [[ -z "$guest_home" ]] && command -v vm_resolve_home >/dev/null 2>&1; then
+      guest_home="$(vm_resolve_home 2>/dev/null)" || guest_home=""
+      [[ "$guest_home" == /home/* ]] || guest_home=""
+    fi
+    if [[ -n "$guest_home" ]]; then
+      base="$guest_home/.opencode-vm/worktrees"
+    else
+      base="$OCVM_GUEST_WORKTREE_BASE"
+    fi
+  fi
   # Validate the base is on a guest-native filesystem.  If the base does not
-  # exist yet, validate its nearest existing parent.
-  local probe="$base"
-  while [[ ! -e "$probe" && "$probe" != "/" ]]; do probe="$(dirname "$probe")"; done
+  # exist yet, validate its nearest existing parent and diagnose clearly.
+  local probe="$base" walked=""
+  while [[ ! -e "$probe" && "$probe" != "/" ]]; do walked="$probe"; probe="$(dirname "$probe")"; done
+  if [[ -n "$walked" ]]; then
+    echo "ocvm_worktree_root: note — base '$base' does not exist yet (probe: '$probe')" >&2
+  fi
   if ! ocvm_is_guest_native_path "$probe"; then
     echo "ocvm_worktree_root: base '$base' is not on a guest-native filesystem (probe '$probe'); refusing host fallback" >&2
     return 1
   fi
   # Portable project hash (md5) — works on macOS (md5 -q) and Linux (md5sum).
   if command -v md5 >/dev/null 2>&1; then
-    phash="$(echo -n "$project" | md5 -q)"
+    phash="$(echo -n "$norm" | md5 -q)"
   elif command -v md5sum >/dev/null 2>&1; then
-    phash="$(echo -n "$project" | md5sum | cut -d' ' -f1)"
+    phash="$(echo -n "$norm" | md5sum | cut -d' ' -f1)"
   else
     echo "ocvm_worktree_root: no md5/md5sum available" >&2; return 1
   fi
   echo "$base/$phash"
 }
 
+# Validate that a task-id is safe as a single path segment.
+# Rejects empty, '.', '..', path separators and traversal attempts.
+ocvm_valid_task_id() {
+  local task="$1"
+  [[ -n "$task" ]] || return 1
+  [[ "$task" != "." && "$task" != ".." ]] || return 1
+  [[ "$task" != */* && "$task" != *\\* ]] || return 1
+  [[ "$task" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 1
+  return 0
+}
+
 # Convenience: full worktree path for a task under a project.
 # Usage:  ocvm_worktree_path <project-dir> <task-id>
 ocvm_worktree_path() {
   local project="$1" task="$2" root
-  [[ -n "$task" ]] || { echo "ocvm_worktree_path: task-id required" >&2; return 1; }
+  [[ -n "$project" ]] || { echo "ocvm_worktree_path: project required" >&2; return 1; }
+  ocvm_valid_task_id "$task" || {
+    echo "ocvm_worktree_path: invalid task-id '$task' (must be a single safe path segment)" >&2
+    return 1
+  }
   root="$(ocvm_worktree_root "$project")" || return 1
   echo "$root/$task"
+}
+
+# Derive the scope_dirs entry for a project's guest worktree root.
+# Usage:  ocvm_worktree_scope <project-dir>
+# Prints the directory to pass as scope_dirs so that Read/Edit/Write tools
+# can address the guest-native worktree checkout.  Returns non-zero when
+# the root cannot be resolved (never silently falls back to a host path).
+ocvm_worktree_scope() {
+  local project="$1" root
+  root="$(ocvm_worktree_root "$project")" || return 1
+  echo "$root"
 }
 
 cleanup_project_worktrees() {
@@ -20064,7 +20112,7 @@ cleanup_project_worktrees() {
     return 0
   fi
   python3 - "$project" <<'WORKTREE_CLEANUP' || {
-import os, pathlib, shutil, subprocess, sys
+import os, pathlib, subprocess, sys
 
 class ProbeError(Exception):
     pass
@@ -20153,39 +20201,6 @@ def run():
         retained += 1
         print(f"[worktrees] Retained {path.name}: {reason}.")
     print(f"[worktrees] Cleanup: {removed} removed, {retained} retained, {failed} failed.")
-    # Second pass: stale guest-worktree registrations.  Guest worktrees live
-    # outside the project root (on the guest filesystem).  When the guest VM
-    # is replaced their checkout paths vanish while the host-side registration
-    # under $GIT_COMMON_DIR/worktrees/<name>/ remains.  Prune those orphaned
-    # registrations.  Worktrees whose paths still exist are left alone.
-    pruned_guest = 0
-    for record in records:
-        path = pathlib.Path(record.get("worktree", ""))
-        if path.parent == base:
-            continue  # already handled above
-        if path.is_symlink():
-            continue  # never touch symlinks
-        if path.exists():
-            continue  # still present (foreign worktree or live guest tree)
-        # Path is gone → orphaned guest registration; remove its admin dir.
-        name = path.name
-        admin = shared / "worktrees" / name
-        if not admin.is_dir() or admin.is_symlink():
-            continue
-        # Safety: admin must be an immediate child of shared/worktrees.
-        try:
-            if admin.resolve(strict=True).parent != (shared / "worktrees").resolve(strict=True):
-                continue
-        except (OSError, ValueError):
-            continue
-        try:
-            shutil.rmtree(admin)
-            pruned_guest += 1
-            print(f"[worktrees] Pruned stale guest registration: {name}")
-        except OSError as error:
-            print(f"[worktrees] Guest prune failed for {name}: {error}")
-    if pruned_guest:
-        print(f"[worktrees] Guest registrations pruned: {pruned_guest}")
 
 try:
     run()
