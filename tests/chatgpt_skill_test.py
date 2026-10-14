@@ -3624,7 +3624,7 @@ class TaskDoneArchiveTraceTest(unittest.TestCase):
         for marker in ("ownership generation", "listening-socket owner",
                        "no listener remains on the port", "cooperatively",
                        "verified host-retained final snapshot",
-                       "opencode-vm doctor [show]", "Resources (ENFILE time protocol)",
+                       "opencode-vm doctor [show]", "Resources (ENFILE time protocol, host history)",
                        "doctor show|tunnel|mcp|services|resources|help",
                        "host-persistent", "Guest-volatile", "guest-probe record"):
             self.assertIn(marker, flat)

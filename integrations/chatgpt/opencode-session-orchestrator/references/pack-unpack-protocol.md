@@ -47,15 +47,17 @@ ownership-guarded teardown actually completed, or whose failure was read and rec
 - The resource sampler (`resmon`) is stopped **cooperatively** through its stop sentinel —
   never a signal or kill. A still-live sampler keeps its ownership markers and is reported;
   that is an honest incomplete stop, not a clean one.
-- Provider-auth and chat-history sync runs on the session **exit trap**; a forced kill of the
-  session shell skips it. A killed session is therefore not a secured stop, and auth state
-  must come from a **verified host-retained final snapshot**, never from a share seed copied
+- Chat-history sync runs in the session **exit trap** (`sync_vm_to_share`), whose rsync
+  **excludes `auth.json`**. Provider-auth finalization is separate and host-side in
+  `lifecycle_finalize_runtime` (stops the owned guest runtime and requires a **verified
+  host-retained final snapshot**). A forced kill of the session shell skips the trap, so a
+  killed session is not a secured stop and auth must never come from a **share seed** copied
   while the VM was still running.
 
 Doctor evidence is read-only; use the shipped commands, never an invented one:
 
 - Host: `opencode-vm doctor [show]` — host sync/auth/model/db, skills, MCPs, connector, plus a
-  **"Resources (ENFILE time protocol)"** section (host file-table/FD/watcher history).
+  **"Resources (ENFILE time protocol, host history)"** section (host file-table/FD/watcher history).
 - Guest (inside the session VM): `doctor` (or `doctor show|tunnel|mcp|services|resources|help`)
   — identity first, each service split into `config | process | readiness | last-success`, a
   *completed* adapter tool trace as the only proven roundtrip, bounded redacted excerpts, and
