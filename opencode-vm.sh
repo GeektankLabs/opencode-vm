@@ -34,7 +34,7 @@ OPENLIVE_PREVIOUS_COMMAND="$OPENLIVE_DIR/previous-command"
 OPENLIVE_AUTH_MARKER="__opencode_vm_openlive__"
 OPENLIVE_LOCK_PATH=""
 OPENLIVE_ADAPTER_VERSION="0.1.8"
-OPENLIVE_ADAPTER_TAG="v0.7.52"
+OPENLIVE_ADAPTER_TAG="v0.7.53"
 OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.8.tar"
 OPENLIVE_ADAPTER_SHA256="74b046b468f853660782d4c78c6e4859fddbfa4a54b167c5d185035dc9102f40"
 OPENLIVE_ACP_SDK_VERSION="1.2.1"
@@ -45,14 +45,14 @@ OPENLIVE_MANAGER_PROMPT="You manage an OpenLive voice call. The voice_sessions t
 MCP_CONNECTOR_DIR="$SHARE_ROOT/mcp-connector"
 MCP_ADAPTER_CACHE_ROOT="$MCP_CONNECTOR_DIR/adapters"
 MCP_ADAPTER_VERSION="0.1.54"
-MCP_ADAPTER_TAG="v0.7.52"
+MCP_ADAPTER_TAG="v0.7.53"
 MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.54.tar"
 MCP_ADAPTER_SHA256="ca65208366f399e4e3d5083249766e0c78ddeec8e1843b531e319c9d1ac481be"
 MCP_SDK_VERSION="1.30.1"
 MCP_OPENCODE_SDK_VERSION="1.18.21"
 MCP_TESTED_PROTOCOL_VERSION="2025-11-25"
 MCP_TUNNEL_DIR="$SHARE_ROOT/mcp-tunnel/openai"
-HUB_ASSET_TAG="v0.7.52"
+HUB_ASSET_TAG="v0.7.53"
 HUB_ASSET_FILENAME="opencode-vm-hub-1.tar"
 HUB_ASSET_SHA256="58a3f875b0da43e1ea4d1717c146543d47ce2d80d4cfc0bdb812e27c9723f04b"
 
@@ -332,10 +332,23 @@ TASKBOARD_ARM64_SHA256="3749fb985f544fdb6788ba1dff69761e599ff82b3fe86d39ca54307c
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.7.52"
+OCVM_VERSION="0.7.53"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
+
+# ENFILE time protocol (resmon): lean, bounded resource time series with a
+# shared UTC time base. Host and guest keep separate histories/identities; no
+# cross-side merge. Strictly read-only against the system: nothing here changes
+# limits, signals processes or restarts services.
+RESMON_INTERVAL_SECONDS="60"     # sampling cadence (bounded CPU/IO)
+RESMON_MAX_SAMPLE_BYTES="4096"   # hard per-line cap; real samples ~1.2 KiB, worst-case top-8 ~1.7 KiB
+RESMON_FILE_CAP_BYTES="2097152"  # 2 MiB per file, one rotation -> <=4 MiB per side
+RESMON_TAIL_BYTES="262144"       # doctor/history read bound
+RESMON_MAX_PROCS="2000"          # bounded top-consumer scan
+RESMON_TOP_N="8"                 # recorded top FD consumers
+RESMON_STALE_AFTER="180"         # seconds after which the newest sample is stale
+RESMON_HOST_TOP_PCT="60"         # darwin: run the costly per-proc scan only above this %
 
 cmd="${1:-help}"
 shift || true
@@ -6444,6 +6457,18 @@ doctor_cmd() {
       if [[ "${OCVM_MATERIALIZE:-1}" == "0" ]]; then
         echo "  status:         DISABLED via OCVM_MATERIALIZE=0"
       fi
+      echo ""
+
+      echo "[doctor] Resources (ENFILE time protocol, host history)"
+      # Same shared renderer the guest doctor uses (one implementation).
+      if [[ -n "${OCVM_RESMON_RENDER_SH:-}" ]]; then eval "$OCVM_RESMON_RENDER_SH" 2>/dev/null || true; fi
+      if command -v resmon_render_history >/dev/null 2>&1; then
+        resmon_render_history "$(resmon_host_file "$(pwd)")" host
+        echo "  note: host history only here; the guest history is read by the in-VM 'doctor resources'."
+        echo "  ENFILE sites live in the session share: <share>/mcp/adapter.log and <share>/monitor/server.log."
+      else
+        echo "  <renderer unavailable>"
+      fi
       ;;
 
     *)
@@ -12537,7 +12562,7 @@ taskboard_ensure_installed_in_base() {
 # behave identically. Pure text — no download.
 read -r -d '' OCVM_DOCTOR_INSTALL_SH <<'DOCTOR_INSTALL' || true
 install_doctor_wrapper() {
-  local bin="$HOME/.local/bin/doctor" marker='ocvm-doctor-wrapper v1' tmp
+  local bin="$HOME/.local/bin/doctor" marker='ocvm-doctor-wrapper v2' tmp
   if [ -L "$bin" ]; then
     echo "[doctor] Refusing to manage a symlinked wrapper: $bin" >&2
     return 1
@@ -12549,12 +12574,12 @@ install_doctor_wrapper() {
   tmp="$bin.ocvm-tmp.$$"
   cat > "$tmp" <<'DOCTORWRAPPER'
 #!/usr/bin/env bash
-# ocvm-doctor-wrapper v1 — ocvm managed; rewritten on drift. Strictly read-only.
+# ocvm-doctor-wrapper v2 — ocvm managed; rewritten on drift. Strictly read-only.
 # Thin PATH entry for the canonical VM-local doctor: discovers this VM's session
 # share from real mount metadata, sources <share>/lib/doctor.sh (the single
 # diagnosis path staged by opencode-vm) and dispatches one area. Never repairs.
 set -u
-doctor_usage() { printf '%s\n' "Usage: doctor [show|tunnel|mcp|services|help]" >&2; }
+doctor_usage() { printf '%s\n' "Usage: doctor [show|tunnel|mcp|services|resources|help]" >&2; }
 if [ "$#" -gt 1 ]; then doctor_usage; exit 2; fi
 area="${1:-show}"
 case "$area" in
@@ -12566,11 +12591,12 @@ case "$area" in
       "  doctor tunnel     MCP tunnel focus (canonical guest tunnel status)" \
       "  doctor mcp        OpenCode backend + incoming MCP adapter focus" \
       "  doctor services   guest services/units/PIDs/listeners focus" \
+      "  doctor resources  ENFILE time protocol: guest file-table/FD/watcher history" \
       "  doctor help       this text" \
       "" \
       "Local checks only — not a ChatGPT/E2E acceptance. Never repairs anything."
     exit 0 ;;
-  show|tunnel|mcp|services) ;;
+  show|tunnel|mcp|services|resources) ;;
   *) doctor_usage; exit 2 ;;
 esac
 hn="$(hostname 2>/dev/null || cat /proc/sys/kernel/hostname 2>/dev/null || printf 'unknown')"
@@ -17181,6 +17207,51 @@ doctor_collect_services() {
   return 0
 }
 
+# --- ENFILE time protocol: guest history + ENFILE sites from real logs ------
+doctor_collect_resources() {
+  local file="${HOME}/.local/state/ocvm/resmon/guest.jsonl" line
+  if command -v resmon_render_history >/dev/null 2>&1; then
+    while IFS= read -r line; do
+      [ -n "$line" ] && _dout "$line"
+    done < <(resmon_render_history "$file" guest 2>/dev/null || true)
+    # History is evidence, never a PASS/FAIL dimension.
+    DOCTOR_UNVERIFIED=$((DOCTOR_UNVERIFIED + 1))
+  else
+    _dout "[resmon] guest history: renderer unavailable (older library staging)"
+    DOCTOR_UNVERIFIED=$((DOCTOR_UNVERIFIED + 1))
+  fi
+  return 0
+}
+
+# Precise ENFILE sites from the existing adapter/monitor logs (bounded tail).
+# Event time comes from the log line when present; otherwise the observation
+# (log mtime) is reported and labelled as such — never an invented event time.
+doctor_collect_enfile() {
+  _dout "[vm-doctor] enfile-sites (bounded tail of existing logs):"
+  local pair name f line ev obs found=0
+  for pair in "adapter:$DOCTOR_SHARE/mcp/adapter.log" "monitor:$DOCTOR_SHARE/monitor/server.log"; do
+    name="${pair%%:*}"; f="${pair#*:}"
+    if [ ! -f "$f" ] || [ -L "$f" ]; then
+      _dout "[vm-doctor]   $name: missing ($f)"
+      continue
+    fi
+    line="$(tail -c "$DOCTOR_EXCERPT_BYTES" "$f" 2>/dev/null | grep -E 'ENFILE' | tail -n 1)"
+    if [ -z "$line" ]; then
+      _dout "[vm-doctor]   $name: no ENFILE marker in bounded tail"
+      continue
+    fi
+    found=1
+    ev="$(printf '%s' "$line" | grep -oE 'at=[0-9T:.Z-]+' | head -n 1 | sed 's/^at=//')"
+    if [ -z "$ev" ]; then
+      obs="$(date -u -r "$f" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf 'unknown')"
+      ev="unknown(no event time in line; log observed_at=$obs)"
+    fi
+    _dout "[vm-doctor]   $name: ENFILE event_at=$ev line=$(printf '%s' "$line" | cut -c1-160)"
+  done
+  [ "$found" = "1" ] || DOCTOR_UNVERIFIED=$((DOCTOR_UNVERIFIED + 1))
+  return 0
+}
+
 # --- findings and support IDs ----------------------------------------------
 doctor_collect_errors() {
   _dout "[vm-doctor] errors/support-ids:"
@@ -17294,11 +17365,19 @@ doctor_main() {
         _doctor_section binding && doctor_collect_binding
         _doctor_section tunnel && doctor_collect_tunnel
         _doctor_section services && doctor_collect_services
+        _doctor_section resources && doctor_collect_resources
+        _doctor_section enfile && doctor_collect_enfile
         _doctor_section errors && doctor_collect_errors
         _doctor_section excerpts && doctor_collect_excerpts ""
         ;;
+      resources)
+        _doctor_section resources && doctor_collect_resources
+        _doctor_section enfile && doctor_collect_enfile
+        _doctor_section errors && doctor_collect_errors
+        ;;
       tunnel)
         _doctor_section tunnel && doctor_collect_tunnel
+        _doctor_section enfile && doctor_collect_enfile
         _doctor_section errors && doctor_collect_errors
         _doctor_section excerpts && doctor_collect_excerpts tunnel
         ;;
@@ -17316,7 +17395,7 @@ doctor_main() {
         _doctor_section errors && doctor_collect_errors
         ;;
       *)
-        printf '%s\n' "Usage: doctor [show|tunnel|mcp|services|help]" >&2
+        printf '%s\n' "Usage: doctor [show|tunnel|mcp|services|resources|help]" >&2
         return 2 ;;
     esac
   fi
@@ -17337,9 +17416,639 @@ install_doctor_lib() {
   local dir="$share/lib"
   [[ ! -L "$dir" ]] || return 1
   mkdir -p "$dir" || return 1
-  printf '%s\n' "$OCVM_DOCTOR_SH" > "$dir/doctor.sh" || return 1
+  # The doctor library carries the shared ENFILE-history renderer so a single
+  # render implementation serves both the guest doctor and the host doctor.
+  printf '%s\n%s\n' "$OCVM_DOCTOR_SH" "$OCVM_RESMON_RENDER_SH" > "$dir/doctor.sh" || return 1
   printf 'OCVM_SCRIPT_VERSION=%q\nOCVM_DOCTOR_LIB_STAGED_AT=%q\n' \
     "$OCVM_VERSION" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$dir/doctor.env" || return 1
+  return 0
+}
+
+# --- ENFILE time protocol: shared renderer + bounded sampler ----------------
+# Shared read-only history renderer. Materialized into lib/doctor.sh for the
+# guest doctor and eval'd by the host doctor, so there is ONE implementation.
+read -r -d '' OCVM_RESMON_RENDER_SH <<'RESMONRENDER' || true
+# Usage: resmon_render_history <jsonl-file> <side-label>
+resmon_render_history() {
+  local file="$1" side="${2:-unknown}"
+  local tail_bytes="${RESMON_TAIL_BYTES:-262144}" stale="${RESMON_STALE_AFTER:-180}"
+  if [ -z "$file" ]; then printf '%s\n' "[resmon] $side history: missing (no path)"; return 0; fi
+  if [ ! -e "$file" ]; then printf '%s\n' "[resmon] $side history: missing ($file)"; return 0; fi
+  if [ ! -f "$file" ] || [ ! -r "$file" ]; then printf '%s\n' "[resmon] $side history: unreadable ($file)"; return 0; fi
+  if ! command -v jq >/dev/null 2>&1; then printf '%s\n' "[resmon] $side history: unreadable (jq missing)"; return 0; fi
+  local size
+  size=0
+  if [ -f "$file" ]; then size="$(wc -c < "$file" 2>/dev/null | tr -d '[:space:]')" || size=0; fi
+  case "$size" in ''|*[!0-9]*) size=0 ;; esac
+  if [ "$size" -eq 0 ]; then printf '%s\n' "[resmon] $side history: empty ($file)"; return 0; fi
+  local tsv
+  # Bounded tail; skip partial/older-schema/unparseable lines instead of failing.
+  tsv="$(tail -c "$tail_bytes" "$file" 2>/dev/null | jq -r -R '
+      fromjson? | select(type=="object" and .schema==1 and (.t|type=="string"))
+      | [ .t, ((.te // "")|tostring), ((.global.used // "")|tostring), ((.global.max // "")|tostring),
+          ((.procs[0].pid // "")|tostring), (.procs[0].comm // ""), ((.procs[0].fds // "")|tostring),
+          ((.procs[0].limit // "")|tostring),
+          ((.watchers.max_user_watches // "")|tostring), ((.watchers.max_user_instances // "")|tostring),
+          ((.limits.nr_open // "")|tostring), ((.limits.maxfilesperproc // "")|tostring),
+          ((.limits.shell_soft // "")|tostring), ((.limits.shell_hard // "")|tostring),
+          ((.limits.launchctl_soft // "")|tostring), ((.limits.launchctl_hard // "")|tostring),
+          ((.coverage.procs_scanned // "")|tostring), ((.coverage.procs_total // "")|tostring),
+          ((.coverage.fd_unreadable // "")|tostring), (.coverage.top_scan // ""), (.coverage.note // ""),
+          ((.sched.heartbeat_fresh // "")|tostring), (.sched.work_state // ""), (.sched.heartbeat_at // ""),
+          (.coverage.guest_probe // "") ]
+      | @tsv' 2>/dev/null)" || tsv=""
+  local valid
+  valid="$(printf '%s\n' "$tsv" | grep -c .)"
+  if [ "$valid" -eq 0 ]; then
+    printf '%s\n' "[resmon] $side history: partial/unparseable within ${tail_bytes}B tail ($file)"
+    return 0
+  fi
+  local now
+  now="$(date +%s)"
+  printf '%s\n' "$tsv" | awk -F'\t' -v side="$side" -v now="$now" -v stale="$stale" '
+    { n++
+      if (n==1){ first_t=$1; if($2!="") first_te=$2+0 }
+      last_t=$1; if($2!="") last_te=$2+0
+      if ($3!=""){ u=$3+0; if(!useen || u>peak){peak=u; peak_t=$1} if(!useen){first_u=u} last_u=u; useen=1 }
+      if ($4!=""){ mx=$4+0; maxset=1; if(!maxinit || mx>maxmax){maxmax=mx} maxinit=1 }
+      if ($7!=""){ p=$7+0; if(!pseen || p>ppeak){ppeak=p; ppid=$5; pcomm=$6; plim=$8; pt=$1; pseen=1; if($8 ~ /^[0-9]+$/) plimnum=$8+0; else plimnum=""} }
+      if ($9!=""){ wmw=$9 }
+      if ($10!=""){ wmi=$10 }
+      if ($11!=""){ nro=$11 }
+      if ($12!=""){ mfp=$12 }
+      if ($13!=""){ ss=$13 }
+      if ($14!=""){ sh=$14 }
+      if ($15!=""){ ls=$15 }
+      if ($16!=""){ lh=$16 }
+      if ($17!=""){ pscanned=$17 }
+      if ($18!=""){ ptotal=$18 }
+      if ($19!=""){ funread=$19 }
+      if ($20!=""){ tscan=$20 }
+      if ($21!=""){ note=$21 }
+      if ($22!=""){ hbf=$22 }
+      if ($23!=""){ ws=$23 }
+      if ($24!=""){ hba=$24 }
+      if ($25!=""){ gprobe=$25 }
+    }
+    END{
+      if(!n){ print "[resmon] " side " history: empty"; exit }
+      state="fresh"
+      if(last_te>0){ age=now-last_te; if(age<0)age=0; if(age>stale) state="stale" } else { age="?"; state="fresh(no-te)" }
+      printf "[resmon] %s history: present samples=%d window=%s..%s age=%s state=%s\n", side, n, first_t, last_t, age, state
+      if(useen){
+        gp="n/a"; if(maxinit && maxmax>0){ gp=int(last_u*100/maxmax) }
+        g=last_u-first_u; gs="+"; if(g<0){gs=""}
+        printf "[resmon] %s global files: used=%d max=%s pct=%s peak_used=%d@%s growth=%s%d(window)\n", side, last_u, (maxinit?maxmax:"unknown"), gp, peak, peak_t, gs, g
+      } else {
+        printf "[resmon] %s global files: UNVERIFIED(no numeric used value in window)\n", side
+      }
+      if(pseen){
+        pp="n/a"; if(plimnum!="" && plimnum>0){ pp=int(ppeak*100/plimnum) }
+        printf "[resmon] %s process fd peak: pid=%s comm=%s fds=%d limit=%s pct=%s at=%s (pid identity is per-sample; unknown limit => pct n/a)\n", side, ppid, pcomm, ppeak, (plim!=""?plim:"unknown"), pp, pt
+      } else {
+        printf "[resmon] %s process fd peak: none recorded (bounded top-scan)\n", side
+      }
+      if(ss!="" || ls!="" || mfp!="" || nro!=""){
+        printf "[resmon] %s host/process config limits: shell=%s/%s launchctl=%s/%s maxfilesperproc=%s nr_open=%s (config values, NOT the per-process fd limit)\n", side, (ss!=""?ss:"?"), (sh!=""?sh:"?"), (ls!=""?ls:"?"), (lh!=""?lh:"?"), (mfp!=""?mfp:"?"), (nro!=""?nro:"?")
+      }
+      if(wmw!="" || wmi!=""){
+        printf "[resmon] %s watchers: max_user_watches=%s max_user_instances=%s (user-level limits, NOT a per-process limit)\n", side, (wmw!=""?wmw:"unknown"), (wmi!=""?wmi:"unknown")
+      } else {
+        printf "[resmon] %s watchers: UNVERIFIED(none recorded; max_user_watches is a user limit, not a process limit)\n", side
+      }
+      printf "[resmon] %s coverage: procs_scanned=%s/%s fd_unreadable=%s top_scan=%s%s%s\n", side, (pscanned!=""?pscanned:"?"), (ptotal!=""?ptotal:"?"), (funread!=""?funread:"?"), (tscan!=""?tscan:"unknown"), (note!=""?" note=" note : ""), (gprobe!=""?" guest_probe=" gprobe " (missing/unknown guest is NOT healthy)" : "")
+      if(hbf!="" || ws!=""){
+        printf "[resmon] %s scheduler: heartbeat_fresh=%s heartbeat_at=%s work_state=%s (separate from history age/state above)\n", side, (hbf!=""?hbf:"unknown"), (hba!=""?hba:"unknown"), (ws!=""?ws:"unknown")
+      }
+      print "[resmon] " side " note: only this bounded window was evaluated; peaks older than the window cannot be excluded. Low current values do not clear a historical peak and are not a PASS."
+    }'
+  return 0
+}
+RESMONRENDER
+
+# Guest-side Linux sampler. Read-only against the system; emits one bounded
+# JSON line and appends it to a VM-local, capped history file. Never changes
+# limits, never signals processes, never reads secrets.
+read -r -d '' OCVM_RESMON_COLLECT_SH <<'RESMONCOLLECT' || true
+resmon_guest_file() { printf '%s\n' "${HOME}/.local/state/ocvm/resmon/guest.jsonl"; }
+
+# Bounded append: NEVER writes a raw-truncated JSON sample. A structurally valid
+# object is guaranteed (jq-checked); an oversize sample is shrunk with the schema
+# preserved (first three processes kept) or, if it still cannot fit, dropped
+# entirely — never cut. The file cap keeps exactly one rotation, mode 0600.
+resmon_append_bounded() {
+  local file="$1" line="$2" cap="${RESMON_FILE_CAP_BYTES:-2097152}" maxlen="${RESMON_MAX_SAMPLE_BYTES:-4096}"
+  local dir size rc=0 shrunk
+  dir="$(dirname "$file")"
+  ( umask 077; mkdir -p "$dir" ) 2>/dev/null || return 1
+  { [ -O "$dir" ] && [ ! -L "$dir" ]; } || return 1
+  if ! printf '%s' "$line" | jq -e 'type=="object"' >/dev/null 2>&1; then
+    return 0
+  fi
+  if [ "$(printf '%s' "$line" | wc -c | tr -d '[:space:]')" -gt "$maxlen" ]; then
+    shrunk="$(printf '%s' "$line" | jq -c 'if (.procs|type)=="array" then .procs=(.procs[:3]) else . end' 2>/dev/null)" || shrunk=""
+    if ! printf '%s' "$shrunk" | jq -e 'type=="object"' >/dev/null 2>&1; then return 0; fi
+    if [ "$(printf '%s' "$shrunk" | wc -c | tr -d '[:space:]')" -gt "$maxlen" ]; then return 0; fi
+    line="$shrunk"
+  fi
+  size=0
+  if [ -f "$file" ]; then size="$(wc -c < "$file" 2>/dev/null | tr -d '[:space:]')" || size=0; fi
+  case "$size" in ''|*[!0-9]*) size=0 ;; esac
+  if [ "$size" -ge "$cap" ]; then
+    mv -f "$file" "$file.1" 2>/dev/null || rc=1
+  fi
+  printf '%s\n' "$line" >> "$file" || rc=1
+  chmod 600 "$file" 2>/dev/null || true
+  return "$rc"
+}
+
+resmon_guest_sample() {
+  local t te fnr used second max filemax nropen mw mi hn
+  t="$(date -u +%Y-%m-%dT%H:%M:%SZ)"; te="$(date +%s)"
+  hn="$(hostname 2>/dev/null || cat /proc/sys/kernel/hostname 2>/dev/null || printf unknown)"
+  fnr="$(cat /proc/sys/fs/file-nr 2>/dev/null)"
+  used="$(printf '%s' "$fnr" | awk '{print $1}')"
+  second="$(printf '%s' "$fnr" | awk '{print $2}')"
+  max="$(printf '%s' "$fnr" | awk '{print $3}')"
+  filemax="$(cat /proc/sys/fs/file-max 2>/dev/null)"
+  nropen="$(cat /proc/sys/fs/nr_open 2>/dev/null)"
+  mw="$(cat /proc/sys/fs/inotify/max_user_watches 2>/dev/null)"
+  mi="$(cat /proc/sys/fs/inotify/max_user_instances 2>/dev/null)"
+  if [ -n "$filemax" ] && { [ -z "$max" ] || [ "$max" = "0" ]; }; then max="$filemax"; fi
+
+  local scanned=0 total=0 unreadable=0 d pid cnt tmp
+  tmp="$(mktemp "${TMPDIR:-/tmp}/ocvm-resmon.XXXXXX" 2>/dev/null)" || tmp=""
+  for d in /proc/[0-9]*; do
+    [ -d "$d" ] || continue
+    pid="${d#/proc/}"
+    total=$((total + 1))
+    [ "$total" -le "${RESMON_MAX_PROCS:-2000}" ] || break
+    if [ -r "$d/fd" ]; then
+      cnt="$(ls -1 "$d/fd" 2>/dev/null | wc -l | tr -d '[:space:]')"
+      scanned=$((scanned + 1))
+      [ -n "$tmp" ] && printf '%s\t%s\n' "$cnt" "$pid" >> "$tmp"
+    else
+      unreadable=$((unreadable + 1))
+    fi
+  done
+  # Top N over ALL pids (never an allowlist only), then bounded enrichment.
+  local enriched="" tcnt tpid comm lim cg ino
+  if [ -n "$tmp" ]; then
+    while IFS="$(printf '\t')" read -r tcnt tpid; do
+      [ -n "$tpid" ] || continue
+      comm="$(cat "/proc/$tpid/comm" 2>/dev/null | cut -c1-40 | tr -d '\t')"
+      lim="$(grep -m1 'Max open files' "/proc/$tpid/limits" 2>/dev/null | awk '{print $4}')"
+      cg="$(cat "/proc/$tpid/cgroup" 2>/dev/null | head -n1 | awk -F: '{print $3}' | sed -e 's#^/##' -e 's#^.*/##' | cut -c1-40 | tr -d '\t')"
+      ino=0
+      local fdinfo
+      for fdinfo in "/proc/$tpid"/fdinfo/*; do
+        [ -f "$fdinfo" ] || continue
+        grep -q '^inotify' "$fdinfo" 2>/dev/null && ino=$((ino + 1))
+      done
+      enriched="${enriched}${tcnt}	${tpid}	${comm}	${lim}	${ino}	${cg}
+"
+    done < <(sort -k1,1 -nr "$tmp" 2>/dev/null | head -n "${RESMON_TOP_N:-8}")
+    rm -f "$tmp"
+  fi
+  local procs_json
+  procs_json="$(printf '%s' "$enriched" | jq -R -s '
+    split("\n") | map(select(length>0)) | map(split("\t") | {
+      pid: (.[1]|tonumber), comm: .[2], fds: (.[0]|tonumber),
+      limit: (if .[3]=="" then null else (try (.[3]|tonumber) catch null) end),
+      inotify: (if .[4]=="" then null else (.[4]|tonumber) end),
+      cgroup: (if .[5]=="" or .[5]=="-" then null else .[5] end)
+    })' 2>/dev/null)" || procs_json="[]"
+  [ -n "$procs_json" ] || procs_json="[]"
+
+  jq -cn --arg t "$t" --argjson te "${te:-0}" --arg hn "$hn" \
+    --arg used "$used" --arg second "$second" --arg max "$max" --arg filemax "$filemax" --arg nropen "$nropen" \
+    --arg mw "$mw" --arg mi "$mi" --argjson procs "$procs_json" \
+    --arg sc "$scanned" --arg tot "$total" --arg un "$unreadable" '
+    def num: if .=="" then null else (try (tonumber) catch null) end;
+    { schema:1, t:$t, te:$te, side:"guest", os:"linux",
+      identity: { host: $hn },
+      global: { used: ($used|num), max: ($max|num), file_max: ($filemax|num), nr_second_legacy: ($second|num) },
+      limits: { nr_open: ($nropen|num) },
+      watchers: { max_user_watches: ($mw|num), max_user_instances: ($mi|num) },
+      procs: $procs,
+      coverage: { procs_scanned: ($sc|tonumber), procs_total: ($tot|tonumber), fd_unreadable: ($un|tonumber), top_scan: "full(/proc)", note: "" } }'
+}
+
+resmon_guest_run() {
+  local share="${1:-}" line
+  line="$(resmon_guest_sample "$share")" || return 1
+  [ -n "$line" ] || return 1
+  resmon_append_bounded "$(resmon_guest_file)" "$line" || return 1
+  printf '%s\n' "$line"
+}
+RESMONCOLLECT
+
+# Materialize the guest sampler into the session share (same absolute path in
+# the VM). Best-effort; the sampler degrades honestly when it is absent.
+install_resmon_lib() {
+  local share="$1"
+  [[ -n "$share" && -d "$share" && ! -L "$share" ]] || return 1
+  local dir="$share/lib"
+  [[ ! -L "$dir" ]] || return 1
+  mkdir -p "$dir" || return 1
+  printf '%s\n' "$OCVM_RESMON_COLLECT_SH" > "$dir/resmon.sh" || return 1
+  return 0
+}
+
+# --- host-side ENFILE sampler (macOS + Linux) -------------------------------
+resmon_host_file() { printf '%s\n' "$(project_state_dir "$1")/resmon/host.jsonl"; }
+resmon_host_dir() { printf '%s\n' "$(project_state_dir "$1")/resmon"; }
+
+resmon_host_append_bounded() {
+  local file="$1" line="$2"
+  local cap="${RESMON_FILE_CAP_BYTES:-2097152}" maxlen="${RESMON_MAX_SAMPLE_BYTES:-4096}"
+  local dir size rc=0 shrunk
+  dir="$(dirname "$file")"
+  ( umask 077; mkdir -p "$dir" ) 2>/dev/null || return 1
+  { [ -O "$dir" ] && [ ! -L "$dir" ]; } || return 1
+  if ! printf '%s' "$line" | jq -e 'type=="object"' >/dev/null 2>&1; then
+    return 0
+  fi
+  if [ "$(printf '%s' "$line" | wc -c | tr -d '[:space:]')" -gt "$maxlen" ]; then
+    shrunk="$(printf '%s' "$line" | jq -c 'if (.procs|type)=="array" then .procs=(.procs[:3]) else . end' 2>/dev/null)" || shrunk=""
+    if ! printf '%s' "$shrunk" | jq -e 'type=="object"' >/dev/null 2>&1; then return 0; fi
+    if [ "$(printf '%s' "$shrunk" | wc -c | tr -d '[:space:]')" -gt "$maxlen" ]; then return 0; fi
+    line="$shrunk"
+  fi
+  size=0
+  if [ -f "$file" ]; then size="$(wc -c < "$file" 2>/dev/null | tr -d '[:space:]')" || size=0; fi
+  case "$size" in ''|*[!0-9]*) size=0 ;; esac
+  if [ "$size" -ge "$cap" ]; then
+    mv -f "$file" "$file.1" 2>/dev/null || rc=1
+  fi
+  printf '%s\n' "$line" >> "$file" || rc=1
+  chmod 600 "$file" 2>/dev/null || true
+  return "$rc"
+}
+
+# Scheduler state from the project monitor registry (read-only, current truth).
+resmon_sched_json() {
+  local proj="$1" reg="$1/.opencode-vm/monitor/registry.json" hb="$1/.opencode-vm/monitor/heartbeat.json"
+  local fresh="null" gen="" at="" ws=""
+  if [[ -f "$hb" && ! -L "$hb" ]] && command -v jq >/dev/null 2>&1; then
+    at="$(jq -r 'select(type=="object") | .at // empty' "$hb" 2>/dev/null || true)"
+    gen="$(jq -r 'select(type=="object") | .generation // empty' "$hb" 2>/dev/null || true)"
+    local now ate atn
+    now="$(date +%s)"
+    atn="$(printf '%s' "$at" | sed -E 's/\.[0-9]+Z?$/Z/')"
+    ate="$(date -u -d "$atn" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$atn" +%s 2>/dev/null || true)"
+    if [[ -n "$ate" ]]; then
+      if [[ $(( now - ate )) -le 90 ]]; then fresh="true"; else fresh="false"; fi
+    fi
+  fi
+  if [[ -f "$reg" && ! -L "$reg" ]] && command -v jq >/dev/null 2>&1; then
+    # Real registry shape: monitors[].state.work (never a flat .state string).
+    ws="$(jq -r 'if type=="object" then ([.monitors[]?.state.work // empty] | join(",")) else empty end' "$reg" 2>/dev/null || true)"
+  fi
+  jq -cn --arg at "$at" --arg gen "$gen" --arg ws "$ws" --argjson fresh "$fresh" \
+    '{ heartbeat_at: (if $at=="" then null else $at end), heartbeat_fresh: $fresh,
+       generation: (if $gen=="" then null else $gen end),
+       work_state: (if $ws=="" then null else $ws end) }'
+}
+
+resmon_host_sample() {
+  local proj="$1" vm="${2:-}" gen="${3:-}" gstate="${4:-}" t te os hn
+  os="$(uname -s)"
+  t="$(date -u +%Y-%m-%dT%H:%M:%SZ)"; te="$(date +%s)"
+  hn="$(hostname 2>/dev/null || printf unknown)"
+  local used="" max="" maxsrc="" mfp="" ss="" sh="" ls="" lh=""
+  local procs_json="[]" tscan="skipped" scanned=0 total=0 unreadable=0 pct_num=0
+  if [[ "$os" == "Darwin" ]]; then
+    used="$(sysctl -n kern.num_files 2>/dev/null || true)"
+    max="$(sysctl -n kern.maxfiles 2>/dev/null || true)"
+    maxsrc="kern.maxfiles"
+    mfp="$(sysctl -n kern.maxfilesperproc 2>/dev/null || true)"
+    ss="$(ulimit -Sn 2>/dev/null || true)"
+    sh="$(ulimit -Hn 2>/dev/null || true)"
+    # launchctl limit maxfiles prints "soft\thard"
+    local lcl
+    lcl="$(launchctl limit maxfiles 2>/dev/null || true)"
+    ls="$(printf '%s' "$lcl" | awk '{print $2}')"
+    lh="$(printf '%s' "$lcl" | awk '{print $3}')"
+    # Costly per-process scan only above a threshold (bounded CPU).
+    if [[ -n "$used" && -n "$max" && "$max" -gt 0 ]]; then pct_num=$(( used * 100 / max )); fi
+    if [[ "$pct_num" -ge "${RESMON_HOST_TOP_PCT:-60}" ]] && command -v lsof >/dev/null 2>&1; then
+      # Count ONLY numeric file descriptors (lsof -Ff): `fcwd`/`ftxt`/`fmem`
+      # are memory/mapping entries and must never be counted as open FDs.
+      procs_json="$(lsof -n -w -Fpcf 2>/dev/null | awk '
+        /^p/{pid=substr($0,2); comm=""; next}
+        /^c/{comm=substr($0,2); cm[pid]=comm; next}
+        /^f/{fd=substr($0,2); if(fd ~ /^[0-9]+$/) cnt[pid]++}
+        END{for(p in cnt) printf "%d\t%s\t%s\n", cnt[p], p, cm[p]}' | sort -k1,1 -nr | head -n "${RESMON_TOP_N:-8}" |
+        jq -R -s 'split("\n")|map(select(length>0))|map(split("\t")|{pid:(.[1]|tonumber),comm:.[2],fds:(.[0]|tonumber),limit:null,inotify:null,cgroup:null})' 2>/dev/null)" || procs_json="[]"
+      tscan="full(lsof numeric fds,above-${RESMON_HOST_TOP_PCT:-60}pct)"
+    else
+      tscan="skipped(cost; global below ${RESMON_HOST_TOP_PCT:-60}pct or lsof absent)"
+    fi
+  elif [[ "$os" == "Linux" ]]; then
+    local fnr
+    fnr="$(cat /proc/sys/fs/file-nr 2>/dev/null || true)"
+    used="$(printf '%s' "$fnr" | awk '{print $1}')"
+    max="$(printf '%s' "$fnr" | awk '{print $3}')"
+    maxsrc="/proc/sys/fs/file-nr[3]"
+    mfp="$(cat /proc/sys/fs/nr_open 2>/dev/null || true)"
+    ss="$(ulimit -Sn 2>/dev/null || true)"
+    sh="$(ulimit -Hn 2>/dev/null || true)"
+    local d pid cnt tmp
+    tmp="$(mktemp "${TMPDIR:-/tmp}/ocvm-resmon-host.XXXXXX" 2>/dev/null)" || tmp=""
+    for d in /proc/[0-9]*; do
+      [ -d "$d" ] || continue
+      pid="${d#/proc/}"
+      total=$((total + 1))
+      [ "$total" -le "${RESMON_MAX_PROCS:-2000}" ] || break
+      if [ -r "$d/fd" ]; then
+        cnt="$(ls -1 "$d/fd" 2>/dev/null | wc -l | tr -d '[:space:]')"
+        scanned=$((scanned + 1))
+        [ -n "$tmp" ] && printf '%s\t%s\n' "$cnt" "$pid" >> "$tmp"
+      else
+        unreadable=$((unreadable + 1))
+      fi
+    done
+    local enriched=""
+    if [ -n "$tmp" ]; then
+      while IFS="$(printf '\t')" read -r cnt pid; do
+        [ -n "$pid" ] || continue
+        local comm lim
+        comm="$(cat "/proc/$pid/comm" 2>/dev/null | cut -c1-40 | tr -d '\t')"
+        lim="$(grep -m1 'Max open files' "/proc/$pid/limits" 2>/dev/null | awk '{print $4}')"
+        enriched="${enriched}${cnt}	${pid}	${comm}	${lim}
+"
+      done < <(sort -k1,1 -nr "$tmp" 2>/dev/null | head -n "${RESMON_TOP_N:-8}")
+      rm -f "$tmp"
+    fi
+    procs_json="$(printf '%s' "$enriched" | jq -R -s '
+      split("\n")|map(select(length>0))|map(split("\t")|{pid:(.[1]|tonumber),comm:.[2],fds:(.[0]|tonumber),limit:(if .[3]=="" then null else (try (.[3]|tonumber) catch null) end),inotify:null,cgroup:null})' 2>/dev/null)" || procs_json="[]"
+    tscan="full(/proc)"
+  fi
+  [ -n "$procs_json" ] || procs_json="[]"
+  local sched
+  sched="$(resmon_sched_json "$proj" 2>/dev/null || printf '{}')"
+  [ -n "$sched" ] || sched="{}"
+  jq -cn --arg t "$t" --argjson te "${te:-0}" --arg os "$os" --arg host "$hn" --arg vm "$vm" --arg gen "$gen" --arg gstate "$gstate" \
+    --arg used "$used" --arg max "$max" --arg maxsrc "$maxsrc" --arg mfp "$mfp" \
+    --arg ss "$ss" --arg sh "$sh" --arg ls "$ls" --arg lh "$lh" \
+    --argjson procs "$procs_json" --argjson sched "$sched" \
+    --arg sc "$scanned" --arg tot "$total" --arg un "$unreadable" --arg tscan "$tscan" '
+    def num: if .=="" then null else (try (tonumber) catch null) end;
+    { schema:1, t:$t, te:$te, side:"host", os:$os,
+      identity: { host: $host, vm: (if $vm=="" then null else $vm end), generation: (if $gen=="" then null else $gen end) },
+      global: { used: ($used|num), max: ($max|num), max_source: $maxsrc },
+      limits: { maxfilesperproc: ($mfp|num), shell_soft: ($ss|num), shell_hard: ($sh|num),
+                launchctl_soft: ($ls|num), launchctl_hard: ($lh|num) },
+      procs: $procs, sched: $sched,
+      coverage: { procs_scanned: ($sc|tonumber), procs_total: ($tot|tonumber), fd_unreadable: ($un|tonumber), top_scan: $tscan, note: "",
+                  guest_probe: (if $gstate=="" then null else $gstate end) } }'
+}
+
+# A per-run token; PID-reuse-safe ownership is (pid + process start marker +
+# vm + generation), never the PID number alone.
+resmon_token() { printf '%s-%s%s%s' "$(date +%s)" "$$" "$RANDOM" "$RANDOM"; }
+
+# Process start marker: /proc/<pid>/stat field 22 (starttime) on Linux,
+# `ps -o lstart=` on macOS. A reused PID yields a different marker.
+resmon_pid_marker() {
+  local pid="$1" out=""
+  if [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 && -r "/proc/$pid/stat" ]]; then
+    out="$(sed 's/^[0-9]* ([^)]*) //' "/proc/$pid/stat" 2>/dev/null | awk '{print $20}' || true)"
+  elif [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 ]]; then
+    out="$(ps -o lstart= -p "$pid" 2>/dev/null | tr -s ' ' || true)"
+  fi
+  printf '%s' "$out"
+  return 0
+}
+
+resmon_pidfile_field() { # $1=pidfile $2=jq field
+  command -v jq >/dev/null 2>&1 || return 1
+  jq -r --arg f "$2" '.[$f] // empty' "$1" 2>/dev/null
+}
+
+resmon_write_pidfile() { # $1=pidfile $2=pid $3=vm $4=gen $5=token
+  local pidfile="$1" pid="$2" vm="$3" gen="$4" token="$5" tmp marker
+  if ! command -v jq >/dev/null 2>&1; then printf '%s\n' "$pid" > "$pidfile"; return 0; fi
+  marker="$(resmon_pid_marker "$pid")"
+  tmp="$pidfile.tmp.$$"
+  if ! jq -cn --argjson pid "$pid" --arg vm "$vm" --arg gen "$gen" --arg token "$token" \
+    --arg marker "$marker" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{ pid: $pid, vm: $vm, generation: $gen, token: $token, marker: $marker, started_at: $at }' > "$tmp" 2>/dev/null; then
+    rm -f "$tmp"; return 1
+  fi
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$pidfile"
+}
+
+# True only when the recorded owner is still the SAME live process for the SAME
+# vm+generation with an unchanged start marker (=> PID reuse detected).
+resmon_own_alive() { # $1=pidfile $2=vm $3=gen
+  local pidfile="$1" vm="$2" gen="$3" pid vm2 g2 mk mk2
+  command -v jq >/dev/null 2>&1 || return 1
+  [[ -f "$pidfile" && ! -L "$pidfile" ]] || return 1
+  pid="$(resmon_pidfile_field "$pidfile" pid)"; vm2="$(resmon_pidfile_field "$pidfile" vm)"
+  g2="$(resmon_pidfile_field "$pidfile" generation)"; mk="$(resmon_pidfile_field "$pidfile" marker)"
+  [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  [[ "$vm2" == "$vm" && "$g2" == "$gen" ]] || return 1
+  mk2="$(resmon_pid_marker "$pid")"
+  [[ -n "$mk" && "$mk" == "$mk2" ]] || return 1
+  return 0
+}
+
+# Remove the pidfile only while still owned by this run's token (never silently
+# remove another live owner's marker).
+resmon_release_pidfile() { # $1=pidfile $2=token
+  local pidfile="$1" token="$2" cur
+  [[ -f "$pidfile" ]] || return 0
+  cur="$(resmon_pidfile_field "$pidfile" token 2>/dev/null || true)"
+  if [[ "$cur" == "$token" ]]; then rm -f "$pidfile" 2>/dev/null || true; fi
+  return 0
+}
+
+# --- project-wide guest-probe budget ---------------------------------------
+# At most ONE guest probe may be in flight for the WHOLE project, across all
+# samplers and VM generations. The record is host-project-persistent and bound
+# to the actually-running transport PID through its start marker, so a hung
+# `limactl shell` (which is never signalled) cannot accumulate N orphans over N
+# start/stop cycles. Ownership reuses the existing PID+start-marker scheme; the
+# short check/claim/spawn section is serialized with an atomic mkdir claim
+# (same primitive the rest of the host code uses), not a new subsystem.
+resmon_probe_record() { printf '%s\n' "$(resmon_host_dir "$1")/guest-probe.json"; }
+
+_resmon_file_age() { # seconds since mtime, or "" when unreadable
+  local f="$1" m now
+  m="$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || true)"
+  [[ "$m" =~ ^[0-9]+$ ]] || { printf ''; return 0; }
+  now="$(date +%s)"
+  printf '%s' "$(( now - m ))"
+}
+
+# Echo "<state>\t<pid>\t<age>": none|in_flight|stale|unknown|invalid.
+resmon_probe_state() {
+  local proj="$1" rec pid mk mk2 age
+  rec="$(resmon_probe_record "$proj")"
+  if [[ ! -e "$rec" ]]; then printf 'none\t\t\n'; return 0; fi
+  if [[ -L "$rec" || ! -f "$rec" ]] || ! command -v jq >/dev/null 2>&1 || ! jq -e 'type=="object"' "$rec" >/dev/null 2>&1; then
+    printf 'invalid\t\t%s\n' "$(_resmon_file_age "$rec")"; return 0
+  fi
+  pid="$(jq -r '.pid // empty' "$rec" 2>/dev/null || true)"
+  mk="$(jq -r '.marker // empty' "$rec" 2>/dev/null || true)"
+  age="$(_resmon_file_age "$rec")"
+  if [[ ! "$pid" =~ ^[0-9]+$ || "$pid" -le 1 ]] || ! kill -0 "$pid" 2>/dev/null; then
+    printf 'stale\t%s\t%s\n' "$pid" "$age"; return 0
+  fi
+  mk2="$(resmon_pid_marker "$pid")"
+  if [[ -z "$mk" || -z "$mk2" ]]; then printf 'unknown\t%s\t%s\n' "$pid" "$age"; return 0; fi
+  if [[ "$mk" != "$mk2" ]]; then printf 'stale\t%s\t%s\n' "$pid" "$age"; return 0; fi
+  printf 'in_flight\t%s\t%s\n' "$pid" "$age"
+}
+
+_resmon_write_probe() { # $1=rec $2=pid $3=marker $4=vm $5=gen $6=token
+  local rec="$1" pid="$2" marker="$3" vm="$4" gen="$5" token="$6" tmp
+  command -v jq >/dev/null 2>&1 || return 1
+  tmp="$rec.tmp.$$"
+  if ! jq -cn --argjson pid "$pid" --arg marker "$marker" --arg vm "$vm" --arg gen "$gen" --arg token "$token" \
+      --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      '{pid:$pid,marker:$marker,vm:$vm,generation:$gen,token:$token,started_at:$at}' > "$tmp" 2>/dev/null; then
+    rm -f "$tmp"; return 1
+  fi
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$rec"
+}
+
+# Remove the probe record only while still owned by this token, so a late old
+# result can never delete/relabel a newer generation's record.
+resmon_probe_release() { # $1=rec $2=token
+  local rec="$1" token="$2" cur
+  [[ -f "$rec" && ! -L "$rec" ]] || return 0
+  cur="$(resmon_pidfile_field "$rec" token 2>/dev/null || true)"
+  if [[ "$cur" == "$token" ]]; then rm -f "$rec" 2>/dev/null || true; fi
+  return 0
+}
+
+_resmon_claim_acquire() { # $1=claimdir ; atomic; dead owner reclaimed
+  local lock="$1" owner tries=0
+  while :; do
+    if mkdir "$lock" 2>/dev/null; then printf '%s\n' "$$" > "$lock/pid"; return 0; fi
+    owner="$(cat "$lock/pid" 2>/dev/null || true)"
+    if [[ "$owner" =~ ^[0-9]+$ && "$owner" -gt 1 ]] && ! kill -0 "$owner" 2>/dev/null; then
+      rm -rf "$lock" 2>/dev/null || true; continue
+    fi
+    if [[ -z "$owner" && "$tries" -gt 20 ]]; then rm -rf "$lock" 2>/dev/null || true; continue; fi
+    tries=$((tries + 1))
+    [[ "$tries" -ge 50 ]] && return 1
+    sleep 0.1
+  done
+}
+_resmon_claim_release() { rm -rf "$1" 2>/dev/null || true; }
+
+# Spawn a guest probe iff the project-wide budget is free.
+# Returns 0 spawned, 1 occupied (in_flight/unknown), 2 claim busy, 3 precond.
+resmon_probe_try_spawn() { # $1=proj $2=vm $3=share $4=gen
+  local proj="$1" vm="$2" share="$3" gen="$4" dir rec lock state pid marker token
+  dir="$(resmon_host_dir "$proj")"; rec="$dir/guest-probe.json"; lock="$dir/guest-probe.claim"
+  ( umask 077; mkdir -p "$dir" ) 2>/dev/null || return 3
+  [[ -f "$share/lib/resmon.sh" ]] || return 3
+  is_vm_running "$vm" || return 3
+  command -v jq >/dev/null 2>&1 || return 3
+  _resmon_claim_acquire "$lock" || return 2
+  state="$(resmon_probe_state "$proj" | cut -f1)"
+  if [[ "$state" == "in_flight" || "$state" == "unknown" ]]; then
+    _resmon_claim_release "$lock"; return 1
+  fi
+  rm -f "$rec" 2>/dev/null || true
+  token="$(resmon_token)"
+  # Bound the record to the real transport/wrapper lifecycle: the tracked PID is
+  # this subshell, which waits on vm_exec (limactl) and only releases the record
+  # (token-guarded) when the probe actually ends. If it hangs, the record stays
+  # and blocks any further project-wide probe.
+  ( vm_exec "$vm" 'share="$1"; . "$share/lib/resmon.sh"; resmon_guest_run "$share" >/dev/null' "$share" >/dev/null 2>&1 || true
+    resmon_probe_release "$rec" "$token" ) &
+  pid=$!
+  marker="$(resmon_pid_marker "$pid")"
+  _resmon_write_probe "$rec" "$pid" "$marker" "$vm" "$gen" "$token" || true
+  _resmon_claim_release "$lock"
+  return 0
+}
+
+resmon_watch() {
+  local proj="$1" vm="$2" share="$3" gen="${4:-}" token="${5:-}"
+  local dir pidfile stopf i cur pstate
+  dir="$(resmon_host_dir "$proj")"
+  ( umask 077; mkdir -p "$dir" ) 2>/dev/null || return 1
+  pidfile="$dir/watch.pid"; stopf="$dir/watch.stop"
+  while :; do
+    if [[ -f "$stopf" ]]; then
+      rm -f "$stopf" 2>/dev/null || true
+      resmon_release_pidfile "$pidfile" "$token"
+      return 0
+    fi
+    # self-revocation: a newer sampler for this project replaced our ownership
+    if [[ -f "$pidfile" ]]; then
+      cur="$(resmon_pidfile_field "$pidfile" token 2>/dev/null || true)"
+      [[ -z "$cur" || "$cur" == "$token" ]] || return 0
+    fi
+    pstate="$(resmon_probe_state "$proj" | cut -f1)"
+    resmon_host_append_bounded "$(resmon_host_file "$proj")" "$(resmon_host_sample "$proj" "$vm" "$gen" "$pstate")" || true
+    # ONE project-wide probe: spawn only when the budget is free/stale.
+    if [[ "$pstate" == "none" || "$pstate" == "stale" || "$pstate" == "invalid" ]]; then
+      resmon_probe_try_spawn "$proj" "$vm" "$share" "$gen" || true
+    fi
+    i=0
+    while [[ "$i" -lt "${RESMON_INTERVAL_SECONDS:-60}" ]]; do
+      [[ -f "$stopf" ]] && break
+      sleep 1
+      i=$((i + 1))
+    done
+  done
+}
+
+resmon_start() {
+  local proj="$1" vm="$2" share="$3" gen="${4:-}"
+  local dir pidfile token bg
+  dir="$(resmon_host_dir "$proj")"
+  ( umask 077; mkdir -p "$dir" ) 2>/dev/null || return 0
+  pidfile="$dir/watch.pid"
+  # Reuse ONLY a live, identity-matching own sampler. A live owner for a
+  # different vm/generation is a stale orphan: not adopted (else the new
+  # session would silently go unsampled) and never killed.
+  if resmon_own_alive "$pidfile" "$vm" "$gen"; then return 0; fi
+  rm -f "$dir/watch.stop" 2>/dev/null || true
+  token="$(resmon_token)"
+  # Claim ownership (placeholder pid) BEFORE the loop starts, so the new sampler
+  # never self-revokes on the previous owner's token; the real pid follows.
+  resmon_write_pidfile "$pidfile" -1 "$vm" "$gen" "$token" || true
+  resmon_watch "$proj" "$vm" "$share" "$gen" "$token" >/dev/null 2>&1 &
+  bg=$!
+  resmon_write_pidfile "$pidfile" "$bg" "$vm" "$gen" "$token" || true
+  disown 2>/dev/null || true
+  return 0
+}
+
+resmon_stop() {
+  local proj="$1"
+  local dir pidfile stopf pid alive=0 waited=0
+  dir="$(resmon_host_dir "$proj")"
+  pidfile="$dir/watch.pid"; stopf="$dir/watch.stop"
+  [[ -e "$pidfile" || -e "$stopf" ]] || return 0
+  ( umask 077; mkdir -p "$dir" ) 2>/dev/null || return 0
+  printf '%s\n' stop > "$stopf" 2>/dev/null || true
+  pid="$(resmon_pidfile_field "$pidfile" pid 2>/dev/null || true)"
+  if [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 ]]; then
+    while [[ "$waited" -lt $(( ${RESMON_INTERVAL_SECONDS:-60} + 5 )) ]]; do
+      if ! kill -0 "$pid" 2>/dev/null; then alive=0; break; fi
+      alive=1
+      sleep 1
+      waited=$((waited + 1))
+    done
+  fi
+  if [[ "$alive" -eq 0 ]]; then
+    rm -f "$stopf" "$pidfile" 2>/dev/null || true
+  else
+    echo "[resmon] Sampler still alive after cooperative stop; leaving ownership/stop markers in place (never killed)." >&2
+  fi
   return 0
 }
 
@@ -18033,6 +18742,7 @@ attach_session() {
 
   # Heal the canonical doctor library and PATH wrapper on reattach.
   install_doctor_lib "$(session_share_dir "$proj")" || echo "[doctor] Staging unavailable; the in-VM doctor will report a missing library." >&2
+  install_resmon_lib "$(session_share_dir "$proj")" || echo "[resmon] Staging unavailable; the ENFILE sampler will report a missing library." >&2
   vm_exec "$SESS_NAME" "$OCVM_DOCTOR_INSTALL_SH"$'\ninstall_doctor_wrapper' ||
     echo "[doctor] Wrapper installation unavailable inside the session." >&2
   if [[ "$sess_editor_enabled" == 1 ]]; then
@@ -18043,6 +18753,8 @@ attach_session() {
     vm_exec "$SESS_NAME" "$OCVM_TASKBOARD_INSTALL_SH"$'\ninstall_taskboard' ||
       echo "[taskboard] Installation unavailable; OpenCode will continue without the board." >&2
   fi
+  # ENFILE time protocol: idempotent sampler (re)start on attach.
+  resmon_start "$proj" "$SESS_NAME" "$(session_share_dir "$proj")" "${SESS_CONTROLLER:-}" || true
   if [[ "$sess_mcp_enabled" == "1" ]]; then
     trap _attach_tunnel_cleanup EXIT HUP TERM
     mcp_watch_host_ready "$SESS_NAME" "$proj" "$(session_share_dir "$proj")" \
@@ -19615,6 +20327,7 @@ start_session() {
 
   # Canonical VM-local doctor library (mode-independent; heals older sessions).
   install_doctor_lib "$sess_share" || echo "[doctor] Staging unavailable; the in-VM doctor will report a missing library." >&2
+  install_resmon_lib "$sess_share" || echo "[resmon] Staging unavailable; the ENFILE sampler will report a missing library." >&2
 
   if [[ "$SESSION_MODE" == "web" ]]; then
     resolve_session_auth "$sess_share" || return 1
@@ -19818,6 +20531,7 @@ start_session() {
   cleanup() {
     trap - EXIT HUP TERM
     stop_mcp_host_watcher || true
+    resmon_stop "$proj" || true
     echo "[cleanup] Starting cleanup... $(_ts)"
     if ! lifecycle_lock_acquire "$proj"; then
       echo "[cleanup] Could not obtain lifecycle ownership; preserving the session." >&2
@@ -20177,6 +20891,9 @@ start_session() {
   # Idempotent wrapper repair for sessions whose base predates the doctor.
   vm_exec "$sess" "$OCVM_DOCTOR_INSTALL_SH"$'\ninstall_doctor_wrapper' ||
     echo "[doctor] Wrapper installation unavailable inside the session." >&2
+  # ENFILE time protocol: one lean, bounded, cooperative host sampler for the
+  # session duration (host sample + guest-side sample through the VM transport).
+  resmon_start "$proj" "$sess" "$sess_share" "${controller_id:-}" || true
   if [[ "$effective_editor_enabled" == 1 ]]; then
     vm_exec "$sess" "$OCVM_EDITOR_INSTALL_SH"$'\ninstall_editor' ||
       echo "[editor] Installation unavailable; OpenCode will continue without the editor." >&2

@@ -39,6 +39,17 @@ fi
 pass "materialized payloads pass bash -n and shellcheck --severity=error"
 
 eval "$OCVM_DOCTOR_SH"
+[[ -n "${OCVM_RESMON_RENDER_SH:-}" ]] || fail "OCVM_RESMON_RENDER_SH payload is missing"
+[[ -n "${OCVM_RESMON_COLLECT_SH:-}" ]] || fail "OCVM_RESMON_COLLECT_SH payload is missing"
+printf '%s\n' "$OCVM_RESMON_RENDER_SH" > "$TMP/resmon-render.sh"
+printf '%s\n' "$OCVM_RESMON_COLLECT_SH" > "$TMP/resmon-collect.sh"
+bash -n "$TMP/resmon-render.sh" || fail "resmon render payload bash -n"
+bash -n "$TMP/resmon-collect.sh" || fail "resmon collect payload bash -n"
+if command -v shellcheck >/dev/null 2>&1; then
+  shellcheck --severity=error -s bash "$TMP/resmon-render.sh" || fail "resmon render shellcheck"
+  shellcheck --severity=error -s bash "$TMP/resmon-collect.sh" || fail "resmon collect shellcheck"
+fi
+eval "$OCVM_RESMON_RENDER_SH"
 eval "$OCVM_DOCTOR_INSTALL_SH"
 command -v doctor_main >/dev/null || fail "doctor_main not defined by library payload"
 command -v install_doctor_wrapper >/dev/null || fail "install_doctor_wrapper not defined"
@@ -51,7 +62,7 @@ opencode() { printf '9.9.9-test\n'; }
 install_doctor_wrapper || fail "wrapper install"
 WRAPPER="$HOME/.local/bin/doctor"
 [[ -x "$WRAPPER" && ! -L "$WRAPPER" ]] || fail "wrapper missing or not executable"
-head -n 2 "$WRAPPER" | grep -qF 'ocvm-doctor-wrapper v1' || fail "wrapper marker missing"
+head -n 2 "$WRAPPER" | grep -qF 'ocvm-doctor-wrapper v2' || fail "wrapper marker missing"
 bash -n "$WRAPPER" || fail "wrapper bash -n"
 if command -v shellcheck >/dev/null 2>&1; then
   shellcheck --severity=error -s bash "$WRAPPER" || fail "wrapper shellcheck"
@@ -59,10 +70,10 @@ fi
 before_install="$(md5 < "$WRAPPER")"
 install_doctor_wrapper || fail "wrapper reinstall"
 [[ "$before_install" == "$(md5 < "$WRAPPER")" ]] || fail "idempotent reinstall rewrote the wrapper"
-grep -v 'ocvm-doctor-wrapper v1' "$WRAPPER" > "$TMP/drifted" || true
+grep -v 'ocvm-doctor-wrapper v2' "$WRAPPER" > "$TMP/drifted" || true
 mv "$TMP/drifted" "$WRAPPER"; chmod 755 "$WRAPPER"
 install_doctor_wrapper || fail "wrapper drift reinstall"
-head -n 2 "$WRAPPER" | grep -qF 'ocvm-doctor-wrapper v1' || fail "wrapper drift not repaired"
+head -n 2 "$WRAPPER" | grep -qF 'ocvm-doctor-wrapper v2' || fail "wrapper drift not repaired"
 rm -f "$WRAPPER"
 ln -s /etc/hosts "$WRAPPER"
 if install_doctor_wrapper 2>/dev/null; then fail "symlinked wrapper was accepted"; fi
@@ -150,6 +161,13 @@ grep -qF "OCVM_SCRIPT_VERSION=$OCVM_VERSION" "$SHARE/lib/doctor.env" || fail "do
 ln -s "$TMP/shares" "$TMP/symshare"
 if install_doctor_lib "$TMP/symshare" 2>/dev/null; then fail "symlinked share accepted by staging"; fi
 pass "install_doctor_lib staging: files, bash -n, version stamp, symlink refusal"
+
+# resmon staging: guest sampler lib + the shared renderer embedded in doctor.sh
+install_resmon_lib "$SHARE" || fail "install_resmon_lib"
+[[ -f "$SHARE/lib/resmon.sh" ]] || fail "resmon lib not staged"
+bash -n "$SHARE/lib/resmon.sh" || fail "staged resmon lib bash -n"
+grep -qF 'resmon_render_history()' "$SHARE/lib/doctor.sh" || fail "shared renderer not embedded in staged doctor library"
+pass "install_resmon_lib staging + shared renderer embedded in the doctor library"
 
 # --- seams -----------------------------------------------------------------
 MOUNT_FIXTURE=""
@@ -634,6 +652,48 @@ need_out "$TMP/c21-noskill.out" "skill-binding: canonical-orchestrator=not-mount
 need_out "$TMP/c21-noskill.out" "skill-source:"
 MCP_TOOLS_JSON=""
 pass "C21d absent orchestrator skill is honest not-mounted with a source line"
+
+# --- C22 ENFILE time protocol: history render + ENFILE site + honest states --
+eval "$OCVM_RESMON_COLLECT_SH"
+HIST_DIR="$HOME/.local/state/ocvm/resmon"; mkdir -p "$HIST_DIR"
+GH="$HIST_DIR/guest.jsonl"
+{
+  printf '%s\n' '{"schema":1,"t":"2026-10-14T00:00:00Z","te":1000,"side":"host","global":{"used":4768,"max":100000},"procs":[{"pid":11,"comm":"dockerd","fds":241,"limit":524287}],"watchers":{"max_user_watches":61510,"max_user_instances":128},"sched":{"heartbeat_fresh":true,"work_state":"active","heartbeat_at":"2026-10-14T00:00:00Z"},"coverage":{"procs_scanned":341,"procs_total":341,"fd_unreadable":0,"top_scan":"full(/proc)"}}'
+  printf '%s\n' '{"schema":1,"t":"2026-10-14T00:10:00Z","te":1600,"side":"guest","global":{"used":4000,"max":100000},"procs":[{"pid":11,"comm":"dockerd","fds":300,"limit":524287}],"watchers":{"max_user_watches":61510},"coverage":{"procs_scanned":341,"procs_total":341,"fd_unreadable":0,"top_scan":"full(/proc)"}}'
+  printf '%s\n' '{"schema":1,"t":"2026-10-14T00:20:00Z","te":2200,"side":"guest","global":{"used":900,"max":100000},"procs":[{"pid":99,"comm":"sh","fds":4,"limit":null}],"watchers":{"max_user_watches":61510},"coverage":{"procs_scanned":10,"procs_total":12,"fd_unreadable":2,"top_scan":"full(/proc)"}}'
+  # a torn/older-schema line must be skipped, not fatal
+  printf '%s\n' '{"schema":9,"t":"2026-10-14T00:25:00Z","te":2300}'
+} > "$GH"
+# precise ENFILE error site in the existing adapter log (never invented time)
+printf '%s\n' '[mcp] activity-commit-failed phase=journal class=ENFILE syscall=open errno=ENFILE path=activity rss_kb=12345 at=2026-10-14T00:15:00Z pid=777' >> "$SHARE/mcp/adapter.log"
+rc="$(run_main resources "$TMP/c22.out" "$TMP/c22.err")"
+[[ "$rc" == 0 ]] || { cat "$TMP/c22.out"; fail "C22 rc=$rc expected 0"; }
+need_out "$TMP/c22.out" "guest history: present samples=3"
+need_out "$TMP/c22.out" "used=900"
+need_out "$TMP/c22.out" "peak_used=4768@2026-10-14T00:00:00Z"
+need_out "$TMP/c22.out" "comm=dockerd fds=300"
+need_out "$TMP/c22.out" "max_user_watches=61510"
+need_out "$TMP/c22.out" "NOT a per-process limit"
+need_out "$TMP/c22.out" "coverage: procs_scanned=10/12"
+need_out "$TMP/c22.out" "scheduler: heartbeat_fresh=true"
+need_out "$TMP/c22.out" "work_state=active"
+need_out "$TMP/c22.out" "ENFILE event_at=2026-10-14T00:15:00Z"
+deny_secrets "$TMP/c22.out" "$TMP/c22.err"
+pass "C22 resources: low current + historic peak, watcher/config-limit labels, ENFILE site from real log"
+
+# ENFILE line without an event time -> observed (mtime) is labelled, never invented
+rm -f "$SHARE/monitor"; mkdir -p "$SHARE/monitor"
+printf '%s\n' '[monitor] error: ENFILE lock' > "$SHARE/monitor/server.log"
+run_main resources "$TMP/c22t.out" "$TMP/c22t.err" >/dev/null || true
+need_out "$TMP/c22t.out" "monitor: ENFILE event_at=unknown(no event time in line; log observed_at="
+rm -rf "$SHARE/monitor"
+pass "C22b ENFILE without event time reports observed mtime, explicit (no invented time)"
+
+# missing history is explicit, not an error
+rm -f "$GH"
+run_main resources "$TMP/c22m.out" "$TMP/c22m.err" >/dev/null || true
+need_out "$TMP/c22m.out" "guest history: missing"
+pass "C22c missing guest history is explicit"
 
 # --- final hygiene ----------------------------------------------------------
 [[ -z "$(jobs -p)" ]] || fail "leftover background jobs at end"

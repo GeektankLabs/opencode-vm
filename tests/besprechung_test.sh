@@ -207,6 +207,12 @@ pass "standalone cache refresh failures, offline reuse, incomplete payloads and 
   apply_policy_in_vm() { :; }
   setup_host_port_forwards_in_vm() { :; }
   graphify_ensure_mcp_in_vm() { :; }
+  # ENFILE time protocol: the resume fixture must never leave a real,
+  # uncontrolled sampler loop running. Neutralize only the lifecycle START hook
+  # (resmon behavior itself is covered by resmon_test); install_resmon_lib still
+  # runs so the staging path stays exercised.
+  resmon_start() { :; }
+  resmon_stop() { :; }
   mkdir -p "$share/xdg-data/opencode"
   auth_sync_begin "$(pwd)" test-vm "$share/xdg-data/opencode/auth.json"
   guest_auth="$TMP/resume-guest-auth.json"
@@ -224,7 +230,7 @@ pass "standalone cache refresh failures, offline reuse, incomplete payloads and 
         # but that write materializes the wrapper file, never an auth seed.
         # Recognize the payload by its own marker BEFORE the broad heuristic
         # and leave the auth fixture (and every auth assertion) untouched.
-        [[ "$2" == *'ocvm-doctor-wrapper v1'* ]] || fail "doctor payload lost its wrapper marker"
+        [[ "$2" == *'ocvm-doctor-wrapper v2'* ]] || fail "doctor payload lost its wrapper marker"
         jq -e 'type == "object"' "$guest_auth" >/dev/null || fail "doctor routing corrupted the auth fixture"
         doctor_installs=$((doctor_installs + 1))
         return 0 ;;
@@ -270,5 +276,10 @@ pass "standalone cache refresh failures, offline reuse, incomplete payloads and 
   attach_session >/dev/null 2>/dev/null
   [[ "$launches" == 4 ]] || fail "not every resume reached the runtime launch"
   [[ "$doctor_installs" == 4 ]] || fail "not every reconnect installed the doctor wrapper"
+  # Cleanup proof: the resmon staging ran, but no uncontrolled sampler was left.
+  assert_file "$share/lib/resmon.sh"
+  if find "$HOME" -path '*/resmon/watch.pid' -type f 2>/dev/null | grep -q .; then
+    fail "resume fixture left a running resmon sampler"
+  fi
 )
 pass "actual reconnect installs, refreshes and removes owned files while preserving edits"

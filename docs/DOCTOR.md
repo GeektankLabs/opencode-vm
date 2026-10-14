@@ -24,6 +24,7 @@ doctor              # full report (same as: doctor show)
 doctor tunnel       # MCP tunnel focus (reuses the canonical guest tunnel status)
 doctor mcp          # OpenCode backend + incoming MCP adapter focus
 doctor services     # guest services/units/PIDs/listeners focus
+doctor resources    # ENFILE time protocol: guest file-table/FD/watcher history
 doctor help         # usage text
 ```
 
@@ -31,6 +32,7 @@ The host-side CLI stays as it is:
 
 ```bash
 opencode-vm doctor [show]   # host state: sync/auth/model/db, skills, MCPs, connector
+                            # plus a "Resources (ENFILE time protocol)" section
 ```
 
 ## What the report covers
@@ -66,6 +68,54 @@ opencode-vm doctor [show]   # host state: sync/auth/model/db, skills, MCPs, conn
 Every report ends with `PASS/FAIL/UNVERIFIED` counts, the used time/line
 budget and the standing notice that these are **local checks only — not a
 ChatGPT/E2E acceptance**.
+
+## ENFILE time protocol (`doctor resources`)
+
+Because `ENFILE` incidents are short-lived, the doctor also reads a small,
+bounded **resource history** instead of only the current instant:
+
+- One lean host sampler runs for the session duration (started on start/attach,
+  stopped cooperatively on cleanup via a sentinel — never a signal, no new
+  service or monitoring framework). Each tick it records the *host* sample
+  (global file table, host config limits, and — on Linux, or on macOS above a
+  cost threshold — the top FD consumers) and asks the VM for one *guest*
+  sample through the existing VM transport. Host and guest keep **separate
+  histories and identities** on a **shared UTC time base**; there is no
+  cross-side merge.
+- At most **one guest probe is in flight for the whole project**, across all
+  samplers and VM generations: a host-project-persistent probe record is bound
+  to the actual transport PID through its start marker, so a hung transport
+  (which is never signalled) cannot accumulate orphans over repeated
+  start/stop cycles. While a probe record is live (or its ownership cannot be
+  verified) no new probe starts; a dead/reused record is reclaimed. The host
+  sample's `coverage.guest_probe` and the report expose the probe state
+  (`none`/`in_flight`/`stale`/`unknown`/`invalid`) — **a missing or unknown
+  guest is never reported as healthy**, while host measurement continues.
+- Guest history is **VM-local** (`~/.local/state/ocvm/resmon/guest.jsonl`,
+  ext4, outside the mount suspected of `ENFILE`); host history is host-local
+  under the project state dir. Both are capped (per line and per file, one
+  rotation) and mode `0600` in a `0700` dir. A sample is only ever written as a
+  complete, schema-valid object: an oversize sample is structurally shrunk
+  (excess processes dropped, schema preserved) or, if it still cannot fit,
+  dropped entirely — **never raw-truncated**. On macOS only **numeric** file
+  descriptors are counted; `lsof` mapping entries (`cwd`/`txt`/`mem`) are not
+  FDs and are ignored.
+- The report separates **global / process / watcher** limits and shows the
+  current value, the **evidenced peak with its time and causer**, growth over
+  the window, and proximity to the limit. A low current value **never** clears
+  a historic peak. `max_user_watches` is reported as a **user** limit, not a
+  process limit; shell/`launchctl` values are labelled as config values, never
+  as a process's own limit. Missing / unreadable / stale / partial history is
+  explicit, and the read window is stated (older peaks are not "excluded").
+- The precise `ENFILE` **error site** is read from the existing
+  `mcp/adapter.log` and `monitor/server.log`: the event time comes from the log
+  line when present, otherwise the observation (log mtime) is labelled as such
+  — no invented time.
+- Read-only: the sampler reads `/proc`, `sysctl` and the existing logs; it never
+  changes limits, signals or restarts anything, and it reads **no secrets, no
+  environment and no full command lines**. Reading other-uid process FD counts
+  would need root and is deliberately **not** enabled — that is reported as an
+  honest coverage/permission gap, not silently escalated.
 
 ## Guarantees and limits
 
