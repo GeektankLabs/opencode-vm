@@ -34,7 +34,7 @@ OPENLIVE_PREVIOUS_COMMAND="$OPENLIVE_DIR/previous-command"
 OPENLIVE_AUTH_MARKER="__opencode_vm_openlive__"
 OPENLIVE_LOCK_PATH=""
 OPENLIVE_ADAPTER_VERSION="0.1.8"
-OPENLIVE_ADAPTER_TAG="v0.7.51"
+OPENLIVE_ADAPTER_TAG="v0.7.52"
 OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.8.tar"
 OPENLIVE_ADAPTER_SHA256="74b046b468f853660782d4c78c6e4859fddbfa4a54b167c5d185035dc9102f40"
 OPENLIVE_ACP_SDK_VERSION="1.2.1"
@@ -45,14 +45,14 @@ OPENLIVE_MANAGER_PROMPT="You manage an OpenLive voice call. The voice_sessions t
 MCP_CONNECTOR_DIR="$SHARE_ROOT/mcp-connector"
 MCP_ADAPTER_CACHE_ROOT="$MCP_CONNECTOR_DIR/adapters"
 MCP_ADAPTER_VERSION="0.1.54"
-MCP_ADAPTER_TAG="v0.7.51"
+MCP_ADAPTER_TAG="v0.7.52"
 MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.54.tar"
 MCP_ADAPTER_SHA256="ca65208366f399e4e3d5083249766e0c78ddeec8e1843b531e319c9d1ac481be"
 MCP_SDK_VERSION="1.30.1"
 MCP_OPENCODE_SDK_VERSION="1.18.21"
 MCP_TESTED_PROTOCOL_VERSION="2025-11-25"
 MCP_TUNNEL_DIR="$SHARE_ROOT/mcp-tunnel/openai"
-HUB_ASSET_TAG="v0.7.51"
+HUB_ASSET_TAG="v0.7.52"
 HUB_ASSET_FILENAME="opencode-vm-hub-1.tar"
 HUB_ASSET_SHA256="58a3f875b0da43e1ea4d1717c146543d47ce2d80d4cfc0bdb812e27c9723f04b"
 
@@ -332,7 +332,7 @@ TASKBOARD_ARM64_SHA256="3749fb985f544fdb6788ba1dff69761e599ff82b3fe86d39ca54307c
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.7.51"
+OCVM_VERSION="0.7.52"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -14284,6 +14284,23 @@ _pid_has_marker() {
   grep -qsF "$2" "/proc/$1/cmdline"
 }
 
+# Find the PID owning a LISTEN socket on a port (same user only).
+# Used by stop_mcp_adapter to recover ownership when pidfiles are missing
+# or stale (legacy pipeline start or corrupted state). The caller must verify
+# the full identity (generation marker + adapter path + starttime) before
+# signaling; this helper only locates the socket owner and checks the UID.
+_mcp_socket_owner() {
+  local port="$1" pid inode hex_port
+  [ -n "$port" ] || return 1
+  hex_port="$(printf '%04X' "$port")"
+  inode="$(awk -v hp="$hex_port" '$2 ~ ":"hp"$" && $4 == "0A" {print $10; exit}' /proc/net/tcp 2>/dev/null)"
+  [ -n "$inode" ] || return 1
+  pid="$(find /proc/[0-9]*/fd -lname "socket:\[$inode\]" 2>/dev/null | head -1 | sed 's|/proc/||;s|/fd/.*||')"
+  [ -n "$pid" ] || return 1
+  [ "$(ps -o uid= -p "$pid" 2>/dev/null | tr -d ' ')" = "$(id -u)" ] || return 1
+  printf '%s' "$pid"
+}
+
 # TLS terminates in the proxy so the browser origin is a secure context: the
 # opencode web UI hashes attachments through crypto.subtle, which browsers
 # withhold from insecure origins, so over a LAN IP attaching files fails
@@ -15657,7 +15674,7 @@ stop_mcp_adapter() (
   exec 7>/tmp/ocvm-mcp-tunnel.lock
   flock -w 180 7 || return 1
   stop_mcp_tunnel || return 1
-  local pid pidf marker item waited failed=0 generation runtime="$SESS_SHARE/mcp/runtime.json" port="${OC_MCP_PORT:-}"
+  local pid pidf marker item waited failed=0 recovery_ok=0 generation runtime="$SESS_SHARE/mcp/runtime.json" port="${OC_MCP_PORT:-}"
   generation="${OC_MCP_GENERATION:-}"
   if [ -f "$runtime" ]; then
     [ -n "$generation" ] || generation="$(jq -r '.generation // empty' "$runtime" 2>/dev/null || true)"
@@ -15694,6 +15711,39 @@ stop_mcp_adapter() (
       rm -f "$pidf"
     fi
   done
+  # Socket-owner recovery: when pidfiles are missing or stale (legacy pipeline
+  # start where run.pid pointed at a wrapper subshell, or corrupted state),
+  # identify the own adapter via the listening socket owner and verify full
+  # identity (generation marker + adapter path + UID + starttime) before
+  # signaling. Foreign or ambiguous processes fail closed. No PGID/port-only kill.
+  if [ -n "$port" ] && [ -n "$generation" ] && ss -ltn "sport = :$port" 2>/dev/null | grep -q LISTEN; then
+    local sock_pid sock_start
+    sock_pid="$(_mcp_socket_owner "$port" 2>/dev/null || true)"
+    if [ -n "$sock_pid" ] && { _pid_has_marker "$sock_pid" "ocvm-mcp-child-$generation" || _pid_has_marker "$sock_pid" "ocvm-mcp-supervisor-$generation"; } && \
+       grep -qsF "$SESS_SHARE/mcp/adapter" "/proc/$sock_pid/cmdline"; then
+      sock_start="$(ps -o lstart= -p "$sock_pid" 2>/dev/null | tr -d ' ')"
+      if [ -n "$sock_start" ]; then
+        kill "$sock_pid" 2>/dev/null || true
+        waited=0
+        while kill -0 "$sock_pid" 2>/dev/null && [ "$(ps -o lstart= -p "$sock_pid" 2>/dev/null | tr -d ' ')" = "$sock_start" ] && [ "$waited" -lt 50 ]; do
+          sleep 0.1
+          waited=$(( waited + 1 ))
+        done
+        if kill -0 "$sock_pid" 2>/dev/null && [ "$(ps -o lstart= -p "$sock_pid" 2>/dev/null | tr -d ' ')" = "$sock_start" ]; then
+          kill -KILL "$sock_pid" 2>/dev/null || true
+          sleep 0.2
+        fi
+        if ! kill -0 "$sock_pid" 2>/dev/null; then
+          recovery_ok=1
+        fi
+      fi
+    fi
+  fi
+  # If socket-owner recovery successfully stopped the real adapter, clear
+  # pidfile-mismatch failures (stale/corrupted pidfiles were handled).
+  if [ "$recovery_ok" = "1" ]; then
+    failed=0
+  fi
   if [ -n "$port" ] && ss -ltn "sport = :$port" 2>/dev/null | grep -q LISTEN; then
     echo "[mcp] Listener on port $port remains after adapter shutdown." >&2
     failed=1

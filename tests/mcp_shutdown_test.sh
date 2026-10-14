@@ -25,10 +25,10 @@ fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 TMP="$(mktemp -d)"
-NODE_PID=""; FOREIGN_PID=""; SLEEP_PID=""
+NODE_PID=""; FOREIGN_PID=""; SLEEP_PID=""; WRONG_PID=""; FOREIGN_GEN_PID=""
 cleanup() {
   set +e
-  for v in "$NODE_PID" "$FOREIGN_PID" "$SLEEP_PID"; do
+  for v in "$NODE_PID" "$FOREIGN_PID" "$SLEEP_PID" "$WRONG_PID" "$FOREIGN_GEN_PID"; do
     [ -n "$v" ] && kill -KILL "$v" 2>/dev/null
   done
   [ -f /tmp/ocvm-mcp.sup.pid ] && kill -KILL "$(cat /tmp/ocvm-mcp.sup.pid)" 2>/dev/null
@@ -69,7 +69,7 @@ printf '%s\n' \
   '        c.close()' \
   '    except Exception:' \
   '        time.sleep(0.2)' > "$FAKENODE"
-printf '%s\n' '#!/usr/bin/env bash' 'exec python3 "$FAKENODE" "${2:-}"' > "$BIN/node"
+printf '%s\n' '#!/usr/bin/env bash' 'exec python3 "$FAKENODE" "${2:-}" "${1:-}"' > "$BIN/node"
 chmod +x "$BIN/aa-exec" "$BIN/node"
 export PATH="$BIN:$PATH" FAKENODE
 
@@ -158,6 +158,69 @@ check "stop refuses an unowned pidfile" "[ $rc -ne 0 ]"
 check "unmarked PID survives" "kill -0 '$SLEEP_PID' 2>/dev/null"
 kill -KILL "$SLEEP_PID" 2>/dev/null || true; wait "$SLEEP_PID" 2>/dev/null || true; SLEEP_PID=""
 rm -f /tmp/ocvm-mcp.run.pid
+
+# --- 7) missing pidfiles: socket-owner recovery stops the own listener ----
+PORT="$(free_port)"; export MCP_TEST_PORT="$PORT"; OC_MCP_PORT="$PORT"; export OC_MCP_PORT
+write_runtime "$PORT"
+rm -f /tmp/ocvm-mcp.sup.pid /tmp/ocvm-mcp.run.pid
+start_mcp_adapter
+wait_node || true
+for _ in $(seq 1 60); do listening "$PORT" && break; sleep 0.1; done
+check "missing-pid: listener is bound" "listening '$PORT'"
+rm -f /tmp/ocvm-mcp.sup.pid /tmp/ocvm-mcp.run.pid
+set +e; stop_mcp_adapter; rc=$?; set -e
+check "missing-pid: stop succeeds via socket-owner recovery" "[ $rc -eq 0 ]"
+check "missing-pid: listener port is released" "! listening '$PORT'"
+check "missing-pid: node is gone" "! kill -0 '$NODE_PID' 2>/dev/null"
+
+# --- 8) legacy pipeline: run.pid is stale, node orphaned, recovery works --
+PORT="$(free_port)"; export MCP_TEST_PORT="$PORT"; OC_MCP_PORT="$PORT"; export OC_MCP_PORT
+write_runtime "$PORT"
+rm -f /tmp/ocvm-mcp.sup.pid /tmp/ocvm-mcp.run.pid
+start_mcp_adapter
+wait_node || true
+for _ in $(seq 1 60); do listening "$PORT" && break; sleep 0.1; done
+check "legacy: listener is bound" "listening '$PORT'"
+sleep 300 & WRONG_PID=$!
+printf '%s\n' "$WRONG_PID" > /tmp/ocvm-mcp.run.pid
+rm -f /tmp/ocvm-mcp.sup.pid
+set +e; stop_mcp_adapter; rc=$?; set -e
+check "legacy: stop succeeds via socket-owner recovery" "[ $rc -eq 0 ]"
+check "legacy: listener port is released" "! listening '$PORT'"
+check "legacy: node is gone" "! kill -0 '$NODE_PID' 2>/dev/null"
+check "legacy: wrong PID survives (unmarked)" "kill -0 '$WRONG_PID' 2>/dev/null"
+kill -KILL "$WRONG_PID" 2>/dev/null || true; wait "$WRONG_PID" 2>/dev/null || true
+
+# --- 9) foreign generation: listener with different marker is not killed --
+PORT="$(free_port)"
+python3 -c 'import socket,sys,time
+s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+s.bind(("127.0.0.1",int(sys.argv[1]))); s.listen(1)
+time.sleep(120)' "$PORT" "$SESS_SHARE/mcp/adapter" ocvm-mcp-child-othergen &
+FOREIGN_GEN_PID=$!
+for _ in $(seq 1 50); do listening "$PORT" && break; sleep 0.1; done
+OC_MCP_PORT="$PORT"; export OC_MCP_PORT; write_runtime "$PORT"
+rm -f /tmp/ocvm-mcp.sup.pid /tmp/ocvm-mcp.run.pid
+set +e; stop_mcp_adapter; rc=$?; set -e
+check "foreign-gen: stop fails closed" "[ $rc -ne 0 ]"
+check "foreign-gen: listener survives" "kill -0 '$FOREIGN_GEN_PID' 2>/dev/null && listening '$PORT'"
+kill -KILL "$FOREIGN_GEN_PID" 2>/dev/null || true; wait "$FOREIGN_GEN_PID" 2>/dev/null || true
+
+# --- 10) stale pidfile: dead PID is cleaned up, real listener stopped ------
+PORT="$(free_port)"; export MCP_TEST_PORT="$PORT"; OC_MCP_PORT="$PORT"; export OC_MCP_PORT
+write_runtime "$PORT"
+rm -f /tmp/ocvm-mcp.sup.pid /tmp/ocvm-mcp.run.pid
+start_mcp_adapter
+wait_node || true
+for _ in $(seq 1 60); do listening "$PORT" && break; sleep 0.1; done
+check "stale-pid: listener is bound" "listening '$PORT'"
+printf '%s\n' '999999' > /tmp/ocvm-mcp.run.pid
+rm -f /tmp/ocvm-mcp.sup.pid
+set +e; stop_mcp_adapter; rc=$?; set -e
+check "stale-pid: stop succeeds" "[ $rc -eq 0 ]"
+check "stale-pid: listener port is released" "! listening '$PORT'"
+check "stale-pid: node is gone" "! kill -0 '$NODE_PID' 2>/dev/null"
+check "stale-pid: stale pidfile removed" "[ ! -e /tmp/ocvm-mcp.run.pid ]"
 
 echo
 if [ "$fails" -eq 0 ]; then echo "PASS mcp shutdown ownership"; else echo "FAIL ($fails)"; exit 1; fi
