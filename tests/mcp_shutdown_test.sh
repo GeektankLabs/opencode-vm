@@ -222,5 +222,26 @@ check "stale-pid: listener port is released" "! listening '$PORT'"
 check "stale-pid: node is gone" "! kill -0 '$NODE_PID' 2>/dev/null"
 check "stale-pid: stale pidfile removed" "[ ! -e /tmp/ocvm-mcp.run.pid ]"
 
+# --- 11) F1: live wrong PID in run.pid cleaned up after recovery; 2nd stop -
+PORT="$(free_port)"; export MCP_TEST_PORT="$PORT"; OC_MCP_PORT="$PORT"; export OC_MCP_PORT
+write_runtime "$PORT"
+rm -f /tmp/ocvm-mcp.sup.pid /tmp/ocvm-mcp.run.pid
+start_mcp_adapter
+wait_node || true
+for _ in $(seq 1 60); do listening "$PORT" && break; sleep 0.1; done
+check "f1: listener is bound" "listening '$PORT'"
+sleep 300 & WRONG_PID=$!
+printf '%s\n' "$WRONG_PID" > /tmp/ocvm-mcp.run.pid
+rm -f /tmp/ocvm-mcp.sup.pid
+set +e; stop_mcp_adapter; rc=$?; set -e
+check "f1: first stop succeeds" "[ $rc -eq 0 ]"
+check "f1: own adapter gone" "! kill -0 '$NODE_PID' 2>/dev/null"
+check "f1: port released" "! listening '$PORT'"
+check "f1: foreign PID survives" "kill -0 '$WRONG_PID' 2>/dev/null"
+check "f1: stale wrong run.pid removed after recovery" "[ ! -e /tmp/ocvm-mcp.run.pid ]"
+set +e; stop_mcp_adapter; rc=$?; set -e
+check "f1: second stop is idempotent success" "[ $rc -eq 0 ]"
+kill -KILL "$WRONG_PID" 2>/dev/null || true; wait "$WRONG_PID" 2>/dev/null || true; WRONG_PID=""
+
 echo
 if [ "$fails" -eq 0 ]; then echo "PASS mcp shutdown ownership"; else echo "FAIL ($fails)"; exit 1; fi

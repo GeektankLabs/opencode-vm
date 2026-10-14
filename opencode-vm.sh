@@ -34,7 +34,7 @@ OPENLIVE_PREVIOUS_COMMAND="$OPENLIVE_DIR/previous-command"
 OPENLIVE_AUTH_MARKER="__opencode_vm_openlive__"
 OPENLIVE_LOCK_PATH=""
 OPENLIVE_ADAPTER_VERSION="0.1.8"
-OPENLIVE_ADAPTER_TAG="v0.7.53"
+OPENLIVE_ADAPTER_TAG="v0.7.54"
 OPENLIVE_ADAPTER_FILENAME="opencode-vm-openlive-adapter-0.1.8.tar"
 OPENLIVE_ADAPTER_SHA256="74b046b468f853660782d4c78c6e4859fddbfa4a54b167c5d185035dc9102f40"
 OPENLIVE_ACP_SDK_VERSION="1.2.1"
@@ -45,14 +45,14 @@ OPENLIVE_MANAGER_PROMPT="You manage an OpenLive voice call. The voice_sessions t
 MCP_CONNECTOR_DIR="$SHARE_ROOT/mcp-connector"
 MCP_ADAPTER_CACHE_ROOT="$MCP_CONNECTOR_DIR/adapters"
 MCP_ADAPTER_VERSION="0.1.54"
-MCP_ADAPTER_TAG="v0.7.53"
+MCP_ADAPTER_TAG="v0.7.54"
 MCP_ADAPTER_FILENAME="opencode-vm-mcp-adapter-0.1.54.tar"
 MCP_ADAPTER_SHA256="ca65208366f399e4e3d5083249766e0c78ddeec8e1843b531e319c9d1ac481be"
 MCP_SDK_VERSION="1.30.1"
 MCP_OPENCODE_SDK_VERSION="1.18.21"
 MCP_TESTED_PROTOCOL_VERSION="2025-11-25"
 MCP_TUNNEL_DIR="$SHARE_ROOT/mcp-tunnel/openai"
-HUB_ASSET_TAG="v0.7.53"
+HUB_ASSET_TAG="v0.7.54"
 HUB_ASSET_FILENAME="opencode-vm-hub-1.tar"
 HUB_ASSET_SHA256="58a3f875b0da43e1ea4d1717c146543d47ce2d80d4cfc0bdb812e27c9723f04b"
 
@@ -332,7 +332,7 @@ TASKBOARD_ARM64_SHA256="3749fb985f544fdb6788ba1dff69761e599ff82b3fe86d39ca54307c
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.7.53"
+OCVM_VERSION="0.7.54"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -15700,7 +15700,7 @@ stop_mcp_adapter() (
   exec 7>/tmp/ocvm-mcp-tunnel.lock
   flock -w 180 7 || return 1
   stop_mcp_tunnel || return 1
-  local pid pidf marker item waited failed=0 recovery_ok=0 generation runtime="$SESS_SHARE/mcp/runtime.json" port="${OC_MCP_PORT:-}"
+  local pid pidf marker item waited failed=0 recovery_ok=0 stale_sup_pid="" stale_run_pid="" generation runtime="$SESS_SHARE/mcp/runtime.json" port="${OC_MCP_PORT:-}"
   generation="${OC_MCP_GENERATION:-}"
   if [ -f "$runtime" ]; then
     [ -n "$generation" ] || generation="$(jq -r '.generation // empty' "$runtime" 2>/dev/null || true)"
@@ -15733,6 +15733,7 @@ stop_mcp_adapter() (
     elif [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
       echo "[mcp] PID file ownership mismatch; refusing to signal process $pid." >&2
       failed=1
+      if [ "$pidf" = /tmp/ocvm-mcp.sup.pid ]; then stale_sup_pid="$pid"; else stale_run_pid="$pid"; fi
     else
       rm -f "$pidf"
     fi
@@ -15769,6 +15770,16 @@ stop_mcp_adapter() (
   # pidfile-mismatch failures (stale/corrupted pidfiles were handled).
   if [ "$recovery_ok" = "1" ]; then
     failed=0
+    # F1 (task_b3f49fc7): after a proven successful recovery, remove the
+    # task-owned pidfiles that named a live, non-owned PID (stale/wrong), but
+    # only while their content is unchanged — a new adapter start rewrites them
+    # with its own marker PID, so a freshly written file is never removed.
+    if [ -n "$stale_sup_pid" ] && [ -f /tmp/ocvm-mcp.sup.pid ] && [ "$(cat /tmp/ocvm-mcp.sup.pid 2>/dev/null || true)" = "$stale_sup_pid" ]; then
+      rm -f /tmp/ocvm-mcp.sup.pid
+    fi
+    if [ -n "$stale_run_pid" ] && [ -f /tmp/ocvm-mcp.run.pid ] && [ "$(cat /tmp/ocvm-mcp.run.pid 2>/dev/null || true)" = "$stale_run_pid" ]; then
+      rm -f /tmp/ocvm-mcp.run.pid
+    fi
   fi
   if [ -n "$port" ] && ss -ltn "sport = :$port" 2>/dev/null | grep -q LISTEN; then
     echo "[mcp] Listener on port $port remains after adapter shutdown." >&2

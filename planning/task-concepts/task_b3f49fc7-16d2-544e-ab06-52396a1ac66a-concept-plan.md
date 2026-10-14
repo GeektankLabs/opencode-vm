@@ -114,3 +114,30 @@ Der sich in diesem Branch befindliche Vorgänger-Compact
 erhalten und wird nur um die belegte Zahlkorrektur `20 Checks → 18 Checks`
 sowie einen Provenienz-Hinweis ergänzt. Er ist nicht der Task-ID-Benennung
 zugeordnet und wird nicht gelöscht oder überschrieben.
+
+## 8. Phase 3 — F1 Pidfile-Cleanup (dieser Turn, isolierter Kandidat)
+
+Unabhängige QC (ses_ec9358393ffeJvFrWodNF5TqnC; Original msg_13a584d9a001xCbxs9WN5avf2c,
+lokaler QC_PASS auf `88db8a1`) fand genau eine echte Restlücke F1 (LOW): bei
+Ownership-Mismatch blieb eine lebende falsche `run.pid` erhalten; der
+erfolgreiche `recovery_ok`-Pfad setzte nur `failed=0`. Der zweite Stop scheiterte
+dann spurios.
+
+**Kleinste Korrektur** (`stop_mcp_adapter`, `opencode-vm.sh`):
+- Der Mismatch-Zweig merkt sich PIDdatei + PID (`stale_sup_pid`/`stale_run_pid`).
+- Nach nachgewiesenem `recovery_ok` werden nur die taskeigenen
+  `/tmp/ocvm-mcp.{sup,run}.pid` entfernt — und nur, solange ihr Inhalt unverändert
+  dem gemerkten (fremden) PID entspricht, damit ein neuer Adapterstart (eigener
+  Marker-PID) nie eine frisch geschriebene Datei verliert.
+- Keine Änderung an Prozessidentitäts-/UID-/Startzeit-/Port-/Residualprüfungen,
+  kein PGID-/Portblindkill, `/proc`-Scanverfahren unverändert.
+
+**Regression** (`tests/mcp_shutdown_test.sh`, Sektion 11): lebende falsche
+`run.pid` → erster Stop rc=0, eigener Adapter tot/Port frei, fremde PID lebend,
+stale `run.pid` entfernt, zweiter Stop idempotent rc=0. Gesamtsuite **40 Checks
+PASS**; Negativkontrolle Basis `88db8a1` **FAIL (2)** (genau die zwei F1-Checks).
+
+**Basis/Pin:** `88db8a101f38580379198873fe4dd0226d7e98dc` (OCVM 0.7.53) →
+Kandidat OCVM 0.7.54 (Tags v0.7.54); MCP-Adapter 0.1.54 unverändert.
+Branch/Worktree `task/b3f49fc7-f1-pidfile-cleanup`. Keine Main-Integration in
+diesem Turn; erneute unabhängige QC und Main-Integration koordiniert der Operator.
