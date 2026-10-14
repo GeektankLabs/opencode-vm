@@ -111,6 +111,42 @@ class WorktreeCleanupTest(unittest.TestCase):
         self.assertTrue(real.exists())
         self.assertTrue(outside.exists())
 
+    def test_guest_native_path_detection(self):
+        # Extract ocvm_is_guest_native_path from the production script.
+        fn = "ocvm_is_guest_native_path() {" + TEXT.split(
+            "ocvm_is_guest_native_path() {", 1)[1].split("\nocvm_worktree_root() {", 1)[0]
+        script = "set -euo pipefail\n" + fn + "\n"
+        # A real directory on the local filesystem should be guest-native
+        # (ext4, tmpfs …) on Linux.  We only assert the function runs and
+        # returns a deterministic boolean for an existing path.
+        result = subprocess.run(
+            ["bash", "-c", script + '\nocvm_is_guest_native_path "$1" && echo yes || echo no',
+             "fixture", str(self.repo)],
+            capture_output=True, text=True, timeout=10)
+        self.assertIn(result.stdout.strip(), ("yes", "no"))
+        # A missing path must return non-zero (refuse to validate).
+        result2 = subprocess.run(
+            ["bash", "-c", script + '\nocvm_is_guest_native_path /nonexistent-path-ocvm-test && echo yes || echo no',
+             "fixture"],
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(result2.stdout.strip(), "no")
+
+    def test_stale_guest_registration_is_pruned_when_checkout_path_vanished(self):
+        outside = self.worktree("task_guest_stale", outside=True)
+        # Simulate guest-VM replacement: checkout directory disappears.
+        shutil.rmtree(outside)
+        self.assertFalse(outside.exists())
+        output = self.cleanup()
+        self.assertIn("Pruned stale guest registration: task_guest_stale", output)
+        self.assertNotIn(str(outside), self.git("worktree", "list", "--porcelain"))
+
+    def test_live_guest_worktree_outside_base_is_left_alone(self):
+        outside = self.worktree("task_guest_live", outside=True)
+        output = self.cleanup()
+        self.assertNotIn("Pruned stale guest registration", output)
+        self.assertTrue(outside.exists())
+        self.assertIn(str(outside), self.git("worktree", "list", "--porcelain"))
+
     def test_main_uncommitted_and_unregistered_work_survive_the_disposal_boundary(self):
         victim = self.worktree("task_disposable")
         (self.repo / "source.txt").write_text("Main pending changes\n")

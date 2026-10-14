@@ -2,13 +2,33 @@
 
 ## Where they live
 
-Task checkouts are local directories inside the host's project checkout:
+Task checkouts can live in two places:
+
+**Legacy host-share location** (current default for existing sessions):
 
 ```text
 <project>/.opencode-vm/worktrees/<task-name>/
 ```
 
-For this repository the location is
+**Guest-native location** (recommended for new worktrees):
+
+```text
+<guest-worktree-root>/<proj-hash>/<task-name>/
+```
+
+The guest root defaults to `/home/lima.guest/.opencode-vm/worktrees` inside
+the VM and is configurable via `OCVM_WORKTREE_ROOT`. Use
+`ocvm_worktree_root <project-dir>` to resolve it; the function validates that
+the base is on a guest-native filesystem (ext4) and refuses to fall back
+silently to a host path. Use `ocvm_worktree_path <project-dir> <task-id>` for
+the full checkout path.
+
+Guest-native worktrees keep all source, dependency, build and scratch data on
+the guest disk, offloading the virtiofs share. Git common directory, refs and
+per-worktree metadata (`.git/worktrees/<name>/`) remain on the host — this is
+deliberate; see "Git metadata" below.
+
+For this repository the legacy location is
 `/Users/admin/Documents/github/opencode-vm/.opencode-vm/worktrees/`.
 `.opencode-vm/` is Git-ignored, so these checkout directories are not uploaded
 to GitHub. Their commits/branches are Git history; pushing a branch is separate
@@ -18,6 +38,22 @@ but have separate source files and often separate dependency/build directories.
 `.opencode/tasks/` contains canonical task contexts, not worktrees.
 Other `.opencode-vm` directories (Taskboard, Monitor, MCP, model policy) are
 project state and are not part of worktree cleanup.
+
+## Git metadata
+
+Per-worktree private metadata (`HEAD`, `index`, `locks`, `logs`) lives in
+`$GIT_COMMON_DIR/worktrees/<name>/` on the host. Git 2.43.0 does **not**
+support `git worktree add --separate-git-dir`; metadata cannot be relocated
+to the guest disk through a supported mechanism. Do not manually move
+`.git/worktrees/` entries — it breaks `git worktree repair` and `prune`.
+
+## Mount resolution
+
+To verify a path is on guest-native disk (not a virtiofs share):
+
+```bash
+stat -f -c %T /path/to/check   # Linux: ext2/ext3 = guest, fuseblk = virtiofs
+```
 
 ## Automatic cleanup on genuinely fresh session starts
 
@@ -49,6 +85,11 @@ selected registered task checkouts is preserved. Even unregistered sibling
 directories under the worktrees folder are not swept. Branches contain commits,
 not uncommitted working-copy data. This cleanup never uses `git clean`, `reset`,
 stash deletion or branch deletion to erase those other working states.
+
+Guest-native worktree registrations (checkout paths outside the project root)
+whose directories no longer exist — typically because the guest VM was
+replaced — are pruned: their `$GIT_COMMON_DIR/worktrees/<name>/` admin
+directory is removed. Live guest worktrees (path still present) are left alone.
 
 The integrator must make a cleanup decision at each integration handback. It
 should remove a completed disposable source checkout after verified integration

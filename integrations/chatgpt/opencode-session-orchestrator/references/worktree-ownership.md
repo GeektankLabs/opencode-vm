@@ -36,13 +36,22 @@ git worktree list --porcelain
 
 Resolve paths physically. Record the initial `HEAD` as immutable **base HEAD** and separately record the current `HEAD` after work. Identify modified, staged, untracked and ignored output relevant to the task. Do not stage, clean, stash, reset, overwrite or commit existing user/other-task changes. Stage explicit task-owned paths; inspect the staged diff before each commit.
 
-For opencode-vm, `.opencode-vm/` is already ignored. Prefer the persistent, project-mounted location:
+For opencode-vm, `.opencode-vm/` is already ignored. Prefer the **guest-native**
+location when available (offloads the virtiofs share):
+
+```text
+<gast-root>/<proj-hash>/<full-task_id>
+```
+
+Resolve the root with `ocvm_worktree_root <project-dir>` (validates guest-native
+filesystem, refuses silent host fallback) or use the legacy project-mounted
+location:
 
 ```text
 <project-root>/.opencode-vm/worktrees/<full-task_id>
 ```
 
-Check that the path is absent or demonstrably belongs to this exact task before creating/reusing it; confirm Git reports it as an active worktree and that its contents/common Git directory remain reachable from the host after the VM ends. `/tmp` is disposable, not a Morning-Handoff store, unless an independently verified snapshot/transfer is part of the authorized task. For other repositories, discover a persistent mounted path and a suitable ignore rule; never create repository state outside the authorized project just because this example exists.
+Check that the path is absent or demonstrably belongs to this exact task before creating/reusing it; confirm Git reports it as an active worktree and that its contents/common Git directory remain reachable from the host after the VM ends. Git common directory and per-worktree metadata remain on the host even for guest-native checkouts. `/tmp` is disposable, not a Morning-Handoff store, unless an independently verified snapshot/transfer is part of the authorized task. For other repositories, discover a persistent mounted path and a suitable ignore rule; never create repository state outside the authorized project just because this example exists.
 
 Being ignored only prevents accidental staging by the parent checkout; it does not prove a host mount or persistence. Verify ignore behavior from the parent and durability of the worktree **and** common Git directory. If a recorded worktree is missing, keep its old base/commit/dirty-state evidence, locate preserved changes and reconcile before any reconstruction. Do not silently recreate it from the latest main HEAD.
 

@@ -337,6 +337,13 @@ OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
 
+# Guest-native worktree root.  New task worktrees that should survive
+# host-share load (dependencies, builds, scratch) go here by default.
+# Override with OCVM_WORKTREE_ROOT to use a different guest path.
+# The root is validated as guest-native before use; there is NO silent
+# host fallback — an invalid root is a clear error.
+OCVM_GUEST_WORKTREE_BASE="${OCVM_GUEST_WORKTREE_BASE:-/home/lima.guest/.opencode-vm/worktrees}"
+
 # ENFILE time protocol (resmon): lean, bounded resource time series with a
 # shared UTC time base. Host and guest keep separate histories/identities; no
 # cross-side merge. Strictly read-only against the system: nothing here changes
@@ -19997,6 +20004,59 @@ apply_openai_header_timeout_default() {
 # A fresh VM is the operator-authorized disposal boundary for task working copies.
 # Discard uncommitted/ignored work, but retain commits and all existing branches.
 # Only registered project-local task paths are in scope; never Main or VM state.
+
+# Return 0 when the given path is on a guest-native filesystem (ext4, tmpfs …)
+# as opposed to a host-mounted virtiofs share (fuseblk).  On a host (macOS)
+# where no guest filesystem is accessible the function returns 1, which is
+# correct: the host has no guest-native path.
+ocvm_is_guest_native_path() {
+  local path="$1" fstype
+  [[ -n "$path" ]] || return 1
+  fstype="$(stat -f -c %T "$path" 2>/dev/null)" || return 1
+  case "$fstype" in
+    fuseblk|fuse.*) return 1 ;;   # virtiofs / host share
+    *) return 0 ;;                # ext4, tmpfs, overlay …
+  esac
+}
+
+# Resolve the guest-native worktree root for a project directory.
+# Layout:  <base>/<proj-hash>/<task-id>
+#   base       – OCVM_WORKTREE_ROOT or OCVM_GUEST_WORKTREE_BASE
+#   proj-hash  – same hash that names project-state and session-share dirs
+# The base must be guest-native; otherwise the function fails clearly instead
+# of silently returning a host path.  Prints the resolved root on stdout.
+ocvm_worktree_root() {
+  local project="$1" base phash
+  [[ -n "$project" ]] || { echo "ocvm_worktree_root: project required" >&2; return 1; }
+  base="${OCVM_WORKTREE_ROOT:-$OCVM_GUEST_WORKTREE_BASE}"
+  # Validate the base is on a guest-native filesystem.  If the base does not
+  # exist yet, validate its nearest existing parent.
+  local probe="$base"
+  while [[ ! -e "$probe" && "$probe" != "/" ]]; do probe="$(dirname "$probe")"; done
+  if ! ocvm_is_guest_native_path "$probe"; then
+    echo "ocvm_worktree_root: base '$base' is not on a guest-native filesystem (probe '$probe'); refusing host fallback" >&2
+    return 1
+  fi
+  # Portable project hash (md5) — works on macOS (md5 -q) and Linux (md5sum).
+  if command -v md5 >/dev/null 2>&1; then
+    phash="$(echo -n "$project" | md5 -q)"
+  elif command -v md5sum >/dev/null 2>&1; then
+    phash="$(echo -n "$project" | md5sum | cut -d' ' -f1)"
+  else
+    echo "ocvm_worktree_root: no md5/md5sum available" >&2; return 1
+  fi
+  echo "$base/$phash"
+}
+
+# Convenience: full worktree path for a task under a project.
+# Usage:  ocvm_worktree_path <project-dir> <task-id>
+ocvm_worktree_path() {
+  local project="$1" task="$2" root
+  [[ -n "$task" ]] || { echo "ocvm_worktree_path: task-id required" >&2; return 1; }
+  root="$(ocvm_worktree_root "$project")" || return 1
+  echo "$root/$task"
+}
+
 cleanup_project_worktrees() {
   local project="$1"
   if ! command -v python3 >/dev/null 2>&1; then
@@ -20004,7 +20064,7 @@ cleanup_project_worktrees() {
     return 0
   fi
   python3 - "$project" <<'WORKTREE_CLEANUP' || {
-import os, pathlib, subprocess, sys
+import os, pathlib, shutil, subprocess, sys
 
 class ProbeError(Exception):
     pass
@@ -20093,6 +20153,39 @@ def run():
         retained += 1
         print(f"[worktrees] Retained {path.name}: {reason}.")
     print(f"[worktrees] Cleanup: {removed} removed, {retained} retained, {failed} failed.")
+    # Second pass: stale guest-worktree registrations.  Guest worktrees live
+    # outside the project root (on the guest filesystem).  When the guest VM
+    # is replaced their checkout paths vanish while the host-side registration
+    # under $GIT_COMMON_DIR/worktrees/<name>/ remains.  Prune those orphaned
+    # registrations.  Worktrees whose paths still exist are left alone.
+    pruned_guest = 0
+    for record in records:
+        path = pathlib.Path(record.get("worktree", ""))
+        if path.parent == base:
+            continue  # already handled above
+        if path.is_symlink():
+            continue  # never touch symlinks
+        if path.exists():
+            continue  # still present (foreign worktree or live guest tree)
+        # Path is gone → orphaned guest registration; remove its admin dir.
+        name = path.name
+        admin = shared / "worktrees" / name
+        if not admin.is_dir() or admin.is_symlink():
+            continue
+        # Safety: admin must be an immediate child of shared/worktrees.
+        try:
+            if admin.resolve(strict=True).parent != (shared / "worktrees").resolve(strict=True):
+                continue
+        except (OSError, ValueError):
+            continue
+        try:
+            shutil.rmtree(admin)
+            pruned_guest += 1
+            print(f"[worktrees] Pruned stale guest registration: {name}")
+        except OSError as error:
+            print(f"[worktrees] Guest prune failed for {name}: {error}")
+    if pruned_guest:
+        print(f"[worktrees] Guest registrations pruned: {pruned_guest}")
 
 try:
     run()
