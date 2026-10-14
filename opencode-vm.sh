@@ -18941,6 +18941,15 @@ attach_session() {
     export XDG_STATE_HOME=/tmp/oc-xdg-state
     export OCVM_MANAGED_POLICY_SOCKET="/tmp/ocvm-managed/$(printf %s "$PROJ_DIR" | sha256sum | cut -c1-40).sock"
     export OCVM_ATTACHMENTS_DIR="$SESS_SHARE/attachments"
+    # Guest-native worktree root: base path for task checkouts.  The adapter
+    # appends /<projectHash>/<sessionId> to create the checkout.  Only set
+    # when the base is on a guest-native filesystem — never silently fall
+    # back to a host path.
+    if [ -n "${OCVM_WORKTREE_ROOT:-}" ]; then
+      : # explicit override already set
+    elif stat -f -c %T "${HOME}/.opencode-vm" 2>/dev/null | grep -qv '^fuse'; then
+      export OCVM_WORKTREE_ROOT="${HOME}/.opencode-vm/worktrees"
+    fi
     prepare_openlive_adapter() {
       [ "$OC_MODE" = "web" ] || return 0
       [ -n "$OC_OPENLIVE_PROJECT_HASH" ] || return 1
@@ -20026,11 +20035,8 @@ ocvm_is_guest_native_path() {
 # The base must be guest-native; otherwise the function fails clearly instead
 # of silently returning a host path.  Prints the resolved root on stdout.
 ocvm_worktree_root() {
-  local project="$1" base phash norm
+  local project="$1" base phash
   [[ -n "$project" ]] || { echo "ocvm_worktree_root: project required" >&2; return 1; }
-  # Normalise the project path so that the hash matches proj_hash(1) used for
-  # project-state / session-share naming (same string → same hash).
-  norm="$(cd "$project" 2>/dev/null && pwd -P)" || norm="$project"
   # Derive base: explicit override > guest-home default.
   if [[ -n "${OCVM_WORKTREE_ROOT:-}" ]]; then
     base="$OCVM_WORKTREE_ROOT"
@@ -20059,11 +20065,12 @@ ocvm_worktree_root() {
     echo "ocvm_worktree_root: base '$base' is not on a guest-native filesystem (probe '$probe'); refusing host fallback" >&2
     return 1
   fi
-  # Portable project hash (md5) — works on macOS (md5 -q) and Linux (md5sum).
+  # Use the same hash as proj_hash (md5 of the raw project path, no
+  # normalisation).  Portable: md5 -q on macOS, md5sum on Linux.
   if command -v md5 >/dev/null 2>&1; then
-    phash="$(echo -n "$norm" | md5 -q)"
+    phash="$(echo -n "$project" | md5 -q)"
   elif command -v md5sum >/dev/null 2>&1; then
-    phash="$(echo -n "$norm" | md5sum | cut -d' ' -f1)"
+    phash="$(echo -n "$project" | md5sum | cut -d' ' -f1)"
   else
     echo "ocvm_worktree_root: no md5/md5sum available" >&2; return 1
   fi
@@ -21167,6 +21174,14 @@ start_session() {
     export XDG_CONFIG_HOME="$SESS_SHARE/config"
     export OCVM_ATTACHMENTS_DIR="$SESS_SHARE/attachments"
     export OCVM_MANAGED_POLICY_SOCKET="/tmp/ocvm-managed/$(printf %s "$PROJ_DIR" | sha256sum | cut -c1-40).sock"
+    # Guest-native worktree root: base path for task checkouts.  Only set
+    # when the base is on a guest-native filesystem — never silently fall
+    # back to a host path.
+    if [ -n "${OCVM_WORKTREE_ROOT:-}" ]; then
+      : # explicit override already set
+    elif stat -f -c %T "${HOME}/.opencode-vm" 2>/dev/null | grep -qv '^fuse'; then
+      export OCVM_WORKTREE_ROOT="${HOME}/.opencode-vm/worktrees"
+    fi
     prepare_openlive_adapter() {
       [ "$OC_MODE" = "web" ] || return 0
       [ -n "$OC_OPENLIVE_PROJECT_HASH" ] || return 1

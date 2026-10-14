@@ -3914,7 +3914,7 @@ test("createSession reports CREATION_UNCERTAIN when guest worktree creation fail
     await gateway.close();
     // Must throw CREATION_UNCERTAIN — not silently return state=created.
     assert.ok(createError, "createSession must fail when guest worktree creation fails");
-    assert.match(createError.message, /could not be confirmed/i, `error must be CREATION_UNCERTAIN, got: ${createError.message}`);
+    assert.match(createError.message, /confirmation failed|could not be confirmed/i, `error must be CREATION_UNCERTAIN, got: ${createError.message}`);
   } finally {
     if (prevSocket === undefined) delete process.env.OCVM_MANAGED_POLICY_SOCKET;
     else process.env.OCVM_MANAGED_POLICY_SOCKET = prevSocket;

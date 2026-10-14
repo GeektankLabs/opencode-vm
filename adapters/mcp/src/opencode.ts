@@ -865,6 +865,22 @@ export class OpenCodeGateway implements SessionGateway {
    * Returns undefined when no guest root can be resolved (host fallback is
    * never silent — the caller simply installs no automatic scope).
    */
+  /**
+   * Check whether a path is on a guest-native filesystem (ext4, tmpfs …)
+   * as opposed to a host-mounted virtiofs share (fuseblk, fuse.*).
+   * Uses `stat -f -c %T` (Linux).  Returns false when the path is missing
+   * or the check cannot be performed.
+   */
+  private isGuestNativePath(path: string): boolean {
+    try {
+      const fstype = execFileSync("stat", ["-f", "-c", "%T", path],
+        { stdio: "pipe", timeout: 5_000 }).toString().trim();
+      return !fstype.startsWith("fuse");
+    } catch {
+      return false;
+    }
+  }
+
   private deriveGuestWorktreeScope(): string | undefined {
     // Narrow: only when the launcher explicitly sets OCVM_WORKTREE_ROOT.
     // No silent auto-derivation from $HOME — that would add scope to every
@@ -877,7 +893,20 @@ export class OpenCodeGateway implements SessionGateway {
     if (!hash || hash.includes("/") || hash.includes("\\") || hash.includes("..") || hash === ".") {
       return undefined;
     }
-    return `${base.replace(/\/+$/u, "")}/${hash}`;
+    const scopeRoot = `${base.replace(/\/+$/u, "")}/${hash}`;
+    // Native mount check: reject host virtiofs/fuseblk and missing roots.
+    // Probe the nearest existing ancestor so a not-yet-created root can still
+    // be validated against its filesystem.
+    let probe = scopeRoot;
+    while (probe !== "/" && !this.isGuestNativePath(probe)) {
+      const parent = probe.replace(/\/[^/]+$/u, "");
+      if (parent === probe) break;
+      probe = parent;
+    }
+    if (!this.isGuestNativePath(probe)) {
+      return undefined; // host mount or missing — not a valid guest root
+    }
+    return scopeRoot;
   }
 
   /**
@@ -940,6 +969,7 @@ export class OpenCodeGateway implements SessionGateway {
     const settings = await this.newSessionSettings();
     // Everything after this point may have created a session. Never retry or
     // roll back an uncertain write: another client may already be using it.
+    let verifiedId: string | undefined;
     try {
       const response = await this.client.session.create(
         { directory: this.runtime.project, title: name, ...settings },
@@ -955,6 +985,8 @@ export class OpenCodeGateway implements SessionGateway {
         throw new Error("Invalid creation response.");
       }
       const session = await this.requireExposedSession(id);
+      // Only after verification is the session ID safe to expose in errors.
+      verifiedId = id;
       if (
         session.id !== id ||
         session.agent !== settings.agent ||
@@ -969,7 +1001,7 @@ export class OpenCodeGateway implements SessionGateway {
       // must be visible so the caller never sees state=created without a
       // working checkout.  The error propagates to the outer catch which
       // reports CREATION_UNCERTAIN (session exists, worktree does not).
-      await this.createGuestWorktree(id);
+      const worktreePath = await this.createGuestWorktree(id);
       await this.adoptManagedSession(id, scope);
       return {
         project: this.projectIdentity(),
@@ -979,12 +1011,15 @@ export class OpenCodeGateway implements SessionGateway {
         provider_id: settings.model.providerID,
         model_id: settings.model.id,
         ...(session.model?.variant ? { variant: session.model.variant } : {}),
+        ...(worktreePath ? { worktree_path: worktreePath } : {}),
         state: "created",
       };
     } catch {
       throw new AdapterError(
         "CREATION_UNCERTAIN",
-        "Session creation could not be confirmed. Inspect list_sessions or OpenCode Web UI before trying again; do not retry automatically.",
+        verifiedId
+          ? `Session ${verifiedId} was created but confirmation failed (worktree/scope incomplete). Inspect list_sessions; do not retry automatically.`
+          : "Session creation could not be confirmed. Inspect list_sessions or OpenCode Web UI before trying again; do not retry automatically.",
       );
     }
   }

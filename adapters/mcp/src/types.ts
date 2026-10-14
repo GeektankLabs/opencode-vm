@@ -572,6 +572,7 @@ export type CreateSessionResult = {
   provider_id: string;
   model_id: string;
   variant?: string;
+  worktree_path?: string;
   state: "created";
 };
 
