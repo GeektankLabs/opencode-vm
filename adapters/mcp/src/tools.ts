@@ -1203,6 +1203,8 @@ const updateMonitorInput = z
   .object({
     monitor_id: monitorIdSchema,
     expected_generation: z.number().int().nonnegative().optional(),
+    task_id: monitorAnchorTaskId.optional(),
+    manager_session_id: sessionId.nullable().optional(),
     title: z.string().trim().min(1).max(160).optional(),
     interval_seconds: z.number().int().min(5).max(86400).optional(),
     autonomy_profile: monitorAutonomySchema.optional(),
@@ -2080,11 +2082,86 @@ export function createMcpServer(
   const updateMonitorHandler = safeHandler(async (input: z.output<typeof updateMonitorInput>) => {
     const project = monitorRuntime().project;
     const now = Date.now();
+    const bindingUpdate = input.task_id !== undefined || input.manager_session_id !== undefined;
+    // Backend validation stays outside the short registry lock. Fence the
+    // observed bindings/claim with CAS when committing the complete update.
+    const before = bindingUpdate ? await readRegistrySnapshot(project) : null;
+    const previous = before?.registry.monitors.find((entry) => entry.id === input.monitor_id);
+    let managerTitle: string | null = null;
+    if (bindingUpdate) {
+      if (!previous) throw new AdapterError("MONITOR_NOT_FOUND", "Monitor does not exist in this project registry.");
+      if (input.expected_generation !== undefined && input.expected_generation !== before!.registry.generation)
+        throw new AdapterError("MONITOR_CONFLICT", "Monitor registry differs from expected_generation; read back before a deliberate retry.");
+      if (previous.run.active || (previous.dispatch_wal && previous.dispatch_wal.message_id === null))
+        throw new AdapterError("MONITOR_STATE_CONFLICT", "Finish the running action or reconcile its uncertain dispatch before changing bindings.");
+      if (input.task_id !== undefined) {
+        if (!board) throw new AdapterError("UNSUPPORTED_CONFIGURATION", "Task binding validation requires the project Taskboard.");
+        await board.getTask(input.task_id);
+      }
+      const managerChanged = input.manager_session_id !== undefined && input.manager_session_id !== previous.session.session_id;
+      const sessions = new Set<string>();
+      if (previous.session.session_id) sessions.add(previous.session.session_id);
+      if (input.manager_session_id) sessions.add(input.manager_session_id);
+      for (const id of sessions) {
+        try {
+          const details = await gateway.getSessionDetails(id);
+          if (details.id !== id || details.activity !== "idle" || details.pending_input.permissions + details.pending_input.questions > 0 ||
+              details.pending_input.coverage === "unknown" || details.admission?.write_in_progress)
+            throw new AdapterError("MONITOR_STATE_CONFLICT", "Manager binding requires an exposed idle session without pending input or concurrent writes.");
+          if (id === input.manager_session_id) managerTitle = details.title;
+          const receipts = new Set([
+            id === previous.session.session_id ? previous.dispatch_wal?.message_id : null,
+            details.admission?.guarded_message_id,
+          ].filter((receipt): receipt is string => typeof receipt === "string"));
+          for (const receipt of receipts) {
+            const status = await gateway.getSessionStatus(id, receipt);
+            if (status.backend_activity !== "idle" || !["completed", "failed", "aborted"].includes(status.state))
+              throw new AdapterError("MONITOR_STATE_CONFLICT", "The manager dispatch is not verified terminal; reconcile it before changing bindings.");
+          }
+        } catch (error) {
+          // Only the old missing runtime is recoverable. An unavailable read,
+          // foreign/new session or real pending permission never becomes a rebind.
+          if (!(error instanceof AdapterError && error.code === "SESSION_NOT_FOUND" && managerChanged && id === previous.session.session_id)) throw error;
+        }
+      }
+    }
     const updated = await withRegistry(
       project,
       (registry) => {
         const monitor = registry.monitors.find((entry) => entry.id === input.monitor_id);
         if (!monitor) throw new AdapterError("MONITOR_NOT_FOUND", "Monitor does not exist in this project registry.");
+        if (bindingUpdate) {
+          if (monitor.run.active || (monitor.dispatch_wal && monitor.dispatch_wal.message_id === null))
+            throw new AdapterError("MONITOR_STATE_CONFLICT", "The monitor has a running action or uncertain dispatch.");
+          if (input.task_id !== undefined && registry.monitors.some((entry) => entry.id !== monitor.id && entry.anchor.task_id === input.task_id))
+            throw new AdapterError("MONITOR_CONFLICT", "This canonical task already has a monitor (unique master-task binding).");
+          if (input.manager_session_id && registry.monitors.some((entry) =>
+              (entry.id !== monitor.id && entry.session.session_id === input.manager_session_id) ||
+              (entry.workers ?? []).some((worker) => worker.runtime_session_id === input.manager_session_id)))
+            throw new AdapterError("MONITOR_CONFLICT", "This session is already bound to a monitor manager or worker.");
+          const taskChanged = input.task_id !== undefined && input.task_id !== monitor.anchor.task_id;
+          const managerChanged = input.manager_session_id !== undefined && input.manager_session_id !== monitor.session.session_id;
+          if (taskChanged || managerChanged) {
+            monitorHistory(monitor, "bindings-updated", {
+              previous_task_id: monitor.anchor.task_id, task_id: input.task_id ?? monitor.anchor.task_id,
+              previous_session_id: monitor.session.session_id,
+              session_id: input.manager_session_id === undefined ? monitor.session.session_id : input.manager_session_id,
+              previous_dispatch: monitor.dispatch_wal,
+            }, now);
+            if (taskChanged) {
+              monitor.anchor.task_id = input.task_id!;
+              monitor.state.watermark = null;
+              monitor.cursors = {};
+            }
+            if (managerChanged) {
+              monitor.session = { session_id: input.manager_session_id!, title: managerTitle, primed_at: null, priming_digest: null };
+              monitor.dispatch_wal = null;
+              monitor.state.receipt_observation = null;
+            } else monitor.session.priming_digest = null;
+            monitor.state.last_seen_digest = null;
+            monitor.state.worker_digest = null;
+          }
+        }
         if (input.title !== undefined) monitor.title = input.title;
         if (input.interval_seconds !== undefined) monitor.scheduler.interval_seconds = input.interval_seconds;
         if (input.autonomy_profile !== undefined) monitor.autonomy_profile = input.autonomy_profile;
@@ -2095,8 +2172,13 @@ export function createMcpServer(
         monitorHistory(monitor, "updated", undefined, now);
         return registry;
       },
-      { ...(input.expected_generation !== undefined ? { expected: input.expected_generation } : {}), now },
-    );
+      { ...((before?.registry.generation ?? input.expected_generation) !== undefined
+        ? { expected: before?.registry.generation ?? input.expected_generation } : {}), now },
+    ).catch((error: unknown) => {
+      if (error instanceof Error && error.message === "monitor registry changed concurrently")
+        throw new AdapterError("MONITOR_CONFLICT", "Monitor registry changed during validation; read back before a deliberate retry.");
+      throw error;
+    });
     const monitor = findMonitor(updated, input.monitor_id)!;
     return success(
       { monitor: monitorSummary(monitor), generation: updated.generation, observed_at: new Date().toISOString() },
@@ -2377,7 +2459,7 @@ export function createMcpServer(
           project,
           input.monitor_id,
           input.worker_key,
-          { runtime_session_id: input.runtime_session_id, dispatch_receipt: input.dispatch_receipt ?? null },
+          { runtime_session_id: input.runtime_session_id, ...(input.dispatch_receipt !== undefined ? { dispatch_receipt: input.dispatch_receipt } : {}) },
           { now },
         );
         break;
@@ -2389,7 +2471,7 @@ export function createMcpServer(
           project,
           input.monitor_id,
           input.worker_key,
-          { runtime_session_id: input.runtime_session_id, dispatch_receipt: input.dispatch_receipt ?? null },
+          { runtime_session_id: input.runtime_session_id, ...(input.dispatch_receipt !== undefined ? { dispatch_receipt: input.dispatch_receipt } : {}) },
           { now },
         );
         break;
@@ -3038,7 +3120,7 @@ export function createMcpServer(
     {
       title: "Update Project Monitor",
       description:
-        "Update monitor title, interval, autonomy profile, runtime profile or expiry (explicit expiry only). Optional expected_generation rejects a concurrent change instead of overwriting it.",
+        "Update monitor settings or separate bindings: task_id is the canonical Board anchor; manager_session_id binds an exposed idle manager (null clears it for next-wake recovery). Binding changes validate both sessions, pending input, dispatch and uniqueness before an atomic CAS; tasks/workers/results and scheduler/work state remain. Optional expected_generation rejects concurrent changes.",
       inputSchema: updateMonitorInput,
       outputSchema: monitorMutationOutput,
       annotations: writeAnnotations,

@@ -548,6 +548,7 @@ export function investigationWorkerFor(
     state.dispatch_receipt = dispatchReceipt;
     state.anchored_at = null;
     state.anchor_source = null;
+    state.last_progress_at = null;
     state.last_tool_digest = null;
     state.cooldown_until = null;
     state.next_deep_check_at = null;
@@ -1250,6 +1251,16 @@ async function rebindOwnWorker(
     (draft) => {
       const { monitor, worker } = findOwnedWorkerOrThrow(draft, monitorId, workerKey);
       if (!allowed.includes(worker.lifecycle)) throw new Error(`worker cannot be rebound from ${worker.lifecycle}`);
+      if (worker.runtime_session_id !== input.runtime_session_id && input.dispatch_receipt === undefined) {
+        // A receipt from the lost runtime is not evidence of dispatch in the
+        // new runtime. Keep its provenance in history, never invent a receipt.
+        monitorHistory(monitor, "worker-episode-detached", {
+          worker_key: workerKey, session_id: worker.runtime_session_id,
+          dispatch_receipt: worker.dispatch_receipt, result_receipt: worker.result_receipt,
+        }, now);
+        worker.dispatch_receipt = null;
+        worker.dispatch_at = null;
+      }
       worker.runtime_session_id = input.runtime_session_id;
       if (input.dispatch_receipt !== undefined) {
         // V2 §13.2/F4: a genuinely NEW dispatch receipt starts a fresh time

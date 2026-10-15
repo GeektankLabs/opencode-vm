@@ -9,7 +9,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { McpHttpServer, MAX_REQUEST_BODY_BYTES } from "./http.js";
 import { MCP_EVENT_DEFINITIONS } from "./events.js";
 import { lastToolRoundtrips, traceToolCall } from "./diagnostics.js";
-import { readRegistrySnapshot } from "./monitor.js";
+import { readRegistrySnapshot, withRegistry } from "./monitor.js";
 import type { SessionGateway } from "./opencode.js";
 import type { AttachmentDescriptor } from "./attachments.js";
 import { AdapterError, ADAPTER_VERSION } from "./types.js";
@@ -1914,6 +1914,127 @@ function rawRequest(
   });
 }
 
+test("monitor emergency: persistent delete frees the anchor and binding changes are atomic, unique and idle-gated", async () => {
+  const project = await mkdtemp(join(tmpdir(), "ocvm-monitor-bindings-"));
+  const nativeIds = ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333"];
+  const tasks = nativeIds.map(id => ({ id, projectId: "board", title: "Preserved task", description: "Preserved work", status: "in_progress", priority: "high" }));
+  const boardServer = http.createServer((request, response) => {
+    assert.equal(request.method, "GET", "binding validation must not mutate tasks");
+    const path = request.url!.split("?")[0];
+    const value = path === "/api/projects" ? [{ id: "board", name: "Test", prefix: "TEST", status: "active" }]
+      : path === "/api/tickets" ? tasks : tasks.find(task => path === `/api/tickets/${task.id}`);
+    response.writeHead(value ? 200 : 404, { "Content-Type": "application/json" });
+    response.end(JSON.stringify(value ?? {}));
+  });
+  await new Promise<void>(resolve => boardServer.listen(0, "127.0.0.1", resolve));
+  const boardPort = (boardServer.address() as { port: number }).port;
+  class BindingGateway extends FakeGateway {
+    busy = false;
+    pending = false;
+    missingOld = false;
+    guarded: string | null = null;
+    receiptReads: string[] = [];
+    race: (() => Promise<void>) | null = null;
+    override async getSessionDetails(id: string): Promise<SessionDetailsResult> {
+      if (this.missingOld && id === "ses_old") throw new AdapterError("SESSION_NOT_FOUND", "missing old manager");
+      if (this.race) { const race = this.race; this.race = null; await race(); }
+      return { id, title: "Manager", created: 1, updated: 2, activity: this.busy ? "busy" : "idle",
+        pending_input: { permissions: this.pending ? 1 : 0, questions: 0 },
+        ...(id === "ses_old" && this.guarded ? { admission: { guarded_message_id: this.guarded, write_in_progress: false } } : {}) };
+    }
+    override async getSessionStatus(id: string, receipt?: string): Promise<SessionStatusResult> {
+      if (receipt) this.receiptReads.push(receipt);
+      const status = await super.getSessionStatus(id, receipt);
+      return receipt === "msg_wal_terminal" ? { ...status, state: "completed" } : status;
+    }
+  }
+  const gateway = new BindingGateway();
+  const adapter = new McpHttpServer({ ...runtime(), project, taskboardUrl: `http://127.0.0.1:${boardPort}`,
+    taskboardMetadataFile: join(project, "board-metadata.json") }, token, gateway);
+  const port = await adapter.start();
+  const client = new Client({ name: "monitor-bindings", version: "1.0.0" });
+  try {
+    await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`),
+      { requestInit: { headers: { "X-OCVM-MCP-Token": token } } }));
+    const call = (name: string, args: Record<string, unknown>) => client.callTool({ name, arguments: args });
+    const catalog = await client.listTools();
+    const properties = catalog.tools.find(tool => tool.name === "update_monitor")!.inputSchema.properties!;
+    assert.ok(properties.task_id && properties.manager_session_id, "separate bindings are discoverable");
+    const listed = await call("list_project_tasks", {});
+    const taskIds = (listed.structuredContent as { tasks: Array<{ task_id: string }> }).tasks.map(task => task.task_id);
+    assert.equal(taskIds.length, 3);
+    const created = await call("create_monitor", { title: "Hello-World-Smoke", task_id: taskIds[0] });
+    const id = (created.structuredContent as { monitor: { monitor_id: string } }).monitor.monitor_id;
+    const second = await call("create_monitor", { title: "Other", task_id: taskIds[1] });
+    const id2 = (second.structuredContent as { monitor: { monitor_id: string } }).monitor.monitor_id;
+    const baseline = () => readFile(join(project, ".opencode-vm", "monitor", "registry.json"), "utf8");
+    let raw = await baseline();
+    assert.equal((await call("update_monitor", { monitor_id: id, task_id: taskIds[1], title: "must not save" })).isError, true);
+    assert.equal(await baseline(), raw, "conflicting task: no partial title or generation write");
+    assert.equal((await call("update_monitor", { monitor_id: id, task_id: "task_99999999-9999-4999-8999-999999999999" })).isError, true);
+    assert.equal(await baseline(), raw);
+    const rebound = await call("update_monitor", { monitor_id: id, task_id: taskIds[2], manager_session_id: "ses_old" });
+    assert.notEqual(rebound.isError, true, JSON.stringify(rebound));
+    assert.equal((rebound.structuredContent as { monitor: { anchor_task_id: string; session_id: string } }).monitor.anchor_task_id, taskIds[2]);
+    assert.equal((rebound.structuredContent as { monitor: { session_id: string } }).monitor.session_id, "ses_old");
+    raw = await baseline();
+    assert.equal((await call("update_monitor", { monitor_id: id2, manager_session_id: "ses_old" })).isError, true);
+    assert.equal(await baseline(), raw, "one session cannot host two monitor clocks");
+    gateway.busy = true;
+    assert.equal((await call("update_monitor", { monitor_id: id, manager_session_id: "ses_new" })).isError, true);
+    gateway.busy = false; gateway.pending = true;
+    assert.equal((await call("update_monitor", { monitor_id: id, manager_session_id: "ses_new" })).isError, true);
+    gateway.pending = false;
+    assert.equal(await baseline(), raw);
+    const generation = (await readRegistrySnapshot(project)).registry.generation;
+    let raced = false;
+    gateway.race = async () => { raced = true; await withRegistry(project, registry => { registry.monitors[0]!.session.session_id = "ses_concurrent"; }); };
+    assert.equal((await call("update_monitor", { monitor_id: id, manager_session_id: "ses_new", expected_generation: generation + 1 })).isError, true);
+    assert.equal(raced, false, "a future expected_generation cannot replace the validation snapshot");
+    assert.equal(await baseline(), raw);
+    gateway.race = null;
+    await withRegistry(project, registry => {
+      registry.monitors[0]!.dispatch_wal = { action_id: "wake_old", at: new Date().toISOString(), prompt_digest: "digest", message_id: "msg_wal_terminal" };
+    });
+    gateway.guarded = "msg_later_unsettled";
+    raw = await baseline();
+    assert.equal((await call("update_monitor", { monitor_id: id, manager_session_id: "ses_new" })).isError, true);
+    assert.deepEqual(gateway.receiptReads, ["msg_wal_terminal", "msg_later_unsettled"], "check distinct WAL and admission receipts");
+    assert.equal(await baseline(), raw, "an unsettled later receipt is not hidden by the terminal WAL");
+    gateway.guarded = null;
+    await withRegistry(project, registry => {
+      registry.monitors[0]!.dispatch_wal = { action_id: "wake_old", at: new Date().toISOString(), prompt_digest: "digest", message_id: null };
+    });
+    raw = await baseline();
+    assert.equal((await call("update_monitor", { monitor_id: id, manager_session_id: "ses_new", title: "unsaved" })).isError, true);
+    assert.equal(await baseline(), raw, "uncertain WAL is not discarded by rebind");
+    await withRegistry(project, registry => { registry.monitors[0]!.dispatch_wal = null; });
+    gateway.race = () => withRegistry(project, registry => { registry.monitors[0]!.run.active = true; }).then(() => {});
+    assert.equal((await call("update_monitor", { monitor_id: id, manager_session_id: "ses_new" })).isError, true, "claim racing validation prevents commit");
+    assert.equal((await readRegistrySnapshot(project)).registry.monitors[0]!.session.session_id, "ses_old");
+    assert.equal((await call("delete_monitor", { monitor_id: id })).isError, true, "active run prevents deletion");
+    await withRegistry(project, registry => { registry.monitors[0]!.run.active = false; });
+    gateway.missingOld = true;
+    assert.notEqual((await call("update_monitor", { monitor_id: id, manager_session_id: "ses_new" })).isError, true);
+    assert.equal((await readRegistrySnapshot(project)).registry.monitors[0]!.anchor.task_id, taskIds[2], "manager recovery preserves task");
+    assert.notEqual((await call("update_monitor", { monitor_id: id, manager_session_id: null })).isError, true);
+    assert.equal((await readRegistrySnapshot(project)).registry.monitors[0]!.session.session_id, null, "explicit detach leaves next-wake recovery pending, without creating a session here");
+    await writeFile(join(project, "preserved-work.txt"), "work");
+    const deleted = await call("delete_monitor", { monitor_id: id });
+    assert.equal((deleted.structuredContent as { deleted: boolean }).deleted, true);
+    assert.equal((await readRegistrySnapshot(project)).registry.monitors.some(monitor => monitor.id === id), false);
+    assert.equal((await call("get_monitor", { monitor_id: id })).isError, true);
+    assert.notEqual((await call("create_monitor", { title: "New monitor", task_id: taskIds[2] })).isError, true, "anchor freed durably");
+    assert.equal(await readFile(join(project, "preserved-work.txt"), "utf8"), "work");
+    assert.equal(tasks.length, 3);
+    assert.deepEqual(gateway.updateCalls, [], "binding edits do not switch session runtimes");
+  } finally {
+    await client.close(); await adapter.close();
+    await new Promise<void>(resolve => boardServer.close(() => resolve()));
+    await rm(project, { recursive: true, force: true });
+  }
+});
+
 test("W2-F2/W4: monitor workers use the locked identity lifecycle through the MCP surface", async () => {
   const project = await mkdtemp(join(tmpdir(), "ocvm-monitor-worker-"));
   const gateway = new FakeGateway();
@@ -1977,6 +2098,10 @@ test("W2-F2/W4: monitor workers use the locked identity lifecycle through the MC
       arguments: { monitor_id: monitorId, worker_key: w0.worker_key, action: "rebind", runtime_session_id: "ses_rebind" },
     });
     assert.equal((rebound.structuredContent as { worker: { runtime_session_id: string } }).worker.runtime_session_id, "ses_rebind");
+    const reboundStored = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(reboundStored.workers![0]!.dispatch_receipt, null);
+    assert.equal(reboundStored.workers![0]!.dispatch_at, null);
+    assert.ok(reboundStored.history.some(entry => entry.type === "worker-episode-detached" && entry.detail?.dispatch_receipt === "msg_d1" && entry.detail?.session_id === "ses_reuse"), "MCP omission preserves prior episode provenance");
 
     // Uncertain create stays reserved and is reconciled, never retried blindly.
     gateway.failNextCreate = true;

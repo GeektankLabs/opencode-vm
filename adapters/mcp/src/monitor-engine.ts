@@ -420,6 +420,7 @@ export class MonitorEngine {
     const summary = canonical.summary;
     const previously = monitor.state.last_seen_digest;
     const triggered = monitor.wake_request !== null;
+    const operatorTriggered = triggered && !monitor.wake_request!.reason.startsWith("investigation-due:");
     const decisionsSince = canonical.decisionsSince;
     // Worker creation/receipt/lifecycle/synthesis deltas must reach the manager
     // as a wake, not be swallowed by the unchanged-board no-op (W4 wake progress).
@@ -465,8 +466,8 @@ export class MonitorEngine {
     // never absorbed by `noop-unchanged` or `busy-held` (V2 §13.7, C1b). The
     // investigation is this wake's one bounded action and performs zero sends.
     const dueWorker = this.investigationDue(monitor, now);
-    if (dueWorker) {
-      return await this.runInvestigation(id, monitor, dueWorker, summary, workerDigest, now);
+    if (dueWorker && !operatorTriggered) {
+      return await this.runInvestigation(id, monitor, dueWorker, now);
     }
 
     // Cheap unchanged path: no model call, no note growth. A pending trigger or
@@ -734,6 +735,14 @@ export class MonitorEngine {
           const record = monitorRecord.workers?.find((entry) => entry.worker_key === observation.worker.worker_key);
           // Idempotence across racing writers: only an still-own active worker is marked or noted.
           if (!record || record.lifecycle !== "active") continue;
+          if (record.runtime_session_id !== observation.worker.runtime_session_id || record.dispatch_receipt !== observation.worker.dispatch_receipt) {
+            monitorHistory(monitorRecord, "worker-observation-superseded", {
+              worker_key: record.worker_key, session_id: observation.worker.runtime_session_id,
+              dispatch_receipt: observation.worker.dispatch_receipt,
+            }, now);
+            changed = true; // Refresh the in-flight view from the newer index.
+            continue;
+          }
           if (observation.kind === "note") {
             monitorDecision(
               monitorRecord,
@@ -973,9 +982,13 @@ export class MonitorEngine {
    */
   private syncWorkerInvestigation(monitor: MonitorRecord, now: number): void {
     const workers = monitor.workers ?? [];
-    const withReceipt = workers.filter((worker) => worker.dispatch_receipt);
-    if (withReceipt.length === 0) return;
+    const withReceipt = workers.filter((worker) => worker.dispatch_receipt &&
+      (worker.lifecycle === "active" || (worker.lifecycle === "idle" && worker.result_receipt && !worker.last_synthesis_at)));
+    if (withReceipt.length === 0 && !monitor.investigation) return;
     const inv = monitor.investigation ??= defaultInvestigationState();
+    // Only current, eligible dispatch episodes own a clock. Historic episode
+    // evidence/history and worker results survive; stale clocks cannot wake.
+    inv.workers = inv.workers.filter((state) => withReceipt.some((worker) => worker.worker_key === state.worker_key));
     const cfg = this.effectiveInvestigationConfig(monitor).config;
     for (const worker of withReceipt) {
       const state = investigationWorkerFor(inv, worker.worker_key, worker.dispatch_receipt);
@@ -1019,7 +1032,9 @@ export class MonitorEngine {
     if (monitor.dispatch_wal && monitor.dispatch_wal.message_id === null) return null;
     if (inv.episode && inv.episode.finished_at === null) return null;
     const anchored = inv.workers
-      .filter((worker) => worker.anchored_at !== null)
+      .filter((state) => state.anchored_at !== null && (monitor.workers ?? []).some((worker) =>
+        worker.worker_key === state.worker_key && worker.dispatch_receipt !== null && worker.dispatch_receipt === state.dispatch_receipt &&
+        (worker.lifecycle === "active" || (worker.lifecycle === "idle" && worker.result_receipt && !worker.last_synthesis_at))))
       .sort((a, b) => (a.next_deep_check_at ?? Number.MAX_SAFE_INTEGER) - (b.next_deep_check_at ?? Number.MAX_SAFE_INTEGER));
     const clockDue = anchored.filter((worker) => (worker.next_deep_check_at ?? Number.MAX_SAFE_INTEGER) <= now)[0] ?? null;
     if (clockDue) return clockDue;
@@ -1070,8 +1085,6 @@ export class MonitorEngine {
     id: string,
     monitor: MonitorRecord,
     dueWorker: InvestigationWorkerState,
-    summary: CanonicalSummary,
-    workerDigest: string,
     now: number,
   ): Promise<WakeOutcome> {
     const { config, task } = this.effectiveInvestigationConfig(monitor);
@@ -1102,13 +1115,15 @@ export class MonitorEngine {
           const record = registry.monitors.find((entry) => entry.id === id);
           if (!record) return registry;
           const inv = record.investigation!;
-          const state = investigationWorkerFor(inv, dueWorker.worker_key, dueWorker.dispatch_receipt);
-          state.next_deep_check_at = windowEnd;
-          state.cooldown_until = null;
-          refreshInvestigationProjections(inv);
-          record.state.last_seen_digest = summary.digest;
-          record.state.worker_digest = workerDigest;
-          record.wake_request = null;
+          const current = record.workers?.find(entry => entry.worker_key === dueWorker.worker_key);
+          if (current && current.runtime_session_id === sessionId && current.dispatch_receipt === dueWorker.dispatch_receipt && current.lifecycle === worker?.lifecycle) {
+            const state = investigationWorkerFor(inv, dueWorker.worker_key, dueWorker.dispatch_receipt);
+            state.next_deep_check_at = windowEnd;
+            state.cooldown_until = null;
+            refreshInvestigationProjections(inv);
+          }
+          if (record.wake_request?.reason.startsWith("investigation-due:") &&
+              digest(record.wake_request) === digest(monitor.wake_request)) record.wake_request = null;
           record.run = { active: false, started_at: null, action: "investigation-deferred" };
           if (record.scheduler.enabled) record.scheduler.next_run_at = now + record.scheduler.interval_seconds * 1000;
           monitorDecision(
@@ -1234,62 +1249,72 @@ export class MonitorEngine {
         const record = registry.monitors.find((entry) => entry.id === id);
         if (!record) return registry;
         const inv = record.investigation ??= defaultInvestigationState();
-        // The investigation observed this canonical snapshot: record it like
-        // every other observed-wake path, so the following wake stays a cheap
-        // no-op unless something actually changed.
-        record.state.last_seen_digest = summary.digest;
-        record.state.worker_digest = workerDigest;
-        record.wake_request = null;
+        // A worker investigation is not a manager acknowledgement of board or
+        // worker changes. Preserve that delta and any concurrent operator wake.
+        if (record.wake_request?.reason.startsWith("investigation-due:") &&
+            digest(record.wake_request) === digest(monitor.wake_request)) record.wake_request = null;
         inv.last_investigation_at = finished;
         inv.recent_investigations = [
           ...(inv.recent_investigations ?? []).filter((entry) => finishedMs - entry < 86_400_000),
           finishedMs,
         ].slice(-128);
-        // F1: exactly ONE overdue-triggered investigation per deadline value —
-        // afterwards only the normal clocks (or a CHANGED deadline) fire again.
-        const milestone = inv.milestone ??= { overdue_handled_for: null, overdue_handled_at: null, achieved_at: null };
-        if (task.task_type === "milestoned" && task.expected_milestone && task.milestone_due_at) {
-          const dueMs = Date.parse(task.milestone_due_at);
-          if (!Number.isNaN(dueMs) && dueMs <= finishedMs && milestone.achieved_at === null) {
-            milestone.overdue_handled_for = task.milestone_due_at;
-            milestone.overdue_handled_at = finished;
-          }
-        }
         inv.counters.investigations_total += 1;
         if (outcome === "inconclusive") inv.counters.inconclusive_total += 1;
-        const state = investigationWorkerFor(inv, dueWorker.worker_key, dueWorker.dispatch_receipt);
-        state.last_tool_digest = toolDigest ?? state.last_tool_digest;
-        if (outcome === "long_work_evidenced") {
-          state.backoff_stage = Math.min(3, state.backoff_stage + 1);
-          state.next_deep_check_at = finishedMs + config.ladder_s[Math.min(2, state.backoff_stage - 1)]! * 1000;
-          state.cooldown_until = null;
+        const current = record.workers?.find(entry => entry.worker_key === dueWorker.worker_key);
+        const episodeCurrent = current && current.runtime_session_id === sessionId &&
+          current.dispatch_receipt === dueWorker.dispatch_receipt && current.lifecycle === worker?.lifecycle;
+        let state: InvestigationWorkerState | null = null;
+        if (episodeCurrent) {
+          // F1: exactly ONE overdue-triggered investigation per deadline value —
+          // afterwards only the normal clocks (or a CHANGED deadline) fire again.
+          const milestone = inv.milestone ??= { overdue_handled_for: null, overdue_handled_at: null, achieved_at: null };
+          if (task.task_type === "milestoned" && task.expected_milestone && task.milestone_due_at) {
+            const dueMs = Date.parse(task.milestone_due_at);
+            if (!Number.isNaN(dueMs) && dueMs <= finishedMs && milestone.achieved_at === null) {
+              milestone.overdue_handled_for = task.milestone_due_at;
+              milestone.overdue_handled_at = finished;
+            }
+          }
+          state = investigationWorkerFor(inv, dueWorker.worker_key, dueWorker.dispatch_receipt);
+          state.last_tool_digest = toolDigest ?? state.last_tool_digest;
+          if (outcome === "long_work_evidenced") {
+            state.backoff_stage = Math.min(3, state.backoff_stage + 1);
+            state.next_deep_check_at = finishedMs + config.ladder_s[Math.min(2, state.backoff_stage - 1)]! * 1000;
+            state.cooldown_until = null;
+          } else {
+            // Cooldown from the investigation END; the progress clock is
+            // untouched (V2 §13.3 — never a already-past deadline, no due loop).
+            state.cooldown_until = finishedMs + config.cooldown_s * 1000;
+            state.next_deep_check_at = state.cooldown_until;
+          }
+          if (episodeAdvanced && worker?.dispatch_receipt) {
+            // Follow the worker into its new episode (fresh anchor per §13.2).
+            state.dispatch_receipt = worker.dispatch_receipt;
+            state.anchored_at = worker.created_at ?? finished;
+            state.anchor_source = worker.created_at ? "creation" : "reconciled";
+            state.next_deep_check_at = Date.parse(state.anchored_at) + config.first_check_s * 1000;
+            state.cooldown_until = null;
+          }
+          refreshInvestigationProjections(inv);
+          inv.episode = {
+            started_at: iso(now),
+            finished_at: finished,
+            outcome,
+            evidence: evidence.slice(0, 6),
+            expected_milestone: task.expected_milestone,
+            wait_reason: outcome === "long_work_evidenced" ? waitReason : null,
+            worker_key: dueWorker.worker_key,
+            dispatch_receipt: dueWorker.dispatch_receipt,
+            generation_source: this.engineGeneration !== "unknown" ? "runtime_json" : null,
+            generation_value: this.engineGeneration !== "unknown" ? this.engineGeneration : null,
+          };
         } else {
-          // Cooldown from the investigation END; the progress clock is
-          // untouched (V2 §13.3 — never a already-past deadline, no due loop).
-          state.cooldown_until = finishedMs + config.cooldown_s * 1000;
-          state.next_deep_check_at = state.cooldown_until;
+          monitorHistory(record, "investigation-superseded", {
+            worker_key: dueWorker.worker_key, session_id: sessionId,
+            dispatch_receipt: dueWorker.dispatch_receipt, outcome,
+            evidence: evidence.slice(0, 3).map(entry => entry.kind),
+          }, now);
         }
-        if (episodeAdvanced && worker?.dispatch_receipt) {
-          // Follow the worker into its new episode (fresh anchor per §13.2).
-          state.dispatch_receipt = worker.dispatch_receipt;
-          state.anchored_at = worker.created_at ?? finished;
-          state.anchor_source = worker.created_at ? "creation" : "reconciled";
-          state.next_deep_check_at = Date.parse(state.anchored_at) + config.first_check_s * 1000;
-          state.cooldown_until = null;
-        }
-        refreshInvestigationProjections(inv);
-        inv.episode = {
-          started_at: iso(now),
-          finished_at: finished,
-          outcome,
-          evidence: evidence.slice(0, 6),
-          expected_milestone: task.expected_milestone,
-          wait_reason: outcome === "long_work_evidenced" ? waitReason : null,
-          worker_key: dueWorker.worker_key,
-          dispatch_receipt: dueWorker.dispatch_receipt,
-          generation_source: this.engineGeneration !== "unknown" ? "runtime_json" : null,
-          generation_value: this.engineGeneration !== "unknown" ? this.engineGeneration : null,
-        };
         // Release the wake claim this investigation consumed (V2 §13.8
         // hygiene: a finished action never leaves an active claim behind).
         record.run = { active: false, started_at: null, action: "investigation" };
@@ -1309,8 +1334,8 @@ export class MonitorEngine {
         );
         monitorHistory(record, `investigation-${outcome}`, {
           worker_key: dueWorker.worker_key,
-          stage: state.backoff_stage,
-          next_deep_check_at: state.next_deep_check_at,
+          stage: state?.backoff_stage ?? null,
+          next_deep_check_at: state?.next_deep_check_at ?? null,
           evidence: evidence.slice(0, 3).map((entry) => entry.kind),
         }, now);
         return registry;
@@ -1689,8 +1714,11 @@ export class MonitorEngine {
         const details = await this.gateway.getSessionDetails(monitor.session.session_id);
         if (details.id === monitor.session.session_id)
           return { kind: "ok", sessionId: details.id, primingDigest: monitor.session.priming_digest ?? null };
-      } catch {
-        // fall through to rebind below
+        return { kind: "session-error", reason: "session-identity-mismatch" };
+      } catch (error) {
+        if (errorCode(error) !== "SESSION_NOT_FOUND")
+          return { kind: "session-error", reason: errorCode(error) ?? "session-read-failed" };
+        // Only a confirmed missing old runtime permits canonical re-creation.
       }
     }
     try {

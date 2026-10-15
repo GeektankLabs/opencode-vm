@@ -251,12 +251,52 @@ test("scheduler toggle and trigger act on the canonical registry; removed action
   assert.equal(await page.getByRole("button", { name: "Laufenden Turn abbrechen" }).count(), 0);
 });
 
-test("delete removes the monitor from the canonical registry", async () => {
+test("delete persists across reload despite unrelated generation writes and frees the task binding", async () => {
   await refresh();
   const id = idByTitle("Deletable Monitor");
+  const taskId = registryMonitors()[id].anchor.task_id;
+  await writeFixtureTasks([...defaultTasks, { task_id: taskId, title: "Freed Master", status: "in_progress", declared: true }]);
+  const stale = registryGeneration();
+  storeCli("bump"); // The real observer also updates the global generation.
+  const legacy = await page.request.post(`${base}/api/monitor/${id.slice(8)}/delete`,
+    { headers: { Origin: base }, data: { generation: stale } });
+  assert.equal(legacy.status(), 409, "the old UI request fails before deletion on an unrelated generation change");
+  assert.ok(registryMonitors()[id]);
   await clickAction("Deletable Monitor", "Löschen");
   assert.ok(await waitStore(items => items[id] === undefined));
   assert.equal(idByTitle("Deletable Monitor"), undefined);
+  assert.match(await page.locator("#monitor-status").innerText(), /Löschung bestätigt und zurückgelesen/);
+  assert.equal(await page.locator(`#monitor-create-task option[value="${taskId}"]`).count(), 1);
+  await page.reload();
+  await page.locator(".monitor-card").first().waitFor();
+  assert.equal(await card("Deletable Monitor").count(), 0);
+  const reply = await page.request.post(`${base}/api/monitor`, { headers: { Origin: base }, data: { title: "Rebound Master", task_id: taskId } });
+  assert.equal(reply.status(), 201, "old anchor is available without deleting its task");
+  await writeFixtureTasks(defaultTasks);
+});
+
+test("delete reports running conflicts, network failures and unverified readback without repeating the write", async () => {
+  await refresh();
+  const id = idByTitle("Running Monitor");
+  await clickAction("Running Monitor", "Löschen");
+  assert.ok(registryMonitors()[id]);
+  assert.match(await card("Running Monitor").locator(".monitor-feedback").innerText(), /MONITOR_STATE_CONFLICT/);
+  let writes = 0;
+  await page.route("**/api/monitor/*/delete", route => { writes++; return route.abort(); });
+  await card("Alpha Monitor").getByRole("button", { name: "Löschen", exact: true }).click();
+  await card("Alpha Monitor").locator(".monitor-feedback", { hasText: "Netzwerk" }).waitFor();
+  assert.equal(writes, 1);
+  await page.unroute("**/api/monitor/*/delete");
+  assert.ok(idByTitle("Alpha Monitor"));
+  // A false 200 is not persistence evidence; the detail read still finds it.
+  const alpha = idByTitle("Alpha Monitor");
+  await page.route("**/api/monitor/*/delete", route => route.fulfill({ contentType: "application/json",
+    body: JSON.stringify({ deleted: true, monitor_id: alpha, generation: registryGeneration() }) }));
+  await clickAction("Alpha Monitor", "Löschen");
+  assert.match(await page.locator("#monitor-status").innerText(), /Löschung nicht zurückgelesen/);
+  await page.unroute("**/api/monitor/*/delete");
+  assert.ok(registryMonitors()[alpha]);
+  assert.deepEqual(pageErrors, []);
 });
 
 test("details starts closed, loads fresh history newest first and has its own refresh feedback", async () => {

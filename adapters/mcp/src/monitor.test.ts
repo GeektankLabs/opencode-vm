@@ -113,7 +113,8 @@ function fakes(state: FakeState) {
     },
     async getSessionDetails(sessionId?: string) {
       const id = sessionId ?? "ses_monitor";
-      if (state.lostSessionId && id === state.lostSessionId) throw new Error("Could not inspect OpenCode session.");
+      if (state.lostSessionId && id === state.lostSessionId)
+        throw Object.assign(new Error("Could not inspect OpenCode session."), { code: "SESSION_NOT_FOUND" });
       return {
         id,
         title: "Monitor",
@@ -232,6 +233,203 @@ const policyConfigured: MonitorPolicyView = {
   profiles: { deep: { provider_id: "deep-provider", model_id: "deep-model" }, standard: null, execution: null },
 };
 const policyUnconfigured: MonitorPolicyView = { finalFallback: null, profiles: { deep: { provider_id: "deep-provider", model_id: "deep-model" } } };
+
+test("emergency recovery: operator trigger precedes due investigation and primes a missing manager once", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    state.lostSessionId = "ses_lost";
+    state.createdSessionId = "ses_recovered";
+    const { gateway, board } = fakes(state);
+    await withRegistry(project, registry => {
+      const monitor = defaultMonitorRecord("M", TASK, {}, 100_000);
+      monitor.scheduler.next_run_at = 0;
+      monitor.session.session_id = "ses_lost";
+      monitor.session.priming_digest = "old";
+      monitor.wake_request = { requested_at: new Date(200_000).toISOString(), reason: "operator-recover" };
+      registry.monitors.push(monitor);
+    });
+    const id = (await readRegistrySnapshot(project)).registry.monitors[0]!.id;
+    const worker = await reserveWorker(project, id, {}, { now: 100_400 });
+    await confirmWorkerCreation(project, id, worker.worker_key, { runtime_session_id: "ses_worker", creation_receipt: "ses_worker" }, { now: 100_500 });
+    await rebindWorker(project, id, worker.worker_key, { runtime_session_id: "ses_worker", dispatch_receipt: "msg_worker" }, { now: 100_600 });
+    await seedDueWorker(project, worker.worker_key, 150_000);
+    const engine = new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => 200_000 });
+    assert.equal(await engine.tick(), "noop-trigger");
+    const after = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(after.session.session_id, "ses_recovered");
+    assert.equal(after.investigation!.counters.investigations_total, 0);
+    assert.equal(after.wake_request, null);
+    assert.equal(state.sends.length, 1);
+    assert.ok(after.history.some(entry => entry.type === "manager-primed"));
+  } finally { await cleanup(); }
+});
+
+test("emergency recovery: transient manager read failure never creates a duplicate manager", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    const { gateway, board } = fakes(state);
+    let creates = 0;
+    gateway.getSessionDetails = async () => { throw Object.assign(new Error("backend unavailable"), { code: "BACKEND_UNAVAILABLE" }); };
+    gateway.createSession = async () => { creates++; throw new Error("must not create"); };
+    await withRegistry(project, registry => {
+      const monitor = defaultMonitorRecord("M", TASK, {}, 100_000);
+      monitor.session.session_id = "ses_existing";
+      monitor.scheduler.next_run_at = 0;
+      monitor.wake_request = { requested_at: new Date(200_000).toISOString(), reason: "operator" };
+      registry.monitors.push(monitor);
+    });
+    const engine = new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => 200_000 });
+    assert.equal(await engine.tick(), "error");
+    const after = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(after.session.session_id, "ses_existing");
+    assert.equal(after.wake_request?.reason, "operator");
+    assert.equal(creates, 0);
+    assert.equal(state.sends.length, 0);
+  } finally { await cleanup(); }
+});
+
+test("emergency investigation: changed board and a concurrent trigger survive the read-only action", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    const { gateway, board } = fakes(state);
+    await withRegistry(project, registry => {
+      const monitor = defaultMonitorRecord("M", TASK, {}, 100_000);
+      monitor.scheduler.next_run_at = 0;
+      monitor.state.last_seen_digest = "unacknowledged-board";
+      registry.monitors.push(monitor);
+    });
+    const id = (await readRegistrySnapshot(project)).registry.monitors[0]!.id;
+    const worker = await reserveWorker(project, id, {}, { now: 100_400 });
+    await confirmWorkerCreation(project, id, worker.worker_key, { runtime_session_id: "ses_worker", creation_receipt: "ses_worker" }, { now: 100_500 });
+    await rebindWorker(project, id, worker.worker_key, { runtime_session_id: "ses_worker", dispatch_receipt: "msg_worker" }, { now: 100_600 });
+    await seedDueWorker(project, worker.worker_key, 150_000);
+    gateway.getSessionProgress = async sessionId => {
+      await withRegistry(project, registry => {
+        registry.monitors[0]!.wake_request = { requested_at: new Date(200_001).toISOString(), reason: "operator-during-investigation" };
+      });
+      return progressResult(sessionId, 1);
+    };
+    const engineAt = (now: number) => new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => now });
+    assert.equal(await engineAt(200_000).tick(), "investigated");
+    const after = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(after.state.last_seen_digest, "unacknowledged-board");
+    assert.equal(after.wake_request?.reason, "operator-during-investigation");
+    assert.equal(state.sends.length, 0);
+    assert.equal(await engineAt(200_002).tick(), "noop-trigger");
+    assert.equal(state.sends.length, 1);
+  } finally { await cleanup(); }
+});
+
+test("QC race: old terminal worker status cannot complete a rebound runtime", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    const { gateway, board } = fakes(state);
+    await withRegistry(project, registry => {
+      const monitor = defaultMonitorRecord("M", TASK, {}, 100_000);
+      monitor.scheduler.next_run_at = 0;
+      registry.monitors.push(monitor);
+    });
+    const id = (await readRegistrySnapshot(project)).registry.monitors[0]!.id;
+    const worker = await reserveWorker(project, id, {}, { now: 100_400 });
+    await confirmWorkerCreation(project, id, worker.worker_key, { runtime_session_id: "ses_old_worker", creation_receipt: "ses_old_worker" }, { now: 100_500 });
+    await rebindWorker(project, id, worker.worker_key, { runtime_session_id: "ses_old_worker", dispatch_receipt: "msg_old" }, { now: 100_600 });
+    gateway.getSessionStatus = async (sessionId, receipt) => {
+      if (sessionId === "ses_old_worker" && receipt === "msg_old") {
+        await rebindWorker(project, id, worker.worker_key, { runtime_session_id: "ses_new_worker", dispatch_receipt: "msg_new" }, { now: 200_001 });
+        return okStatus({ assistant_message_ids: ["msg_old_result"] });
+      }
+      return okStatus();
+    };
+    const engine = new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => 200_000 });
+    assert.equal(await engine.tick(), "dispatched");
+    const after = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.equal(after.workers![0]!.runtime_session_id, "ses_new_worker");
+    assert.equal(after.workers![0]!.dispatch_receipt, "msg_new");
+    assert.equal(after.workers![0]!.lifecycle, "active");
+    assert.equal(after.workers![0]!.result_receipt, null);
+    assert.ok(after.history.some(entry => entry.type === "worker-observation-superseded"));
+  } finally { await cleanup(); }
+});
+
+test("QC race: old investigation keeps only historical evidence after a concurrent worker rebind", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    const { gateway, board } = fakes(state);
+    await withRegistry(project, registry => {
+      const monitor = defaultMonitorRecord("M", TASK, {}, 100_000);
+      monitor.scheduler.next_run_at = 0;
+      registry.monitors.push(monitor);
+    });
+    const id = (await readRegistrySnapshot(project)).registry.monitors[0]!.id;
+    const worker = await reserveWorker(project, id, {}, { now: 100_400 });
+    await confirmWorkerCreation(project, id, worker.worker_key, { runtime_session_id: "ses_old_worker", creation_receipt: "ses_old_worker" }, { now: 100_500 });
+    await rebindWorker(project, id, worker.worker_key, { runtime_session_id: "ses_old_worker", dispatch_receipt: "msg_old" }, { now: 100_600 });
+    await seedDueWorker(project, worker.worker_key, 150_000);
+    gateway.getSessionProgress = async sessionId => {
+      await rebindWorker(project, id, worker.worker_key, { runtime_session_id: "ses_new_worker", dispatch_receipt: "msg_new" }, { now: 200_001 });
+      await withRegistry(project, registry => {
+        const inv = registry.monitors[0]!.investigation!;
+        const next = investigationWorkerFor(inv, worker.worker_key, "msg_new");
+        next.anchored_at = new Date(200_001).toISOString();
+        next.anchor_source = "dispatch";
+        next.next_deep_check_at = 9_000_000;
+        next.backoff_stage = 2;
+        refreshInvestigationProjections(inv);
+      });
+      return progressResult(sessionId, 1);
+    };
+    const engine = new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => 200_000 });
+    assert.equal(await engine.tick(), "investigated");
+    const after = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    const clock = after.investigation!.workers[0]!;
+    assert.equal(clock.dispatch_receipt, "msg_new");
+    assert.equal(clock.next_deep_check_at, 9_000_000);
+    assert.equal(clock.backoff_stage, 2);
+    assert.equal(clock.last_tool_digest, null);
+    assert.equal(after.investigation!.counters.investigations_total, 1, "executed reads still count toward the budget");
+    assert.equal(after.investigation!.episode, null, "old result cannot replace current episode evidence");
+    assert.ok(after.history.some(entry => entry.type === "investigation-superseded" && entry.detail?.dispatch_receipt === "msg_old"));
+    assert.equal(after.run.active, false);
+    assert.equal(state.sends.length, 0);
+  } finally { await cleanup(); }
+});
+
+test("emergency stale clocks: archived and null-receipt workers cannot investigate; rebind preserves provenance", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const state = baseState();
+    const { gateway, board } = fakes(state);
+    await withRegistry(project, registry => {
+      const monitor = defaultMonitorRecord("M", TASK, {}, 100_000);
+      monitor.scheduler.next_run_at = 0;
+      registry.monitors.push(monitor);
+    });
+    const id = (await readRegistrySnapshot(project)).registry.monitors[0]!.id;
+    for (const lifecycle of ["archived", "rebound"] as const) {
+      const worker = await reserveWorker(project, id, {}, { now: 100_400 });
+      await confirmWorkerCreation(project, id, worker.worker_key, { runtime_session_id: "ses_old_worker", creation_receipt: "ses_old_worker" }, { now: 100_500 });
+      await rebindWorker(project, id, worker.worker_key, { runtime_session_id: "ses_old_worker", dispatch_receipt: "msg_old" }, { now: 100_600 });
+      await seedDueWorker(project, worker.worker_key, 150_000);
+      if (lifecycle === "archived") await setWorkerLifecycle(project, id, worker.worker_key, "archived");
+      else {
+        await rebindWorker(project, id, worker.worker_key, { runtime_session_id: "ses_new_worker" });
+        assert.equal((await getWorker(project, id, worker.worker_key))!.dispatch_receipt, null);
+      }
+    }
+    const engine = new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => 200_000 });
+    assert.equal(await engine.tick(), "dispatched");
+    const after = (await readRegistrySnapshot(project)).registry.monitors[0]!;
+    assert.deepEqual(after.investigation!.workers, []);
+    assert.equal(after.investigation!.next_deep_check_at, null);
+    assert.equal(after.workers!.length, 2);
+    assert.ok(after.history.some(entry => entry.type === "worker-episode-detached" && entry.detail?.dispatch_receipt === "msg_old"));
+  } finally { await cleanup(); }
+});
 
 test("registry: CAS generation, concurrent rejection, invalid shapes and atomic publication", async () => {
   const { project, cleanup } = await setup();
@@ -2624,10 +2822,11 @@ async function seedDueWorker(project: string, workerKey: string, dueAt: number):
   await withRegistry(project, (registry) => {
     const monitor = registry.monitors[0]!;
     const inv = monitor.investigation ??= defaultInvestigationState();
-    const state = investigationWorkerFor(inv, workerKey, "msg_dispatch");
+    const receipt = monitor.workers!.find(worker => worker.worker_key === workerKey)!.dispatch_receipt;
+    const state = investigationWorkerFor(inv, workerKey, receipt);
     state.anchored_at = "2026-10-07T00:00:00.000Z";
     state.anchor_source = "creation";
-    state.dispatch_receipt = "msg_dispatch";
+    state.dispatch_receipt = receipt;
     state.next_deep_check_at = dueAt;
     refreshInvestigationProjections(inv);
     return registry;
@@ -2818,9 +3017,11 @@ test("P5: a due investigation runs before the no-op shortcut AND before the busy
     assert.equal(record.investigation!.last_progress_at, null, "an investigation result is never progress");
     assert.ok(record.investigation!.workers.find((entry) => entry.worker_key === reserved.worker_key)!.cooldown_until !== null, "cooldown from the investigation end");
 
-    // (2) Cooldown prevents an immediate second investigation (no due loop).
+    // (2) Cooldown prevents another investigation; the previously unacknowledged
+    // worker-index delta still reaches the manager instead of being swallowed.
     await advanceDue(project, 300_000);
-    assert.equal(await engineFactory(300_000).tick(), "noop-unchanged");
+    assert.equal(await engineFactory(300_000).tick(), "dispatched");
+    assert.equal((await readRegistrySnapshot(project)).registry.monitors[0]!.investigation!.counters.investigations_total, 1);
 
     // (3) Busy/blocked worker: due investigation still runs read-only (C1b),
     // unattributable running without telemetry stays inconclusive.
@@ -3202,9 +3403,11 @@ test("F1: an overdue unachieved milestone pulls one early investigation per dead
     assert.equal(record.investigation!.milestone!.overdue_handled_for, "1970-01-01T00:03:00.000Z");
     assert.ok(record.investigation!.milestone!.overdue_handled_at !== null);
 
-    // Exactly ONCE per deadline: the next unchanged wakes are cheap no-ops.
+    // Exactly ONCE per deadline: first deliver the pending worker delta, then
+    // the unchanged wake is a cheap no-op (no repeated investigation).
     await advanceDue(project, 300_000);
-    assert.equal(await engineFactory(300_000).tick(), "noop-unchanged", "no due loop from the expired deadline");
+    assert.equal(await engineFactory(300_000).tick(), "dispatched", "deliver the worker delta, no due loop from the expired deadline");
+    assert.equal((await readRegistrySnapshot(project)).registry.monitors[0]!.investigation!.counters.investigations_total, 1);
     await advanceDue(project, 400_000);
     assert.equal(await engineFactory(400_000).tick(), "noop-unchanged");
 

@@ -273,21 +273,43 @@
   async function act(state, action) {
     if (writing || loading) return;
     writing = true;
+    let actionFeedback = null;
     try {
-      const { ok, body } = await api(`/api/monitor/${state.monitor_id.slice(8)}/${action}`, {
+      const { ok, status, body } = await api(`/api/monitor/${state.monitor_id.slice(8)}/${action}`, {
         method: "POST",
-        body: JSON.stringify({ generation: snapshot.generation }),
+        // Delete addresses a stable object, not an edited snapshot. The server
+        // checks existence and the live run claim under the registry lock;
+        // unrelated observer writes must not prevent an explicit deletion.
+        body: JSON.stringify(action === "delete" ? {} : { generation: snapshot.generation }),
       });
-      if (ok) {
-        setFeedback(state, `Aktion ${action} bestätigt (Generation ${body?.generation}).`);
-        await load(true, true);
+      if (ok && action === "delete" && body?.deleted === true && body.monitor_id === state.monitor_id) {
+        const detail = await api(`/api/monitor/${state.monitor_id.slice(8)}`);
+        const absent = detail.status === 404 && detail.body?.code === "MONITOR_NOT_FOUND";
+        const reloaded = await load(true, true);
+        if (absent && reloaded) {
+          await loadCandidates();
+          actionFeedback = `${summaryText()} · Löschung bestätigt und zurückgelesen (${state.monitor_id}).`;
+        } else {
+          setFeedback(state, "Löschung nicht zurückgelesen; aktuellen Stand prüfen, kein automatischer Wiederholungswrite.");
+          actionFeedback = "Löschung nicht zurückgelesen; aktuellen Stand prüfen, kein automatischer Wiederholungswrite.";
+        }
+      } else if (ok && action !== "delete" && body?.monitor) {
+        const reloaded = await load(true, true);
+        setFeedback(state, reloaded ? `Aktion ${action} bestätigt (Generation ${body.generation}).`
+          : "Aktion angenommen; Rücklesen fehlgeschlagen. Aktuellen Stand prüfen.");
       } else if (body?.code === "MONITOR_REVISION_CONFLICT") {
         await load(true, true);
         setFeedback(state, "Registry anderweitig geändert; aktueller Stand geladen. Aktion bewusst wiederholen.");
       } else {
-        setFeedback(state, `Aktion nicht bestätigt: ${esc(body?.code || body?.error || "unbekannt")}.`);
+        setFeedback(state, `Aktion nicht bestätigt: ${body?.code || body?.error || status || "unbekannt"}.`);
       }
-    } finally { writing = false; renderList(); }
+    } catch {
+      setFeedback(state, "Aktion nicht bestätigt (Netzwerk); aktuellen Stand zurücklesen, kein automatischer Wiederholungswrite.");
+      actionFeedback = "Aktion nicht bestätigt (Netzwerk); aktuellen Stand zurücklesen, kein automatischer Wiederholungswrite.";
+    } finally {
+      writing = false; renderList();
+      if (actionFeedback) $("monitor-status").textContent = actionFeedback;
+    }
   }
 
   async function loadHistory(state) {
