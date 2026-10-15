@@ -38,6 +38,11 @@ MAX_REGISTRY_BYTES = 1_048_576
 
 
 def registry_directory(project: Path) -> Path:
+    # Phase 2 (task_3eaf2d4a): guest-native monitor state dir when exported by
+    # the VM-side startup script; falls back to the legacy project path.
+    guest = os.environ.get("OCVM_MONITOR_STATE_DIR")
+    if guest:
+        return Path(guest)
     return project / ".opencode-vm" / "monitor"
 
 

@@ -73,8 +73,12 @@ Secure state by persistence class:
 - **Host-persistent** (survives a VM rebuild): the per-project state under
   `~/.opencode-vm/project-state/<hash>/` (including the resmon host history
   `resmon/host.jsonl`), the per-session working copy under `~/.opencode-vm/sessions/<hash>/`,
-  the project's `.opencode-vm/monitor/` and `.opencode-vm/taskboard/` state, the registered
-  C/P and task documents, the provider-auth baseline, and host worktrees (by reference).
+  the project's `.opencode-vm/taskboard/` state, the registered C/P and task
+  documents, the provider-auth baseline, and host worktrees (by reference).
+  **`.opencode-vm/monitor/` is no longer host-persistent** — the scheduler/
+  monitor management (registry, heartbeat, workers, history, logs) now lives
+  on the guest artifact dir (`$OCVM_MONITOR_STATE_DIR`, Phase 2).  A
+  declarative restart description is persisted separately (see below).
 - **Guest-volatile** (do not blindly copy): `/proc`-derived data, adapter pidfiles, proxy
   markers, in-VM caches and the guest resmon history are VM-local.
 
@@ -125,5 +129,12 @@ Stage the outcome: `CODE_RESTORED` / `CONTEXT_RESTORED` are separate from `OPERA
 / `TEST_READY` / `MONITOR_READY`. **Monitor resume:** after a full unpack and check, ask the
 operator concretely whether the affected old monitors should be deleted and correctly
 assigned new ones created (creating has a start effect), naming the affected monitors and
-the loss of run history. Without a concrete restart release, the old monitors stay off —
-no delete, no create, no start. Code/context restoration implies no new full/test/recovery run.
+the loss of run history.  **Operator explicitly Yes/No required** — without concrete restart
+release, the old monitors stay off: no delete, no create, no start.  **IDs only as
+reference:** the declarative restart description records the old monitor configuration as
+historical reference; at recreation, the regular create flow generates **new monitor IDs** —
+no ID copy, no reuse of old IDs.  **No silent adoption:** old runtime state, session
+bindings and worker records from a different VM lifecycle are never silently reactivated.
+**Duplicate protection:** before creation, check the live registry for same-name/same-ID
+monitors; existing entries (e.g. from a kept VM) are never duplicated — report instead.
+Code/context restoration implies no new full/test/recovery run.

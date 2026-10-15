@@ -638,6 +638,10 @@ export type MonitorRegistry = {
 export type RegistrySnapshot = { registry: MonitorRegistry; path: string };
 
 export function monitorRegistryDirectory(project: string): string {
+  // Phase 2 (task_3eaf2d4a): guest-native monitor state dir when exported by
+  // the VM-side startup script; falls back to the legacy project path.
+  const guest = process.env.OCVM_MONITOR_STATE_DIR;
+  if (guest) return guest;
   return join(project, ".opencode-vm", "monitor");
 }
 export function monitorRegistryPath(project: string): string {

@@ -51,6 +51,16 @@ Ordinary OpenCode implementation sessions do not use the management MCP; their w
 7. Archive finished own sessions and remove their context files only after the secured-handover sequence in the worker-context contract; reuse still-needed workers.
 8. Update journal, compact context and the worker index through `update_monitor_worker` for the next resume and verify the readback. An engine-observed finished dispatched worker is marked `idle` with a fresh `result_receipt`, which is a wake signal to synthesize — read the result original; the receipt is not itself an acceptance.
 
+**Phase 2 guest-state note (task_3eaf2d4a §17):** when recreating monitors after
+an authorized unpack, only **regular new IDs** are generated (the create flow's
+native IDs); old monitor IDs from the declarative restart description are
+historical reference only — never copied.  Old session bindings, worker records
+and PIDs from a different VM lifecycle are never silently reactivated; new valid
+bindings are established through the regular `create_monitor_worker` /
+`update_monitor_worker` flow.  Before creation, check for same-name/same-ID
+monitors in the live registry; existing entries are never duplicated (report
+instead).
+
 ## Autonomy versus model profiles
 
 Autonomy profiles (**conservative / sandbox / mvp / yolo**) govern decision latitude, reversibility expectations, scope and escalation triggers; they are operator-configured and never self-changed. Model/thinking profiles (**execution / standard / deep / design / review**) select provider/model/variant per work type through current project policy with catalog and runtime readback. Keep the two axes separate in every prompt and decision; existing detailed contracts apply: [Optimistic MVP](optimistic-mvp.md), [Work packages](work-packages.md#minimal-functional-autonomy-and-decision-parking), [Integration-test monitor counters](integration-test-monitor.md#fingerprint-counters-and-progress), [Fallback routing](fallback-routing.md), [Worktree ownership](worktree-ownership.md), [Monitor tasks](monitor-tasks.md) for external scheduling.

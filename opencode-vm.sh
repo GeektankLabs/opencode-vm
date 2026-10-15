@@ -344,7 +344,7 @@ TASKBOARD_ARM64_SHA256="3749fb985f544fdb6788ba1dff69761e599ff82b3fe86d39ca54307c
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.7.59"
+OCVM_VERSION="0.7.60"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -3310,6 +3310,41 @@ graphify_guest_dir() {
     echo "graphify_guest_dir: no md5/md5sum available" >&2; return 1
   fi
   printf '%s' "$base/$phash/graphify"
+}
+
+# Canonical guest dir for one project's monitor state.  Same layout as
+# graphify_guest_dir (<base>/<proj-hash>/monitor), same hash function
+# (md5 of the raw project path).  Used by host-side heartbeat/resmon reads
+# and by start_monitor to compute the guest state dir.
+monitor_guest_dir() {
+  local vm_home="${1:?vm_home}" proj="${2:?proj}" base phash
+  base="$(graphify_guest_base "$vm_home")"
+  if command -v md5 >/dev/null 2>&1; then
+    phash="$(echo -n "$proj" | md5 -q)"
+  elif command -v md5sum >/dev/null 2>&1; then
+    phash="$(echo -n "$proj" | md5sum | cut -d' ' -f1)"
+  else
+    echo "monitor_guest_dir: no md5/md5sum available" >&2; return 1
+  fi
+  printf '%s' "$base/$phash/monitor"
+}
+
+# Relocate an adapter's node_modules from the session share (virtiofs) to
+# the guest artifact dir and symlink it back.  All npm ci/install sites run
+# in the VM — this helper runs after them in the same context.
+# $1 = adapter dir (contains node_modules as a real dir after npm ci)
+# $2 = guest node_modules target (e.g. $OCVM_ARTIFACT_ROOT/<hash>/mcp-adapter/node_modules)
+# Only relocates when node_modules is a real dir (not already a symlink);
+# never follows or removes foreign targets.  Returns 0 on success/no-op.
+_nm_relocate_to_guest() {
+  local src="${1:?adapter_dir/node_modules}" dst="${2:?guest_node_modules}"
+  [[ -d "$src" && ! -L "$src" ]] || return 0
+  local dst_parent; dst_parent="$(dirname "$dst")"
+  mkdir -p "$dst_parent" || return 1
+  rm -rf -- "$dst" 2>/dev/null || true
+  mv -- "$src" "$dst" || { echo "[nm-relocate] WARNING: mv failed: $src -> $dst" >&2; return 1; }
+  ln -s "$dst" "$src" || { echo "[nm-relocate] WARNING: symlink failed; node_modules relocated but not linked: $dst" >&2; return 0; }
+  return 0
 }
 
 # Create <proj>/.graphify-out -> $guest_dir exactly once.  Existing entries
@@ -15070,7 +15105,8 @@ dashboard_failure() {
 
 start_monitor() {
   [[ "$OC_MODE" == web ]] || return 0
-  local dir="$SESS_SHARE/monitor" adapter="$SESS_SHARE/dashboard/adapter" tmp="" node_bin=""
+  local mon_state="${OCVM_MONITOR_STATE_DIR:-$SESS_SHARE/monitor}"
+  local dir="$mon_state/run" adapter="$SESS_SHARE/dashboard/adapter" tmp="" node_bin=""
   stop_monitor || return 1
   [[ -d "$adapter" && ! -L "$adapter" ]] || return 1
   [[ -f "$adapter/.ocvm-managed" ]] && grep -qFx 'opencode-vm-mcp-staging-v1' "$adapter/.ocvm-managed" || return 1
@@ -15108,13 +15144,17 @@ start_monitor() {
   echo "[monitor] Engine active (project registry; no listener, no port)."
 }
 
-# The engine writes its heartbeat next to the project-persistent monitor
-# registry (<project>/.opencode-vm/monitor/heartbeat.json, monitor-main.ts),
-# never into the session share. Readiness reads exactly that path and verifies
-# identity plus freshness, so a starting or foreign runtime is not reported as
-# this runtime's engine.
+# The engine writes its heartbeat to the monitor state dir
+# ($OCVM_MONITOR_STATE_DIR/heartbeat.json, monitor-main.ts).  When
+# OCVM_MONITOR_STATE_DIR is set (Phase 2 guest state), the path resolves
+# inside the VM; on the host the env is unset and the legacy project path
+# is returned (won't exist after migration — host-side reads use vm_exec).
 monitor_heartbeat_path() {
-  printf '%s\n' "$1/.opencode-vm/monitor/heartbeat.json"
+  if [[ -n "${OCVM_MONITOR_STATE_DIR:-}" ]]; then
+    printf '%s\n' "$OCVM_MONITOR_STATE_DIR/heartbeat.json"
+  else
+    printf '%s\n' "$1/.opencode-vm/monitor/heartbeat.json"
+  fi
 }
 
 monitor_wait_heartbeat() {
@@ -15143,7 +15183,8 @@ monitor_wait_heartbeat() {
 }
 
 stop_monitor() {
-  local dir="$SESS_SHARE/monitor" heartbeat=""
+  local mon_state="${OCVM_MONITOR_STATE_DIR:-$SESS_SHARE/monitor}"
+  local dir="$mon_state/run" heartbeat=""
   if systemctl is-active --quiet ocvm-monitor.service 2>/dev/null; then
     local description=""
     description="$(systemctl show -p Description --value ocvm-monitor.service 2>/dev/null || true)"
@@ -15162,7 +15203,7 @@ stop_monitor() {
     && [[ "$(jq -r '.generation // empty' "$heartbeat" 2>/dev/null || true)" == "${OC_HUB_GENERATION:-}" ]]; then
     rm -f "$heartbeat"
   fi
-  rm -f "$dir/runtime-input.json" "$dir/heartbeat.json"
+  rm -f "$dir/runtime-input.json"
   return 0
 }
 
@@ -15180,6 +15221,9 @@ start_dashboard() {
     ( cd "$adapter" && npm ci --ignore-scripts --no-audit --no-fund --loglevel=error && npm run build --silent ) || return 1
   fi
   [[ -f "$adapter/dist/dashboard-main.js" && -f "$adapter/dashboard/index.html" ]] || return 1
+  if [[ -n "${OCVM_ARTIFACT_ROOT:-}" && -n "${OCVM_PROJ_HASH:-}" ]]; then
+    _nm_relocate_to_guest "$adapter/node_modules" "${OCVM_ARTIFACT_ROOT}/${OCVM_PROJ_HASH}/dashboard-adapter/node_modules"
+  fi
   local OC_TLS=1 OC_SCHEME=http OC_TLS_CERT="" OC_TLS_KEY=""
   ensure_web_tls
   [[ "$OC_SCHEME" == https ]] || { dashboard_failure "Existing HTTPS certificate unavailable."; return 1; }
@@ -18010,9 +18054,45 @@ resmon_host_append_bounded() {
 }
 
 # Scheduler state from the project monitor registry (read-only, current truth).
+# Phase 2: when a running VM is available ($2=vm), reads registry+heartbeat
+# from the guest state dir via vm_exec; else tries the legacy host path (may
+# exist in pre-migration sessions); else returns nulls (honest: no engine = no
+# scheduler state).  Called from resmon_host_sample which has the VM name.
 resmon_sched_json() {
-  local proj="$1" reg="$1/.opencode-vm/monitor/registry.json" hb="$1/.opencode-vm/monitor/heartbeat.json"
+  local proj="$1" vm="${2:-}"
   local fresh="null" gen="" at="" ws=""
+  # Guest read via vm_exec when a running VM is available.  The guest script
+  # mirrors the same jq logic using OCVM_MONITOR_STATE_DIR (exported at
+  # startup).  On failure, fall through to legacy host read.
+  if [[ -n "$vm" ]] && is_vm_running "$vm" 2>/dev/null; then
+    local _guest_json
+    _guest_json="$(vm_exec "$vm" '
+      reg="$OCVM_MONITOR_STATE_DIR/registry.json"
+      hb="$OCVM_MONITOR_STATE_DIR/heartbeat.json"
+      fresh="null"; gen=""; at=""; ws=""
+      if [ -f "$hb" ] && ! [ -L "$hb" ] && command -v jq >/dev/null 2>&1; then
+        at="$(jq -r "select(type==\"object\") | .at // empty" "$hb" 2>/dev/null || true)"
+        gen="$(jq -r "select(type==\"object\") | .generation // empty" "$hb" 2>/dev/null || true)"
+        now=$(date +%s)
+        atn="$(printf "%s" "$at" | sed -E "s/\.[0-9]+Z?$/Z/")"
+        ate="$(date -u -d "$atn" +%s 2>/dev/null || true)"
+        if [ -n "$ate" ]; then
+          if [ $(( now - ate )) -le 90 ]; then fresh="true"; else fresh="false"; fi
+        fi
+      fi
+      if [ -f "$reg" ] && ! [ -L "$reg" ] && command -v jq >/dev/null 2>&1; then
+        ws="$(jq -r "if type==\"object\" then ([.monitors[]?.state.work // empty] | join(\",\")) else empty end" "$reg" 2>/dev/null || true)"
+      fi
+      jq -cn --arg at "$at" --arg gen "$gen" --arg ws "$ws" --argjson fresh "$fresh" \
+        "{heartbeat_at:(if \$at==\"\" then null else \$at end),heartbeat_fresh:\$fresh,generation:(if \$gen==\"\" then null else \$gen end),work_state:(if \$ws==\"\" then null else \$ws end)}"
+    ' 2>/dev/null)" || true
+    if [[ -n "$_guest_json" ]] && printf '%s' "$_guest_json" | jq -e 'type=="object"' >/dev/null 2>&1; then
+      printf '%s' "$_guest_json"
+      return 0
+    fi
+  fi
+  # Legacy host path fallback (pre-migration sessions, or no VM running).
+  local reg="$1/.opencode-vm/monitor/registry.json" hb="$1/.opencode-vm/monitor/heartbeat.json"
   if [[ -f "$hb" && ! -L "$hb" ]] && command -v jq >/dev/null 2>&1; then
     at="$(jq -r 'select(type=="object") | .at // empty' "$hb" 2>/dev/null || true)"
     gen="$(jq -r 'select(type=="object") | .generation // empty' "$hb" 2>/dev/null || true)"
@@ -18110,7 +18190,7 @@ resmon_host_sample() {
   fi
   [ -n "$procs_json" ] || procs_json="[]"
   local sched
-  sched="$(resmon_sched_json "$proj" 2>/dev/null || printf '{}')"
+  sched="$(resmon_sched_json "$proj" "${vm:-}" 2>/dev/null || printf '{}')"
   [ -n "$sched" ] || sched="{}"
   jq -cn --arg t "$t" --argjson te "${te:-0}" --arg os "$os" --arg host "$hn" --arg vm "$vm" --arg gen "$gen" --arg gstate "$gstate" \
     --arg used "$used" --arg max "$max" --arg maxsrc "$maxsrc" --arg mfp "$mfp" \
@@ -19230,6 +19310,33 @@ attach_session() {
       esac
       unset _ocvm_wt_probe _ocvm_wt_fstype
     fi
+    # Guest-native artifact root and per-project state dirs (Phase 2).
+    # Same default as graphify_guest_base on the host; OCVM_PROJ_HASH
+    # matches proj_hash (md5 of the raw project path).  Exports the
+    # canonical monitor state dir for monitorRegistryDirectory / hub to
+    # resolve without recomputing.
+    if [ -z "${OCVM_ARTIFACT_ROOT:-}" ]; then
+      export OCVM_ARTIFACT_ROOT="${HOME}/.opencode-vm/artifacts"
+    fi
+    if [ -z "${OCVM_PROJ_HASH:-}" ]; then
+      _ocvm_aph="$(printf '%s' "$(pwd -P)" | md5sum 2>/dev/null | cut -d' ' -f1)"
+      [ -n "$_ocvm_aph" ] || _ocvm_aph="$(printf '%s' "$(pwd -P)" | md5 -q 2>/dev/null)"
+      export OCVM_PROJ_HASH="${_ocvm_aph}"
+      unset _ocvm_aph
+    fi
+    export OCVM_MONITOR_STATE_DIR="${OCVM_MONITOR_STATE_DIR:-${OCVM_ARTIFACT_ROOT}/${OCVM_PROJ_HASH}/monitor}"
+    # Relocate node_modules from virtiofs (session share) to guest disk and
+    # symlink back.  All npm ci/install sites run in the VM — this helper
+    # runs after them.  $1 = source node_modules dir (real dir after npm ci)
+    # $2 = guest target (e.g. $OCVM_ARTIFACT_ROOT/$OCVM_PROJ_HASH/mcp-adapter/node_modules).
+    _nm_relocate_to_guest() {
+      local src="${1:?src}" dst="${2:?dst}"
+      [ -d "$src" ] && ! [ -L "$src" ] || return 0
+      mkdir -p "$(dirname "$dst")" || return 1
+      rm -rf -- "$dst" 2>/dev/null || true
+      mv -- "$src" "$dst" || { echo "[nm-relocate] WARNING: mv failed: $src -> $dst" >&2; return 1; }
+      ln -s "$dst" "$src" || { echo "[nm-relocate] WARNING: symlink failed" >&2; return 0; }
+    }
     prepare_openlive_adapter() {
       [ "$OC_MODE" = "web" ] || return 0
       [ -n "$OC_OPENLIVE_PROJECT_HASH" ] || return 1
@@ -19249,6 +19356,7 @@ attach_session() {
           ( cd "$adapter" && npm ci --omit=dev --ignore-scripts --no-audit --no-fund --loglevel=error ) || return 1
         fi
         printf "%s\n" "$mode" > "$adapter/node_modules/.ocvm-install-mode" || return 1
+        _nm_relocate_to_guest "$adapter/node_modules" "${OCVM_ARTIFACT_ROOT}/${OCVM_PROJ_HASH}/openlive-adapter/node_modules"
       fi
       if [ "${mode%%-*}" = "source" ]; then
         # Source staging excludes dist, so every web start rebuilds it.
@@ -19365,6 +19473,7 @@ attach_session() {
         echo "[attach] Installing opencode config dependencies (custom tools/plugins)..."
         ( cd "$OC_CFG_DIR" && npm install --no-audit --no-fund --loglevel=error ) ||
           echo "[attach] WARNING: config dependency install failed — custom tools may not load."
+        _nm_relocate_to_guest "$OC_CFG_DIR/node_modules" "${OCVM_ARTIFACT_ROOT}/${OCVM_PROJ_HASH}/oc-config-node_modules/node_modules"
         echo "[attach] Config dependencies ready."
       fi
     fi
@@ -19388,8 +19497,13 @@ attach_session() {
       ensure_web_tls
       start_openlive_gateway
       start_web_proxies
-      if ! prepare_mcp_adapter || ! start_mcp_adapter; then
+      if ! prepare_mcp_adapter; then
         echo "[mcp] ERROR: adapter preparation failed; refusing MCP-enabled startup." >&2
+        exit 1
+      fi
+      _nm_relocate_to_guest "$SESS_SHARE/mcp/adapter/node_modules" "${OCVM_ARTIFACT_ROOT}/${OCVM_PROJ_HASH}/mcp-adapter/node_modules"
+      if ! start_mcp_adapter; then
+        echo "[mcp] ERROR: adapter start failed; refusing MCP-enabled startup." >&2
         exit 1
       fi
       start_hub || echo "[hub] Unavailable; OpenCode continues without the Hub." >&2
@@ -21495,6 +21609,33 @@ start_session() {
       esac
       unset _ocvm_wt_probe _ocvm_wt_fstype
     fi
+    # Guest-native artifact root and per-project state dirs (Phase 2).
+    # Same default as graphify_guest_base on the host; OCVM_PROJ_HASH
+    # matches proj_hash (md5 of the raw project path).  Exports the
+    # canonical monitor state dir for monitorRegistryDirectory / hub to
+    # resolve without recomputing.
+    if [ -z "${OCVM_ARTIFACT_ROOT:-}" ]; then
+      export OCVM_ARTIFACT_ROOT="${HOME}/.opencode-vm/artifacts"
+    fi
+    if [ -z "${OCVM_PROJ_HASH:-}" ]; then
+      _ocvm_aph="$(printf '%s' "$(pwd -P)" | md5sum 2>/dev/null | cut -d' ' -f1)"
+      [ -n "$_ocvm_aph" ] || _ocvm_aph="$(printf '%s' "$(pwd -P)" | md5 -q 2>/dev/null)"
+      export OCVM_PROJ_HASH="${_ocvm_aph}"
+      unset _ocvm_aph
+    fi
+    export OCVM_MONITOR_STATE_DIR="${OCVM_MONITOR_STATE_DIR:-${OCVM_ARTIFACT_ROOT}/${OCVM_PROJ_HASH}/monitor}"
+    # Relocate node_modules from virtiofs (session share) to guest disk and
+    # symlink back.  All npm ci/install sites run in the VM — this helper
+    # runs after them.  $1 = source node_modules dir (real dir after npm ci)
+    # $2 = guest target (e.g. $OCVM_ARTIFACT_ROOT/$OCVM_PROJ_HASH/mcp-adapter/node_modules).
+    _nm_relocate_to_guest() {
+      local src="${1:?src}" dst="${2:?dst}"
+      [ -d "$src" ] && ! [ -L "$src" ] || return 0
+      mkdir -p "$(dirname "$dst")" || return 1
+      rm -rf -- "$dst" 2>/dev/null || true
+      mv -- "$src" "$dst" || { echo "[nm-relocate] WARNING: mv failed: $src -> $dst" >&2; return 1; }
+      ln -s "$dst" "$src" || { echo "[nm-relocate] WARNING: symlink failed" >&2; return 0; }
+    }
     prepare_openlive_adapter() {
       [ "$OC_MODE" = "web" ] || return 0
       [ -n "$OC_OPENLIVE_PROJECT_HASH" ] || return 1
@@ -21514,6 +21655,7 @@ start_session() {
           ( cd "$adapter" && npm ci --omit=dev --ignore-scripts --no-audit --no-fund --loglevel=error ) || return 1
         fi
         printf "%s\n" "$mode" > "$adapter/node_modules/.ocvm-install-mode" || return 1
+        _nm_relocate_to_guest "$adapter/node_modules" "${OCVM_ARTIFACT_ROOT}/${OCVM_PROJ_HASH}/openlive-adapter/node_modules"
       fi
       if [ "${mode%%-*}" = "source" ]; then
         # Source staging excludes dist, so every web start rebuilds it.
@@ -21705,6 +21847,7 @@ EOF
         echo "[$(date +%T)] Installing opencode config dependencies (custom tools/plugins)..."
         ( cd "$OC_CFG_DIR" && npm install --no-audit --no-fund --loglevel=error ) ||
           echo "[run] WARNING: config dependency install failed — custom tools may not load on first start."
+        _nm_relocate_to_guest "$OC_CFG_DIR/node_modules" "${OCVM_ARTIFACT_ROOT}/${OCVM_PROJ_HASH}/oc-config-node_modules/node_modules"
         echo "[$(date +%T)] Config dependencies ready."
       fi
     fi
