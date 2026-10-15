@@ -11,6 +11,12 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 TMP="$(mktemp -d)"
+# macOS: mktemp -d returns /var/folders/... and /var is a symlink to
+# /private/var. The guest resolver below refuses symlinked path components
+# (owner/mount/symlink protection, intentionally not loosened), so every
+# resolver-facing fixture must sit below the physical temp root.
+TMP="$(cd "$TMP" && pwd -P)"
+[[ "$TMP" == "$(cd "$TMP" && pwd -P)" ]] || { printf 'not ok - TMP must be a physical path\n' >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 export HOME="$TMP/home" OCVM_INTERNAL_SOURCE_ONLY=1 OCVM_DISABLE_UPDATE_CHECK=1
 mkdir -p "$HOME" "$TMP/emptytmp" "$TMP/.opencode-vm/sessions"

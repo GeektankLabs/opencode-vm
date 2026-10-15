@@ -8,6 +8,12 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 TMP="$(mktemp -d)"
+# macOS: mktemp -d returns /var/folders/... and /var is a symlink to
+# /private/var. The guest resolver used by the scheduler read refuses
+# symlinked path components (protection intentionally not loosened), so the
+# resolver-facing fixtures must sit below the physical temp root.
+TMP="$(cd "$TMP" && pwd -P)"
+[[ "$TMP" == "$(cd "$TMP" && pwd -P)" ]] || { printf 'not ok - TMP must be a physical path for the guest resolver\n' >&2; exit 1; }
 # On any exit (incl. a failed assertion) stop this test's own sampler
 # cooperatively and remove the temp tree — never leave an orphan loop behind.
 trap '
@@ -125,6 +131,14 @@ HELPER="$ROOT/runtime/guest-state.py"
 SHARE_PROBE="$(session_share_dir "$PROJ")"
 mkdir -p "$SHARE_PROBE/config/opencode/managed-policy"
 cp "$HELPER" "$SHARE_PROBE/config/opencode/managed-policy/guest-state.py"
+# Regression (CI macOS failure class): a symlinked ancestor (macOS /var ->
+# /private/var) must fail closed in the guest resolver; only the physical temp
+# root above is usable. Loosening the product protection must break here.
+mkdir -p "$TMP/real-parent"
+ln -s "$TMP/real-parent" "$TMP/symlink-parent"
+if OCVM_ARTIFACT_ROOT="$TMP/symlink-parent/artifacts" python3 "$HELPER" resolve "$PROJ" monitor >/dev/null 2>&1; then
+  fail "guest resolver accepted a symlinked ancestor (must fail closed)"
+fi
 STATE="$(python3 "$HELPER" resolve "$PROJ" monitor --create)"
 is_vm_running() { return 0; }
 vm_exec() { local _vm="$1" _script="$2"; shift 2; bash -lc "$_script" _ "$@"; }
