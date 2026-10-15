@@ -77,11 +77,11 @@ class GraphifyFixture(unittest.TestCase):
                     "OCVM_DISABLE_UPDATE_CHECK": "1",
                     "OCVM_ARTIFACT_ROOT": str(self.guest)}
 
-    def run_fns(self, script, extra_env=None):
+    def run_fns(self, script, extra_env=None, timeout=60):
         cmd = "set -uo pipefail\n" + FNS + "\n" + script
         return subprocess.run(["bash", "-c", cmd],
                               env={**self.env, **(extra_env or {})},
-                              capture_output=True, text=True, timeout=60)
+                              capture_output=True, text=True, timeout=timeout)
 
     def git(self, *args):
         return subprocess.run(
@@ -477,23 +477,225 @@ def _mcp_server_python():
 
 class GraphifyMcpPinTest(unittest.TestCase):
     """The tested graphifyy+mcp combination is reproducible: every
-    graphify install/ensure path pins the decorator-era mcp release."""
+    graphify install/ensure path pins the decorator-era mcp release with
+    --force (a plain inject no-ops on the already-present unpinned 2.x)."""
 
     PIN = "mcp==1.30.0"
+    FORCE_INJECT = "pipx inject graphifyy --force"
 
     def test_install_and_ensure_pin_the_same_mcp_release(self):
-        self.assertIn(f"pipx inject graphifyy '{self.PIN}'", TEXT)
-        self.assertEqual(TEXT.count(f"pipx inject graphifyy '{self.PIN}'"), 2,
-                         "install (provision_base) and ensure (graphify_ensure_mcp_in_vm) "
-                         "must both pin the tested mcp release")
-        # No unpinned mcp install/inject may remain on the graphify path.
+        # Single-quoted form: provision_base site (its warn text repeats the
+        # command as documentation); double-quoted form: the ensure snippet.
+        self.assertIn(f"{self.FORCE_INJECT} '{self.PIN}'", TEXT)
+        self.assertIn(f'{self.FORCE_INJECT} "{self.PIN}"', TEXT)
+        self.assertGreaterEqual(TEXT.count(f"{self.FORCE_INJECT} '{self.PIN}'") +
+                                TEXT.count(f'{self.FORCE_INJECT} "{self.PIN}"'), 2,
+                                "install (provision_base) and ensure (graphify_ensure_mcp_in_vm) "
+                                "must both force-pin the tested mcp release")
+        # No unpinned inject and no without-force inject may remain: without
+        # --force pipx reports the already-present 2.x as installed and
+        # changes nothing (the ab6c3c1 defect).
         self.assertNotIn("pipx inject graphifyy mcp ", TEXT + " ")
-        self.assertNotIn('pipx inject graphifyy mcp\n', TEXT)
+        self.assertNotIn("pipx inject graphifyy mcp\n", TEXT)
+        self.assertNotIn(f"pipx inject graphifyy '{self.PIN}'", TEXT)
+        self.assertNotIn(f'pipx inject graphifyy "{self.PIN}"', TEXT)
         # graphifyy itself stays on its exact pin.
         self.assertIn("graphifyy[mcp]==0.4.32", TEXT)
-        # Both pin sites document the consumer requirement (decorator-era
-        # @server.list_tools, removed in mcp >= 2.0).
+        # Both sites verify the API the consumer needs (decorator-era
+        # Server.list_tools), not mere module presence.
+        self.assertGreaterEqual(TEXT.count("hasattr(Server"), 2)
         self.assertGreaterEqual(TEXT.count("@server.list_tools"), 2)
+
+
+PIPX = shutil.which("pipx") or str(Path.home() / ".local/bin/pipx")
+
+
+def _venv_py(home: Path) -> Path:
+    return home / ".local/share/pipx/venvs/graphifyy/bin/python"
+
+
+def _py_probe(py, code: str):
+    return subprocess.run([str(py), "-c", code], capture_output=True, text=True, timeout=120)
+
+
+def _mcp_version(py) -> str:
+    r = _py_probe(py, "import importlib.metadata as m; print(m.version('mcp'))")
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def _mcp_api_ok(py) -> bool:
+    return _py_probe(py, 'from mcp.server import Server; assert hasattr(Server, "list_tools")').returncode == 0
+
+
+def _mcp_protocol_probe(py, graph: str):
+    """Real MCP stdio protocol against python -m graphify.serve <graph>
+    (the exact entry the production wrapper execs). Returns (tools, stats)."""
+    proc = subprocess.Popen([str(py), "-m", "graphify.serve", graph],
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True)
+
+    def send(obj):
+        proc.stdin.write(json.dumps(obj) + "\n")
+        proc.stdin.flush()
+
+    send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+          "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                     "clientInfo": {"name": "ocvm-test", "version": "1"}}})
+    send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+    send({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+          "params": {"name": "graph_stats", "arguments": {}}})
+    got = {}
+    inbox = queue.Queue()
+
+    def reader():
+        for line in proc.stdout:
+            inbox.put(line)
+
+    threading.Thread(target=reader, daemon=True).start()
+    deadline = time.time() + 20
+    while time.time() < deadline and not all(i in got for i in (1, 2, 3)):
+        try:
+            msg = json.loads(inbox.get(timeout=1))
+        except (queue.Empty, ValueError):
+            continue
+        if "id" in msg:
+            got[msg["id"]] = msg
+    try:
+        proc.stdin.close()
+        proc.terminate()
+        proc.wait(timeout=10)
+        for stream in (proc.stdout, proc.stderr):
+            if stream:
+                stream.close()
+    except Exception:
+        pass
+    tools = sorted(t["name"] for t in got.get(2, {}).get("result", {}).get("tools", []))
+    stats = "".join(c.get("text", "") for c in got.get(3, {}).get("result", {}).get("content", []))
+    return got, tools, stats
+
+
+@unittest.skipUnless(Path(PIPX).exists() or shutil.which("pipx"),
+                     "pipx not installed")
+class GraphifyMcpPipxSandboxTest(GraphifyFixture):
+    """Real pipx-sandbox regression for the pinned mcp compatibility fix
+    (isolated PIPX_HOME under the fixture tempdir; the live venv, host
+    install and base VM are never touched)."""
+
+    def _sandbox_env(self, name="sbx", extra_path=None):
+        home = self.base / name
+        home.mkdir(parents=True, exist_ok=True)
+        # pipx is a user-site install: redirecting HOME hides it from its own
+        # interpreter. Keep the real user-site importable via PYTHONPATH while
+        # PIPX_HOME still derives from the sandbox HOME (venv layout then
+        # matches the production $HOME/.local/share/pipx path).
+        user_site = subprocess.run(["python3", "-c", "import site; print(site.getusersitepackages())"],
+                                   capture_output=True, text=True, timeout=30).stdout.strip()
+        env = {**self.env, "HOME": str(home), "PATH": extra_path or os.environ["PATH"],
+               # Explicit sandbox pipx home: an inherited PIPX_HOME (e.g. a
+               # session tmp redirect) would place venvs outside the sandbox
+               # and collide with other installs. The sandbox layout matches
+               # the production $HOME/.local/share/pipx path the ensure
+               # snippet probes.
+               "PIPX_HOME": str(home / ".local/share/pipx"),
+               "PIPX_BIN_DIR": str(home / ".local/bin")}
+        if user_site:
+            env["PYTHONPATH"] = user_site
+        return home, env
+
+    def _install(self, env, *spec):
+        return subprocess.run([PIPX, "install", *spec], env=env,
+                              capture_output=True, text=True, timeout=600)
+
+    def test_incompatible_2x_healed_by_real_ensure_snippet_and_serves(self):
+        if not _have_graphifyy():
+            self.skipTest("graphifyy CLI not installed (needed to produce the graph)")
+        home, env = self._sandbox_env("sbx-incompat")
+        # 1. The exact base install command: [mcp] extra resolves mcp unpinned.
+        r = self._install(env, "graphifyy[mcp]==0.4.32")
+        py = _venv_py(home)
+        self.assertTrue(py.exists(), r.stdout + r.stderr)
+        v2 = _mcp_version(py)
+        self.assertNotEqual(v2, "1.30.0",
+                            f"the [mcp] extra must resolve unpinned mcp (observed {v2})")
+        self.assertFalse(_mcp_api_ok(py), f"mcp {v2} must be API-incompatible")
+        # 2. QC_FAIL evidence: without --force the pin is a no-op.
+        subprocess.run([PIPX, "inject", "graphifyy", "mcp==1.30.0"],
+                       env=env, capture_output=True, text=True, timeout=600)
+        self.assertNotEqual(_mcp_version(py), "1.30.0",
+                            "without --force the pin must not downgrade (ab6c3c1 defect)")
+        self.assertFalse(_mcp_api_ok(py), "no-op inject must not fix the API")
+        # 3. The REAL ensure snippet heals (API check + --force pin + verify).
+        r = self.run_fns(VM_EXEC_STUB + "graphify_ensure_mcp_in_vm sess",
+                         extra_env=env,
+                         timeout=300)
+        out = r.stdout + r.stderr
+        self.assertIn("self-heal complete", out, out)
+        self.assertEqual(_mcp_version(py), "1.30.0", out)
+        self.assertTrue(_mcp_api_ok(py), "decorator-era API must be present after heal")
+        # 4. Real MCP protocol on the sandbox-fixed venv over the same
+        #    guest graph the real writer produced through the link.
+        (self.proj / "src.py").write_text("def a():\n    return 1\ndef b():\n    return a()\n")
+        token = self.run_fns(
+            f'_mcps_graph_path_for_session /home/lima.linux "{self.proj}"'
+        ).stdout.strip()
+        canonical = token[: -len("/graph.json")]
+        self.run_fns(f'graphify_ensure_out_link "{self.proj}" "{canonical}"')
+        Path(canonical).mkdir(parents=True, exist_ok=True)
+        w = subprocess.run([GRAPHIFY_CLI, "update", str(self.proj)],
+                           capture_output=True, text=True, timeout=180,
+                           env={**self.env, "HOME": str(self.base)})
+        self.assertTrue(Path(token).exists(), w.stdout + w.stderr)
+        got, tools, stats = _mcp_protocol_probe(py, token)
+        self.assertIn(1, got, "initialize unanswered by sandbox venv")
+        self.assertEqual(tools, ["get_community", "get_neighbors", "get_node",
+                                 "god_nodes", "graph_stats", "query_graph",
+                                 "shortest_path"], tools)
+        self.assertIn("Nodes:", stats, f"graph_stats over MCP failed: {got.get(3)}")
+
+    def test_missing_module_healed_by_real_ensure_snippet(self):
+        home, env = self._sandbox_env("sbx-missing")
+        # Bare install without the [mcp] extra: mcp missing entirely.
+        r = self._install(env, "graphifyy==0.4.32")
+        py = _venv_py(home)
+        self.assertTrue(py.exists(), r.stdout + r.stderr)
+        self.assertFalse(_mcp_api_ok(py), "mcp must be missing before heal")
+        r = self.run_fns(VM_EXEC_STUB + "graphify_ensure_mcp_in_vm sess",
+                         extra_env=env,
+                         timeout=300)
+        out = r.stdout + r.stderr
+        self.assertIn("self-heal complete", out, out)
+        self.assertEqual(_mcp_version(py), "1.30.0", out)
+        self.assertTrue(_mcp_api_ok(py), out)
+
+    def test_no_venv_is_a_silent_noop(self):
+        home, env = self._sandbox_env("sbx-novenv")
+        r = self.run_fns(VM_EXEC_STUB + "graphify_ensure_mcp_in_vm sess",
+                         extra_env=env)
+        out = r.stdout + r.stderr
+        self.assertNotIn("self-heal", out, out)
+        self.assertFalse(_venv_py(home).exists())
+
+    def test_ineffective_install_reports_warning_not_success(self):
+        home, _ = self._sandbox_env("sbx-err")
+        venvbin = _venv_py(home).parent
+        venvbin.mkdir(parents=True, exist_ok=True)
+        stub = venvbin / "python"
+        stub.write_text("#!/bin/sh\nexit 1\n")
+        stub.chmod(0o755)
+        # Shadow pipx with a failing stub: the inject cannot take effect ->
+        # the ensure path must warn, never claim success.
+        bindir = home / "failbin"
+        bindir.mkdir(exist_ok=True)
+        fake = bindir / "pipx"
+        fake.write_text("#!/bin/sh\nexit 1\n")
+        fake.chmod(0o755)
+        r = self.run_fns(VM_EXEC_STUB + "graphify_ensure_mcp_in_vm sess",
+                         extra_env={"HOME": str(home),
+                                    "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}"})
+        out = r.stdout + r.stderr
+        self.assertIn("WARN self-heal ineffective", out, out)
+        self.assertNotIn("self-heal complete", out, out)
 
 
 class RealMcpServerProtocolTest(GraphifyFixture):

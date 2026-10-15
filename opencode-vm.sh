@@ -344,7 +344,7 @@ TASKBOARD_ARM64_SHA256="3749fb985f544fdb6788ba1dff69761e599ff82b3fe86d39ca54307c
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.7.58"
+OCVM_VERSION="0.7.59"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -4404,17 +4404,23 @@ graphify_ensure_mcp_in_vm() {
     python_bin="$HOME/.local/share/pipx/venvs/graphifyy/bin/python"
     # No venv = graphify not installed in this base (older or stripped) — nothing to heal.
     [[ -x "$python_bin" ]] || exit 0
-    if "$python_bin" -c "import mcp" 2>/dev/null; then
+    # API compatibility, not mere module presence: graphifyy 0.4.32 serve
+    # needs the decorator-era @server.list_tools, which mcp >= 2.0 removed
+    # (AttributeError). An importable-but-incompatible mcp 2.x must heal too.
+    check_api() {
+      "$python_bin" -c "from mcp.server import Server; assert hasattr(Server, \"list_tools\")" 2>/dev/null
+    }
+    if check_api; then
       exit 0
     fi
-    echo "[graphify] mcp module missing in pipx venv — injecting (one-time, ~5s)..." >&2
-    # mcp pinned to the tested decorator-era release (graphifyy 0.4.32 needs
-    # @server.list_tools, removed in mcp >= 2.0). Same pin as the base-image
-    # install in provision_base — keep both in sync.
-    if pipx inject graphifyy 'mcp==1.30.0' >/dev/null 2>&1; then
+    echo "[graphify] mcp missing or API-incompatible (need decorator-era Server.list_tools) — pinning mcp==1.30.0 (one-time, ~5s)..." >&2
+    # --force is required: without it pipx reports the already-present
+    # unpinned mcp (the [mcp] extra pulled 2.x) as installed and changes
+    # nothing. Same pin + same --force as provision_base — keep both in sync.
+    if pipx inject graphifyy --force "mcp==1.30.0" >/dev/null 2>&1 && check_api; then
       echo "[graphify] self-heal complete; MCP server will start cleanly" >&2
     else
-      echo "[graphify] WARN self-heal failed; MCP will likely fail to start" >&2
+      echo "[graphify] WARN self-heal ineffective: mcp still missing or API-incompatible after pinned inject." >&2
       echo "[graphify]      run: opencode-vm init    to rebuild oc-base cleanly" >&2
     fi
   ' 2>&1 || true
@@ -11611,9 +11617,20 @@ mkdir -p ~/.local/bin
 # without the mcp extras, inject the missing module into its venv directly.
 # mcp is pinned to the tested decorator-era release: graphifyy 0.4.32's
 # serve module uses @server.list_tools(), which mcp >= 2.0 removed
-# (AttributeError: 'Server' object has no attribute 'list_tools'). Same pin
-# as graphify_ensure_mcp_in_vm below — keep both in sync.
-~/.local/bin/pipx inject graphifyy 'mcp==1.30.0' >/dev/null 2>&1 || true
+# (AttributeError: 'Server' object has no attribute 'list_tools'). The
+# [mcp] extra above resolves mcp unpinned (pulls 2.x), and a plain
+# `pipx inject graphifyy mcp==1.30.0` reports the already-present 2.x as
+# installed and changes nothing — --force is what actually pins 2.3 -> 1.30.0
+# (verified with pipx 1.17.13). Same pin + same --force as
+# graphify_ensure_mcp_in_vm below — keep both in sync.
+~/.local/bin/pipx inject graphifyy --force 'mcp==1.30.0' >/dev/null 2>&1 || true
+# Sensible error path: verify the API the consumer needs, not mere module
+# presence, and warn loudly when the pin was ineffective (graphify MCP would
+# come up broken). Never fail the whole provision for an optional MCP.
+if ! "$HOME/.local/share/pipx/venvs/graphifyy/bin/python" -c 'from mcp.server import Server; assert hasattr(Server, "list_tools")' 2>/dev/null; then
+  echo "[graphify] WARN: graphifyy venv mcp is missing or API-incompatible after pinned inject (need decorator-era Server.list_tools)." >&2
+  echo "[graphify]      run: opencode-vm init when the network is healthy, or: pipx inject graphifyy --force 'mcp==1.30.0'" >&2
+fi
 # Patch graphifyy so its hardcoded output dir is .graphify-out (hidden) rather
 # than graphify-out. Upstream offers no override flag, env var, or config; the
 # only way to rename the on-disk artefact is to replace the literal in the
