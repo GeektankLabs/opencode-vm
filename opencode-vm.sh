@@ -344,7 +344,7 @@ TASKBOARD_ARM64_SHA256="3749fb985f544fdb6788ba1dff69761e599ff82b3fe86d39ca54307c
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.7.56"
+OCVM_VERSION="0.7.57"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -3258,47 +3258,222 @@ mcrepo_docs_dir() {
   printf '%s' "$proj/docs"
 }
 
-# Ensure <docs>/graphify/ exists and that <proj>/.graphify-out is a symlink to
-# it (graphifyy 0.4.x hardcodes its output dir relative to the project; the
-# in-VM install is sed-patched at base-image build time so it writes to
-# .graphify-out instead of graphify-out, keeping the entry grouped with the
-# other hidden management dirs like .playwright-mcp). Also seeds a .gitignore
-# inside the graphify dir so the local-only cache and the mtime-based manifest
-# don't bloat git status (graphify upstream itself recommends ignoring both —
-# cache can grow to ~10k files on medium codebases and the manifest's mtimes
-# are unreliable across `git clone`).
+# ---------------------------------------------------------------------------
+# graphify guest artifact staging (task_3eaf2d4a §16, Phase 1)
 #
-# Auto-migration: if a previous opencode-vm release left an un-hidden
-# <proj>/graphify-out symlink behind, rename it in-place (atomic — preserves
-# the symlink target, no data movement).
+# graphifyy 0.4.x hardcodes its output dir to .graphify-out relative to the
+# watched project path (the in-VM install is sed-patched at base-image build
+# time from upstream 'graphify-out'); there is no --out/env override.  The
+# canonical output location is therefore reached through a project-local
+# .graphify-out symlink pointing at a guest-native artifact dir outside any
+# host-shared project:
 #
-# Idempotent. Returns the absolute docs/graphify path on stdout.
-mcrepo_ensure_graphify_dir() {
-  local proj="${1:?proj}"
-  local docs; docs="$(mcrepo_docs_dir "$proj")"
-  local target="$docs/graphify"
-  mkdir -p "$target"
+#   ${OCVM_ARTIFACT_ROOT:-<vm-home>/.opencode-vm/artifacts}/<proj-hash>/graphify
+#
+# <proj-hash> is the same md5 as proj_hash/project-state/session-share naming.
+# Generation (graphify update/watch through the link) and MCP reading
+# ({GRAPH_PATH}) resolve to the same canonical guest path.  The graph,
+# reports and cache are explicitly regenerable and may vanish with the VM
+# disk: NO automatic host copy-back, no silent legacy fallback.  Existing
+# project entries are never re-aimed or deleted at start (parallel VM/checkout
+# use must not flip one shared link); legacy cleanup happens only in an
+# explicitly authorized migration run with the gate chain below.
+# ---------------------------------------------------------------------------
 
-  local new_link="$proj/.graphify-out"
+# Pure string builder for the artifact base. Honors OCVM_ARTIFACT_ROOT
+# (absolute guest path); $1 = guest VM home used for the default base.
+# No filesystem access — usable before the VM is up.
+graphify_guest_base() {
+  local vm_home="${1:-}"
+  if [[ -n "${OCVM_ARTIFACT_ROOT:-}" ]]; then
+    printf '%s' "$OCVM_ARTIFACT_ROOT"
+    return 0
+  fi
+  if [[ -z "$vm_home" ]]; then
+    echo "graphify_guest_base: vm_home required when OCVM_ARTIFACT_ROOT is unset" >&2
+    return 1
+  fi
+  printf '%s' "$vm_home/.opencode-vm/artifacts"
+}
 
-  if [[ -L "$new_link" ]]; then
-    : # already a symlink — leave it alone (path may be relative or absolute)
-  elif [[ -e "$new_link" ]]; then
-    echo "[mcrepo] WARNING: $new_link exists and is not a symlink; leaving graphify output there." >&2
+# Canonical guest dir for one project's graphify output.  Same hash as
+# proj_hash (md5 of the raw project path, no normalisation).  Portable md5
+# (macOS + Linux) so the function is testable outside a macOS host.
+graphify_guest_dir() {
+  local vm_home="${1:?vm_home}" proj="${2:?proj}" base phash
+  base="$(graphify_guest_base "$vm_home")"
+  if command -v md5 >/dev/null 2>&1; then
+    phash="$(echo -n "$proj" | md5 -q)"
+  elif command -v md5sum >/dev/null 2>&1; then
+    phash="$(echo -n "$proj" | md5sum | cut -d' ' -f1)"
   else
-    # Use a path relative to the project root. The docs dir name may contain
-    # a space (e.g. "🧾 docs"); ln handles that fine when the arg is quoted.
-    local rel="${docs#$proj/}/graphify"
-    ln -s "$rel" "$new_link"
+    echo "graphify_guest_dir: no md5/md5sum available" >&2; return 1
+  fi
+  printf '%s' "$base/$phash/graphify"
+}
+
+# Create <proj>/.graphify-out -> $guest_dir exactly once.  Existing entries
+# are NEVER re-aimed and never deleted:
+#   missing        -> ln -s (absolute guest target; dangling on the host is
+#                     expected and accepted — the link resolves inside the VM)
+#   symlink        -> leave untouched, report target
+#   real dir/other -> leave untouched, warn (no migration, no deletion)
+# No docs/graphify README/.gitignore seeding any more.  Prints the effective
+# guest dir on stdout; decisions go to stderr.  Never fails hard.
+graphify_ensure_out_link() {
+  local proj="${1:?proj}" guest_dir="${2:?guest_dir}"
+  local link="$proj/.graphify-out"
+  if [[ -L "$link" ]]; then
+    echo "[graphify] note: $link already exists (-> $(readlink "$link" 2>/dev/null || echo '?')); leaving it unchanged." >&2
+  elif [[ -e "$link" ]]; then
+    echo "[graphify] WARNING: $link exists and is not a symlink; leaving graphify output there (no migration, no deletion)." >&2
+  else
+    ln -s "$guest_dir" "$link" 2>/dev/null || \
+      echo "[graphify] WARNING: could not create $link -> $guest_dir" >&2
+  fi
+  printf '%s' "$guest_dir"
+}
+
+# True when the given project-relative path is git-tracked (decisive per-file
+# protection: tracked content is never auto-removed).
+_graphify_git_tracked() {
+  local proj="${1:?proj}" rel="${2:?rel}"
+  git -C "$proj" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
+  git -C "$proj" ls-files --error-unmatch -- "$rel" >/dev/null 2>&1
+}
+
+# Bounded content gate for a known graphify output entry.  Returns 0 only for
+# shapes our own writer produces; anything else is foreign.
+#   $1 = absolute path, $2 = kind (graph-json|manifest|html|flag|cache-dir|out-dir)
+_graphify_form_ok() {
+  local path="${1:?path}" kind="${2:?kind}" f n
+  case "$kind" in
+    graph-json)
+      [[ -f "$path" && ! -L "$path" ]] || return 1
+      jq -e 'type == "object" and has("nodes")' "$path" >/dev/null 2>&1 ;;
+    manifest)
+      [[ -f "$path" && ! -L "$path" ]] || return 1
+      jq -e 'type == "object"' "$path" >/dev/null 2>&1 ;;
+    html|flag)
+      [[ -f "$path" && ! -L "$path" && -s "$path" ]] ;;
+    cache-dir)
+      [[ -d "$path" && ! -L "$path" ]] || return 1
+      # Bounded one-level walk: only regular *.json hash files, no links.
+      for f in "$path"/*; do
+        [[ -e "$f" || -L "$f" ]] || continue
+        n="$(basename "$f")"
+        [[ ! -L "$f" && -f "$f" && "$n" == *.json ]] || return 1
+      done
+      return 0 ;;
+    out-dir)
+      # memory/converted/wiki/transcripts: bounded walk, no links anywhere,
+      # only regular files/dirs — provenance is the known output container.
+      [[ -d "$path" && ! -L "$path" ]] || return 1
+      while IFS= read -r -d '' f; do
+        [[ ! -L "$f" ]] || return 1
+      done < <(find -P "$path" -mindepth 1 -print0 2>/dev/null)
+      return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Later-authorized legacy migration (§16.5 gate chain).  Replaces ONLY the
+# known own mcrepo legacy link (.graphify-out -> docs/graphify / 🧾 docs/
+# graphify, the exact relative forms this script ever created) with the guest
+# link, and removes ONLY uniquely identified own regenerable outputs.  Runs
+# as dry-run unless mode=apply.  Foreign, custom, dangling, unclear or
+# git-tracked content is never touched and only reported.  Never follows
+# links (lstat/find -P).  Optional $4/$5 = old session-share and old
+# project-state graphify dirs to retire the same way.
+graphify_migrate_legacy_outputs() {
+  local proj="${1:?proj}" guest_dir="${2:?guest_dir}" mode="${3:?dry-run|apply}"
+  local old_sess="${4:-}" old_persist="${5:-}"
+  case "$mode" in dry-run|apply) ;; *)
+    echo "[graphify-migrate] ERROR: mode must be dry-run or apply" >&2; return 2 ;;
+  esac
+  local act=0   # 1 in apply mode
+  [[ "$mode" == apply ]] && act=1
+  local link="$proj/.graphify-out" text target docs rel f
+
+  # --- link handling (never follow, never re-aim an unknown target) --------
+  if [[ -L "$link" ]]; then
+    text="$(readlink "$link" 2>/dev/null || true)"
+    if [[ "$text" == "$guest_dir" ]]; then
+      echo "[graphify-migrate] link already on guest target: $link"
+    elif [[ "$text" == "docs/graphify" || "$text" == "🧾 docs/graphify" ]]; then
+      docs="$(mcrepo_docs_dir "$proj")"
+      target="$proj/$text"
+      if [[ -d "$target" && ! -L "$target" ]]; then
+        if (( act )); then
+          rm -f "$link" && ln -s "$guest_dir" "$link"
+          echo "[graphify-migrate] replaced own legacy link $link: '$text' -> '$guest_dir' (target kept)"
+        else
+          echo "[graphify-migrate] would replace own legacy link $link: '$text' -> '$guest_dir' (target kept)"
+        fi
+      else
+        echo "[graphify-migrate] KEEP+REPORT: legacy-form link $link has no real canonical target (dangling/unclear) — unchanged"
+      fi
+    else
+      echo "[graphify-migrate] KEEP+REPORT: custom/unclear link $link (-> ${text:-?}) — never followed, never re-aimed"
+    fi
+  elif [[ -e "$link" ]]; then
+    echo "[graphify-migrate] note: $link is not a symlink — only identified outputs are candidates (see cleanup)"
   fi
 
-  # Drop the .gitignore on first activation. Don't overwrite a user-edited
-  # version; if they removed entries they'll have done so deliberately.
-  if [[ ! -f "$target/.gitignore" && -f "$SCRIPT_DIR/mcps/graphify/gitignore.template" ]]; then
-    cp -p "$SCRIPT_DIR/mcps/graphify/gitignore.template" "$target/.gitignore"
-  fi
+  # --- identified own output cleanup (per-item gates, no blind rm -rf) ----
+  _graphify_clean_known() {
+    local dir="$1" name item rel
+    [[ -d "$dir" && ! -L "$dir" ]] || return 0
+    for name in graph.json graph.html manifest.json needs_update cache memory converted wiki transcripts; do
+      item="$dir/$name"
+      [[ -e "$item" || -L "$item" ]] || continue
+      if [[ -L "$item" ]]; then
+        echo "[graphify-migrate] KEEP+REPORT: link in output dir: $item"
+        continue
+      fi
+      rel="${item#$proj/}"
+      if _graphify_git_tracked "$proj" "$rel"; then
+        echo "[graphify-migrate] KEEP+REPORT: git-tracked: $item"
+        continue
+      fi
+      case "$name" in
+        graph.json) _graphify_form_ok "$item" graph-json || { echo "[graphify-migrate] KEEP+REPORT: foreign shape: $item"; continue; } ;;
+        manifest.json) _graphify_form_ok "$item" manifest || { echo "[graphify-migrate] KEEP+REPORT: foreign shape: $item"; continue; } ;;
+        graph.html) _graphify_form_ok "$item" html || { echo "[graphify-migrate] KEEP+REPORT: foreign shape: $item"; continue; } ;;
+        needs_update) _graphify_form_ok "$item" flag || { echo "[graphify-migrate] KEEP+REPORT: foreign shape: $item"; continue; } ;;
+        cache) _graphify_form_ok "$item" cache-dir || { echo "[graphify-migrate] KEEP+REPORT: foreign shape: $item"; continue; } ;;
+        memory|converted|wiki|transcripts) _graphify_form_ok "$item" out-dir || { echo "[graphify-migrate] KEEP+REPORT: foreign shape: $item"; continue; } ;;
+      esac
+      if (( act )); then
+        rm -rf "$item" && echo "[graphify-migrate] removed identified own output: $item"
+      else
+        echo "[graphify-migrate] would remove identified own output: $item"
+      fi
+    done
+    return 0
+  }
 
-  printf '%s' "$target"
+  [[ -d "$link" && ! -L "$link" ]] && _graphify_clean_known "$link"
+  _graphify_clean_known "$proj/graphify-out"
+  docs="$(mcrepo_docs_dir "$proj")"
+  _graphify_clean_known "$docs/graphify"
+
+  # Old session-share / project-state stores: ours by construction; retire
+  # only the known graph file and the dir when nothing foreign remains.
+  for f in "$old_sess" "$old_persist"; do
+    [[ -n "$f" && -d "$f" && ! -L "$f" ]] || continue
+    _graphify_clean_known "$f"
+    if [[ -z "$(find -P "$f" -mindepth 1 -maxdepth 1 2>/dev/null)" ]]; then
+      if (( act )); then
+        rmdir "$f" 2>/dev/null && echo "[graphify-migrate] removed emptied legacy store: $f"
+      else
+        echo "[graphify-migrate] would remove emptied legacy store: $f"
+      fi
+    else
+      echo "[graphify-migrate] KEEP+REPORT: legacy store not empty/unknown content: $f"
+    fi
+  done
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -4104,54 +4279,25 @@ _mcps_substitute_tokens() {
           else . end)' <<<"$json"
 }
 
-# Path the {GRAPH_PATH} token resolves to. Two cases:
-#   - mcrepo workspace: the graph lives in the workspace at <docs>/graphify/
-#     graph.json (committed alongside the rest of the docs); this file is
-#     visible from the VM via the project-root virtiofs mount.
-#   - single-repo workspace: the graph lives in $sess_share/graphify/graph.json,
-#     bind-mounted at the same absolute path inside the VM, and is
-#     load-ed/save-d to host-side per-project state by
-#     graphify_persist_load_for_session / graphify_persist_save_for_session.
+# Path the {GRAPH_PATH} token resolves to. Since Phase 1 (task_3eaf2d4a §16)
+# BOTH workspace types share one canonical guest path:
+#   <artifact-base>/<proj-hash>/graphify/graph.json
+# Generation (graphify update/watch through <proj>/.graphify-out) writes the
+# same file the MCP server reads. There is no session-share staging and no
+# host-side persist copy-back any more; the graph is regenerable and may
+# vanish with the VM disk.
 _mcps_graph_path_for_session() {
-  local sess_share="$1"
-  local proj="${2:-}"
-  if [[ -n "$proj" ]] && is_mcrepo_workspace "$proj"; then
-    local docs; docs="$(mcrepo_docs_dir "$proj")"
-    echo "$docs/graphify/graph.json"
-    return 0
-  fi
-  echo "$sess_share/graphify/graph.json"
+  local vm_home="${1:?vm_home}" proj="${2:?proj}"
+  echo "$(graphify_guest_dir "$vm_home" "$proj")/graph.json"
 }
 
-# Per-project persistent graph location (host-side, survives session resets).
+# LEGACY host-side per-project graph location (pre-Phase-1 persist store).
+# Kept only so purge/migration can report old paths; nothing copies here any
+# more and nothing deletes it automatically.
 graphify_persist_dir_for_project() {
   local proj="$1"
   local hash; hash="$(proj_hash "$proj")"
   echo "$PROJECT_STATE_DIR/$hash/graphify"
-}
-
-# At session start: load the persisted graph (if any) into sess_share so the
-# graphify MCP server inside the VM can read it.
-graphify_persist_load_for_session() {
-  local proj="$1" sess_share="$2"
-  local persist_dir; persist_dir="$(graphify_persist_dir_for_project "$proj")"
-  local sess_dir="$sess_share/graphify"
-  mkdir -p "$persist_dir" "$sess_dir"
-  if [[ -f "$persist_dir/graph.json" ]]; then
-    cp -p "$persist_dir/graph.json" "$sess_dir/graph.json"
-  fi
-}
-
-# At session end: copy any updated graph from sess_share back to the
-# per-project persist dir. Safe to call when graphify wasn't active — just
-# becomes a no-op when the file doesn't exist.
-graphify_persist_save_for_session() {
-  local proj="$1" sess_share="$2"
-  local sess_file="$sess_share/graphify/graph.json"
-  [[ -f "$sess_file" ]] || return 0
-  local persist_dir; persist_dir="$(graphify_persist_dir_for_project "$proj")"
-  mkdir -p "$persist_dir"
-  cp -p "$sess_file" "$persist_dir/graph.json"
 }
 
 # Ensure the graphifyy pipx venv inside the session VM can launch its MCP
@@ -4256,6 +4402,48 @@ graphify_ensure_mcp_in_vm() {
   ' 2>&1 || true
 }
 
+# Prepare the guest artifact dir inside the session VM (Phase 1). Fail-closed
+# guest-native check (stat -f: fuse* = host share -> refuse, no host fallback)
+# plus mkdir -p — the dir must exist before graphify writes through the
+# .graphify-out symlink (a dangling link cannot be mkdir'd through). $2 is the
+# exact host-computed guest dir (same string as the symlink target and
+# {GRAPH_PATH}); only */graphify paths are accepted.
+graphify_guest_prepare() {
+  local sess="${1:?sess}" guest_dir="${2:?guest_dir}"
+  vm_exec "$sess" '
+    set -e
+    d="$1"
+    case "$d" in
+      */graphify) ;;
+      *) echo "[graphify] refusing non-artifact dir: $d" >&2; exit 1 ;;
+    esac
+    probe="$d"
+    while [ ! -e "$probe" ] && [ "$probe" != "/" ]; do probe="$(dirname "$probe")"; done
+    fstype="$(stat -f -c %T "$probe" 2>/dev/null || echo unknown)"
+    case "$fstype" in
+      fuse*|unknown)
+        echo "[graphify] WARNING: $d is not on a guest-native filesystem (probe $probe: $fstype); refusing host fallback." >&2
+        exit 1 ;;
+    esac
+    mkdir -p "$d"
+  ' "$guest_dir" 2>&1 || echo "[graphify] WARNING: guest artifact dir not prepared ($guest_dir); graphify writes may fail until then." >&2
+}
+
+# Prepare the guest artifact dir for a project when — and only when — the
+# project's .graphify-out link exists and points at our canonical guest dir.
+# Legacy/custom/dangling links are never followed or prepared (§16.5).
+# Never fails hard.
+graphify_guest_prepare_link() {
+  local sess="${1:?sess}" vm_home="${2:?vm_home}" proj="${3:?proj}"
+  local link="$proj/.graphify-out" target canon
+  [[ -L "$link" ]] || return 0
+  target="$(readlink "$link" 2>/dev/null || true)"
+  canon="$(graphify_guest_dir "$vm_home" "$proj" 2>/dev/null)" || return 0
+  [[ -n "$target" && "$target" == "$canon" ]] || return 0
+  graphify_guest_prepare "$sess" "$canon" || true
+  return 0
+}
+
 # Build the {mcp: {...}} object for session injection by iterating
 # MCPS_PACKAGES, reading mcp_config from the registry, substituting placeholder
 # tokens, and materializing credentials for MCPs that flag
@@ -4269,7 +4457,10 @@ mcps_build_config_json() {
   local sess_share="${2:-}"
   local proj="${3:-}"
   local proj_h=""; [[ -n "$proj" ]] && proj_h="$(proj_hash "$proj")"
-  local graph_p=""; [[ -n "$sess_share" ]] && graph_p="$(_mcps_graph_path_for_session "$sess_share" "$proj")"
+  local graph_p=""
+  if [[ -n "$proj" ]]; then
+    graph_p="$(_mcps_graph_path_for_session "$vm_home" "$proj")" || graph_p=""
+  fi
   local reg
   reg="$(_mcps_registry_read 2>/dev/null)" || { echo '{}'; return 0; }
 
@@ -4452,7 +4643,9 @@ mcps_build_agents_sidecar() {
 
   local proj_h="" graph_p=""
   [[ -n "$proj" ]] && proj_h="$(proj_hash "$proj")"
-  [[ -n "$sess_share" ]] && graph_p="$(_mcps_graph_path_for_session "$sess_share" "$proj")"
+  if [[ -n "$proj" ]]; then
+    graph_p="$(_mcps_graph_path_for_session "$vm_home" "$proj")" || graph_p=""
+  fi
 
   local is_mcrepo=0
   [[ -n "$proj" ]] && is_mcrepo_workspace "$proj" && is_mcrepo=1
@@ -4505,22 +4698,43 @@ mcps_cmd() {
       ;;
     purge)
       # Wipe per-project cached state for an MCP. Currently only graphify
-      # owns persistent per-project state (the graph); add cases here for
-      # future MCPs as needed. Runs against the CWD project (proj_hash matches
-      # what start_session uses).
+      # owns per-project state: since Phase 1 the graph lives on the guest
+      # artifact dir (explicit user call is the only deletion authorization
+      # there). Pre-Phase-1 host-side stores are only REPORTED, never deleted
+      # automatically (§16.5 migration gates decide about those).
       [[ -n "${1:-}" ]] || { echo "Usage: opencode-vm mcps purge <name>" >&2; return 2; }
-      local _purge_pkg="$1" _purge_proj _purge_dir
+      local _purge_pkg="$1" _purge_proj _purge_guest _purge_legacy _purge_vm=""
       _purge_proj="$(pwd)"
       case "$_purge_pkg" in
         graphify)
-          _purge_dir="$(graphify_persist_dir_for_project "$_purge_proj")"
-          if [[ -d "$_purge_dir" ]]; then
-            rm -rf "$_purge_dir"
-            echo "[mcps] Purged graphify cache for project: $_purge_proj"
-            echo "[mcps]   removed: $_purge_dir"
+          if _purge_guest="$(graphify_guest_dir "$(vm_resolve_home "$BASE_NAME")" "$_purge_proj" 2>/dev/null)"; then
+            local _purge_senv
+            _purge_senv="$(session_env "$_purge_proj")"
+            if [[ -f "$_purge_senv" ]]; then
+              # shellcheck disable=SC1090
+              source "$_purge_senv"
+              _purge_vm="${SESS_NAME:-}"
+            fi
+            if [[ -n "$_purge_vm" ]] && is_vm_running "$_purge_vm"; then
+              if vm_exec "$_purge_vm" 'd="$1"; case "$d" in */graphify) rm -rf -- "$d" ;; *) echo "refusing: $d" >&2; exit 1 ;; esac' "$_purge_guest"; then
+                echo "[mcps] Purged guest graphify artifact for project: $_purge_proj"
+                echo "[mcps]   removed (guest): $_purge_guest"
+              else
+                echo "[mcps] Guest graphify purge failed; nothing changed." >&2
+              fi
+            else
+              echo "[mcps] No running session VM for this project — guest artifact not reachable from the host."
+              echo "[mcps]   guest path (removed with the VM disk): $_purge_guest"
+            fi
           else
-            echo "[mcps] No graphify cache to purge for: $_purge_proj"
+            echo "[mcps] Cannot resolve the guest graphify artifact path." >&2
           fi
+          _purge_legacy="$(graphify_persist_dir_for_project "$_purge_proj")"
+          if [[ -d "$_purge_legacy" ]]; then
+            echo "[mcps] LEGACY host store kept (not auto-deleted): $_purge_legacy"
+          fi
+          [[ ! -d "$(session_share_dir "$_purge_proj")/graphify" ]] || \
+            echo "[mcps] LEGACY host store kept (not auto-deleted): $(session_share_dir "$_purge_proj")/graphify"
           ;;
         *)
           echo "[mcps] '$_purge_pkg' has no per-project state to purge." >&2
@@ -18574,6 +18788,7 @@ attach_session() {
   # Self-heal graphify venv before OpenCode tries to launch its MCP server.
   # No-op when graphify isn't installed; injects mcp extras when missing.
   graphify_ensure_mcp_in_vm "$SESS_NAME"
+  graphify_guest_prepare_link "$SESS_NAME" "$(vm_resolve_home "$SESS_NAME")" "$proj"
   local transition_backup transition_committed=0 transition_taken_over=0 auth_share_backup="" auth_share_had=0 new_auth_generation=""
   transition_backup="$(mktemp)"
   cp -p "$senv" "$transition_backup"
@@ -20422,9 +20637,10 @@ start_session() {
   # Copy project state into session share (XDG directory structure)
   mkdir -p "$sess_share/config/opencode" "$sess_share/xdg-data/opencode" "$sess_share/xdg-state/opencode"
 
-  # Load any persisted graphify graph for this project into sess_share so the
-  # graphify MCP server (running in the VM via virtiofs mount) can read it.
-  graphify_persist_load_for_session "$proj" "$sess_share"
+  # graphify Phase 1 (task_3eaf2d4a §16): no host-side graph staging any more.
+  # The graph is generated and read on the guest artifact dir (see
+  # graphify_guest_dir); nothing is copied into the session share and nothing
+  # is copied back to the host.
   if [[ -f "$proj_cfg" ]]; then
     cp -p "$proj_cfg" "$sess_share/config/opencode/opencode.json"
   else
@@ -20440,13 +20656,7 @@ start_session() {
   if is_mcrepo_workspace "$proj"; then
     export MCPS_FORCE_ON="graphify"
     export MCPS_FORCE_OFF="repomapper"
-    local _gfy_dir; _gfy_dir="$(mcrepo_ensure_graphify_dir "$proj")"
-    # First-activation README so a human opening the docs folder knows what
-    # the files are. Don't overwrite if the user has already edited it.
-    if [[ ! -f "$_gfy_dir/README.md" && -f "$SCRIPT_DIR/mcps/graphify/README.template.md" ]]; then
-      cp -p "$SCRIPT_DIR/mcps/graphify/README.template.md" "$_gfy_dir/README.md"
-    fi
-    echo "[run] mcrepo detected — graphify auto-on, repomapper auto-off (session only); graph dir: $_gfy_dir $(_ts)"
+    echo "[run] mcrepo detected — graphify auto-on, repomapper auto-off (session only) $(_ts)"
   fi
 
   # Inject session overrides: MCP block built from mcps/registry.json + active
@@ -20454,6 +20664,28 @@ start_session() {
   local sess_cfg_file="$sess_share/config/opencode/opencode.json"
   local vm_home
   vm_home="$(vm_resolve_home "$BASE_NAME")"
+  # graphify guest artifact staging (Phase 1): optional explicit legacy
+  # migration (OCVM_GRAPHIFY_MIGRATE=dry-run|apply — off by default; no live
+  # project migration during development), then create-once
+  # .graphify-out -> guest link for both workspace types. Existing entries
+  # are never re-aimed or deleted here (parallel VM/checkout safety).
+  mcps_load
+  case " ${MCPS_PACKAGES:-} " in
+    *" graphify "*)
+      local _gfy_guest=""
+      if _gfy_guest="$(graphify_guest_dir "$vm_home" "$proj")"; then
+        case "${OCVM_GRAPHIFY_MIGRATE:-}" in
+          dry-run|apply)
+            graphify_migrate_legacy_outputs "$proj" "$_gfy_guest" "$OCVM_GRAPHIFY_MIGRATE" \
+              "$sess_share/graphify" "$(graphify_persist_dir_for_project "$proj")"
+            ;;
+        esac
+        graphify_ensure_out_link "$proj" "$_gfy_guest" >/dev/null
+      else
+        echo "[graphify] WARNING: cannot resolve guest artifact dir; project entries left unchanged." >&2
+      fi
+      ;;
+  esac
   if command -v jq >/dev/null 2>&1 && [[ -f "$sess_cfg_file" ]]; then
     local mcp_obj
     mcp_obj="$(mcps_build_config_json "$vm_home" "$sess_share" "$proj")"
@@ -20897,9 +21129,9 @@ start_session() {
       rm -f "$_gfy_pidfile"
     fi
 
-    # Persist any updated graphify graph back to the per-project store
-    # (single-repo path; mcrepo workspaces commit the graph in docs/graphify/).
-    graphify_persist_save_for_session "$proj" "$sess_share" 2>/dev/null || true
+    # graphify Phase 1: NO host copy-back. The graph lives only on the guest
+    # artifact dir and is regenerable (lost with the VM disk); nothing is
+    # copied into project-state or the session share.
 
     # ECC: persist project-scoped homunculus learnings back to host project state.
     if ecc_enabled; then
@@ -21011,8 +21243,10 @@ start_session() {
   fi
 
   # graphify self-heal (mcp module): runs in every session, no-op when graphify
-  # isn't installed in the base. Defined near graphify_persist_*.
+  # isn't installed in the base. graphify_guest_prepare_link creates the
+  # canonical guest artifact dir behind an own .graphify-out link (Phase 1).
   graphify_ensure_mcp_in_vm "$sess"
+  graphify_guest_prepare_link "$sess" "$vm_home" "$proj"
   if [[ "$SESSION_MODE" == "web" ]]; then
     a2a_ensure_installed_in_vm "$sess"
   fi

@@ -7,9 +7,12 @@ files blindly**: it sees connections that span repository boundaries, which
 no per-repo tool can.
 
 The graph is **already built and continuously watched** for this session:
-- Live graph file: `{GRAPH_PATH}` (committed inside the workspace's docs folder).
-- Human-readable summary: `GRAPH_REPORT.md` next to it — read this first for
-  god-nodes, suggested questions, and surprising cross-repo connections.
+- Live graph file: `{GRAPH_PATH}` on the session VM's guest disk (the
+  project's `.graphify-out` symlink points there; not committed, not copied
+  to the host — regenerable, lost with the VM disk).
+- Human-readable summary: `GRAPH_REPORT.md` in the same guest folder — read
+  this first for god-nodes, suggested questions, and surprising cross-repo
+  connections.
 - A background `graphify watch` process keeps the graph in sync as files
   change during the session — you do **not** need to run `graphify update`
   or `graphify <build-cmd>` yourself.
