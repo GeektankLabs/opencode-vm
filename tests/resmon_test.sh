@@ -35,6 +35,9 @@ fi
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 perms() { if stat -c %a "$1" >/dev/null 2>&1; then stat -c %a "$1"; else stat -f %Lp "$1"; fi; }
+# BSD/macOS `wc` right-justifies counts with leading blanks; normalize before any
+# string comparison (the appender itself already strips whitespace).
+_lines() { wc -l < "$1" | tr -d '[:space:]'; }
 PROJ="$TMP/project"
 
 # --- F5: the script keeps its executable bit --------------------------------
@@ -60,25 +63,36 @@ printf '%s' "$(tail -n1 "$f")" | jq -e 'type=="object"' >/dev/null || fail "writ
 [[ "$(perms "$f")" == "600" ]] || fail "history file not 0600"
 [[ "$(perms "$(dirname "$f")")" == "700" ]] || fail "history dir not 0700"
 # invalid JSON is dropped, never truncated into the file
-before="$(wc -l < "$f")"
+before="$(_lines "$f")"
 resmon_host_append_bounded "$f" 'this is not json {{{'
-[[ "$(wc -l < "$f")" == "$before" ]] || fail "invalid JSON was written"
+[[ "$(_lines "$f")" == "$before" ]] || fail "invalid JSON was written"
 # oversize valid JSON is structurally shrunk (schema preserved), not cut
 RESMON_MAX_SAMPLE_BYTES=600
 big=$(jq -cn '{schema:1,t:"2026-10-14T00:00:00Z",te:1,side:"host",global:{used:1,max:2},procs:[range(0;8)|{pid:.,comm:"a-very-long-process-name-xxxxxxxxxxxxxxxx",fds:.,limit:1024}],coverage:{procs_scanned:1,procs_total:1,fd_unreadable:0,top_scan:"full(/proc)",note:""}}')
 [[ "$(printf '%s' "$big" | wc -c)" -gt 600 ]] || fail "fixture not actually oversize"
-nlines="$(wc -l < "$f")"
+nlines="$(_lines "$f")"
 resmon_host_append_bounded "$f" "$big"
-[[ "$(wc -l < "$f")" == "$((nlines + 1))" ]] || fail "shrink did not add exactly one line"
+[[ "$(_lines "$f")" == "$((nlines + 1))" ]] || fail "shrink did not add exactly one line"
 last="$(tail -n1 "$f")"
 printf '%s' "$last" | jq -e 'type=="object" and (.procs|type=="array") and (.procs|length)<=3' >/dev/null || fail "shrunk sample invalid schema"
 [[ "$(printf '%s' "$last" | wc -c)" -le 601 ]] || fail "shrunk sample still exceeds cap"
+# Regression: native macOS `wc` pads counts with leading blanks (BSD), so the
+# append-count assertions must compare NORMALIZED counts, not raw `wc` output —
+# otherwise they fail under a padded counter even though exactly one line was
+# added. Simulated with a padding `wc` so this also guards on GNU/Linux.
+( wc() { case "${1:-}" in -l|-c) printf '%8d\n' "$(/usr/bin/wc "$@")" ;; *) command wc "$@" ;; esac; }
+  reg="$TMP/regress-lines.jsonl"
+  resmon_host_append_bounded "$reg" "$good"
+  regbefore="$(_lines "$reg")"
+  resmon_host_append_bounded "$reg" "$big"
+  [[ "$(_lines "$reg")" == "$((regbefore + 1))" ]] || fail "padded wc (BSD/macOS) broke the append-count comparison"
+)
 # a still-too-large object after shrink is dropped, not cut
 RESMON_MAX_SAMPLE_BYTES=60
-nlines="$(wc -l < "$f")"
+nlines="$(_lines "$f")"
 huge=$(jq -cn '{schema:1,t:"2026-10-14T00:00:00Z",te:1,side:"host",global:{used:1,max:2},procs:[range(0;8)|{pid:.,comm:"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}],coverage:{note:"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}}')
 resmon_host_append_bounded "$f" "$huge"
-[[ "$(wc -l < "$f")" == "$nlines" ]] || fail "unsrhrinkable oversize was written"
+[[ "$(_lines "$f")" == "$nlines" ]] || fail "unsrhrinkable oversize was written"
 if tail -n1 "$f" | grep -q '\.\.\.'; then fail "raw truncation marker found"; fi
 # rotation at file cap (one rotation, hard bound)
 RESMON_MAX_SAMPLE_BYTES=4096 RESMON_FILE_CAP_BYTES=64
