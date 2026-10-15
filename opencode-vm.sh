@@ -344,7 +344,7 @@ TASKBOARD_ARM64_SHA256="3749fb985f544fdb6788ba1dff69761e599ff82b3fe86d39ca54307c
 
 # Self-update metadata
 SCRIPT_NAME="opencode-vm.sh"
-OCVM_VERSION="0.7.57"
+OCVM_VERSION="0.7.58"
 OCVM_UPDATE_REPO="GeektankLabs/opencode-vm"
 OCVM_UPDATE_BRANCH="main"
 OCVM_UPDATE_SCRIPT_PATH="opencode-vm.sh"
@@ -4408,7 +4408,10 @@ graphify_ensure_mcp_in_vm() {
       exit 0
     fi
     echo "[graphify] mcp module missing in pipx venv — injecting (one-time, ~5s)..." >&2
-    if pipx inject graphifyy mcp >/dev/null 2>&1; then
+    # mcp pinned to the tested decorator-era release (graphifyy 0.4.32 needs
+    # @server.list_tools, removed in mcp >= 2.0). Same pin as the base-image
+    # install in provision_base — keep both in sync.
+    if pipx inject graphifyy 'mcp==1.30.0' >/dev/null 2>&1; then
       echo "[graphify] self-heal complete; MCP server will start cleanly" >&2
     else
       echo "[graphify] WARN self-heal failed; MCP will likely fail to start" >&2
@@ -11606,7 +11609,11 @@ mkdir -p ~/.local/bin
   || ~/.local/bin/pipx install --force 'graphifyy[mcp]==0.4.32' >/dev/null
 # Belt-and-suspenders: if a previous install of bare graphifyy is still around
 # without the mcp extras, inject the missing module into its venv directly.
-~/.local/bin/pipx inject graphifyy mcp >/dev/null 2>&1 || true
+# mcp is pinned to the tested decorator-era release: graphifyy 0.4.32's
+# serve module uses @server.list_tools(), which mcp >= 2.0 removed
+# (AttributeError: 'Server' object has no attribute 'list_tools'). Same pin
+# as graphify_ensure_mcp_in_vm below — keep both in sync.
+~/.local/bin/pipx inject graphifyy 'mcp==1.30.0' >/dev/null 2>&1 || true
 # Patch graphifyy so its hardcoded output dir is .graphify-out (hidden) rather
 # than graphify-out. Upstream offers no override flag, env var, or config; the
 # only way to rename the on-disk artefact is to replace the literal in the

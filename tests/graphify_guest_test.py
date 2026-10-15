@@ -475,6 +475,27 @@ def _mcp_server_python():
     return None, None
 
 
+class GraphifyMcpPinTest(unittest.TestCase):
+    """The tested graphifyy+mcp combination is reproducible: every
+    graphify install/ensure path pins the decorator-era mcp release."""
+
+    PIN = "mcp==1.30.0"
+
+    def test_install_and_ensure_pin_the_same_mcp_release(self):
+        self.assertIn(f"pipx inject graphifyy '{self.PIN}'", TEXT)
+        self.assertEqual(TEXT.count(f"pipx inject graphifyy '{self.PIN}'"), 2,
+                         "install (provision_base) and ensure (graphify_ensure_mcp_in_vm) "
+                         "must both pin the tested mcp release")
+        # No unpinned mcp install/inject may remain on the graphify path.
+        self.assertNotIn("pipx inject graphifyy mcp ", TEXT + " ")
+        self.assertNotIn('pipx inject graphifyy mcp\n', TEXT)
+        # graphifyy itself stays on its exact pin.
+        self.assertIn("graphifyy[mcp]==0.4.32", TEXT)
+        # Both pin sites document the consumer requirement (decorator-era
+        # @server.list_tools, removed in mcp >= 2.0).
+        self.assertGreaterEqual(TEXT.count("@server.list_tools"), 2)
+
+
 class RealMcpServerProtocolTest(GraphifyFixture):
     """Real MCP server + JSON-RPC protocol request on the same guest graph —
     independent of the CLI reader (QC: CLI query alone is not enough)."""
