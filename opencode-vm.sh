@@ -3380,11 +3380,15 @@ _graphify_form_ok() {
 # Later-authorized legacy migration (§16.5 gate chain).  Replaces ONLY the
 # known own mcrepo legacy link (.graphify-out -> docs/graphify / 🧾 docs/
 # graphify, the exact relative forms this script ever created) with the guest
-# link, and removes ONLY uniquely identified own regenerable outputs.  Runs
-# as dry-run unless mode=apply.  Foreign, custom, dangling, unclear or
-# git-tracked content is never touched and only reported.  Never follows
-# links (lstat/find -P).  Optional $4/$5 = old session-share and old
-# project-state graphify dirs to retire the same way.
+# link.  Output cleanup runs ONLY inside the positively recognized link's
+# EXACT target container — name+form alone never authorize deletion and no
+# mcrepo_docs_dir preference is used, so with both docs variants present the
+# wrong container is never touched.  Bare real dirs and any unprovenanced
+# lookalike container are KEEP+REPORT (foreign self-generated output must
+# survive).  Old session-share/project-state stores passed by the caller are
+# ours by construction and stay name+form gated.  Runs as dry-run unless
+# mode=apply.  Never follows links (lstat/find -P).  Optional $4/$5 = old
+# session-share and old project-state graphify dirs to retire.
 graphify_migrate_legacy_outputs() {
   local proj="${1:?proj}" guest_dir="${2:?guest_dir}" mode="${3:?dry-run|apply}"
   local old_sess="${4:-}" old_persist="${5:-}"
@@ -3393,7 +3397,7 @@ graphify_migrate_legacy_outputs() {
   esac
   local act=0   # 1 in apply mode
   [[ "$mode" == apply ]] && act=1
-  local link="$proj/.graphify-out" text target docs rel f
+  local link="$proj/.graphify-out" text target clean_target="" f
 
   # --- link handling (never follow, never re-aim an unknown target) --------
   if [[ -L "$link" ]]; then
@@ -3401,9 +3405,12 @@ graphify_migrate_legacy_outputs() {
     if [[ "$text" == "$guest_dir" ]]; then
       echo "[graphify-migrate] link already on guest target: $link"
     elif [[ "$text" == "docs/graphify" || "$text" == "🧾 docs/graphify" ]]; then
-      docs="$(mcrepo_docs_dir "$proj")"
+      # Ownership proof = exact historical creation form + real target dir
+      # inside this project.  The recognized target is the ONLY container
+      # that cleanup may ever touch.
       target="$proj/$text"
       if [[ -d "$target" && ! -L "$target" ]]; then
+        clean_target="$target"
         if (( act )); then
           rm -f "$link" && ln -s "$guest_dir" "$link"
           echo "[graphify-migrate] replaced own legacy link $link: '$text' -> '$guest_dir' (target kept)"
@@ -3417,10 +3424,10 @@ graphify_migrate_legacy_outputs() {
       echo "[graphify-migrate] KEEP+REPORT: custom/unclear link $link (-> ${text:-?}) — never followed, never re-aimed"
     fi
   elif [[ -e "$link" ]]; then
-    echo "[graphify-migrate] note: $link is not a symlink — only identified outputs are candidates (see cleanup)"
+    echo "[graphify-migrate] note: $link is not a symlink — no ownership proof, nothing is deleted there"
   fi
 
-  # --- identified own output cleanup (per-item gates, no blind rm -rf) ----
+  # --- identified own output cleanup (provenance + per-item gates) ---------
   _graphify_clean_known() {
     local dir="$1" name item rel
     [[ -d "$dir" && ! -L "$dir" ]] || return 0
@@ -3453,10 +3460,18 @@ graphify_migrate_legacy_outputs() {
     return 0
   }
 
-  [[ -d "$link" && ! -L "$link" ]] && _graphify_clean_known "$link"
-  _graphify_clean_known "$proj/graphify-out"
-  docs="$(mcrepo_docs_dir "$proj")"
-  _graphify_clean_known "$docs/graphify"
+  if [[ -n "$clean_target" ]]; then
+    _graphify_clean_known "$clean_target"
+  fi
+
+  # Unprovenanced lookalike containers (bare real dirs, the other docs
+  # variant, anything without positive link recognition): report only —
+  # name+form are never a deletion authorization (§16.5 gate 2).
+  for f in "$link" "$proj/graphify-out" "$proj/docs/graphify" "$proj/🧾 docs/graphify"; do
+    [[ -d "$f" && ! -L "$f" ]] || continue
+    [[ "$f" == "$clean_target" ]] && continue
+    echo "[graphify-migrate] KEEP+REPORT: no ownership proof (name+form never suffice): $f — unchanged"
+  done
 
   # Old session-share / project-state stores: ours by construction; retire
   # only the known graph file and the dir when nothing foreign remains.

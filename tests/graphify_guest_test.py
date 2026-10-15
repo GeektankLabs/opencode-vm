@@ -3,20 +3,29 @@
 Runs the real production functions from opencode-vm.sh against disposable
 fixtures (same convention as worktree_cleanup_test.py). Covers:
   - writer/MCP-reader path equality (SingleRepo and MCrepo),
-  - positive own legacy-link migration vs. negative foreign/unclear/dangling,
+  - positive own legacy-link migration vs. negative foreign/unclear/dangling/
+    unprovenanced containers and foreign JSON/cache,
   - parallel checkouts and never-re-aimed links,
   - no host copy-back of the graph,
   - real graphifyy writer -> reader end-to-end on the canonical path (skipped
-    when graphifyy is not installed).
+    when graphifyy is not installed) and a real MCP server protocol round-trip
+    (initialize/tools/list/tools/call) on the same guest graph (skipped when no
+    python with graphifyy + the decorator-era mcp API is available — pre-existing
+    graphifyy 0.4.32 vs mcp>=2.0 break, see C/P).
 
 Real VM keep/delete lifecycle is NOT covered here and stays UNVERIFIED.
 """
 import hashlib
+import json
 import os
 from pathlib import Path
+import queue
 import shutil
 import subprocess
+import sys
 import tempfile
+import threading
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -256,6 +265,76 @@ class LegacyMigrationTest(GraphifyFixture):
         self.assertTrue(old_persist.exists())        # foreign file -> kept
         self.assertIn("not empty/unknown content", out.stdout)
 
+    def test_negativ_real_dirs_without_link_kept(self):
+        # Name+form alone are never a deletion authorization (QC-F1): bare
+        # real dirs with self-generated-looking outputs survive.
+        self.write_own_outputs(self.proj / ".graphify-out")
+        self.write_own_outputs(self.proj / "graphify-out")
+        self.write_own_outputs(self.proj / "docs" / "graphify")
+        out, _ = self.migrate("apply")
+        self.assertIn("no ownership proof", out.stdout)
+        self.assertTrue((self.proj / ".graphify-out" / "graph.json").exists())
+        self.assertTrue((self.proj / ".graphify-out" / "cache" / "abc.json").exists())
+        self.assertTrue((self.proj / "graphify-out" / "graph.json").exists())
+        self.assertTrue((self.proj / "docs" / "graphify" / "graph.json").exists())
+        self.assertEqual(out.stdout.count("removed identified own output"), 0)
+
+    def test_negativ_deviating_link_kept_and_lookalikes_not_cleaned(self):
+        (self.proj / "docs" / "graphify").mkdir(parents=True)
+        (self.proj / "docs" / "graphify" / "graph.json").write_text(
+            '{"nodes": [], "edges": []}')
+        os.symlink("./docs/graphify", self.proj / ".graphify-out")  # deviating form
+        out, _ = self.migrate("apply")
+        self.assertIn("KEEP+REPORT: custom/unclear link", out.stdout)
+        self.assertEqual(os.readlink(self.proj / ".graphify-out"), "./docs/graphify")
+        self.assertTrue((self.proj / "docs" / "graphify" / "graph.json").exists())
+        self.assertEqual(out.stdout.count("removed identified own output"), 0)
+
+    def test_positiv_emoji_target_only_docs_variant_kept(self):
+        # Both docs variants present: cleanup must hit ONLY the recognized
+        # link target, never the wrong container.
+        (self.proj / "🧾 docs" / "graphify").mkdir(parents=True)
+        self.write_own_outputs(self.proj / "🧾 docs" / "graphify")
+        (self.proj / "docs" / "graphify").mkdir(parents=True)
+        self.write_own_outputs(self.proj / "docs" / "graphify")
+        os.symlink("🧾 docs/graphify", self.proj / ".graphify-out")
+        out, _ = self.migrate("apply")
+        self.assertIn("replaced own legacy link", out.stdout)
+        self.assertFalse((self.proj / "🧾 docs" / "graphify" / "graph.json").exists())
+        self.assertTrue((self.proj / "docs" / "graphify" / "graph.json").exists())
+        self.assertIn("no ownership proof (name+form never suffice): "
+                      + str(self.proj / "docs" / "graphify"), out.stdout)
+
+    def test_positiv_docs_target_only_emoji_variant_kept(self):
+        (self.proj / "docs" / "graphify").mkdir(parents=True)
+        self.write_own_outputs(self.proj / "docs" / "graphify")
+        (self.proj / "🧾 docs" / "graphify").mkdir(parents=True)
+        self.write_own_outputs(self.proj / "🧾 docs" / "graphify")
+        os.symlink("docs/graphify", self.proj / ".graphify-out")
+        out, _ = self.migrate("apply")
+        self.assertFalse((self.proj / "docs" / "graphify" / "graph.json").exists())
+        self.assertTrue((self.proj / "🧾 docs" / "graphify" / "graph.json").exists())
+        self.assertIn("no ownership proof (name+form never suffice): "
+                      + str(self.proj / "🧾 docs" / "graphify"), out.stdout)
+
+    def test_negativ_foreign_json_and_cache_kept(self):
+        (self.proj / "docs" / "graphify").mkdir(parents=True)
+        target = self.proj / "docs" / "graphify"
+        (target / "graph.json").write_text('{"links": [], "nodes": []}')  # own form
+        (target / "manifest.json").write_text('{"a": 1}')
+        (target / "graph.html").write_text("<html>x</html>")
+        (target / "foreign.json").write_text('{"nodes": []}')            # foreign name
+        (target / "cache").mkdir()
+        (target / "cache" / "junk.txt").write_text("nope")               # foreign cache
+        os.symlink("docs/graphify", self.proj / ".graphify-out")
+        out, _ = self.migrate("apply")
+        self.assertIn("removed identified own output: " + str(target / "graph.json"),
+                      out.stdout)
+        self.assertIn("KEEP+REPORT: foreign shape: " + str(target / "cache"),
+                      out.stdout)
+        self.assertTrue((target / "foreign.json").exists())
+        self.assertTrue((target / "cache" / "junk.txt").exists())
+
     def test_migration_idempotent_no_flapping(self):
         (self.proj / "docs" / "graphify").mkdir(parents=True)
         os.symlink("docs/graphify", self.proj / ".graphify-out")
@@ -371,6 +450,107 @@ class RealWriterReaderE2ETest(GraphifyFixture):
                            env={**self.env, "HOME": str(self.base)})
         self.assertNotIn("No graph at", q.stdout + q.stderr)
         self.assertEqual(q.returncode, 0, q.stdout + q.stderr)
+
+
+def _mcp_server_python():
+    """A python that can run graphify.serve with the decorator-era mcp API
+    (Server.list_tools exists). graphifyy 0.4.32 + mcp>=2.0 is a pre-existing
+    break (serve.py:164 @server.list_tools); mcp==1.30.0 works."""
+    cands = []
+    if os.environ.get("GRAPHIFY_MCP_PYTHON"):
+        cands.append(os.environ["GRAPHIFY_MCP_PYTHON"])
+    cands += [sys.executable,
+              str(Path.home() / ".local/share/pipx/venvs/graphifyy/bin/python"),
+              "/tmp/opencode/graphify-mcp-venv/bin/python"]
+    check = ("import graphify.serve, importlib.metadata as m; "
+             "from mcp.server import Server; "
+             "assert hasattr(Server('t'), 'list_tools'); "
+             "print(m.version('mcp'))")
+    for py in cands:
+        if not (Path(py).exists() or shutil.which(py)):
+            continue
+        r = subprocess.run([py, "-c", check], capture_output=True, text=True, timeout=60)
+        if r.returncode == 0:
+            return py, r.stdout.strip()
+    return None, None
+
+
+class RealMcpServerProtocolTest(GraphifyFixture):
+    """Real MCP server + JSON-RPC protocol request on the same guest graph —
+    independent of the CLI reader (QC: CLI query alone is not enough)."""
+
+    def test_mcp_protocol_round_trip_on_guest_graph(self):
+        py, mcp_ver = _mcp_server_python()
+        if not py:
+            self.skipTest("no python with graphifyy + decorator-era mcp API "
+                          "(pre-existing graphifyy 0.4.32 vs mcp>=2.0 break; "
+                          "build /tmp/opencode/graphify-mcp-venv as in C/P)")
+        if not _have_graphifyy():
+            self.skipTest("graphifyy CLI not installed (needed to produce the graph)")
+        (self.proj / "src.py").write_text("def a():\n    return 1\ndef b():\n    return a()\n")
+        token = self.run_fns(
+            f'_mcps_graph_path_for_session /home/lima.linux "{self.proj}"'
+        ).stdout.strip()
+        canonical = token[: -len("/graph.json")]
+        self.run_fns(f'graphify_ensure_out_link "{self.proj}" "{canonical}"')
+        Path(canonical).mkdir(parents=True, exist_ok=True)
+        w = subprocess.run([GRAPHIFY_CLI, "update", str(self.proj)],
+                           capture_output=True, text=True, timeout=180,
+                           env={**self.env, "HOME": str(self.base)})
+        self.assertTrue(Path(token).exists(), w.stdout + w.stderr)
+        # REAL MCP reader: the same module entry the production wrapper execs
+        # (graphify-serve-wrapper.sh -> python -m graphify.serve <graph>).
+        proc = subprocess.Popen(
+            [py, "-m", "graphify.serve", token],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True)
+
+        def send(obj):
+            proc.stdin.write(json.dumps(obj) + "\n")
+            proc.stdin.flush()
+
+        send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+              "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                         "clientInfo": {"name": "ocvm-test", "version": "1"}}})
+        send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        send({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+              "params": {"name": "graph_stats", "arguments": {}}})
+        got = {}
+        inbox = queue.Queue()
+
+        def reader():
+            for line in proc.stdout:
+                inbox.put(line)
+
+        threading.Thread(target=reader, daemon=True).start()
+        deadline = time.time() + 20
+        while time.time() < deadline and not all(i in got for i in (1, 2, 3)):
+            try:
+                msg = json.loads(inbox.get(timeout=1))
+            except (queue.Empty, ValueError):
+                continue
+            if "id" in msg:
+                got[msg["id"]] = msg
+        try:
+            proc.stdin.close()
+            proc.terminate()
+            proc.wait(timeout=10)
+            for stream in (proc.stdout, proc.stderr):
+                if stream:
+                    stream.close()
+        except Exception:
+            pass
+        self.assertIn(1, got, "initialize unanswered")
+        self.assertEqual(got[1]["result"]["serverInfo"]["name"], "graphify")
+        tools = sorted(t["name"] for t in got.get(2, {}).get("result", {}).get("tools", []))
+        self.assertEqual(tools, ["get_community", "get_neighbors", "get_node",
+                                 "god_nodes", "graph_stats", "query_graph",
+                                 "shortest_path"], tools)
+        content = got.get(3, {}).get("result", {}).get("content", [])
+        text = "".join(c.get("text", "") for c in content)
+        self.assertIn("Nodes:", text, f"graph_stats over MCP failed: {got.get(3)}")
+        self.assertTrue(mcp_ver, "recorded mcp version of the serving python")
 
 
 if __name__ == "__main__":

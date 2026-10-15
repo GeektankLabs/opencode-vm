@@ -208,7 +208,7 @@ MCPs may also contribute an `agents_md_snippet` (in [`mcps/registry.json`](mcps/
 
 [`graphify`](https://github.com/safishamsi/graphify) builds a tree-sitter-based knowledge graph of your codebase and exposes 7 read-only query tools (`query_graph`, `get_node`, `get_neighbors`, `get_community`, `god_nodes`, `graph_stats`, `shortest_path`). The MCP server itself makes **zero LLM calls** — semantic enrichment of non-code content (docs, papers, images) happens through the agent, which uses your already-configured opencode provider. **No separate API key is needed.**
 
-The graph file is persisted per-project at `~/.opencode-vm/project-state/<hash>/graphify/graph.json` and survives session resets. On first activation in a fresh project the wrapper returns a "no graph" message — build the graph with the `graphify` CLI inside the session VM (`graphify --help` to see the current subcommands). Use `opencode-vm mcps purge graphify` to wipe the cached graph.
+The graph lives on the session VM's guest disk at `${OCVM_ARTIFACT_ROOT:-<vm-home>/.opencode-vm/artifacts}/<proj-hash>/graphify/graph.json` (the project's `.graphify-out` symlink points there). It is **regenerable and not copied to the host**: it is lost when the session VM is deleted — rebuild with the `graphify` CLI inside the session VM (`graphify --help` to see the current subcommands). On first activation in a fresh project the wrapper returns a "no graph" message until you build the graph. `opencode-vm mcps purge graphify` removes the guest artifact via a running session VM (and only reports pre-existing host-side stores; it never deletes those automatically).
 
 ### Proxmox MCP
 
