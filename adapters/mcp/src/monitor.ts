@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord } from "./types.js";
+import { guestStateDirectory } from "./guest-state.js";
 
 /**
  * W3 Monitor Engine — persistent registry + deterministic state machines.
@@ -638,11 +639,10 @@ export type MonitorRegistry = {
 export type RegistrySnapshot = { registry: MonitorRegistry; path: string };
 
 export function monitorRegistryDirectory(project: string): string {
-  // Phase 2 (task_3eaf2d4a): guest-native monitor state dir when exported by
-  // the VM-side startup script; falls back to the legacy project path.
-  const guest = process.env.OCVM_MONITOR_STATE_DIR;
-  if (guest) return guest;
-  return join(project, ".opencode-vm", "monitor");
+  return guestStateDirectory(project);
+}
+export function prepareMonitorDirectory(project: string): string {
+  return guestStateDirectory(project, true);
 }
 export function monitorRegistryPath(project: string): string {
   return join(monitorRegistryDirectory(project), "registry.json");
@@ -826,6 +826,8 @@ async function acquireLock(directory: string, now: number): Promise<() => Promis
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       try {
         const info = await lstat(lock);
+        if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== process.getuid?.())
+          throw new Error("unsafe monitor registry lock retained");
         if (now - info.mtimeMs > LOCK_STALE_MS) {
           await rm(lock, { recursive: true, force: true });
           continue;
@@ -856,8 +858,7 @@ export async function withRegistry(
   mutate: (registry: MonitorRegistry) => MonitorRegistry | void | Promise<MonitorRegistry | void>,
   options: { expected?: number; now?: number } = {},
 ): Promise<MonitorRegistry> {
-  const directory = monitorRegistryDirectory(project);
-  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const directory = prepareMonitorDirectory(project);
   const root = await lstat(project);
   if (!root.isDirectory() || root.isSymbolicLink()) throw new Error("unsafe monitor project root");
   const release = await acquireLock(directory, options.now ?? Date.now());
@@ -1030,13 +1031,13 @@ export function workerAliasFor(managerAlias: string, ordinal: number): string {
 }
 
 export function monitorWorkersDirectory(project: string): string {
-  return join(project, ".opencode-vm", "monitor", "workers");
+  return guestStateDirectory(project, false, "workers");
 }
 export function monitorWorkerContextPath(project: string, monitorId: string, workerKey: string): string {
-  return join(monitorWorkersDirectory(project), monitorId, `${workerKey}.md`);
+  return join(guestStateDirectory(project, false, `workers/${monitorId}`), `${workerKey}.md`);
 }
 export function monitorManagerContextPath(project: string, monitorId: string): string {
-  return join(monitorWorkersDirectory(project), monitorId, "manager.md");
+  return join(guestStateDirectory(project, false, `workers/${monitorId}`), "manager.md");
 }
 
 function findMonitorOrThrow(registry: MonitorRegistry, monitorId: string): MonitorRecord {

@@ -31,6 +31,7 @@ trap 'rm -rf "$TMP"' EXIT
 STAGE="$TMP/$NAME"
 mkdir -p "$STAGE/dist" "$STAGE/runtime"
 cp -p "$ROOT/runtime/managed-core.mjs" "$ROOT/runtime/managed-policy.mjs" "$ROOT/runtime/a2a-managed.py" "$STAGE/runtime/"
+cp -p "$ROOT/runtime/guest-state.py" "$STAGE/runtime/"
 
 (
   cd "$ADAPTER"

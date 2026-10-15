@@ -1,4 +1,4 @@
-import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
+import { lstat, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createOpencodeClient } from "@opencode-ai/sdk/v2";
 import { OpenCodeGateway } from "./opencode.js";
@@ -6,7 +6,7 @@ import { ProjectBoardService } from "./taskboard.js";
 import { readPolicy, routingRegime } from "./agent-control.js";
 import { MonitorEngine } from "./monitor-engine.js";
 import type { MonitorBoardLike, MonitorPolicyView } from "./monitor-engine.js";
-import { monitorRegistryDirectory } from "./monitor.js";
+import { prepareMonitorDirectory } from "./monitor.js";
 import type { RuntimeDescriptor } from "./types.js";
 
 /**
@@ -106,8 +106,7 @@ async function main(): Promise<void> {
     },
   });
 
-  const stateDir = monitorRegistryDirectory(runtime.project);
-  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  const stateDir = prepareMonitorDirectory(runtime.project);
   const heartbeatPath = join(stateDir, "heartbeat.json");
   let stopped = false;
   const writeHeartbeat = async (): Promise<void> => {

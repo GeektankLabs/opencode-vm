@@ -21,6 +21,7 @@ import {
   monitorHistory,
   monitorManagerContextPath,
   monitorRegistryPath,
+  prepareMonitorDirectory,
   monitorWorkerContextPath,
   monitorWorkersDirectory,
   readEpisode,
@@ -2812,7 +2813,7 @@ function progressResult(sessionId: string, tick: number) {
 }
 
 async function writeHeartbeat(project: string, generation: string, atMs: number): Promise<void> {
-  const dir = join(project, ".opencode-vm", "monitor");
+  const dir = prepareMonitorDirectory(project);
   await mkdir(dir, { recursive: true });
   await writeFile(join(dir, "heartbeat.json"), JSON.stringify({ schema: 1, projectHash: "p", generation, pid: 1, at: new Date(atMs).toISOString() }) + "\n");
 }

@@ -24,6 +24,7 @@ import {
   monitorDecision,
   monitorHistory,
   monitorLog,
+  monitorRegistryDirectory,
   pushRecoveryAttempt,
   readEpisode,
   readRegistrySnapshot,
@@ -2316,7 +2317,7 @@ export class MonitorEngine {
  * (`<project>/.opencode-vm/monitor/heartbeat.json`, written by the service
  * every 30 s). Freshness is content-time based (`at`), never assumed. */
 async function readEngineHeartbeat(project: string, nowMs: number): Promise<{ generation: string; at: number; fresh: boolean } | null> {
-  const path = join(project, ".opencode-vm", "monitor", "heartbeat.json");
+  const path = join(monitorRegistryDirectory(project), "heartbeat.json");
   try {
     const info = await lstat(path);
     if (!info.isFile() || info.isSymbolicLink() || info.size > 16_384) return null;

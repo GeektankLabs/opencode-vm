@@ -33,6 +33,32 @@ Two covered situations (same protocol, different urgency):
   then a separately authorised re-enable. A worker rebind is **not** a monitor-root rebind;
   never edit monitor state directly.
 
+## Declarative monitor handover (existing pack task, not a runtime backup)
+
+After the secure boundary and native scheduler pause/readback, run the shipped
+host entry **in the project**: `opencode-vm monitor pack`. It reads the current
+guest registry and writes only `.opencode-vm/handover/monitor-restart.json`
+plus `.manifest.json` (SHA-256) to the persistent project. Include both in the
+existing pack manifest and verify their hashes. Fields are allowlisted: historical
+reference ID, name, master Task-ID, interval, autonomy/runtime profiles, expiry
+and investigation configuration. No workers/session IDs, PIDs, heartbeat, locks,
+WAL/wake/checkpoint state, functional logs or complete history are exported.
+Selected evidence is included only when the existing pack task needs it and is
+never imported as runtime state. This entry is explicit; no exit-trap copyback.
+
+For unpack, `opencode-vm monitor unpack` validates project/hash manifest and
+prints the concrete **Ja/Nein** question with the monitor/task/interval list;
+it creates and activates nothing. Ask that question to the operator. After an
+explicit **No**, use `monitor unpack --no` (persistent rejection receipt, no
+registry creation). After an explicit **Yes**, and only then, use
+`monitor unpack --yes`: the normal monitor constructor and locked registry flow
+generate new IDs and empty session bindings; the engine establishes fresh
+sessions through its existing regular path. A lost/uncertain call is reconciled
+against the live registry and decision receipt, never blindly repeated. Existing
+master-task/title entries are retained rather than duplicated. No old registry
+is copied into the new one. Kept same-VM state is retained; a fresh VM starts
+empty even when an old host registry or a restart description exists.
+
 ## Shutdown, doctor and state checks (current tooling)
 
 A secure worker boundary (above) is not yet a *verified stop*. Pack only from a state whose

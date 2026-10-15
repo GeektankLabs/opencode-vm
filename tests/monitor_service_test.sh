@@ -23,12 +23,15 @@ command -v jq >/dev/null 2>&1 || { echo "SKIP monitor service checks (jq require
 SHARE="$TMP/share"
 PROJECT="$TMP/project"
 mkdir -p "$SHARE" "$PROJECT/.opencode-vm"
+export OCVM_ARTIFACT_ROOT="$TMP/artifacts" OCVM_GUEST_STATE_HELPER="$ROOT/runtime/guest-state.py"
+python3 "$OCVM_GUEST_STATE_HELPER" resolve "$PROJECT" monitor --create >/dev/null
 install_web_lib "$SHARE" >/dev/null
 [[ -f "$SHARE/lib/web.sh" ]] || fail "web.sh was not materialized"
 
 # ---------------------------------------------------------------- heartbeat
 FUNCS="$TMP/monitor-funcs.sh"
 {
+  awk '/^guest_state\(\) \{/,/^\}$/' "$SHARE/lib/web.sh"
   awk '/^monitor_heartbeat_path\(\) \{/,/^\}$/' "$SHARE/lib/web.sh"
   awk '/^monitor_wait_heartbeat\(\) \{/,/^\}$/' "$SHARE/lib/web.sh"
 } > "$FUNCS"
@@ -38,8 +41,8 @@ grep -q '^monitor_wait_heartbeat() {' "$FUNCS" || fail "monitor_wait_heartbeat n
 HASH="66370db6a9e3f88af333b4d90620d90b"
 GENERATION="oc-fixture-generation"
 heartbeat_path="$(bash -c "source '$FUNCS'; monitor_heartbeat_path '$PROJECT'")"
-[[ "$heartbeat_path" == "$PROJECT/.opencode-vm/monitor/heartbeat.json" ]] \
-  || fail "heartbeat path is not the project monitor registry path ($heartbeat_path)"
+[[ "$heartbeat_path" == "$OCVM_ARTIFACT_ROOT"/*/monitor/heartbeat.json ]] \
+  || fail "heartbeat path is not the guest project registry path ($heartbeat_path)"
 
 write_heartbeat() { # <path> <hash> <generation> <age-seconds>
   local file="$1" at

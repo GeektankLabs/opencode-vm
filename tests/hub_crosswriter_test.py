@@ -4,6 +4,7 @@ path must preserve the additive `investigation` fields byte-stably. This test
 imports the real hub module and exercises the real `mutate`/`_valid_registry`
 path on a temp registry that carries investigation state."""
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -24,7 +25,10 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory() as tmp:
         project = Path(tmp) / "project"
-        (project / ".opencode-vm" / "monitor").mkdir(parents=True)
+        project.mkdir(parents=True)
+        for key in ("OCVM_MONITOR_STATE_DIR", "OCVM_PROJECT_PATH", "OCVM_PROJ_HASH"):
+            os.environ.pop(key, None)
+        os.environ["OCVM_ARTIFACT_ROOT"] = str(Path(tmp) / "artifacts")
         investigation = {
             "schema": 1,
             "last_progress_at": None,
@@ -95,6 +99,7 @@ def main() -> int:
                 },
             }],
         }
+        monitor.mutate(project, lambda draft: None)
         monitor.registry_path(project).write_text(json.dumps(registry, indent=2) + "\n", encoding="utf-8")
 
         snapshot = monitor.snapshot(project)

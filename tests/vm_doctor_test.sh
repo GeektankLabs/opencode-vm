@@ -682,11 +682,34 @@ deny_secrets "$TMP/c22.out" "$TMP/c22.err"
 pass "C22 resources: low current + historic peak, watcher/config-limit labels, ENFILE site from real log"
 
 # ENFILE line without an event time -> observed (mtime) is labelled, never invented
-rm -f "$SHARE/monitor"; mkdir -p "$SHARE/monitor"
-printf '%s\n' '[monitor] error: ENFILE lock' > "$SHARE/monitor/server.log"
+# The monitor service log lives in the canonical guest state (not the share).
+# The payload is a Linux guest script; GNU-compatible stat/date shims let
+# native macOS Bash resolve guest state through the same bytes.
+mkdir -p "$TMP/bin"
+cat > "$TMP/bin/stat" <<'STAT'
+#!/usr/bin/env bash
+if [ "${1:-}" = "-f" ] && [ "${2:-}" = "-c" ] && [ "${3:-}" = "%T" ]; then printf 'ext4\n'; exit 0; fi
+exec /usr/bin/stat "$@"
+STAT
+cat > "$TMP/bin/date" <<'DATE'
+#!/usr/bin/env bash
+if [ "${1:-}" = "-u" ] && [ "${2:-}" = "-d" ]; then
+  python3 -c 'import sys,datetime; print(int(datetime.datetime.fromisoformat(sys.argv[1].replace("Z","+00:00")).timestamp()))' "$3"
+  exit $?
+fi
+exec /bin/date "$@"
+DATE
+chmod +x "$TMP/bin/stat" "$TMP/bin/date"
+PATH="$TMP/bin:$PATH"
+export OCVM_ARTIFACT_ROOT="$TMP/artifacts"
+mkdir -p "$SHARE/config/opencode/managed-policy"
+cp "$ROOT/runtime/guest-state.py" "$SHARE/config/opencode/managed-policy/guest-state.py"
+MON_STATE="$(python3 "$SHARE/config/opencode/managed-policy/guest-state.py" resolve "$PROJECT" monitor --create)"
+mkdir -p "$MON_STATE/run"
+printf '%s\n' '[monitor] error: ENFILE lock' > "$MON_STATE/run/server.log"
 run_main resources "$TMP/c22t.out" "$TMP/c22t.err" >/dev/null || true
 need_out "$TMP/c22t.out" "monitor: ENFILE event_at=unknown(no event time in line; log observed_at="
-rm -rf "$SHARE/monitor"
+rm -rf "$MON_STATE/run"
 pass "C22b ENFILE without event time reports observed mtime, explicit (no invented time)"
 
 # missing history is explicit, not an error

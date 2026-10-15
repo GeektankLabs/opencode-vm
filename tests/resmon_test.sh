@@ -30,7 +30,6 @@ fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 perms() { if stat -c %a "$1" >/dev/null 2>&1; then stat -c %a "$1"; else stat -f %Lp "$1"; fi; }
 PROJ="$TMP/project"
-mkdir -p "$PROJ/.opencode-vm/monitor"
 
 # --- F5: the script keeps its executable bit --------------------------------
 [[ -x "$ROOT/opencode-vm.sh" ]] || fail "opencode-vm.sh is not executable"
@@ -99,25 +98,55 @@ printf '%s\n' "$out" | grep -q 'process fd peak: pid=' || fail "renderer did not
 pass "end-to-end real sample -> append -> renderer records schema-valid required metrics"
 
 # --- scheduler read: real registry shape monitors[].state.work ---------------
+# No running VM: honest unknown, never evidence from an old host register.
+if resmon_sched_json "$PROJ" >/dev/null 2>&1; then fail "no-VM scheduler read served a projection"; fi
+if resmon_sched_json "$PROJ" vm-unborn >/dev/null 2>&1; then fail "not-running VM served a scheduler projection"; fi
+# The projection is read by the REAL guest probe through the staged helper.
+# The payload is a Linux guest script; run it through a local stub with
+# GNU-compatible stat/date shims so native macOS Bash exercises the same bytes.
+mkdir -p "$TMP/bin"
+cat > "$TMP/bin/stat" <<'STAT'
+#!/usr/bin/env bash
+if [ "${1:-}" = "-f" ] && [ "${2:-}" = "-c" ] && [ "${3:-}" = "%T" ]; then printf 'ext4\n'; exit 0; fi
+exec /usr/bin/stat "$@"
+STAT
+cat > "$TMP/bin/date" <<'DATE'
+#!/usr/bin/env bash
+if [ "${1:-}" = "-u" ] && [ "${2:-}" = "-d" ]; then
+  python3 -c 'import sys,datetime; print(int(datetime.datetime.fromisoformat(sys.argv[1].replace("Z","+00:00")).timestamp()))' "$3"
+  exit $?
+fi
+exec /bin/date "$@"
+DATE
+chmod +x "$TMP/bin/stat" "$TMP/bin/date"
+PATH="$TMP/bin:$PATH"
+export OCVM_ARTIFACT_ROOT="$TMP/artifacts"
+HELPER="$ROOT/runtime/guest-state.py"
+SHARE_PROBE="$(session_share_dir "$PROJ")"
+mkdir -p "$SHARE_PROBE/config/opencode/managed-policy"
+cp "$HELPER" "$SHARE_PROBE/config/opencode/managed-policy/guest-state.py"
+STATE="$(python3 "$HELPER" resolve "$PROJ" monitor --create)"
+is_vm_running() { return 0; }
+vm_exec() { local _vm="$1" _script="$2"; shift 2; bash -lc "$_script" _ "$@"; }
 now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-printf '{"schema":1,"projectHash":"h","generation":"g","pid":1,"at":"%s"}\n' "$now" > "$PROJ/.opencode-vm/monitor/heartbeat.json"
-printf '{"schema":1,"generation":5,"monitors":[{"id":"m1","state":{"work":"active"}},{"id":"m2","state":{"work":"parked_input_required"}}]}\n' > "$PROJ/.opencode-vm/monitor/registry.json"
-s="$(resmon_sched_json "$PROJ")"
+printf '{"schema":1,"projectHash":"h","generation":"g","pid":1,"at":"%s"}\n' "$now" > "$STATE/heartbeat.json"
+printf '{"schema":1,"generation":5,"monitors":[{"id":"m1","state":{"work":"active"}},{"id":"m2","state":{"work":"parked_input_required"}}]}\n' > "$STATE/registry.json"
+s="$(resmon_sched_json "$PROJ" vm-x)" || fail "guest scheduler probe failed"
 [[ "$(printf '%s' "$s" | jq -r .heartbeat_fresh)" == "true" ]] || fail "fresh heartbeat not detected"
 [[ "$(printf '%s' "$s" | jq -r .work_state)" == "active,parked_input_required" ]] || fail "state.work not read from real schema"
 # missing registry -> null, not a crash
-rm -f "$PROJ/.opencode-vm/monitor/registry.json"
-s="$(resmon_sched_json "$PROJ")"
+rm -f "$STATE/registry.json"
+s="$(resmon_sched_json "$PROJ" vm-x)" || fail "guest scheduler probe failed"
 [[ "$(printf '%s' "$s" | jq -r .work_state)" == "null" ]] || fail "missing registry not null"
 # unreadable registry -> null
-printf '{"monitors":[]}\n' > "$PROJ/.opencode-vm/monitor/registry.json"; chmod 000 "$PROJ/.opencode-vm/monitor/registry.json"
-s="$(resmon_sched_json "$PROJ")"
+printf '{"monitors":[]}\n' > "$STATE/registry.json"; chmod 000 "$STATE/registry.json"
+s="$(resmon_sched_json "$PROJ" vm-x)" || fail "guest scheduler probe failed"
 [[ "$(printf '%s' "$s" | jq -r .work_state)" == "null" ]] || fail "unreadable registry not null"
-chmod 600 "$PROJ/.opencode-vm/monitor/registry.json"; rm -f "$PROJ/.opencode-vm/monitor/registry.json" "$PROJ/.opencode-vm/monitor/heartbeat.json"
+chmod 600 "$STATE/registry.json"; rm -f "$STATE/registry.json" "$STATE/heartbeat.json"
 # stale heartbeat -> false
-printf '{"schema":1,"generation":"g","at":"2000-01-01T00:00:00Z"}\n' > "$PROJ/.opencode-vm/monitor/heartbeat.json"
-[[ "$(resmon_sched_json "$PROJ" | jq -r .heartbeat_fresh)" == "false" ]] || fail "stale heartbeat not detected"
-rm -f "$PROJ/.opencode-vm/monitor/heartbeat.json"
+printf '{"schema":1,"generation":"g","at":"2000-01-01T00:00:00Z"}\n' > "$STATE/heartbeat.json"
+[[ "$(resmon_sched_json "$PROJ" vm-x | jq -r .heartbeat_fresh)" == "false" ]] || fail "stale heartbeat not detected"
+rm -f "$STATE/heartbeat.json"
 pass "scheduler read: real monitors[].state.work, multiple/missing/unreadable, fresh vs stale"
 
 # --- F2: Darwin lsof counts ONLY numeric fds --------------------------------
@@ -218,9 +247,16 @@ SPAWNLOG="$TMP/r2-spawns"; : > "$SPAWNLOG"
 PROBE_DONE="$TMP/r2-done"; rm -f "$PROBE_DONE"
 is_vm_running() { return 0; }
 vm_exec() {
-  printf 'start\n' >> "$SPAWNLOG"
-  while [[ ! -f "$PROBE_DONE" ]]; do sleep 0.1; done
-  printf 'end\n' >> "$SPAWNLOG"
+  # Only the async GUEST PROBE (resmon_guest_run) counts as a probe spawn; the
+  # synchronous scheduler read of the same transport returns immediately.
+  case "$2" in
+    *resmon_guest_run*)
+      printf 'start\n' >> "$SPAWNLOG"
+      while [[ ! -f "$PROBE_DONE" ]]; do sleep 0.1; done
+      printf 'end\n' >> "$SPAWNLOG"
+      ;;
+    *) printf '{}' ;;
+  esac
 }
 RESMON_INTERVAL_SECONDS=1
 for i in 1 2 3; do

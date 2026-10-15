@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-10-15-r59
+
+- Phase-2 monitor/dependency guest storage: pack secures only an allowlisted
+  declarative `monitor-restart.json` and its SHA manifest through the real
+  `opencode-vm monitor pack` entry. Unpack previews an explicit Ja/Nein question;
+  only a fresh operator Yes permits `monitor unpack --yes`. No restores at
+  boot, no old IDs/session bindings, no automatic history/runtime copyback;
+  retained same-VM monitors are deduplicated by master task/title.
+- Functional monitor registry/history/locks/logs are guest-local; Taskboard,
+  canonical C/P and required selected handover evidence remain persistent.
+
 ## 2026-10-14-r58
 
 - Guest-native worktree convention (task_3eaf2d4a): document `ocvm_worktree_root` / `ocvm_worktree_path` / `ocvm_worktree_scope` helpers with guest-native filesystem validation, project-hash isolation, strict task-id segment validation and scope_dirs derivation. Update `worktree-ownership.md` to recommend the guest-native location and note that Git common directory and per-worktree metadata remain on the host. No new MCP parameter; existing `scope_dirs` / `external_directory` mechanism is used.

@@ -42,6 +42,13 @@ class HubReadModelTest(unittest.TestCase):
         )
         (self.mcp / "tunnel.log").chmod(0o600)
         self.prior = (server.PROJECT, server.SESSION_ROOT, server.RUNTIME, server.AUTH_CREDENTIALS, server.REQUEST_SCHEME)
+        self.prior_env = {key: os.environ.get(key) for key in
+                          ("OCVM_ARTIFACT_ROOT", "OCVM_GUEST_STATE_HELPER", "OCVM_MONITOR_STATE_DIR",
+                           "OCVM_PROJECT_PATH", "OCVM_PROJ_HASH")}
+        os.environ["OCVM_ARTIFACT_ROOT"] = str(root / "artifacts")
+        os.environ["OCVM_GUEST_STATE_HELPER"] = str(ROOT / "runtime" / "guest-state.py")
+        for key in ("OCVM_MONITOR_STATE_DIR", "OCVM_PROJECT_PATH", "OCVM_PROJ_HASH"):
+            os.environ.pop(key, None)
         self.runtime_path = self.hub / "runtime-input.json"
         self.project_id = hashlib.md5(str(self.project.resolve()).encode()).hexdigest()
         self.write_runtime()
@@ -49,6 +56,11 @@ class HubReadModelTest(unittest.TestCase):
 
     def tearDown(self):
         server.PROJECT, server.SESSION_ROOT, server.RUNTIME, server.AUTH_CREDENTIALS, server.REQUEST_SCHEME = self.prior
+        for key, value in self.prior_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
         self.temp.cleanup()
 
     def write_runtime(self, **changes):
@@ -524,11 +536,20 @@ class HubMonitorLogTest(HubMonitorTest):
         self.assertEqual(status, 201)
         return created["monitor"]["monitor_id"]
 
+    def guest_run_dir(self):
+        import hub.monitor as store
+        directory = store._guest_directory(self.project, True, "run")
+        directory.mkdir(mode=0o700, exist_ok=True)
+        return directory
+
+    def guest_heartbeat_path(self):
+        import hub.monitor as store
+        store._guest_directory(self.project, True)
+        return store.registry_directory(self.project) / "heartbeat.json"
+
     def write_server_log(self, lines, share=None):
         import hub.monitor as store
-        root = share or self.share
-        directory = root / "monitor"
-        directory.mkdir(parents=True, exist_ok=True)
+        directory = self.guest_run_dir()
         directory.chmod(0o700)
         path = directory / "server.log"
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -550,7 +571,7 @@ class HubMonitorLogTest(HubMonitorTest):
                 "[monitor] ready project=x generation=fixture",
                 "[monitor] error: Authorization: Bearer topsecretvalue123 api_key=sk-thismaynotleakhere",
             ])
-            heartbeat = self.project / ".opencode-vm" / "monitor" / "heartbeat.json"
+            heartbeat = self.guest_heartbeat_path()
             heartbeat.write_text(json.dumps({"schema": 1, "projectHash": self.project_id,
                                              "generation": "fixture-generation", "pid": 4242,
                                              "at": "2026-10-10T00:00:00.000Z"}) + "\n", encoding="utf-8")
@@ -647,9 +668,7 @@ class HubMonitorLogTest(HubMonitorTest):
             # Symlinked tail target fails closed and is never read.
             target = Path(self.temp.name) / "elsewhere.log"
             target.write_text("SYMLINKED secret-token-xyz\n", encoding="utf-8")
-            directory = self.share / "monitor"
-            directory.mkdir(parents=True, exist_ok=True)
-            directory.chmod(0o700)
+            directory = self.guest_run_dir()
             link = directory / "server.log"
             link.symlink_to(target)
             status, body = self.request(base, f"/api/monitor/{monitor_id[8:]}/log")
@@ -659,25 +678,28 @@ class HubMonitorLogTest(HubMonitorTest):
             self.assertEqual(body["completeness"], "unavailable")
             self.assertNotIn("SYMLINKED", body["text"])
             self.assertNotIn("secret-token-xyz", json.dumps(body))
-            # Share switch (reconnect simulation): the tail source is freshly
-            # determined from the CURRENT session share every time — there is
-            # no parameter that could point the reader at a foreign project.
+            # Share switch (reconnect simulation): the tail source is fixed to
+            # THIS project's owned guest registry — a foreign project's log is
+            # structurally unreachable, even when the informational session
+            # share context points at it.
+            link.unlink()
+            self.write_server_log(["[monitor] project-own line"])
             prior_share = server.SESSION_ROOT
             server.SESSION_ROOT = other
             try:
                 status, body = self.request(base, f"/api/monitor/{monitor_id[8:]}/log")
                 tail = next(source for source in body["sources"] if source["kind"] == "server_log_tail")
                 self.assertEqual(tail["state"], "ok")
-                self.assertIn("NEW-SHARE", body["text"])
+                self.assertIn("project-own line", body["text"])
+                self.assertNotIn("NEW-SHARE", body["text"])
                 self.assertEqual(body["source_context"]["share_root"], str(other))
             finally:
                 server.SESSION_ROOT = prior_share
             # A heartbeat from a different generation is an honest mismatch.
-            heartbeat = self.project / ".opencode-vm" / "monitor" / "heartbeat.json"
+            heartbeat = self.guest_heartbeat_path()
             heartbeat.write_text(json.dumps({"schema": 1, "projectHash": "0" * 32,
                                              "generation": "other-generation", "pid": 1,
                                              "at": "2026-10-10T00:00:00Z"}) + "\n", encoding="utf-8")
-            (self.share / "monitor" / "server.log").unlink()
             self.write_server_log(["[monitor] ok"])
             status, body = self.request(base, f"/api/monitor/{monitor_id[8:]}/log")
             kinds = {source["kind"]: source for source in body["sources"]}
@@ -711,7 +733,7 @@ class HubMonitorLogTest(HubMonitorTest):
             except HTTPError as missing:
                 self.assertEqual(missing.code, 404)
             # A corrupt registry is an honest 503, never a stale success.
-            registry_dir = self.project / ".opencode-vm" / "monitor"
+            registry_dir = self.guest_run_dir().parent
             registry_dir.mkdir(parents=True, exist_ok=True)
             (registry_dir / "registry.json").write_text("{broken", encoding="utf-8")
             try:
@@ -780,9 +802,7 @@ class HubMonitorLogTest(HubMonitorTest):
         http, thread, base = self.start()
         try:
             monitor_id = self.seed_monitor(base)
-            directory = self.share / "monitor"
-            directory.mkdir(parents=True, exist_ok=True)
-            directory.chmod(0o700)
+            directory = self.guest_run_dir()
             path = directory / "server.log"
             huge = "x" * (400 * 1024)
             for case, content in (("no-newline", huge), ("with-newline", huge + "\n")):

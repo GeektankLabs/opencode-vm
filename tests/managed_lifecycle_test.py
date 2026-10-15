@@ -23,7 +23,7 @@ FUNCTION = re.search(r"^managed_policy_install\(\) \{\n.*?^\}", SCRIPT, re.M | r
 class LifecycleTest(unittest.TestCase):
     def builder_fixture(self, root):
         (root / "runtime").mkdir()
-        for name in ("managed-core.mjs", "managed-policy.mjs", "a2a-managed.py"):
+        for name in ("managed-core.mjs", "managed-policy.mjs", "a2a-managed.py", "guest-state.py"):
             (root / "runtime" / name).write_bytes((ROOT / "runtime" / name).read_bytes())
         (root / "scripts").mkdir()
         builder = root / "scripts/build-managed-runtime.py"
@@ -59,7 +59,7 @@ class LifecycleTest(unittest.TestCase):
             compressed = base64.b64decode(encoded)
             self.assertEqual(compressed[9], 255)
             with tarfile.open(fileobj=io.BytesIO(gzip.decompress(compressed)), mode="r:") as archive:
-                self.assertEqual(archive.getnames(), ["managed-core.mjs", "managed-policy.mjs", "a2a-managed.py"])
+                self.assertEqual(archive.getnames(), ["managed-core.mjs", "managed-policy.mjs", "a2a-managed.py", "guest-state.py"])
                 for entry in archive.getmembers():
                     self.assertTrue(entry.isfile())
                     self.assertEqual((entry.mode, entry.mtime, entry.uid, entry.gid), (0o644, 0, 0, 0))

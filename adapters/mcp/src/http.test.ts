@@ -9,7 +9,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { McpHttpServer, MAX_REQUEST_BODY_BYTES } from "./http.js";
 import { MCP_EVENT_DEFINITIONS } from "./events.js";
 import { lastToolRoundtrips, traceToolCall } from "./diagnostics.js";
-import { readRegistrySnapshot, withRegistry } from "./monitor.js";
+import { readRegistrySnapshot, withRegistry, monitorRegistryPath } from "./monitor.js";
 import type { SessionGateway } from "./opencode.js";
 import type { AttachmentDescriptor } from "./attachments.js";
 import { AdapterError, ADAPTER_VERSION } from "./types.js";
@@ -1967,7 +1967,7 @@ test("monitor emergency: persistent delete frees the anchor and binding changes 
     const id = (created.structuredContent as { monitor: { monitor_id: string } }).monitor.monitor_id;
     const second = await call("create_monitor", { title: "Other", task_id: taskIds[1] });
     const id2 = (second.structuredContent as { monitor: { monitor_id: string } }).monitor.monitor_id;
-    const baseline = () => readFile(join(project, ".opencode-vm", "monitor", "registry.json"), "utf8");
+    const baseline = () => readFile(monitorRegistryPath(project), "utf8");
     let raw = await baseline();
     assert.equal((await call("update_monitor", { monitor_id: id, task_id: taskIds[1], title: "must not save" })).isError, true);
     assert.equal(await baseline(), raw, "conflicting task: no partial title or generation write");

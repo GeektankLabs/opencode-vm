@@ -777,8 +777,9 @@ class Handler(BaseHTTPRequestHandler):
         operational = [entry for entry in logs if (self._entry_epoch(entry.get("at")) or 0) >= cutoff]
         decisions_omitted = len(history) - len(decisions)
         operational_omitted = len(logs) - len(operational)
-        tail = monitor_store.read_server_log_tail(SESSION_ROOT)
+        tail = monitor_store.read_server_log_tail(PROJECT)
         heartbeat = monitor_store.read_heartbeat(PROJECT)
+        tail_label_path = tail.get("path") or "monitor/server.log"
         heartbeat_value = heartbeat.get("value") or {}
         if heartbeat["state"] == "ok":
             same_identity = (heartbeat_value.get("projectHash") == project_hash()
@@ -806,7 +807,7 @@ class Handler(BaseHTTPRequestHandler):
              "state": heartbeat["state"], "count": 1 if heartbeat["state"] == "matching" else 0,
              "truncated": False,
              "from": None, "to": heartbeat_value.get("at") if heartbeat["state"] in ("matching", "mismatch") else None},
-            {"kind": "server_log_tail", "label": f"Service-Log-Tail ({SESSION_ROOT}/monitor/server.log)",
+             {"kind": "server_log_tail", "label": f"Service-Log-Tail ({tail_label_path})",
              "state": tail_state, "count": len(tail.get("lines", [])),
              "truncated": bool(tail.get("truncated_bytes") or tail.get("truncated_lines")),
              "from": None, "to": None},
@@ -888,7 +889,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             emit(f"heartbeat: nicht lesbar ({heartbeat['state']})")
         emit("")
-        emit(f"--- Service-Log-Tail ({SESSION_ROOT}/monitor/server.log) ---")
+        emit(f"--- Service-Log-Tail ({tail_label_path}) ---")
         if tail_state == "ok":
             for raw_line in tail.get("lines", []):
                 emit(raw_line)

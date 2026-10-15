@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Monitor registry access for the Agent Control Hub (W4).
 
-Reads and writes the same project-persistent registry as the Monitor Engine
-and the MCP adapter tools: <project>/.opencode-vm/monitor/registry.json.
+Reads and writes the same checked project-separated guest registry as the
+Monitor Engine and MCP adapter tools (no legacy host-register fallback).
 One canonical store, one generation counter, one cooperating mkdir lock.
 Stdlib only, mirroring the TypeScript schema exactly.
 """
@@ -38,12 +38,21 @@ MAX_REGISTRY_BYTES = 1_048_576
 
 
 def registry_directory(project: Path) -> Path:
-    # Phase 2 (task_3eaf2d4a): guest-native monitor state dir when exported by
-    # the VM-side startup script; falls back to the legacy project path.
-    guest = os.environ.get("OCVM_MONITOR_STATE_DIR")
-    if guest:
-        return Path(guest)
-    return project / ".opencode-vm" / "monitor"
+    return _guest_directory(project, False)
+
+
+def _guest_directory(project: Path, create: bool, child: str | None = None) -> Path:
+    import subprocess
+    helper = os.environ.get("OCVM_GUEST_STATE_HELPER")
+    if not helper:
+        helper = str(Path(__file__).resolve().parent.parent / "runtime" / "guest-state.py")
+    try:
+        result = subprocess.run(["python3", helper, "resolve", str(project), "monitor"] + ([child] if child else [])
+                                + (["--create"] if create else []),
+                                check=True, capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise MonitorError("Guest monitor state unavailable/unsafe; no host fallback") from error
+    return Path(result.stdout.strip())
 
 
 def registry_path(project: Path) -> Path:
@@ -119,6 +128,9 @@ def _lock(project: Path) -> Path:
             return lock
         except FileExistsError:
             try:
+                info = lock.lstat()
+                if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != os.getuid():
+                    raise MonitorError("Unsafe monitor registry lock retained.")
                 if time.time() - lock.stat().st_mtime > LOCK_STALE_SECONDS:
                     for child in lock.iterdir():
                         child.unlink()
@@ -149,8 +161,7 @@ def _publish(project: Path, registry: dict[str, Any]) -> None:
 
 def mutate(project: Path, mutator, expected_generation: int | None = None) -> dict[str, Any]:
     """Serialized read-modify-write with monotonic CAS generation."""
-    directory = registry_directory(project)
-    directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+    directory = _guest_directory(project, True)
     lock = _lock(project)
     try:
         registry = _read_registry(project)
@@ -204,21 +215,27 @@ DISPLAY_WINDOW_HOURS = 24
 MAX_HEARTBEAT_BYTES = 4_096
 
 
-def server_log_path(share_root: Path) -> Path:
-    return share_root / "monitor" / "server.log"
+def server_log_path(project: Path) -> Path:
+    return _guest_directory(project, False, "run") / "server.log"
 
 
-def read_server_log_tail(share_root: Path) -> dict[str, Any]:
-    """Bounded, ownership-checked tail of <session-share>/monitor/server.log.
+def read_server_log_tail(project: Path) -> dict[str, Any]:
+    """Bounded, ownership-checked tail of the canonical guest monitor log.
 
-    The path is fixed to the current session share, so a foreign project log
-    is structurally unreachable; symlinks, non-regular files, group/other
-    writable directories and foreign-owned files fail closed as `unsafe`
-    without reading them. Byte and line limits are enforced server-side.
+    The path is fixed to this project's owned guest registry, so a foreign
+    project log is structurally unreachable; symlinks, non-regular files,
+    group/other writable directories and foreign-owned files fail closed as
+    `unsafe` without reading them. Byte and line limits are enforced
+    server-side.
     """
-    directory = share_root / "monitor"
     result: dict[str, Any] = {"state": "ok", "source": "monitor/server.log", "lines": [],
                               "bytes": 0, "truncated_bytes": False, "truncated_lines": False}
+    try:
+        directory = _guest_directory(project, False, "run")
+    except MonitorError:
+        result["state"] = "unsafe"
+        return result
+    result["path"] = str(directory / "server.log")
     try:
         info = directory.lstat()
     except OSError:
@@ -275,8 +292,13 @@ def read_server_log_tail(share_root: Path) -> dict[str, Any]:
 
 def read_heartbeat(project: Path) -> dict[str, Any]:
     """Project-local engine heartbeat, read strictly (regular, private, small)."""
-    path = project / ".opencode-vm" / "monitor" / "heartbeat.json"
-    result: dict[str, Any] = {"state": "absent", "source": ".opencode-vm/monitor/heartbeat.json", "value": None}
+    result: dict[str, Any] = {"state": "absent", "source": "monitor/heartbeat.json", "value": None}
+    try:
+        path = registry_directory(project) / "heartbeat.json"
+    except MonitorError:
+        result["state"] = "unsafe"
+        return result
+    result["path"] = str(path)
     try:
         info = path.lstat()
     except OSError:
