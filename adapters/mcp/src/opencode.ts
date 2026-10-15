@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { request as httpRequest } from "node:http";
-import { lstat, mkdir, readFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath } from "node:fs/promises";
+import { normalize } from "node:path";
 import { createOpencodeClient } from "@opencode-ai/sdk/v2";
 import type { FilePartInput, TextPartInput } from "@opencode-ai/sdk/v2";
 import { ActivityJournal } from "./activity.js";
@@ -174,7 +175,7 @@ export interface SessionGateway {
   waitForProjectActivity(
     query: ActivityQuery & { after_cursor: string; timeout_ms?: number },
   ): Promise<ActivityResult & { timeout: boolean }>;
-  createSession(title?: string, scopeDirs?: string[]): Promise<CreateSessionResult>;
+  createSession(title?: string, scopeDirs?: string[], scopeReadFiles?: string[]): Promise<CreateSessionResult>;
   listSessions(limit?: number, cursor?: string): Promise<ListSessionsResult>;
   getSessionDetails(
     sessionId: string,
@@ -201,6 +202,7 @@ export interface SessionGateway {
     message: string,
     attachmentIds?: string[],
     scopeDirs?: string[],
+    scopeReadFiles?: string[],
   ): Promise<SendMessageResult>;
   sendFollowup?(
     sessionId: string,
@@ -286,13 +288,13 @@ export class OpenCodeGateway implements SessionGateway {
     return this.compatibilityPromise;
   }
 
-  protected async adoptManagedSession(sessionId: string, scopeDirs?: string[]): Promise<void> {
+  protected async adoptManagedSession(sessionId: string, scopeDirs?: string[], scopeReadFiles?: string[]): Promise<void> {
     const socketPath = process.env.OCVM_MANAGED_POLICY_SOCKET;
     if (!socketPath) throw new AdapterError("BACKEND_INCOMPATIBLE", "The agent-managed backend policy is not installed. Start or attach with the current opencode-vm before submitting work.");
     await new Promise<void>((resolve, reject) => {
       const request = httpRequest({ socketPath, path: "/adopt", method: "POST", headers: { "content-type": "application/json" }, timeout: this.backendDeadlineMs }, response => {
         let text = "";
-        response.on("data", chunk => { text += chunk; if (text.length > 4096) request.destroy(new Error("Managed policy response exceeded its limit")); });
+        response.on("data", chunk => { text += chunk; if (text.length > 32768) request.destroy(new Error("Managed policy response exceeded its limit")); });
         response.on("end", () => {
           try {
             const result = JSON.parse(text);
@@ -300,13 +302,15 @@ export class OpenCodeGateway implements SessionGateway {
             if (result.error === "MANAGED_INPUT_PENDING") throw new AdapterError("INPUT_REQUIRED", "The session has pending operator input; no work was admitted.", undefined, "pending_input");
             if (result.error === "MANAGED_SCOPE_INVALID" || result.error === "MANAGED_SCOPE_LIMIT") throw new AdapterError("INVALID_ARGUMENT", `The managed policy rejected the authorized scope: ${String(result.error).slice(0, 120)}.`);
             if (response.statusCode !== 200 || result.session_id !== sessionId || result.agent_managed !== true || result.revision !== 1) throw new Error("Managed policy adoption was not confirmed");
+            if (scopeReadFiles?.length && (!Array.isArray(result.scope_read_files) || !scopeReadFiles.every(file => result.scope_read_files.includes(file))))
+              throw new AdapterError("BACKEND_INCOMPATIBLE", "The loaded managed policy did not confirm scope_read_files; load the current plugin through controlled runtime re-attach before admitting this work.");
             resolve();
           } catch (error) { reject(error); }
         });
       });
       request.on("timeout", () => request.destroy(new Error("Managed policy admission timed out")));
       request.on("error", reject);
-      request.end(JSON.stringify({ session_id: sessionId, ingress: "mcp", ...(scopeDirs?.length ? { scope_dirs: scopeDirs } : {}) }));
+      request.end(JSON.stringify({ session_id: sessionId, ingress: "mcp", ...(scopeDirs?.length ? { scope_dirs: scopeDirs } : {}), ...(scopeReadFiles?.length ? { scope_read_files: scopeReadFiles } : {}) }));
     }).catch(error => { if (error instanceof AdapterError) throw error; throw new AdapterError("BACKEND_INCOMPATIBLE", "Agent-managed policy adoption could not be verified; no work prompt was submitted."); });
   }
 
@@ -402,6 +406,7 @@ export class OpenCodeGateway implements SessionGateway {
       try {
         if (entry.event_type === "session.input_required") {
           const status = await this.getSessionStatus(entry.session_id, entry.submitted_message_id);
+          if (status.pending_input.coverage === "unknown") throw unavailable("Pending-input coverage is unknown; notification was retained.");
           if (status.pending_input.permissions + status.pending_input.questions === 0) {
             await this.journal.supersedeAttention(entry.event_id, "Pending input was resolved before prefetch; this notification is stale.");
             continue;
@@ -952,7 +957,7 @@ export class OpenCodeGateway implements SessionGateway {
     return checkoutPath;
   }
 
-  async createSession(title?: string, scopeDirs?: string[]): Promise<CreateSessionResult> {
+  async createSession(title?: string, scopeDirs?: string[], scopeReadFiles?: string[]): Promise<CreateSessionResult> {
     const name = title === undefined ? "MCP Work Session" : title.trim();
     if (!name || name.length > 160 || /[\x00-\x1f\x7f]/u.test(name)) {
       throw new AdapterError(
@@ -966,6 +971,7 @@ export class OpenCodeGateway implements SessionGateway {
     // worktree root so Read/Edit/Write tools can address the checkout.
     // Explicit scope_dirs always wins (existing allow/deny rules preserved).
     let scope: string[] | undefined;
+    const readFiles = scopeReadFiles === undefined ? undefined : await validateScopeReadFiles(scopeReadFiles);
     if (scopeDirs !== undefined) {
       scope = validateScopeDirs(scopeDirs);
     } else {
@@ -1016,7 +1022,7 @@ export class OpenCodeGateway implements SessionGateway {
       // working checkout.  The error propagates to the outer catch which
       // reports CREATION_UNCERTAIN (session exists, worktree does not).
       const worktreePath = await this.createGuestWorktree(id);
-      await this.adoptManagedSession(id, scope);
+      await this.adoptManagedSession(id, scope, readFiles);
       return {
         project: this.projectIdentity(),
         session_id: session.id,
@@ -2135,7 +2141,9 @@ export class OpenCodeGateway implements SessionGateway {
     message: string,
     attachmentIds: string[] = [],
     scopeDirs?: string[],
+    scopeReadFiles?: string[],
   ): Promise<SendMessageResult> {
+    const readFiles = scopeReadFiles === undefined ? undefined : await validateScopeReadFiles(scopeReadFiles);
     if (message.length < 1 || message.length > 32_000) {
       throw new AdapterError(
         "INVALID_ARGUMENT",
@@ -2203,7 +2211,7 @@ export class OpenCodeGateway implements SessionGateway {
         }
       }
       const attachments = this.attachments.resolve(sessionId, attachmentIds);
-      await this.adoptManagedSession(sessionId, scope);
+      await this.adoptManagedSession(sessionId, scope, readFiles);
       const parts: Array<TextPartInput | FilePartInput> = [
         { type: "text", text: message },
       ];
@@ -2550,6 +2558,7 @@ export class OpenCodeGateway implements SessionGateway {
       this.activity(sessionId),
       this.combinedPending(sessionId),
     ]);
+    if (pending.coverage === "unknown") throw unavailable("Pending-input coverage is unknown; no follow-up was admitted.");
     if (pending.permissions + pending.questions > 0)
       throw new AdapterError(
         "INPUT_REQUIRED",
@@ -2576,35 +2585,7 @@ export class OpenCodeGateway implements SessionGateway {
   }
 
   private async combinedPending(sessionId: string): Promise<PendingInput & Partial<PendingCoverage>> {
-    const [pending, v1Permissions] = await Promise.all([
-      this.pending(sessionId),
-      this.pendingV1PermissionCount(sessionId),
-    ]);
-    return {
-      permissions: pending.permissions + v1Permissions,
-      questions: pending.questions,
-      ...(pending.coverage ? { coverage: pending.coverage } : {}),
-      ...(pending.descendantPermissions?.length ? { descendant_permissions: pending.descendantPermissions } : {}),
-    };
-  }
-
-  private async pendingV1PermissionCount(sessionId: string): Promise<number> {
-    const response = await this.backendCall(
-      () =>
-        this.client.permission.list(
-          { directory: this.runtime.project },
-          { signal: this.deadline() },
-        ),
-      "Could not read pending OpenCode permissions.",
-    );
-    if (!Array.isArray(response.data)) {
-      throw incompatible("OpenCode returned unsupported permission data.");
-    }
-    return response.data.filter(
-      (entry) =>
-        isRecord(entry) &&
-        (entry.sessionID === undefined || entry.sessionID === sessionId),
-    ).length;
+    return pendingCounts(await this.pending(sessionId));
   }
 
   async supersedeUnresolvedSubmission(
@@ -3020,7 +3001,7 @@ export class OpenCodeGateway implements SessionGateway {
   }
 
   private async pending(sessionId: string): Promise<PendingDetails> {
-    const [permissions, questions] = await Promise.all([
+    const [permissions, questions, nativePermissions, nativeQuestions] = await Promise.all([
       this.backendCall(
         () =>
           this.client.v2.session.permission.list(
@@ -3028,7 +3009,7 @@ export class OpenCodeGateway implements SessionGateway {
             { signal: this.deadline() },
           ),
         "Could not read pending OpenCode permissions.",
-      ),
+      ).catch(() => null),
       this.backendCall(
         () =>
           this.client.v2.session.question.list(
@@ -3036,70 +3017,62 @@ export class OpenCodeGateway implements SessionGateway {
             { signal: this.deadline() },
           ),
         "Could not read pending OpenCode questions.",
-      ),
+      ).catch(() => null),
+      this.backendCall(() => this.client.permission.list({ directory: this.runtime.project }, { signal: this.deadline() }),
+        "Could not read native pending permissions.").catch(() => null),
+      this.backendCall(() => this.client.question.list({ directory: this.runtime.project }, { signal: this.deadline() }),
+        "Could not read native pending questions.").catch(() => null),
     ]);
-    const permissionsList = permissions.data?.data;
-    const questionsList = questions.data?.data;
-    if (!Array.isArray(permissionsList) || !Array.isArray(questionsList)) {
-      throw incompatible("OpenCode returned unsupported pending-input data.");
-    }
-    // Additive descendant coverage: native child sessions (task subagents)
-    // are not exposed through the session API, but their pending permission
-    // asks block the parent's running tool call. A root must never report a
-    // clean zero while a managed child waits on an interactive approval.
-    let coverage: PendingDetails["coverage"] = "session";
-    let descendantPermissions: PendingDetails["descendantPermissions"] = [];
-    try {
-      const v1 = await this.backendCall(
-        () =>
-          this.client.permission.list(
-            { directory: this.runtime.project },
-            { signal: this.deadline() },
-          ),
-        "Could not read pending OpenCode permissions.",
-      );
-      const foreign = (Array.isArray(v1.data) ? v1.data : []).filter(
-        (entry) =>
-          isRecord(entry) && typeof entry.sessionID === "string" && entry.sessionID !== sessionId,
-      );
-      if (foreign.length === 0) {
-        coverage = "session+descendants";
-      } else {
-        const inventory = await this.readDashboardInventory();
-        if (!inventory.complete) {
-          coverage = "unknown";
-        } else {
-          const parents = new Map(inventory.sessions.map((item) => [item.id, item.parentID ?? null]));
-          const isDescendant = (id: string): boolean => {
-            const seen = new Set<string>();
-            let current: string | null | undefined = id;
-            while (current && !seen.has(current)) {
-              seen.add(current);
-              const parent = parents.get(current);
-              if (parent === undefined) return false;
-              if (parent === sessionId) return true;
-              current = parent;
-            }
-            return false;
-          };
-          descendantPermissions = foreign
-            .filter((entry) => isDescendant(entry.sessionID as string))
-            .map((entry) => ({
-              session_id: String(entry.sessionID),
-              permission: String((entry as { permission?: unknown }).permission ?? "unknown"),
-            }))
-            .slice(0, 20);
-          coverage = "session+descendants";
-        }
+    const sources = [permissions?.data?.data, questions?.data?.data, nativePermissions?.data, nativeQuestions?.data];
+    let coverage: PendingDetails["coverage"] = sources.every(Array.isArray) ? "session+descendants" : "unknown";
+    const permissionRows = new Map<string, Record<string, unknown>>();
+    const questionRows = new Map<string, Record<string, unknown>>();
+    for (const [index, source] of sources.entries()) {
+      if (!Array.isArray(source)) continue;
+      for (const [rowIndex, item] of source.entries()) {
+        if (!isRecord(item)) { coverage = "unknown"; continue; }
+        const owner = typeof item.sessionID === "string" ? item.sessionID : index < 2 ? sessionId : null;
+        if (!owner) { coverage = "unknown"; continue; }
+        const rows = index % 2 === 0 ? permissionRows : questionRows;
+        const key = typeof item.id === "string" ? item.id : `${index}:${rowIndex}`;
+        const existing = rows.get(key);
+        if (existing && existing.sessionID !== owner) { coverage = "unknown"; continue; }
+        rows.set(key, { ...existing, ...item, sessionID: owner });
       }
-    } catch {
-      coverage = "unknown";
     }
+    const parents = new Map<string, string | null>();
+    const foreign = [...permissionRows.values(), ...questionRows.values()].filter(item => item.sessionID !== sessionId);
+    try {
+      if (foreign.length) {
+        const inventory = await this.readDashboardInventory();
+        if (!inventory.complete) coverage = "unknown";
+        for (const item of inventory.sessions) parents.set(item.id, item.parentID ?? null);
+      }
+    } catch { coverage = "unknown"; }
+    const belongs = (item: Record<string, unknown>): boolean => {
+      let current = String(item.sessionID);
+      const seen = new Set<string>();
+      while (current !== sessionId) {
+        if (seen.has(current) || !parents.has(current)) { coverage = "unknown"; return false; }
+        seen.add(current);
+        const parent = parents.get(current);
+        if (parent === null) return false;
+        current = parent!;
+      }
+      return true;
+    };
+    const ownPermissions = [...permissionRows.values()].filter(belongs);
+    const ownQuestions = [...questionRows.values()].filter(belongs);
+    const descendantPermissions = ownPermissions.filter(item => item.sessionID !== sessionId).map(item => ({
+      session_id: String(item.sessionID), permission: typeof item.permission === "string" ? item.permission : "unknown",
+    })).slice(0, 20);
     return {
-      permissions: permissionsList.length + descendantPermissions.length,
-      questions: questionsList.length,
-      permissionsList,
-      questionsList,
+      permissions: ownPermissions.length,
+      questions: ownQuestions.length,
+      permissionsList: ownPermissions.filter(item => item.sessionID === sessionId).map(item => ({
+        ...item, source: isRecord(item.source) ? item.source : isRecord(item.tool) ? item.tool : undefined,
+      })) as PermissionV2Request[],
+      questionsList: ownQuestions.filter(item => item.sessionID === sessionId) as QuestionV2Request[],
       coverage,
       ...(descendantPermissions.length ? { descendantPermissions } : {}),
     };
@@ -3460,6 +3433,8 @@ export class OpenCodeGateway implements SessionGateway {
     pending: PendingInput,
     receipt?: string,
   ): void {
+    if (pending.coverage === "unknown")
+      throw unavailable("Pending-input coverage is unknown; no operation was admitted.");
     if (pending.permissions + pending.questions > 0)
       throw new AdapterError(
         "INPUT_REQUIRED",
@@ -3774,6 +3749,20 @@ export function validateScopeDirs(input: unknown): string[] {
     );
   }
   return unique;
+}
+
+export async function validateScopeReadFiles(input: unknown): Promise<string[]> {
+  if (!Array.isArray(input) || input.length === 0 || input.length > 16)
+    throw new AdapterError("INVALID_ARGUMENT", "scope_read_files requires 1..16 explicit absolute single files.");
+  for (const file of input) {
+    if (typeof file !== "string" || file.length > 512 || !file.startsWith("/") || file === "/" ||
+        /[\x00-\x1f\x7f*?\[\]{}\\]/u.test(file) || normalize(file) !== file || file.endsWith("/"))
+      throw new AdapterError("INVALID_ARGUMENT", "scope_read_files accepts normalized absolute single files without globs or control characters.");
+    const info = await lstat(file).catch(() => null);
+    if (!info?.isFile() || info.isSymbolicLink() || await realpath(file) !== file)
+      throw new AdapterError("INVALID_ARGUMENT", "scope_read_files requires existing regular canonical files without symlink escapes.");
+  }
+  return [...new Set(input)];
 }
 
 function isActivity(value: unknown): value is SessionActivity {

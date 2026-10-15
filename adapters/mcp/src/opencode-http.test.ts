@@ -95,6 +95,7 @@ test("generated OpenCode client uses the expected scoped routes and 204 admissio
       return json(response, { data: exposed });
     }
     if (path === "/session/status") return json(response, {});
+    if (path === "/permission" || path === "/question") return json(response, []);
     if (path === "/api/session/ses_wire/permission") {
       return json(response, { data: [] });
     }

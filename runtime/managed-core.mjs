@@ -44,6 +44,15 @@ export function scopeAllowRules(agentRules = [], scope = [], dirs = []) {
     .map(dir => ({ permission: "external_directory", pattern: `${dir}/*`, action: "allow" }));
 }
 
+// Exact native Read patterns are formed by the backend from validated files.
+// A file declaration grants neither external_directory nor edit permission.
+export function readAllowRules(agentRules = [], scope = [], files = []) {
+  const denies = [...agentRules, ...scope].filter(rule => rule.action === "deny");
+  return files.filter(({ file, pattern }) => !denies.some(rule =>
+    matchesGlob("read", rule.permission) && (matchesGlob(pattern, rule.pattern) || matchesGlob(file, rule.pattern))))
+    .map(({ pattern }) => ({ permission: "read", pattern, action: "allow" }));
+}
+
 // An ask is authorized only when it carries patterns and every pattern is
 // covered by an explicitly authorized scope directory. Empty/absent patterns
 // are NEVER authorized (they must end in the terminal blocker, not a hidden
@@ -67,7 +76,7 @@ export function mergeScopeDirs(existing = [], incoming = []) {
 // managed line behind the processing bound. This is an ordering heuristic
 // only; the authoritative lineage check still runs per ask.
 export function orderSweepAsks(pending, managedSessions) {
-  const external = (Array.isArray(pending) ? pending : []).filter(item => item?.permission === "external_directory" && typeof item.sessionID === "string");
+  const external = (Array.isArray(pending) ? pending : []).filter(item => typeof item?.permission === "string" && typeof item.sessionID === "string");
   const managed = new Set(managedSessions ?? []);
   return [
     ...external.filter(item => managed.has(item.sessionID)),
@@ -80,7 +89,7 @@ export function restrictions(rules) {
   const denied = new Set(independent.filter(r => r.action === "deny").map(r => r.permission));
   return independent.filter(r => r.action === "deny" || r.permission !== "*" && (denied.has(r.permission) || denied.has("*")));
 }
-export function policyDelta(current, agentRules = [], scope = [], scopeDirs = []) {
+export function policyDelta(current, agentRules = [], scope = [], scopeDirs = [], readFiles = []) {
   const desired = [
     ...copyableAgentRules(agentRules),
     ...scope,
@@ -91,6 +100,9 @@ export function policyDelta(current, agentRules = [], scope = [], scopeDirs = []
     // Preserve task/agent denies; only the VM's ordinary commit asks are relaxed.
     ...restrictions(agentRules),
     ...restrictions(scope),
+    // Exact newer Read authorization can supersede an ask even when a
+    // different file has a deny. Matching denies were filtered above.
+    ...readAllowRules(agentRules, scope, readFiles),
     { permission: "question", pattern: "*", action: "deny" },
     ...remoteRules,
   ];
@@ -180,7 +192,8 @@ export function handback(questions) {
 export function permissionBlocker(info) {
   const text = value => String(value ?? "").replace(/\r/g, "").slice(0, 500);
   const patterns = (Array.isArray(info?.patterns) ? info.patterns : []).slice(0, 4).map(text).join("; ");
-  return `INPUT_REQUIRED:\n- decision: External directory access is not authorized for this managed session and was not approved automatically. Requested scope: ${patterns || "unknown"}.\n- context: A tool needed paths outside the workspace directory; interactive permission dialogs cannot be answered in agent-managed noninteractive work, so the request was rejected and this turn ends with a readable blocker instead of waiting for approval.\n- safe_options: Have the orchestrator authorize the exact directory scope for this session and send a normal follow-up in this same session; or continue with in-scope paths only.\n- completed: Work already stored in this session remains available for review; nothing was approved or bypassed.\n- paused: All work depending on the unauthorized external paths.`;
+  const permission = text(info?.permission ?? "external_directory");
+  return `INPUT_REQUIRED:\n- decision: Permission ${permission} is not authorized for this managed session and was not approved automatically. Requested scope: ${patterns || "unknown"}.\n- context: Interactive permission dialogs cannot be answered in agent-managed noninteractive work. The request was blocked without approval and this turn ends with a readable blocker instead of waiting.\n- safe_options: Have the orchestrator declare the exact scope_read_files for an authorized Read and separately scope_dirs where external access is needed, or resolve the actual permission restriction; then send a normal follow-up in this same session. Explicit denies and tool disables remain binding.\n- completed: Work already stored in this session remains available for review; nothing was approved or bypassed.\n- paused: Work depending on the blocked permission.`;
 }
 
 export function protocol(body, url, family = "") {

@@ -1,11 +1,11 @@
 import { createServer } from "node:http";
 import { connect } from "node:net";
-import { mkdir, readFile, writeFile, rename, lstat, unlink, chmod } from "node:fs/promises";
-import { dirname, join, normalize as normalizePath, resolve } from "node:path";
+import { mkdir, readFile, writeFile, rename, lstat, realpath, unlink, chmod } from "node:fs/promises";
+import { dirname, join, normalize as normalizePath, relative, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { policyDelta, remoteWrite, tokens, handback, permissionBlocker, PRIMER, COMMIT_SENTENCE, LEGACY_VM_ASK, MANAGED_VM_ASK, protocol, questionInResponse, responseUsage, terminalResponse, matchesGlob, mergeScopeDirs, authorizedFor, orderSweepAsks, REVISION } from "./managed-core.mjs";
+import { policyDelta, remoteWrite, tokens, handback, permissionBlocker, PRIMER, COMMIT_SENTENCE, LEGACY_VM_ASK, MANAGED_VM_ASK, protocol, questionInResponse, responseUsage, terminalResponse, matchesGlob, mergeScopeDirs, orderSweepAsks, REVISION } from "./managed-core.mjs";
 
 const FETCH_STATE = Symbol.for("ocvm.managed.fetch.v1");
 const HEADER = "x-ocvm-managed-turn";
@@ -25,6 +25,17 @@ function normalizeScopeDirs(dirs) {
     if (normalized === "/" || normalized.includes("..")) throw new Error("MANAGED_SCOPE_INVALID");
     return normalized.replace(/\/+$/, "") || "/";
   });
+}
+
+async function normalizeReadFiles(files) {
+  if (!Array.isArray(files) || files.length > 16) throw new Error("MANAGED_SCOPE_INVALID");
+  for (const file of files) {
+    if (typeof file !== "string" || file.length > 512 || !file.startsWith("/") || file === "/" ||
+        /[\x00-\x1f\x7f*?\[\]{}\\]/.test(file) || normalizePath(file) !== file || file.endsWith("/")) throw new Error("MANAGED_SCOPE_INVALID");
+    const info = await lstat(file).catch(() => null);
+    if (!info?.isFile() || info.isSymbolicLink() || await realpath(file) !== file) throw new Error("MANAGED_SCOPE_INVALID");
+  }
+  return [...new Set(files)];
 }
 
 // Gate one provider step before the SDK can dispatch a native Question. The
@@ -75,7 +86,7 @@ function installCompletionGate() {
   return state;
 }
 
-export default async ({ client, directory }) => {
+export default async ({ client, directory, worktree }) => {
   const socket = process.env.OCVM_MANAGED_POLICY_SOCKET;
   if (!socket) return {}; // ordinary standalone OpenCode remains unchanged
   const project = resolve(directory);
@@ -117,7 +128,7 @@ export default async ({ client, directory }) => {
     if ([...(questions ?? []), ...(permissions ?? [])].some(item => item.sessionID === id)) throw new Error("MANAGED_INPUT_PENDING");
     if (status?.[id]?.type && status[id].type !== "idle") throw new Error("MANAGED_SESSION_BUSY");
   };
-  const prepare = async (id, agentName, checkIdle = false, scopeDirs = []) => {
+  const prepare = async (id, agentName, checkIdle = false, scopeDirs = [], scopeReadFiles = []) => {
     const info = await getSession(id);
     if (checkIdle) await idle(id);
     const [agents, config] = await Promise.all([api("GET", "/agent"), api("GET", "/config")]);
@@ -125,8 +136,9 @@ export default async ({ client, directory }) => {
     if (!agent || agent.name === "openlive-manager") throw new Error("MANAGED_AGENT_INVALID");
     const current = info.permission ?? [];
     const previous = saved.sessions[id];
-    const entry = previous ? structuredClone(previous) : { revision: REVISION, adoptedAt: new Date().toISOString(), base: current, disabled: {}, scopeDirs: [], lastNative: current };
-    if (!Array.isArray(entry.base) || !Array.isArray(entry.lastNative)) throw new Error("MANAGED_STATE_REVISION_UNSUPPORTED");
+    const entry = previous ? structuredClone(previous) : { revision: REVISION, adoptedAt: new Date().toISOString(), base: current, disabled: {}, scopeDirs: [], scopeReadFiles: [], lastNative: current };
+    if (entry.revision !== REVISION || !Array.isArray(entry.base) || !Array.isArray(entry.lastNative) ||
+        typeof entry.disabled !== "object" || entry.disabled === null || Array.isArray(entry.disabled)) throw new Error("MANAGED_STATE_REVISION_UNSUPPORTED");
     // Writers before the scopeDirs field persisted otherwise-valid entries
     // without it. Normalize ONLY a genuinely absent field on a strictly
     // validated same-revision entry to an empty scope — no external access is
@@ -140,10 +152,17 @@ export default async ({ client, directory }) => {
       entry.scopeDirs = [];
       migrated = true;
     } else if (previous && !Array.isArray(previous.scopeDirs)) throw new Error("MANAGED_STATE_REVISION_UNSUPPORTED");
-    // New native children inherit the managed parent's authorized external
-    // scope; reused children keep their own persisted scope.
-    if (!previous && info.parentID && saved.sessions[info.parentID]?.scopeDirs) entry.scopeDirs = [...saved.sessions[info.parentID].scopeDirs];
+    if (previous && previous.scopeReadFiles === undefined) { entry.scopeReadFiles = []; migrated = true; }
+    else if (!Array.isArray(entry.scopeReadFiles)) throw new Error("MANAGED_STATE_REVISION_UNSUPPORTED");
+    // New and reused children receive newly declared parent scope before work.
+    const parent = info.parentID ? saved.sessions[info.parentID] : null;
+    const priorScope = JSON.stringify([entry.scopeDirs, entry.scopeReadFiles]);
+    entry.scopeDirs = mergeScopeDirs(entry.scopeDirs ?? [], parent?.scopeDirs ?? []);
     entry.scopeDirs = mergeScopeDirs(entry.scopeDirs ?? [], normalizeScopeDirs(scopeDirs));
+    entry.scopeReadFiles = mergeScopeDirs(entry.scopeReadFiles, parent?.scopeReadFiles ?? []);
+    entry.scopeReadFiles = mergeScopeDirs(entry.scopeReadFiles, await normalizeReadFiles(scopeReadFiles));
+    if (entry.scopeReadFiles.length && (typeof worktree !== "string" || !worktree.startsWith("/"))) throw new Error("MANAGED_READ_CONTEXT_UNKNOWN");
+    const readFiles = entry.scopeReadFiles.map(file => ({ file, pattern: relative(worktree, file) }));
     const prefix = entry.lastNative.every((r, i) => current[i]?.permission === r.permission && current[i]?.pattern === r.pattern && current[i]?.action === r.action);
     if (!prefix) throw new Error("MANAGED_POLICY_REPLACED_EXTERNALLY");
     // Actual external PATCH appends are preserved separately from our owned
@@ -151,19 +170,19 @@ export default async ({ client, directory }) => {
     // as new task restrictions and never accumulates on an unchanged readback.
     entry.base = [...entry.base, ...current.slice(entry.lastNative.length)];
     const scope = [...entry.base, ...Object.entries(entry.disabled).filter(([, value]) => value).map(([permission]) => ({ permission, pattern: "*", action: "deny" }))];
-    const delta = policyDelta(current, agent.permission ?? [], scope, entry.scopeDirs);
+    const delta = policyDelta(current, agent.permission ?? [], scope, entry.scopeDirs, readFiles);
     if (delta.length) {
       await api("PATCH", `/session/${id}`, { permission: delta });
       const verified = await getSession(id);
-      if (policyDelta(verified.permission ?? [], agent.permission ?? [], scope, entry.scopeDirs).length) throw new Error("MANAGED_POLICY_READBACK_FAILED");
+      if (policyDelta(verified.permission ?? [], agent.permission ?? [], scope, entry.scopeDirs, readFiles).length) throw new Error("MANAGED_POLICY_READBACK_FAILED");
       entry.lastNative = verified.permission ?? [];
     }
-    if (!saved.sessions[id] || delta.length || migrated) {
+    if (!saved.sessions[id] || delta.length || migrated || priorScope !== JSON.stringify([entry.scopeDirs, entry.scopeReadFiles])) {
       saved.sessions[id] = entry;
       try { await persist(); }
       catch (error) { if (previous) saved.sessions[id] = previous; else delete saved.sessions[id]; throw error; }
     }
-    return { session_id: id, revision: REVISION, agent_managed: true };
+    return { session_id: id, revision: REVISION, agent_managed: true, scope_read_files: entry.scopeReadFiles };
   };
   const isManaged = async id => {
     const seen = new Set();
@@ -223,11 +242,15 @@ export default async ({ client, directory }) => {
       }
       if (req.method !== "POST" || req.url !== "/adopt") throw new Error("MANAGED_OPERATION_INVALID");
       let body = "";
-      for await (const chunk of req) { body += chunk; if (body.length > 4096) throw new Error("MANAGED_REQUEST_LIMIT"); }
+      for await (const chunk of req) { body += chunk; if (body.length > 32768) throw new Error("MANAGED_REQUEST_LIMIT"); }
       const input = JSON.parse(body);
       if (!["mcp", "openlive", "a2a"].includes(input.ingress)) throw new Error("MANAGED_INGRESS_INVALID");
       const scopeDirs = input.scope_dirs === undefined ? [] : normalizeScopeDirs(input.scope_dirs);
-      const result = await serial(() => prepare(input.session_id, undefined, true, scopeDirs));
+      const scopeReadFiles = input.scope_read_files === undefined ? [] : await normalizeReadFiles(input.scope_read_files);
+      const result = await serial(() => prepare(input.session_id, undefined, true, scopeDirs, scopeReadFiles));
+      // Existing A2A/OpenLive clients retain the compact legacy reply; the
+      // exact-file echo is required only by an explicit file declaration.
+      if (input.scope_read_files === undefined) delete result.scope_read_files;
       res.setHeader("content-type", "application/json"); res.end(JSON.stringify(result));
     } catch (error) { res.statusCode = 409; res.end(JSON.stringify({ error: String(error.message).slice(0, 200) })); }
   });
@@ -238,7 +261,7 @@ export default async ({ client, directory }) => {
   // noninteractive precedent (auto-reject via the reply API), add corrective
   // feedback, and terminate the affected managed turn through the completion
   // gate so the blocker is a stored terminal report — never a hidden UI wait.
-  // Manual sessions and non-external permissions stay interactive/unchanged.
+  // Manual sessions stay interactive; no managed Ask is automatically allowed.
   const asked = new AbortController();
   // Shared reject+terminal-report handling for one pending external ask.
   // Empty/absent ask patterns are NEVER authorized (fail closed into the
@@ -252,17 +275,21 @@ export default async ({ client, directory }) => {
     const attempts = askRechecks.get(info.id) ?? 0;
     if (attempts >= 3) return;
     askRechecks.set(info.id, attempts + 1);
-    const timer = setTimeout(() => { askRechecks.delete(info.id); void sweepPendingAsks(); }, 1500);
+    const timer = setTimeout(() => { void sweepPendingAsks(); }, 1500);
     timer.unref?.();
   };
+  const rejectingAsks = new Set();
+  const rejectedAsks = new Set();
   const rejectUnauthorizedAsk = async info => {
-    if (info?.permission !== "external_directory" || typeof info.sessionID !== "string" || typeof info.id !== "string") return false;
+    if (typeof info?.permission !== "string" || typeof info.sessionID !== "string" || typeof info.id !== "string") return false;
+    if (rejectingAsks.has(info.id) || rejectedAsks.has(info.id)) return false;
     let managed = true;
     try { managed = await isManaged(info.sessionID); }
     catch { scheduleAskRecheck(info); return false; }
     if (!managed) return false;
+    if (rejectingAsks.has(info.id) || rejectedAsks.has(info.id)) return false;
+    rejectingAsks.add(info.id);
     const patterns = Array.isArray(info.patterns) && info.patterns.length ? info.patterns : (info.metadata?.parentDir ? [`${info.metadata.parentDir}/*`] : []);
-    if (authorizedFor(saved.sessions[info.sessionID]?.scopeDirs ?? [], patterns)) return false;
     const report = permissionBlocker({ ...info, patterns });
     // Arm the completion gate BEFORE replying: resolving the pending
     // Deferred immediately unblocks the runner into its next provider
@@ -272,9 +299,12 @@ export default async ({ client, directory }) => {
       if (turn?.sessionID === info.sessionID) turn.report ??= report;
     }
     try {
-      await api("POST", `/permission/${encodeURIComponent(info.id)}/reply`, { reply: "reject", message: "External directory access is not authorized for this managed session; end the turn with a readable blocker." });
-    } catch { /* already answered or gone: the terminal report above still ends the turn */ }
-    askRechecks.delete(info.id);
+      await api("POST", `/permission/${encodeURIComponent(info.id)}/reply`, { reply: "reject", message: "This permission is not authorized for the managed turn; end with a readable blocker. No permission was approved." });
+      rejectedAsks.add(info.id);
+      if (rejectedAsks.size > 2048) rejectedAsks.delete(rejectedAsks.values().next().value);
+      askRechecks.delete(info.id);
+    } catch { scheduleAskRecheck(info); }
+    finally { rejectingAsks.delete(info.id); }
     return true;
   };
   // Bounded fail-open reconciliation: asks that appeared while the event
@@ -350,7 +380,25 @@ export default async ({ client, directory }) => {
     },
     "tool.execute.before": async ({ tool, sessionID }, { args }) => {
       if (!await isManaged(sessionID)) return;
-      if (tool === "task" && args.task_id) await serial(() => prepare(args.task_id, undefined, !saved.sessions[args.task_id]));
+      if (tool === "task" && args.task_id) {
+        const parent = saved.sessions[sessionID];
+        await serial(() => prepare(args.task_id, undefined, true, parent?.scopeDirs ?? [], parent?.scopeReadFiles ?? []));
+      }
+      if (tool === "read" || tool === "invalid" && args.tool === "read") {
+        const entry = saved.sessions[sessionID];
+        const file = typeof args.filePath === "string" ? resolve(directory, args.filePath) : null;
+        const pattern = file && typeof worktree === "string" ? relative(worktree, file) : null;
+        const action = pattern && entry?.lastNative.findLast(rule => matchesGlob("read", rule.permission) && matchesGlob(pattern, rule.pattern))?.action;
+        let invalid = false;
+        if (file && entry?.scopeReadFiles?.includes(file)) {
+          try { await normalizeReadFiles([file]); } catch { invalid = true; }
+        }
+        if (tool === "invalid" || action === "ask" || action === "deny" || invalid) {
+          const report = permissionBlocker({ permission: "read", patterns: pattern ? [pattern] : [] });
+          for (const key of turnKeys) { const turn = fetchState.turns.get(key); if (turn?.sessionID === sessionID) turn.report ??= report; }
+          throw new Error("INPUT_REQUIRED: managed Read permission blocked without interactive approval");
+        }
+      }
       if (tool === "question" || tool === "invalid" && args.tool === "question") {
         for (const key of turnKeys) { const turn = fetchState.turns.get(key); if (turn?.sessionID === sessionID) turn.report = handback(args.questions); }
         throw new Error("INPUT_REQUIRED: business question suppressed by the managed completion gate");

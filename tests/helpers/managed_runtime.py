@@ -47,6 +47,7 @@ class Runtime:
         self.scripts = {}
         self.requests = []
         self.calls = {}
+        self.events = []
         self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=8)
         self.process = None
         self.log = None
@@ -145,6 +146,30 @@ os.execv({self.git!r}, [{self.git!r}] + sys.argv[1:])
         wait(ready, 60)
         self.api("GET", "/config")
         wait(lambda: Path(self.socket).exists())
+        # Subscribe before test prompts. Capture metadata-only Ask events so
+        # "no permission.asked" is evidence, not an empty eventual pending list.
+        connected = threading.Event()
+        url = self.url + "/event?directory=" + urllib.parse.quote(str(self.project))
+        process = self.process
+        def trace():
+            try:
+                with urllib.request.urlopen(url, timeout=180) as response:
+                    for line in response:
+                        if not line.startswith(b"data:"):
+                            continue
+                        event = json.loads(line[5:])
+                        event = event.get("payload", event)
+                        connected.set()
+                        if event.get("type") == "permission.asked":
+                            info = event.get("properties", {})
+                            info = info.get("info", info)
+                            self.events.append({"type": "permission.asked", "sessionID": info.get("sessionID"), "id": info.get("id"), "permission": info.get("permission")})
+                        if process.poll() is not None:
+                            break
+            except (OSError, urllib.error.URLError):
+                pass
+        threading.Thread(target=trace, daemon=True).start()
+        assert connected.wait(10), "native Ask trace must be subscribed before probes"
 
     def api(self, method, path, body=None):
         query = "" if path == "/global/health" else "?directory=" + urllib.parse.quote(str(self.project))
@@ -153,13 +178,15 @@ os.execv({self.git!r}, [{self.git!r}] + sys.argv[1:])
             value = response.read()
             return json.loads(value) if value else None
 
-    def adopt(self, sid, ingress="mcp", scope_dirs=None):
+    def adopt(self, sid, ingress="mcp", scope_dirs=None, scope_read_files=None):
         connection = http.client.HTTPConnection("localhost", timeout=10)
         connection.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         connection.sock.connect(self.socket)
         payload = {"session_id": sid, "ingress": ingress}
         if scope_dirs is not None:
             payload["scope_dirs"] = scope_dirs
+        if scope_read_files is not None:
+            payload["scope_read_files"] = scope_read_files
         connection.request("POST", "/adopt", json.dumps(payload), {"Content-Type": "application/json"})
         response = connection.getresponse()
         data = json.loads(response.read())

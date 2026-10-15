@@ -41,7 +41,7 @@ def adopt_raw(fixture, sid, scope_dirs=None):
 
 def legacy_shape(entry, adopted_at):
     """Strip the scopeDirs field, pre-0.1.45 writer shape (4db0ace era)."""
-    legacy = {key: entry[key] for key in entry if key != "scopeDirs"}
+    legacy = {key: entry[key] for key in entry if key not in ("scopeDirs", "scopeReadFiles")}
     assert "scopeDirs" not in legacy and set(legacy) >= {"revision", "adoptedAt", "base", "disabled", "lastNative"}
     legacy["adoptedAt"] = adopted_at
     return legacy
@@ -96,7 +96,7 @@ def check():
         # noDeltaPersist: the managed tail is already in place, so this
         # re-prepare had an empty policy delta — the persisted migration
         # proves the explicit migrated-flag persistence.
-        assert saved[plain] == {**sessions[plain], "scopeDirs": []}, saved[plain]
+        assert saved[plain] == {**sessions[plain], "scopeDirs": [], "scopeReadFiles": []}, saved[plain]
         assert saved[plain]["base"] == plain_entry["base"] and saved[plain]["lastNative"] == plain_entry["lastNative"] and saved[plain]["disabled"] == plain_entry["disabled"], "stored rules stay verbatim"
         # Lazy migration touches only the queried session.
         assert saved[nullbad] == sessions[nullbad] and saved[typebad] == sessions[typebad], "unqueried entries must not be rewritten"

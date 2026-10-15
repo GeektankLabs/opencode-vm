@@ -29,8 +29,11 @@ the former manual-session clause. Executable permissions remain unchanged.
   a normal terminal `INPUT_REQUIRED` report: concrete question, context, options,
   completed and paused work. The orchestrator resolves it in Chat/Voice and sends
   a normal follow-up to the same idle session.
-- Real independent security permissions remain separate pending operator input;
-  the feature does not approve/reply to them or reinterpret them as business text.
+- Real independent security restrictions stay binding. Since 0.7.56 an unexpected
+  native permission Ask in a verified managed session is rejected without approval
+  and ends as a stored terminal permission blocker for the orchestrator. It is not
+  converted into a business decision or auto-allowed; manual sessions keep their
+  native interactive permission flow. External host/OS/MCP approval remains separate.
 - `external_directory` (OpenCode's tool permission for paths outside the
   workspace) is handled noninteractively since 0.7.36: adoption no longer copies
   OpenCode's default interactive `external_directory "*": "ask"` or the generic
@@ -66,6 +69,39 @@ the former manual-session clause. Executable permissions remain unchanged.
   nothing approves or bypasses a real permission, and host/mount/remote-write
   boundaries are untouched.
 
+## Exact single-file Read declarations (0.7.56 / MCP 0.1.56)
+
+`create_session`, idle `send_message` and `create_monitor_worker` accept optional
+`scope_read_files`: 1–16 explicitly authorized absolute, normalized, existing
+regular single-file paths. Globs, control characters, directory paths and symlink
+escapes are rejected before creation/admission. The plugin independently validates
+the declaration, merges the bounded union atomically, persists it and verifies the
+native permission readback. The gateway requires the loaded plugin to echo the
+requested declaration; an older plugin cannot silently ignore it and admit work.
+
+OpenCode checks external-directory access and Read separately. Read grants use the
+actual plugin worktree-relative native pattern for exactly the named file, never
+its directory, neighbouring files or Edit. Matching explicit agent/session denies
+and tool disables always win. `scope_dirs` stays a separate declaration; filenames,
+free-text `scope`, prompts and reviewer/model roles grant no file access. New and
+reused native children receive current parent declarations before work; pure reads
+and management do not adopt sessions or add scopes. Reused/manual-lineage child
+targets retain the native idle/pending check before preparation.
+
+Known Read asks/denies are blocked before the native Read executes and end via the
+completion gate; declared reads have no `permission.asked` event. A changed
+canonical file/symlink is rechecked at Read execution. Other unexpected permission
+classes use the verified-lineage Ask watcher, with reject only, request-ID
+deduplication and bounded rechecks. A reactive watcher can observe an Ask event;
+its guarantee is terminal reporting rather than indefinite interactive waiting.
+
+Status, Progress, Repo Live, Activity/Attention and admission use one deduplicated
+V1/V2 permission-and-question snapshot for the root and verified descendants.
+Native request IDs count once; known foreign roots are excluded. Partial/unreadable
+sources or lineage inventories are `coverage:unknown`, never proof of no pending
+input; dependent admissions hold and pending Attention is retained. The final
+native adoption idle/pending check remains a separate race protection.
+
 ## Implementation and lifecycle
 
 `runtime/managed-policy.mjs` is an owned OpenCode plugin. Private Unix admission
@@ -76,7 +112,7 @@ disables are preserved without allowing V1's tools replacement to erase policy.
 New and reused Managed-workstream children are prepared synchronously before
 their work prompt, including previously manual child lineage. Enabled background
 continuations retain the same state. Entries persisted by plugin versions
-before the `scopeDirs` field existed are lazily normalized, per queried session
+before the `scopeDirs` or `scopeReadFiles` fields existed are lazily normalized, per queried session
 only, to an empty scope at adoption/prepare: the field is added only when it is
 genuinely absent on a strictly validated same-revision entry, all stored rules,
 denies, disables and `adoptedAt` stay verbatim, no external access is granted,
@@ -102,7 +138,8 @@ This is not a new independent policy daemon. An unavailable/incompatible policy
 refuses work; reads and management remain available.
 
 Existing sessions started with an older script keep their loaded configuration
-until a normal stop/attach/restart. Updating source files alone does not activate
+until a controlled runtime re-attach/restart. A MCP-only restart does not load
+changed OpenCode plugin logic. Updating source files alone does not activate
 the policy in an already running OpenCode instance.
 
 ## Boundary and evidence
@@ -124,6 +161,7 @@ reported separately from local disposable regression evidence.
 Maintained gates: `tests/managed_policy_test.mjs`, `tests/managed_a2a_test.py`,
 `tests/managed_policy_integration.py`, `tests/managed_legacy_migration_test.py`,
 `tests/managed_ingress_integration.py`,
+`tests/managed_read_integration.py`,
 MCP/OpenLive package suites and lifecycle/standalone checks. Historical V1 spike
 evidence remains under `tests/agent-managed-v1-spike/`; its old external-G3 model
 selection interpretation is superseded by this task's canonical operator plan.

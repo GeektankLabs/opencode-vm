@@ -40,3 +40,4 @@ jobs:
           python3 -B tests/managed_policy_integration.py --sdk @ai-sdk/openai
           python3 -B tests/managed_policy_integration.py --sdk @ai-sdk/anthropic
           python3 -B tests/managed_ingress_integration.py
+          python3 -B tests/managed_read_integration.py

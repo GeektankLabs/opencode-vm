@@ -89,20 +89,18 @@ def check(binary=None, sdk="@ai-sdk/openai-compatible"):
         assert run(fixture.git, "rev-parse", "HEAD", cwd=fixture.project, env=fixture.env) == head
         assert not any(q["sessionID"] == restricted for q in fixture.api("GET", "/permission"))
         print("PASS agent/session scope restrictions despite tools replacement", flush=True)
-        # Manual Questions and independent security asks remain native, not
-        # autoanswered or converted into business-handback text.
+        # Manual Questions remain native. Unexpected managed permission asks
+        # are blocked without approval and end in a normal terminal handback.
         future = fixture.prompt(manual, "manual-question", [QUESTION, "manual continuation"])
         pending = wait(lambda: [q for q in fixture.api("GET", "/question") if q["sessionID"] == manual])
         fixture.api("POST", f"/question/{pending[0]['id']}/reject", {})
         future.result(timeout=15)
         security = fixture.session(permission=[{"permission": "read", "pattern": "*", "action": "ask"}])
         fixture.adopt(security)
-        future = fixture.prompt(security, "security", [("read", {"filePath": str(fixture.project / "work.txt")}), "security continuation"])
-        pending = wait(lambda: [q for q in fixture.api("GET", "/permission") if q["sessionID"] == security])
-        assert pending[0]["permission"] == "read"
-        fixture.api("POST", f"/permission/{pending[0]['id']}/reply", {"reply": "reject"})
-        future.result(timeout=15)
-        print("PASS manual Question and independent security permission", flush=True)
+        result = fixture.finish(fixture.prompt(security, "security", [("read", {"filePath": str(fixture.project / "work.txt")}), "security continuation"]), security)
+        assert "INPUT_REQUIRED" in str(result["parts"]) and "Permission read" in str(result["parts"])
+        assert not any(q["sessionID"] == security for q in fixture.pending_permissions())
+        print("PASS manual Question unchanged and managed Read permission terminally blocked without approval", flush=True)
         # A real V1 Always-Allow approval is seeded only for the fake Git binary.
         seed = fixture.session(permission=[{"permission": "bash", "pattern": "git push *", "action": "ask"}])
         future = fixture.prompt(seed, "always-seed", [("bash", {"command": "git push fixture-only", "description": "Disposable Always-Allow canary"}), "seed complete"])

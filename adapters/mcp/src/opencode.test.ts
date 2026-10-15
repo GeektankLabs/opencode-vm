@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -11,7 +11,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { McpHttpServer } from "./http.js";
 import { READ_RESPONSE_BYTES, READ_PAYLOAD_BYTES } from "./content.js";
 import type { SessionV2Info } from "@opencode-ai/sdk/v2";
-import { OpenCodeGateway as ProductionGateway, validateScopeDirs } from "./opencode.js";
+import { OpenCodeGateway as ProductionGateway, validateScopeDirs, validateScopeReadFiles } from "./opencode.js";
 import { createServer as unixServer } from "node:net";
 import { AdapterError } from "./types.js";
 import type { RuntimeDescriptor, TaskResult } from "./types.js";
@@ -73,6 +73,7 @@ type FakeState = {
   permissions: Array<Record<string, unknown>>;
   questions: Array<Record<string, unknown>>;
   v1Permissions: Array<Record<string, unknown>>;
+  v1Questions: Array<Record<string, unknown>>;
   promptCalls: Array<Record<string, unknown>>;
   promptAsync?: (parameters: Record<string, unknown>) => Promise<unknown>;
   abortCalls: Array<Record<string, unknown>>;
@@ -136,6 +137,9 @@ function fakeClient(state: FakeState, projectDir: string = project) {
       async list() {
         return { data: state.v1Permissions };
       },
+    },
+    question: {
+      async list() { return { data: state.v1Questions }; },
     },
     v2: {
       model: {
@@ -377,6 +381,7 @@ function baseState(sessions = [session("ses_work")]): FakeState {
     permissions: [],
     questions: [],
     v1Permissions: [],
+    v1Questions: [],
     promptCalls: [],
     abortCalls: [],
     config: { default_agent: "plan", model: "provider/model" },
@@ -3381,6 +3386,7 @@ test("W1: follow-up never bypasses pending input on the v1 or v2 surface", async
   const s4 = baseState();
   s4.statuses["ses_work"] = { type: "busy" };
   s4.v1Permissions = [{ id: "per_3", sessionID: "ses_other" }];
+  s4.sessions.push(session("ses_other")); // Proven foreign root, not an unknown lineage.
   s4.promptAsync = async (parameters) => {
     s4.messages.push(stored(parameters.messageID as string, "task"));
   };
@@ -3718,6 +3724,84 @@ test("unverifiable descendant coverage is reported as unknown, never as a clean 
   assert.equal(pending.descendant_permissions, undefined);
 });
 
+test("permission emergency: V1 root Ask is visible across status/progress/activity/MCP and blocks admission", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ocvm-pending-root-"));
+  const state = baseState();
+  state.messages = [stored("user", "Read fixture"), stored("answer", "waiting", "user")];
+  state.v1Permissions = [{ id: "per_native", sessionID: "ses_work", permission: "read", tool: { messageID: "answer", callID: "call_read" } }];
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  const adapter = new McpHttpServer({ ...runtime(), listenPort: 0 }, "x".repeat(64), gateway);
+  const client = new Client({ name: "pending-root", version: "1" });
+  try {
+    await gateway.enableActivity(join(dir, "activity.json"));
+    await gateway.captureActivity("ses_work");
+    assert.equal((await gateway.getSessionDetails("ses_work")).pending_input.permissions, 1);
+    assert.equal((await gateway.getSessionStatus("ses_work")).pending_input.permissions, 1);
+    assert.equal((await gateway.getSessionStatus("ses_work", "user")).state, "input_required", "V1 tool.messageID is correlated like V2 source.messageID");
+    assert.equal((await gateway.getSessionProgress("ses_work")).pending_input.permissions, 1);
+    assert.equal((await gateway.getCombinedPendingInput("ses_work")).permissions, 1);
+    const activity = await gateway.getProjectActivity({ tail: true });
+    assert.ok(activity.events.some(event => event.pending_input?.permissions === 1));
+    const attention = await gateway.getProjectAttention({});
+    assert.ok(attention.entries.some(entry => entry.event_type === "session.input_required" && entry.lifecycle !== "superseded"), "a visible V1 Ask must not disappear during attention prefetch");
+    const port = await adapter.start();
+    await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`),
+      { requestInit: { headers: { "X-OCVM-MCP-Token": "x".repeat(64) } } }));
+    for (const name of ["get_session", "get_session_status", "get_session_progress"]) {
+      const reply = await client.callTool({ name, arguments: { session_id: "ses_work" } });
+      assert.notEqual(reply.isError, true, JSON.stringify(reply));
+      assert.equal((reply.structuredContent as { pending_input: { permissions: number } }).pending_input.permissions, 1);
+    }
+    const rejected = await client.callTool({ name: "send_message", arguments: { session_id: "ses_work", message: "must not admit" } });
+    assert.equal(rejected.isError, true);
+    assert.equal(state.promptCalls.length, 0);
+  } finally { await client.close(); await adapter.close(); await gateway.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test("permission emergency: deduplicates V1/V2 IDs, counts child Questions and excludes proven foreign roots", async () => {
+  const state = baseState();
+  state.sessions.push(session("ses_child", { parentID: "ses_work" }), session("ses_foreign"));
+  state.permissions = [{ id: "per_root", sessionID: "ses_work", permission: "read" }];
+  state.v1Permissions = [state.permissions[0]!, { id: "per_child", sessionID: "ses_child", permission: "read" }, { id: "per_foreign", sessionID: "ses_foreign" }];
+  state.questions = [{ id: "q_root", sessionID: "ses_work" }];
+  state.v1Questions = [state.questions[0]!, { id: "q_child", sessionID: "ses_child" }, { id: "q_foreign", sessionID: "ses_foreign" }];
+  const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+  const pending = await gateway.getCombinedPendingInput("ses_work");
+  assert.equal(pending.permissions, 2);
+  assert.equal(pending.questions, 2);
+  assert.equal(pending.coverage, "session+descendants");
+  assert.deepEqual(pending.descendant_permissions, [{ session_id: "ses_child", permission: "read" }]);
+  assert.deepEqual((await gateway.getSessionDetails("ses_work")).pending_input, pending);
+});
+
+test("permission emergency: missing native coverage is unknown and holds sends, not a clean zero", async () => {
+  const state = baseState();
+  const client = fakeClient(state) as { permission: { list: () => Promise<unknown> } };
+  client.permission.list = async () => { throw new Error("native pending read unavailable"); };
+  const gateway = new OpenCodeGateway(runtime(), client as never);
+  assert.equal((await gateway.getSessionStatus("ses_work")).pending_input.coverage, "unknown");
+  assert.equal((await gateway.getCombinedPendingInput("ses_work")).coverage, "unknown");
+  await assert.rejects(gateway.sendMessage("ses_work", "not admitted"), { code: "BACKEND_UNAVAILABLE" });
+  assert.equal(state.promptCalls.length, 0);
+});
+
+test("single-file declarations validate exact canonical regular files before any creation", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ocvm-read-files-"));
+  const file = join(dir, "route.env");
+  try {
+    await writeFile(file, "PORT=1234\nDB=fixture\n");
+    await symlink(file, join(dir, "alias.env"));
+    assert.deepEqual(await validateScopeReadFiles([file, file]), [file]);
+    for (const input of [[], ["relative.env"], ["/"], [file + "/*"], [file + "/"], [join(dir, "alias.env")], [dir], [join(dir, "missing.env")]])
+      await assert.rejects(validateScopeReadFiles(input), { code: "INVALID_ARGUMENT" });
+    const state = baseState();
+    const gateway = new OpenCodeGateway(runtime(), fakeClient(state) as never);
+    const before = state.sessions.length;
+    await assert.rejects(gateway.createSession("invalid files", undefined, [join(dir, "missing.env")]), { code: "INVALID_ARGUMENT" });
+    assert.equal(state.sessions.length, before);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 test("validateScopeDirs enforces the managed plugin contract fail-fast", () => {
   assert.deepEqual(validateScopeDirs(["/srv/data", "/srv/data/"]), ["/srv/data"], "normalized duplicates dedupe like the plugin merge");
   assert.throws(() => validateScopeDirs([]), /non-empty/u);
@@ -3740,7 +3824,9 @@ test("adoptManagedSession forwards authorized scope_dirs over the managed socket
       const split = buffer.indexOf("\r\n\r\n");
       if (split < 0) return;
       received.push(JSON.parse(buffer.slice(split + 4)));
-      const body = JSON.stringify({ session_id: "ses_work", agent_managed: true, revision: 1 });
+      const input = received.at(-1) as { scope_read_files?: string[] };
+      const body = JSON.stringify({ session_id: "ses_work", agent_managed: true, revision: 1,
+        ...(input.scope_read_files && !input.scope_read_files.includes("/tmp/opencode/unsupported.env") ? { scope_read_files: input.scope_read_files } : {}) });
       socket.end(`HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: ${body.length}\r\nconnection: close\r\n\r\n${body}`);
     });
   });
@@ -3751,10 +3837,13 @@ test("adoptManagedSession forwards authorized scope_dirs over the managed socket
     const gateway = new OpenCodeGateway(runtime(), fakeClient(baseState()) as never);
     await (ProductionGateway.prototype as unknown as { adoptManagedSession(id: string, dirs?: string[]): Promise<void> }).adoptManagedSession.call(gateway, "ses_work", ["/srv/data"]);
     await (ProductionGateway.prototype as unknown as { adoptManagedSession(id: string, dirs?: string[]): Promise<void> }).adoptManagedSession.call(gateway, "ses_work");
+    await (ProductionGateway.prototype as unknown as { adoptManagedSession(id: string, dirs?: string[], files?: string[]): Promise<void> }).adoptManagedSession.call(gateway, "ses_work", undefined, ["/tmp/opencode/route.env"]);
+    await assert.rejects((ProductionGateway.prototype as unknown as { adoptManagedSession(id: string, dirs?: string[], files?: string[]): Promise<void> }).adoptManagedSession.call(gateway, "ses_work", undefined, ["/tmp/opencode/unsupported.env"]), { code: "BACKEND_INCOMPATIBLE" }, "old loaded policy must not silently ignore the declaration");
     await gateway.close();
-    assert.equal(received.length, 2);
+    assert.equal(received.length, 4);
     assert.deepEqual(received[0], { session_id: "ses_work", ingress: "mcp", scope_dirs: ["/srv/data"] });
     assert.deepEqual(received[1], { session_id: "ses_work", ingress: "mcp" });
+    assert.deepEqual(received[2], { session_id: "ses_work", ingress: "mcp", scope_read_files: ["/tmp/opencode/route.env"] });
   } finally {
     if (previous === undefined) delete process.env.OCVM_MANAGED_POLICY_SOCKET;
     else process.env.OCVM_MANAGED_POLICY_SOCKET = previous;

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { policyDelta, remoteWrite, questionInResponse, terminalResponse, handback, permissionBlocker, matchesGlob, scopeAllowRules, authorizedFor, mergeScopeDirs, orderSweepAsks } from "../runtime/managed-core.mjs";
+import { policyDelta, remoteWrite, questionInResponse, terminalResponse, handback, permissionBlocker, matchesGlob, scopeAllowRules, readAllowRules, authorizedFor, mergeScopeDirs, orderSweepAsks } from "../runtime/managed-core.mjs";
 
 test("policy composition is idempotent and preserves independent agent/session denies", () => {
   const scope = [{ permission: "read", pattern: "secret*", action: "deny" }, { permission: "bash", pattern: "git commit *", action: "deny" }];
@@ -129,5 +129,21 @@ test("sweep ordering keeps managed asks ahead of foreign pending volume", () => 
   const ordered = orderSweepAsks([...foreign, own], ["ses_managed_child"]);
   assert.equal(ordered[0].id, "per_own", "the managed ask behind 65 foreign pendings must be processed first");
   assert.equal(ordered.length, 66);
-  assert.deepEqual(orderSweepAsks([own, { id: "x", sessionID: "s", permission: "bash" }], []), [own], "non-external asks are not swept");
+  const read = { id: "read", sessionID: "ses_managed_child", permission: "read" };
+  assert.deepEqual(orderSweepAsks([{ id: "x", sessionID: "s", permission: "bash" }, read], ["ses_managed_child"]), [read, { id: "x", sessionID: "s", permission: "bash" }], "all managed permission classes are prioritized; lineage is verified before rejection");
+});
+
+test("single-file Read grants use exact relative patterns and never grant edits or directories; denies win", () => {
+  const files = [{ file: "/tmp/opencode/route.env", pattern: "../../tmp/opencode/route.env" }];
+  const agent = [{ permission: "read", pattern: "*.env", action: "ask" }];
+  const delta = policyDelta([], agent, [], [], files);
+  assert.deepEqual(readAllowRules(agent, [], files), [{ permission: "read", pattern: files[0].pattern, action: "allow" }]);
+  assert.ok(!delta.some(rule => ["external_directory", "edit"].includes(rule.permission) && rule.action === "allow"));
+  assert.deepEqual(policyDelta(delta, agent, [], [], files), []);
+  assert.deepEqual(readAllowRules([{ permission: "read", pattern: "*.env", action: "deny" }], [], files), []);
+  assert.deepEqual(readAllowRules(agent, [{ permission: "read", pattern: "*", action: "deny" }], files), []);
+  assert.deepEqual(readAllowRules(agent, [{ permission: "*", pattern: "*", action: "deny" }], files), []);
+  const separate = policyDelta([], agent, [{ permission: "read", pattern: "*.env", action: "ask" }, { permission: "read", pattern: "secret.env", action: "deny" }], [], files);
+  assert.equal(separate.findLast(rule => rule.permission === "read" && matchesGlob(files[0].pattern, rule.pattern)).action, "allow", "unrelated denies do not override the exact authorized read with an older ask");
+  assert.ok(!delta.some(rule => rule.permission === "read" && rule.action === "allow" && matchesGlob("../../tmp/opencode/neighbour.env", rule.pattern)));
 });

@@ -1,7 +1,20 @@
 Task-ID: task_25b3af4f-e97f-5707-b523-13bcc99ed03c
 Title: OpenCode VM – agent-managed Sessions non-interactive betreiben, lokale Git-Arbeit erlauben, Remote-Push sperren
-Last-updated: 2026-09-30T23:56:44+02:00
-Implementation-state: full-scope-locally-implementation-complete; implementation-committed; external-acceptance-separate
+Last-updated: 2026-10-15
+Implementation-state: permission-emergency-fix-in-progress; historical-implementation-retained; live-activation-separate
+
+## Aktueller serieller Emergency-Anschluss 2026-10-15
+
+- Bestehender Task wieder in_progress; neue Autorisierung und comment_9362af9e-57b5-4096-b29e-7c32eb6a3bab gelesen. Vollständiges terminales Analyseoriginal msg_13ce5a1a2002uRmNvsMXK3uGl8 (ses_ec31fc328ffe8yX7Kge5HXuewZ, parent msg_759786f797be45478ac665150ae433cb, finish stop) übernommen; dort keine gespeicherte Planung/Implementierung wegen Plan-Edit-Deny.
+- Exklusiver Mainwriter ses_ec332f966ffewq39g36eFkeRN1, Build opencode/gpt-6.1-sol/high; Basis c1946fc16c87f42cb85ec3684b2b85e2f3812d13 (Monitorfix mit unabhängiger Re-QC PASS). Keine fremden produktiven Writer aktiv; fremde Task-/Plan-, r58-, ENFILE-/Doctor-/Gast-Worktree-Arbeit erhalten. Keine neuen Worktrees.
+- Implementiert: additiv `scope_read_files` (1–16 absolute, normalisierte, existierende kanonische Regular-Einzeldateien, keine Globs/Symlink-Escape; ursprüngliche Routendatei ist Operator-Evidence) an `create_session`, idle `send_message` und `create_monitor_worker`. Plugin validiert erneut, bildet das native worktree-relativ Muster, merged atomar/persistent und reflektiert die Deklaration; ein alter geladener Plugin ohne Echo ergibt `BACKEND_INCOMPATIBLE`, nie stillschweigende Arbeit. Nur Read-Regel, nie Edit/Directory; Read-Denies/Tooldisables gewinnen; Freitext-/Review-/Suffixableitungen existieren nicht. Neue/reused native Children erhalten elterliche Deklarationen vor Work; Monitorworkerspezial-Feld `scope` bleibt Metadaten.
+- Unerwartete Permissionasks nur nach verifizierter Managed-Linie rejecten, ohne Allow; Completiongate wird vor Reply gezielt gesetzt, derselbe Permissionblocker wird terminal gespeichert und beendet den Turn; request-ID-Dedup und begrenzte Rechecks. Eine bekanntroutierte Read-/Deny-Aktion wird vor dem nativen Ask blockiert. Manuelle Sessions bleiben interaktiv.
+- Eine gemeinsame deduplizierte Pending-Ermittlung: V1/V2 Root-Permissions und Root-Questions, Request-ID-Dedup, Descendants mit verwandter Linie, fremde Roots ausgeschlossen, fehlende/unsichere Quellen ergeben `coverage:"unknown"` statt Null. Read-Admission, Attention-Prefetch und geteilte combined-Reads verwenden diesen Stand; die native Idle-/Pending-Raceprüfung der Adoption bleibt bestehen.
+- Versions-/Paketstand: Script 0.7.56, MCP 0.1.56, OpenLive 0.1.8 (unverändert), Hub-Pin unverändert. Eingebetteter Runtimepayload aktualisiert und Quellcode/Parität geprüft.
+- Prüfergebnis vor unabhängiger QC: MCP Typecheck/Build + vollständige Suite (env-u OCVM_WORKTREE_ROOT für disposeable Fixtures) grün; Policyunits 12/12; neue reale OpenCode1.19.0-Read-Integration 8/8 (exakte Routedatei ohne Ask-Event, Nachbar/fehlende Deklaration terminal, autorisierter Folgeturn, neue+reused Children, Monitorworker strukturiert vs. Freitext, separater Reviewer-Root, Read-Deny/Tooldisable, unerwarteter Managed-Bash-Ask terminal, manuelle Read-Permission interaktiv); bestehende Managed-Policy-Integration inklusive External-Dir-Repros A/B und Fault/Sweep grün; Legacy-Migration 7/7; Lifecycle 5/5; A2A 3/3; Ingress-Integration grün; Release-Metadaten 5/5 und Release-State 6/6 (OpenLive-Pin-Rebuild); builder --check, Bash/Shellcheck severity error, diff --check grün. MCP-Archiv zweimal byteidentisch SHA 4e5a8fe1c5ab99bda4df7175127ff0d3a1354caa02aa747f92b16c7ef4afef60; OpenLive/Hub-Pins unverändert.
+- BI-MC-Routedatei/Session/Screenshot nur Operator-Evidence; kein eigener Screenshotread/Incident-Rule-Nachweis. Keine BI-MC-Mutation, kein Push/Release/Liveupdate/Reset. Aktivierung später durch kontrolliertes Runtime-Reattach; MCP-Restart allein genügt nicht.
+
+Historische Abschnitte darunter bleiben Evidence; der aktuelle Auftrag ersetzt ihre engeren Aussagen über weiterhin interaktive Managed-Read-Asks.
 
 ## Concept Plan
 
