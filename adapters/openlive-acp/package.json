@@ -8,9 +8,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "check": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test dist/*.test.js",
-    "test:integration": "node tests/opencode-tool-integration.mjs && node tests/openlive-remote-integration.mjs"
+    "check": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.2.1",

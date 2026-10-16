@@ -43,9 +43,9 @@ cp -p "$ADAPTER/package.json" "$ADAPTER/package-lock.json" "$STAGE/"
 cp -p "$ROOT/LICENSE" "$STAGE/LICENSE"
 # Canonical runtime module list: ship every compiled module except compiled tests.
 # A hardcoded per-file list silently shipped an incomplete adapter (a required
-# sibling module was omitted); the archive import-closure regression
-# (tests/mcp_adapter_archive_test.sh) extracts the tar and loads the real
-# entrypoint so a missing runtime module fails the build instead of production.
+# sibling module was omitted); the release workflow extracts the tar and checks
+# the packaged entrypoint/module set so a missing runtime module fails the build
+# instead of production.
 for module in "$ADAPTER"/dist/*.js; do
   case "$module" in *.test.js) continue ;; esac
   cp -p "$module" "$STAGE/dist/"
