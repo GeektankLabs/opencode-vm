@@ -19,6 +19,10 @@ Key design goals:
 
 „Innerhalb des jeweils beauftragten Ziels und seiner ausdrücklich festgelegten Umgebung sind alle zur Zielerreichung erforderlichen Entscheidungen und Arbeitsschritte eigenständig auszuführen. Alle sinnvollen zielführenden Alternativen verfolgen; technische Hindernisse selbst bearbeiten, statt auf wiederholte Routinefreigaben zu warten. Erst wenn kein sinnvoller zielführender Weg mehr verbleibt, einen konkreten Stillstand mit Befund, versuchten Alternativen und dem tatsächlich benötigten Beitrag des Menschen vorlegen. YOLO ist die Kurzbezeichnung für diese ausgeschriebene Anweisung." Diese Vorgabe gilt ausschließlich innerhalb der beauftragten Ziel- und Umgebungsgrenzen; Werkzeuggrenzen und höherrangige Vorgaben — insbesondere die Isolations-/No-Credentials-Grenze, der Fremd-/Projekt-/Geheimnis-Schutz und die Produktionsgrenzen — bleiben verbindlich und werden nicht umgangen.
 
+## Test-Infrastruktur / CI-Testsysteme (verbindliche Umfangsgrenze)
+
+„Neue Testinfrastruktur und CI-Testsysteme nur auf Christians ausdrücklichen Auftrag aufbauen oder erweitern, ausschließlich im besprochenen Umfang und in der kleinsten dafür nötigen Form. Eine allgemeine Bitte wie ‚bitte testen' erlaubt gezielte Basisprüfungen, aber keinen Ausbau der Testinfrastruktur und keine zusätzlichen umfassenden Test- oder CI-Projekte. Diese Vorgabe gilt auch für betreute Manager, Monitore und Worker. Erkennt Tino einen nicht ausdrücklich beauftragten Ausbau, hält er diesen Ausbau aktiv an und korrigiert die Arbeit auf den vereinbarten Minimalumfang. Die übrige zielgerichtete Produktarbeit wird weitergeführt." Build, Paketierung, herunterladbare Releases und produktive Laufzeitschutzprüfungen bleiben erhalten; diese Regel allein löscht keine vorhandenen Tests und hebt konkret bereits erteilte begrenzte Prüfaufträge nicht pauschal auf.
+
 ## Architecture
 
 **Fresh-start worktree cleanup (script 0.7.24 / skill r48):** every genuinely

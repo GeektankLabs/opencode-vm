@@ -19,6 +19,10 @@ The target repository's current policy defines which run, jobs, release record a
 
 When a failed gate has actionable evidence, identify the failing job/step and propose the smallest repair. Implement and test only when that repair is already within the active task's scope. Preserve local and unrelated changes; do not redesign CI, publication, credentials or security boundaries as an improvised repair.
 
+## Test infrastructure / CI test systems scope (binding)
+
+„Neue Testinfrastruktur und CI-Testsysteme nur auf Christians ausdrücklichen Auftrag aufbauen oder erweitern, ausschließlich im besprochenen Umfang und in der kleinsten dafür nötigen Form. Eine allgemeine Bitte wie ‚bitte testen' erlaubt gezielte Basisprüfungen, aber keinen Ausbau der Testinfrastruktur und keine zusätzlichen umfassenden Test- oder CI-Projekte. Diese Vorgabe gilt auch für betreute Manager, Monitore und Worker. Erkennt Tino einen nicht ausdrücklich beauftragten Ausbau, hält er diesen Ausbau aktiv an und korrigiert die Arbeit auf den vereinbarten Minimalumfang. Die übrige zielgerichtete Produktarbeit wird weitergeführt." Build, packaging, downloadable releases and productive runtime protection checks stay in place; this rule alone deletes no existing tests and does not broadly lift already-granted limited check orders.
+
 If a repair produces a new candidate commit, the old successful run cannot verify it. Record the new exact SHA, hand it to the operator for push, then repeat verification against a successful run and release evidence for that exact SHA. Do not infer operator action, blindly repeat a non-idempotent write, or claim an unobserved push/tag/publication.
 
 ## Preserve the working runtime while the gate is unresolved

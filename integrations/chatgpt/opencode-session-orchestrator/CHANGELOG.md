@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-10-16-r61
+
+- Anchor the binding **test-infrastructure / CI scope** rule: new test
+  infrastructure and CI test systems only on Christian's explicit order, in the
+  discussed scope and the smallest necessary form (a general "please test"
+  allows targeted base checks but no expansion of test infrastructure and no
+  additional comprehensive test/CI projects). It also applies to supervised
+  managers, monitors and workers; unauthorised expansion is actively stopped and
+  corrected to the agreed minimal scope while the rest of the targeted product
+  work continues. Recorded in the repository `AGENTS.md` and
+  ([release-gates.md](references/release-gates.md)). Build, packaging,
+  downloadable releases and productive runtime protection checks stay in place;
+  this rule alone deletes no existing tests.
+
 ## 2026-10-16-r60
 
 - Write out the binding **YOLO** autonomy instruction (verbindlicher Wortlaut) at
