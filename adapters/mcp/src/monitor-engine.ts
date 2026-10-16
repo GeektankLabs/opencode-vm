@@ -184,6 +184,12 @@ const RESTARTABLE_EXHAUSTION_REASONS = new Set([
 /** Version of the MANAGEMENT role/context contract. Bumping it re-primes once. */
 const PRIMING_CONTRACT = "mgmt-v4";
 
+// Written-out YOLO autonomy directive (verbindlicher Wortlaut). Delivered in the
+// management priming only for the operator-set `yolo` autonomy profile, so the
+// running manager receives the full instruction rather than just the label.
+const YOLO_DIRECTIVE =
+  "Innerhalb des jeweils beauftragten Ziels und seiner ausdrücklich festgelegten Umgebung sind alle zur Zielerreichung erforderlichen Entscheidungen und Arbeitsschritte eigenständig auszuführen. Alle sinnvollen zielführenden Alternativen verfolgen; technische Hindernisse selbst bearbeiten, statt auf wiederholte Routinefreigaben zu warten. Erst wenn kein sinnvoller zielführender Weg mehr verbleibt, einen konkreten Stillstand mit Befund, versuchten Alternativen und dem tatsächlich benötigten Beitrag des Menschen vorlegen. YOLO ist die Kurzbezeichnung für diese ausgeschriebene Anweisung.";
+
 function iso(now: number): string {
   return new Date(now).toISOString();
 }
@@ -2235,6 +2241,9 @@ export class MonitorEngine {
       `Master anchor: ${summary.task.id} — "${summary.task.title}". Resolve Master/Work-Package → member tickets → their sessions with existing tools only (list_project_tasks, get_project_task links/documents, get_task_management_history, list_sessions, get_session_status); no second assignment store.`,
       `Canonical context, read on demand and never duplicated here: ${documents}; the anchor task's management journal. Keep task state, journal checkpoints and the compact context current after every decided step. Journal entries are appended only through the board's management-note interface (add_task_management_note); never create, edit, chmod, replace or delete journal files under the board's management-journal directory with shell or any tool — report persistence unverified instead.`,
       `Autonomy profile ${monitor.autonomy_profile}: apply its operator-contract scope. Sandbox covers the explicitly assigned test estate (harness, test code and tests, test services/DB/containers/images, assigned cleanup and rebuild); product source and semantics are out of scope, production, foreign or unknown targets never. Autonomy governs decision latitude; execution/standard/deep/design/review are separate runtime model profiles resolved from project policy with readback — never conflate them.`,
+      ...(monitor.autonomy_profile === "yolo"
+        ? [`YOLO (ausgeschrieben): ${YOLO_DIRECTIVE} Diese Vorgabe gilt nur innerhalb der beauftragten Ziel-/Umgebungsgrenzen; Werkzeug-, Isolations-/No-Credentials-, Fremd-/Projekt-/Geheimnis- und Produktionsgrenzen bleiben verbindlich und werden nicht umgangen.`]
+        : []),
       `Ownership: delegate only to your own root worker sessions — create fresh ones or reuse ones verifiably created by you (creation receipt/registry identity, never the title); never take over, steer or relabel foreign existing sessions; never use native subtasks for management work, including internal parallel research. Workers decide their own subtask use inside existing scope and permissions; no extra enablement, no micromanagement. No parallel sub-managers.`,
       `Delegated authorization: within documented grants you may concretize an existing authorization and re-task a worker without a new human loop; the prior contract supplies authority, silence never does. Never bypass or auto-approve a real host/security permission or a denied connector action; escalate those and any unclear target or scope.`,
       `Worker failures: analyse from the exact receipt, safe error details and originals; report visibly — task/session/work, error class and evidenced cause, impact, recovery attempt and budget, blocker, next action; a failed turn differs from busy and from an externally still-running job. Terminal timeout/quota follows the configured project fallback policy (read it; never substitute a model yourself) with idle / no-pending-input / catalog / update-readback / one-send / reconcile / no-duplicate discipline. A worker's business input_required: resolve with a normal same-session follow-up once the actual decision exists in profile/scope; a genuine operator decision escalates as INPUT_REQUIRED; a pending security permission is never answered or bypassed.`,

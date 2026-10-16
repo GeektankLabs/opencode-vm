@@ -1154,6 +1154,38 @@ test("engine: MANAGEMENT priming is sent once, later wakes stay short and single
   }
 });
 
+test("engine: the yolo autonomy profile delivers the written-out YOLO directive; other profiles stay unchanged", async () => {
+  const { project, cleanup } = await setup();
+  try {
+    const primingFor = async (profile: "yolo" | "mvp") => {
+      const state = baseState();
+      const { gateway, board } = fakes(state);
+      const engine = new MonitorEngine({ project, gateway, board, readPolicy: async () => policyConfigured, now: () => 100_000 });
+      await withRegistry(project, (registry) => {
+        registry.monitors = [];
+        const created = defaultMonitorRecord("M", TASK, { autonomy_profile: profile }, 100_000);
+        created.scheduler.next_run_at = 0;
+        registry.monitors.push(created);
+        return registry;
+      });
+      assert.equal(await engine.tick(), "dispatched");
+      return state.sends[0]!;
+    };
+    const yolo = await primingFor("yolo");
+    assert.match(yolo, /Autonomy profile yolo: apply its operator-contract scope/);
+    assert.match(yolo, /YOLO \(ausgeschrieben\): /);
+    assert.ok(yolo.includes("YOLO ist die Kurzbezeichnung für diese ausgeschriebene Anweisung."),
+      "the written-out YOLO directive must reach the yolo manager");
+    assert.ok(yolo.includes("bleiben verbindlich und werden nicht umgangen"),
+      "the boundary clause must accompany the directive");
+    const mvp = await primingFor("mvp");
+    assert.ok(!mvp.includes("YOLO (ausgeschrieben)"), "mvp priming must not carry the YOLO directive");
+    assert.ok(!mvp.includes("YOLO ist die Kurzbezeichnung"), "mvp priming stays unchanged");
+  } finally {
+    await cleanup();
+  }
+});
+
 test("engine: compaction continuation repeats the MANAGEMENT role block once", async () => {
   const { project, cleanup } = await setup();
   try {
