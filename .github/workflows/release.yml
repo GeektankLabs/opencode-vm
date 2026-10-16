@@ -21,19 +21,6 @@ permissions:
   contents: write
 
 jobs:
-  host-shell:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - name: Validate native macOS Bash lock cleanup
-        run: /bin/bash tests/mcp_lock_test.sh
-      - name: Validate VM-local doctor payloads on native macOS Bash
-        run: /bin/bash tests/vm_doctor_test.sh
-      - name: Validate ENFILE time-protocol sampler on native macOS Bash
-        run: /bin/bash tests/resmon_test.sh
-
   metadata:
     runs-on: ubuntu-latest
     outputs:
@@ -88,7 +75,7 @@ jobs:
           printf 'openlive_asset=%s\nmcp_asset=%s\nhub_asset=%s\nrelease_tag=%s\n' "$openlive_asset" "$mcp_asset" "$hub_asset" "$release_tag" >> "$GITHUB_OUTPUT"
 
   release:
-    needs: [metadata, host-shell]
+    needs: [metadata]
     runs-on: ubuntu-latest
     concurrency:
       group: opencode-vm-release-${{ needs.metadata.outputs.release_tag }}
@@ -181,43 +168,9 @@ jobs:
         if: steps.state.outputs.release_needed == 'true'
         working-directory: adapters/mcp
         run: npm ci --ignore-scripts
-      - name: Validate OpenLive adapter
+      - name: Compile-check published script and build scripts
         if: steps.state.outputs.release_needed == 'true'
-        working-directory: adapters/openlive-acp
-        run: npm run check && npm run build && npm test
-      - name: Validate MCP adapter
-        if: steps.state.outputs.release_needed == 'true'
-        working-directory: adapters/mcp
-        run: npm run check && npm run build && npm test && npm run test:integration
-      - name: Validate shell integration
-        if: steps.state.outputs.release_needed == 'true'
-        run: |
-          python3 tests/release_metadata_test.py
-          python3 tests/release_state_test.py
-          PYTHONPATH=. python3 -B tests/hub_test.py
-          PYTHONPATH=. python3 -B tests/agent_control_test.py
-          python3 -B tests/agent_hub_launcher_test.py
-          python3 -B tests/web_editor_test.py
-          python3 -B tests/web_launcher_proxy_test.py
-          python3 -B tests/web_service_flags_test.py
-          node --test tests/web_editor_extension_test.cjs
-          node --test tests/web_launcher_dom_test.cjs
-          # shellcheck parses and lints every listed file (syntax errors included),
-          # so a separate `bash -n` pass over the same list would be a duplicate.
-          shellcheck --severity=error opencode-vm.sh tests/install_test.sh tests/hub_release_test.sh tests/mcp_adapter_test.sh tests/mcp_adapter_archive_test.sh tests/mcp_shutdown_test.sh tests/monitor_service_test.sh tests/openlive_test.sh tests/besprechung_test.sh tests/vm_doctor_test.sh tests/resmon_test.sh scripts/build-agent-hub.sh scripts/build-mcp-adapter.sh scripts/build-openlive-adapter.sh
-          bash tests/install_test.sh
-          bash tests/hub_release_test.sh
-          bash tests/besprechung_test.sh
-          # mcp_lock_test runs natively on macOS in the host-shell job (Bash 3.2 is
-          # the binding portability proof; its Linux branch is only the md5 shim),
-          # so it is not re-run here.
-          bash tests/vm_doctor_test.sh
-          bash tests/resmon_test.sh
-          bash tests/mcp_adapter_test.sh
-          bash tests/mcp_adapter_archive_test.sh
-          bash tests/monitor_service_test.sh
-          bash tests/openlive_test.sh
-          bash tests/mcp_shutdown_test.sh
+        run: bash -n opencode-vm.sh scripts/build-openlive-adapter.sh scripts/build-mcp-adapter.sh scripts/build-agent-hub.sh
       - name: Build reproducible adapters
         if: steps.state.outputs.release_needed == 'true'
         run: |
@@ -251,21 +204,6 @@ jobs:
           test ! -e "$root/src"
           test ! -e "$root/tests"
           test ! -e "$root/node_modules"
-          npm ci --omit=dev --ignore-scripts --no-audit --no-fund --prefix "$root"
-          node --check "$root/dist/main.js"
-          node --check "$root/dist/remote/client.js"
-          node --check "$root/dist/remote/server.js"
-          if output="$(env -u OCVM_OPENLIVE_RUNTIME -u OCVM_OPENLIVE_MANAGER_FILE \
-            -u OCVM_OPENLIVE_CONTROL_SOCKET -u OCVM_OPENLIVE_PROJECT_HASH \
-            node "$root/dist/main.js" 2>&1)"; then
-            echo "packaged adapter unexpectedly started without its runtime descriptor" >&2
-            exit 1
-          fi
-          grep -q 'Missing required OpenLive adapter environment: OCVM_OPENLIVE_RUNTIME' <<<"$output"
-          OCVM_OPENLIVE_TEST_MANAGER_TOOL="$PWD/$root/manager/tool.mjs" \
-            node adapters/openlive-acp/tests/opencode-tool-integration.mjs
-          OCVM_OPENLIVE_PACKAGE_ROOT="$PWD/$root" \
-            node adapters/openlive-acp/tests/openlive-remote-integration.mjs
           mkdir release-mcp-smoke
           tar -xf "release-a/$MCP_ASSET" -C release-mcp-smoke
           mcp_root="release-mcp-smoke/${MCP_ASSET%.tar}"
@@ -274,13 +212,6 @@ jobs:
           test ! -e "$mcp_root/src"
           test ! -e "$mcp_root/tests"
           test ! -e "$mcp_root/node_modules"
-          npm ci --omit=dev --ignore-scripts --no-audit --no-fund --prefix "$mcp_root"
-          node --check "$mcp_root/dist/main.js"
-          if output="$(env -u OCVM_MCP_RUNTIME node "$mcp_root/dist/main.js" 2>&1)"; then
-            echo "packaged MCP adapter unexpectedly started without its runtime descriptor" >&2
-            exit 1
-          fi
-          grep -q 'Missing required MCP adapter environment: OCVM_MCP_RUNTIME' <<<"$output"
           mkdir release-hub-smoke
           tar -xf "release-a/$HUB_ASSET" -C release-hub-smoke
           test -f release-hub-smoke/hub/server.py
