@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026-10-16-r60
+
+- Write out the binding **YOLO** autonomy instruction (verbindlicher Wortlaut) at
+  its effective delivery points: the repository `AGENTS.md` and this skill's
+  autonomy section
+  ([monitor-manager-rules.md](references/monitor-manager-rules.md)). YOLO is
+  spelled out as "carry out all decisions/work steps required for the assigned
+  goal independently within its explicitly defined environment; pursue all
+  sensible goal-oriented alternatives; handle technical obstacles yourself
+  instead of waiting for repeated routine approvals; only when no sensible path
+  remains, present a concrete standstill with findings, attempted alternatives
+  and the actually needed human contribution". It applies only inside the
+  assigned goal/environment boundaries; tool boundaries and higher-order
+  instructions (isolation/no-credentials, foreign/project/secret protection,
+  production limits) stay binding and are never bypassed. The Monitor Engine's
+  runtime management priming is unchanged.
+
 ## 2026-10-15-r59
 
 - Phase-2 monitor/dependency guest storage: pack secures only an allowlisted
