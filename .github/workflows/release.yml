@@ -202,12 +202,15 @@ jobs:
           python3 -B tests/web_service_flags_test.py
           node --test tests/web_editor_extension_test.cjs
           node --test tests/web_launcher_dom_test.cjs
-          bash -n opencode-vm.sh tests/install_test.sh tests/hub_release_test.sh tests/mcp_adapter_test.sh tests/mcp_adapter_archive_test.sh tests/mcp_shutdown_test.sh tests/monitor_service_test.sh tests/openlive_test.sh tests/besprechung_test.sh tests/vm_doctor_test.sh tests/resmon_test.sh scripts/build-agent-hub.sh scripts/build-mcp-adapter.sh scripts/build-openlive-adapter.sh
+          # shellcheck parses and lints every listed file (syntax errors included),
+          # so a separate `bash -n` pass over the same list would be a duplicate.
           shellcheck --severity=error opencode-vm.sh tests/install_test.sh tests/hub_release_test.sh tests/mcp_adapter_test.sh tests/mcp_adapter_archive_test.sh tests/mcp_shutdown_test.sh tests/monitor_service_test.sh tests/openlive_test.sh tests/besprechung_test.sh tests/vm_doctor_test.sh tests/resmon_test.sh scripts/build-agent-hub.sh scripts/build-mcp-adapter.sh scripts/build-openlive-adapter.sh
           bash tests/install_test.sh
           bash tests/hub_release_test.sh
           bash tests/besprechung_test.sh
-          bash tests/mcp_lock_test.sh
+          # mcp_lock_test runs natively on macOS in the host-shell job (Bash 3.2 is
+          # the binding portability proof; its Linux branch is only the md5 shim),
+          # so it is not re-run here.
           bash tests/vm_doctor_test.sh
           bash tests/resmon_test.sh
           bash tests/mcp_adapter_test.sh
