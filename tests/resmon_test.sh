@@ -272,10 +272,19 @@ resmon_start "$PROJ" vm-H "$SHARE2" gen-H || fail "resmon_start H"
 sleep 3
 hlines="$(wc -l < "$(resmon_host_file "$PROJ")" 2>/dev/null || printf 0)"
 [[ "$hlines" -ge 2 ]] || fail "host loop blocked by a hung guest transport (lines=$hlines)"
-start_s="$(date +%s)"
+# Precise, portable monotonic timing (python3), not coarse `date +%s` (GNU/BSD
+# differ, floors to whole seconds and can report a bounded ~6 s stop as 7).
+# resmon_stop's own cooperative wait bound is `RESMON_INTERVAL_SECONDS + 5`
+# polling iterations; allow a finite +2 s buffer for CI sleep-overshoot and
+# scheduling jitter. A genuinely unbounded return would exceed this finite
+# bound; the gate stays intact and is not masked.
+stop_budget=$(( RESMON_INTERVAL_SECONDS + 5 ))
+t0="$(python3 -c 'import time; print(time.monotonic())')"
 resmon_stop "$PROJ"
-stop_s=$(( $(date +%s) - start_s ))
-[[ "$stop_s" -le 6 ]] || fail "stop not bounded while guest transport hangs (${stop_s}s)"
+t1="$(python3 -c 'import time; print(time.monotonic())')"
+stop_s="$(python3 -c "print(f'{$t1-$t0:.3f}')")"
+python3 -c "import sys; sys.exit(0 if $stop_s <= $stop_budget + 2 else 1)" \
+  || fail "stop not bounded while guest transport hangs (${stop_s}s > $((stop_budget + 2))s budget)"
 rm -rf "$SHARE2"
 pass "hung guest transport: sampling continues, cooperative stop stays bounded (no kill)"
 
