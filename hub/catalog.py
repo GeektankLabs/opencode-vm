@@ -235,6 +235,10 @@ def read_board_tasks(runtime, session_root, project_hash, *, connection=None, li
     a `compact_context` or `concept_plan` role; the terminal native status `done`
     is excluded by the existing include_terminal filter of list_project_tasks.
 
+    The read uses the adapter's lean summary projection (task identity, title,
+    status and registered document roles; no descriptions or comments) so a
+    text-heavy board stays within the adapter's existing task-output budget.
+
     One bounded unfiltered scan first; when the adapter reports its scan budget
     (`TASK_SEARCH_INCOMPLETE`), the existing backend `status` filter narrows the
     read per open status instead of surfacing an empty list. Incomplete coverage
@@ -246,14 +250,15 @@ def read_board_tasks(runtime, session_root, project_hash, *, connection=None, li
     if connection.get("state") != "ready":
         return None
     try:
-        tasks, error = _list_project_tasks(connection, {"include_terminal": False})
+        tasks, error = _list_project_tasks(connection, {"include_terminal": False, "summary": True})
         completeness, reason, missing = "complete", None, []
         if tasks is None:
             if error != "TASK_SEARCH_INCOMPLETE":
                 return None
             tasks = []
             for status in BOARD_SCAN_STATUSES:
-                page, page_error = _list_project_tasks(connection, {"include_terminal": False, "status": status})
+                page, page_error = _list_project_tasks(
+                    connection, {"include_terminal": False, "status": status, "summary": True})
                 if page is None:
                     missing.append(status)
                     continue

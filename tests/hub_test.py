@@ -500,7 +500,9 @@ class HubMonitorTest(HubReadModelTest):
         try:
             catalog._request = budget_then_narrowed
             result = catalog.read_board_tasks({"enabled": True}, None, "hash", connection=connection)
-            self.assertEqual(calls[0], {"include_terminal": False})
+            self.assertEqual(calls[0], {"include_terminal": False, "summary": True})
+            self.assertEqual(calls[1], {"include_terminal": False, "status": "todo", "summary": True},
+                             "the narrowed scan stays on the lean summary projection")
             self.assertEqual(result["completeness"], "partial")
             self.assertEqual(result["reason"], "task-scan-budget")
             self.assertEqual(result["missing_statuses"], ["in_progress"], "an unread status is named, not hidden")

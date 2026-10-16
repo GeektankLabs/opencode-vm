@@ -1303,6 +1303,8 @@ test("MCP board search, reverse lookup, complete links and overflow use the publ
         { readOnlyHint: false, destructiveHint: false, idempotentHint, openWorldHint: false });
     }
     assert.equal(catalog.tools.find((tool) => tool.name === "list_project_tasks")?.annotations?.readOnlyHint, true);
+    assert.equal(catalog.tools.find((tool) => tool.name === "list_project_tasks")?.outputSchema !== undefined, true,
+      "the list output schema stays advertised in tools/list");
     assert.equal(catalog.tools.find((tool) => tool.name === "get_task_documents")?.annotations?.readOnlyHint, true);
     assert.equal(catalog.tools.find((tool) => tool.name === "read_task_document")?.annotations?.readOnlyHint, true);
     assert.equal(catalog.tools.find((tool) => tool.name === "get_task_management_history")?.annotations?.readOnlyHint, true);
@@ -1318,6 +1320,9 @@ test("MCP board search, reverse lookup, complete links and overflow use the publ
     assert.equal(found.isError, undefined);
     const tasks = (found.structuredContent as { tasks: Array<{ task_id: string }> }).tasks;
     assert.equal(tasks.length, 1);
+    assert.equal((found.structuredContent as { tasks: Array<{ description: string }> }).tasks[0]?.description,
+      "Searchable body", "the full projection still transports descriptions");
+    assert.equal("summary" in (found.structuredContent as Record<string, unknown>), false);
     const id = tasks[0]!.task_id;
     const noted = await client.callTool({ name: "add_task_management_note", arguments: { task_id: id, note: " Follow up " } });
     assert.equal(noted.isError, undefined);
@@ -1397,6 +1402,19 @@ test("MCP board search, reverse lookup, complete links and overflow use the publ
       ["msg_one", "msg_two"]);
     const reversed = await client.callTool({ name: "list_project_tasks", arguments: { session_id: "ses" } });
     assert.deepEqual((reversed.structuredContent as { tasks: Array<{ task_id: string }> }).tasks.map((task) => task.task_id), [id]);
+    const summarized = await client.callTool({ name: "list_project_tasks", arguments: { summary: true } });
+    assert.equal(summarized.isError, undefined);
+    const summarizedBody = summarized.structuredContent as {
+      summary: boolean;
+      tasks: Array<Record<string, unknown> & { documents: Array<{ role: string; path: string }> }>;
+    };
+    assert.equal(summarizedBody.summary, true);
+    assert.equal(summarizedBody.tasks.length, 1);
+    assert.equal("description" in summarizedBody.tasks[0]!, false);
+    assert.equal("comments" in summarizedBody.tasks[0]!, false);
+    assert.equal("session_ids" in summarizedBody.tasks[0]!, false);
+    assert.deepEqual(summarizedBody.tasks[0]!.documents.map((ref) => [ref.role, ref.path]),
+      [["compact_context", contextPath]]);
     rows = Array.from({ length: 501 }, (_, index) => ({ id: `id-${index}`, projectId: "backend-project",
       title: "Other", description: "", status: "todo", priority: "medium" }));
     const overflow = await client.callTool({ name: "list_project_tasks", arguments: { query: "absent" } });

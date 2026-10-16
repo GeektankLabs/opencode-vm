@@ -863,6 +863,42 @@ test("scan and result overflow return an error, never a false empty or partial m
   }
 });
 
+test("summary projection lists a large-description board within the budget where the full list rejects", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ocvm-board-summary-"));
+  const rows = Array.from({ length: 40 }, (_, index) => ({ id: `backend-${index}`, projectId: "backend-project",
+    title: `Work Package ${index}`, description: "x".repeat(2000), status: "todo", priority: "medium" }));
+  const board = fakeBoard(rows);
+  try {
+    const state = runtime(directory);
+    const service = new ProjectBoardService(state);
+    const declared = (await service.listTasks({ query: "Work Package 0" }))[0]!;
+    const compact = `.opencode/tasks/task-${declared.task_id}.compact.md`;
+    await mkdir(join(directory, ".opencode/tasks"), { recursive: true });
+    await writeFile(join(directory, compact), `Task-ID: ${declared.task_id}\nSummary fixture\n`);
+    await service.addDocumentBindings(declared.task_id, { compactContext: compact });
+    await assert.rejects(service.listTasks(), { code: "TASK_SEARCH_INCOMPLETE" });
+    const summary = await service.listTasks({ summary: true });
+    assert.equal(summary.length, 40);
+    for (const task of summary) {
+      assert.equal("description" in task, false);
+      assert.equal("comments" in task, false);
+      assert.equal("session_ids" in task, false);
+    }
+    assert.equal(JSON.stringify(summary).includes("x".repeat(2000)), false);
+    const bound = summary.find((task) => task.task_id === declared.task_id)!;
+    assert.deepEqual(bound.documents, [{ role: "compact_context", path: compact }]);
+    const plain = summary.find((task) => task.task_id !== declared.task_id)!;
+    assert.deepEqual(plain.documents, []);
+    rows.length = 1;
+    const full = await service.listTasks();
+    assert.equal(full[0]!.description, "x".repeat(2000));
+    assert.equal("summary" in full[0]!, false);
+  } finally {
+    board.restore();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("pinned upstream binary: two writer processes do not lose comments", { skip: !process.env.OCVM_TASKBOARD_BIN }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "ocvm-board-real-"));
   const server = createServer();

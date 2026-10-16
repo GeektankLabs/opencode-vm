@@ -187,6 +187,23 @@ const taskOutput = z
       generation: z.string().uuid(), head_sequence: z.number().int().positive() }).strict().optional(),
   })
   .strict();
+// Lean list projection: identity, title, status and registered document roles
+// only, marked with summary:true in the list result. The top level stays a
+// plain object (an SDK tools/list advertisement needs a top-level object
+// schema), so the projection union lives inside the tasks array.
+const taskSummaryOutput = z.object({
+  task_id: taskId,
+  project_id: taskId,
+  board_project_id: taskId,
+  scope: z.literal("project-local"),
+  title: z.string(),
+  status: z.string(),
+  documents: z.array(documentReference),
+}).strict();
+const taskListOutput = z.object({
+  tasks: z.array(z.union([taskOutput, taskSummaryOutput])),
+  summary: z.literal(true).optional(),
+}).strict();
 const managementJournalEntryOutput = z.object({ sequence: z.number().int().positive(), entry_id: z.string().uuid(),
   appended_at: z.string().datetime({ offset: true }), text: z.string(), journal_offset: z.number().int().nonnegative() }).strict();
 const managementHistoryOutput = z.object({
@@ -216,6 +233,7 @@ const listTasksInput = taskInputBase
     session_id: sessionId.optional(),
     updated_since: z.string().datetime({ offset: true }).optional(),
     include_terminal: z.boolean().optional(),
+    summary: z.boolean().optional(),
   })
   .strict();
 const getTaskInput = z.object({ task_id: taskId }).strict();
@@ -1441,9 +1459,9 @@ export function createMcpServer(
       "list_project_tasks",
       {
         title: "List Project Tasks",
-        description: `Read the complete project-local board, optionally matching title/description text or a linked session. A bounded scan returns TASK_SEARCH_INCOMPLETE rather than partial results. ${boardError}`,
+        description: `Read the complete project-local board, optionally matching title/description text or a linked session. A bounded scan returns TASK_SEARCH_INCOMPLETE rather than partial results. Optional summary projects each task to identity, title, status and registered document roles only, without descriptions or comments. ${boardError}`,
         inputSchema: listTasksInput,
-        outputSchema: z.object({ tasks: z.array(taskOutput) }).strict(),
+        outputSchema: taskListOutput,
         annotations: readOnlyAnnotations,
       },
       safeHandler(async (input) =>
@@ -1451,7 +1469,8 @@ export function createMcpServer(
           { tasks: await board.listTasks({ projectId: input.project_id, boardProjectId: input.board_project_id,
             status: input.status,
             query: input.query, sessionId: input.session_id, updatedSince: input.updated_since,
-            includeTerminal: input.include_terminal }) },
+            includeTerminal: input.include_terminal, summary: input.summary }),
+            ...(input.summary ? { summary: true } : {}) },
           "Returned project tasks.",
         ),
       ),
@@ -3533,7 +3552,7 @@ export function createMcpServer(
           case "list_project_tasks":
             return await validatedToolCall(
               listTasksInput,
-              z.object({ tasks: z.array(taskOutput) }).strict(),
+              taskListOutput,
               input,
               async (value) =>
                 board
@@ -3547,7 +3566,9 @@ export function createMcpServer(
                           sessionId: value.session_id,
                           updatedSince: value.updated_since,
                           includeTerminal: value.include_terminal,
+                          summary: value.summary,
                         }),
+                        ...(value.summary ? { summary: true } : {}),
                       },
                       "Returned project tasks.",
                     )

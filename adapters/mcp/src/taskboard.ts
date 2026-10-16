@@ -60,6 +60,23 @@ type BackendTask = {
   blockedBy?: string[];
 };
 
+type ListTasksInput = {
+  projectId?: string;
+  boardProjectId?: string;
+  status?: string;
+  query?: string;
+  sessionId?: string;
+  updatedSince?: string;
+  includeTerminal?: boolean;
+  summary?: boolean;
+};
+
+// Lean list projection for bounded candidate discovery: task identity, title,
+// status and registered document roles only — no descriptions or comments.
+export type TaskSummary = Pick<PublicTask, "task_id" | "project_id" | "board_project_id" | "scope" | "title" | "status"> & {
+  documents: TaskDocument[];
+};
+
 type PublicBoardProject = {
   board_project_id: string;
   name: string;
@@ -243,15 +260,9 @@ export class ProjectBoardService {
     });
   }
 
-  async listTasks(input: {
-    projectId?: string;
-    boardProjectId?: string;
-    status?: string;
-    query?: string;
-    sessionId?: string;
-    updatedSince?: string;
-    includeTerminal?: boolean;
-  } = {}): Promise<PublicTask[]> {
+  async listTasks(input: ListTasksInput & { summary: true }): Promise<TaskSummary[]>;
+  async listTasks(input?: ListTasksInput): Promise<PublicTask[]>;
+  async listTasks(input: ListTasksInput = {}): Promise<Array<PublicTask | TaskSummary>> {
     const metadata = await this.loadMetadata();
     this.requireNoPendingTransfer(metadata);
     if (input.projectId && input.boardProjectId && input.projectId !== input.boardProjectId) {
@@ -272,8 +283,13 @@ export class ProjectBoardService {
       (since === undefined || (row.updatedAt !== undefined && Date.parse(row.updatedAt) >= since)) &&
       (!input.sessionId || (metadata.links[this.taskId(row.id, metadata)] ?? [])
         .some((link) => link.session_id === input.sessionId)),
-    ).map((row) => {
+    ).map((row): PublicTask | TaskSummary => {
       const taskId = this.taskId(row.id, metadata);
+      if (input.summary) {
+        const task = this.publicTask(row, metadata);
+        return { task_id: task.task_id, project_id: task.project_id, board_project_id: task.board_project_id,
+          scope: task.scope, title: task.title, status: task.status, documents: metadata.documents[taskId] ?? [] };
+      }
       return { ...this.publicTask(row, metadata), documents: metadata.documents[taskId] ?? [] };
     });
     if (tasks.length > TASK_RESULT_LIMIT || Buffer.byteLength(JSON.stringify({ tasks }), "utf8") > MAX_TASK_OUTPUT_BYTES) {
