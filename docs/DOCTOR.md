@@ -143,13 +143,8 @@ bounded **resource history** instead of only the current instant:
 
 ## Headless testing
 
-`tests/vm_doctor_test.sh` exercises the wrapper and the materialized library
-without Lima, VMs or network: identity selection (single/zero/multiple/stale/
-foreign), cwd independence, redaction (planted secrets, stdin-vs-argv proof,
-corrupt-JSON error paths), absence and permission degradation, stopped
-adapter, absent OpenCode, global wall budget, line budget, worker-event vs.
-tool-trace labeling, no-mutation byte/mode preservation, `bash -n` and
-`shellcheck --severity=error` on the materialized payloads, plus wrapper
-install idempotence/drift and staging regressions. Native fresh-Mac/Lima
-shell acceptance and real end-to-end runs remain separate NOT_RUN/UNVERIFIED
-gates.
+The headless test runner (`tests/vm_doctor_test.sh`) was removed with the
+repository's test apparatus. Wrapper and materialized-library behavior
+(identity selection, redaction, budgets, staging) is verified manually; native
+fresh-Mac/Lima shell acceptance and real end-to-end runs remain separate
+NOT_RUN/UNVERIFIED gates.

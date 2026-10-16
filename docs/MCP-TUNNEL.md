@@ -166,18 +166,10 @@ Delivery B (adapter 0.1.4 / script 0.5.68) adds local-control-plane coverage for
 
 PTY dialog tests also cover the action menu, add alias, selected-project status, all three removal types, exact entry selection, referenced-entry refusal, invalid input, cancellation/EOF, empty lists, and noninteractive compatibility.
 
-`tests/mcp_lock_test.sh` verifies release of short port/project locks on success, failure and explicit exit, parent-lock isolation, and dead-owner recovery. Run it with macOS `/bin/bash` as well as a current Bash; CI gates publication on the native macOS check.
+The lock-regression runner (`tests/mcp_lock_test.sh`) and the tunnel protocol
+runner (`tests/mcp_tunnel_protocol_test.mjs`) were removed with the repository's
+test apparatus; the Bash 3.2 subshell-scope rule for `LIFECYCLE_LOCK_LINK` /
+`LIFECYCLE_LOCK_CLAIM` stays binding (see `AGENTS.md`). Publication is no
+longer gated on a macOS test job.
 
-Optional real-client checks, after building `adapters/mcp`:
-
-```bash
-OCVM_TUNNEL_CLIENT=/absolute/path/to/tunnel-client \
-  node tests/mcp_tunnel_protocol_test.mjs
-
-# Linux/systemd and sudo; uses a separate fixture unit/socket namespace:
-OCVM_TUNNEL_CLIENT=/absolute/path/to/tunnel-client \
-OCVM_TUNNEL_ARCHIVE=/absolute/path/to/pinned-linux-release.zip \
-  node tests/mcp_tunnel_protocol_test.mjs
-```
-
-Real macOS/Lima multi-project start/reconnect behavior and hosted OpenAI/ChatGPT/Voice acceptance still require the target host/account. Local tests do not establish product acceptance.
+Real macOS/Lima multi-project start/reconnect behavior and hosted OpenAI/ChatGPT/Voice acceptance still require the target host/account. Local runs do not establish product acceptance.

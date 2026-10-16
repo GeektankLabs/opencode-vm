@@ -94,16 +94,11 @@ read producer; it does not create an MCP listener/token or broaden public MCP
 child/manager/history exposure. Only an owned transient service is stopped,
 under a bounded cleanup lock and matching generation/description.
 
-Private checks (in `adapters/mcp`): `node --test dist/dashboard*.test.js
-dist/control-app*.test.js`, `python3 -B tests/dashboard_lifecycle_test.py`;
-browser fixtures:
-`PLAYWRIGHT_MODULE=/absolute/playwright/index.mjs node tests/dashboard-browser.mjs`
-(browser transport, real collector over HTTPS) and
-`PLAYWRIGHT_MODULE=/absolute/playwright/index.mjs node tests/repo-live-app-browser.mjs`
-(assembled MCP app resource in an iframe with a simulated MCP Apps host bridge).
-Artifacts default to `/tmp/opencode/wc-browser` and `/tmp/opencode/repo-live-app`,
-generated fixture certificates are test-only. Source mutation times are paired
-with actual production-UI status/runtime renders in the following painted frame
-(DOM observation plus double requestAnimationFrame), not producer polling
-constants. Independent QC, integration and all external acceptance remain
-separate gates.
+The dashboard/browser check collection (`dist/*.test.js`, `tests/dashboard_*`,
+`adapters/mcp/tests/dashboard-browser*`, `adapters/mcp/tests/repo-live-app-browser.mjs`)
+was removed with the repository's test apparatus; automated delivery is build,
+packaging and release publication (`docs/RELEASING.md`). Source mutation times
+remain paired with actual production-UI status/runtime renders in the following
+painted frame (DOM observation plus double requestAnimationFrame), not producer
+polling constants. Independent QC, integration and all external acceptance
+remain separate gates.

@@ -173,7 +173,7 @@ Source checkouts validate and stage adjacent `adapters/mcp/` source and build it
 15. `start_session` — main workflow: backup config → host/project sync → clone → mount → apply policy → inject MCPs → mount skill docs → run opencode → cleanup+sync-back
 16. `doctor_cmd` / `skills_cmd` / top-level `case` dispatch
 
-**Optional ChatGPT companion skill:** `integrations/chatgpt/opencode-session-orchestrator/` contains the maintained client-side skill sources (independent of the VM-side skills registry). `integrations/chatgpt/bundle.json` is the source inventory/revision; `scripts/build-chatgpt-skill.py` creates the checked-in ZIP and SHA-256 with fixed metadata, including the root MIT license. After edits, update the skill revision/marker/changelog, rebuild, run `--check` and `python3 -B tests/chatgpt_skill_test.py`, and include sources plus artifacts together. CI verifies consistency. Setup/import/voice-surface limits are in `docs/CHATGPT.md`. Keep the skill generic: no actual account/tunnel/session IDs or fixed MCP dependency. Hosted import/behavior acceptance is separate from package validation.
+**Optional ChatGPT companion skill:** `integrations/chatgpt/opencode-session-orchestrator/` contains the maintained client-side skill sources (independent of the VM-side skills registry). `integrations/chatgpt/bundle.json` is the source inventory/revision; `scripts/build-chatgpt-skill.py` creates the checked-in ZIP and SHA-256 with fixed metadata, including the root MIT license. After edits, update the skill revision/marker/changelog, rebuild, run `--check`, and include sources plus artifacts together. Setup/import/voice-surface limits are in `docs/CHATGPT.md`. Keep the skill generic: no actual account/tunnel/session IDs or fixed MCP dependency. Hosted import/behavior acceptance is separate from package validation.
 
 ## Commands
 
@@ -225,7 +225,7 @@ opencode-vm export-patch [topic]         # alias for create-patch
 
 ## Version Bumping
 
-**Host-shell lock regression (fixed in v0.5.64):** Bash 3.2 can discard function locals before an EXIT trap on explicit subshell exit. Keep `LIFECYCLE_LOCK_LINK` and `LIFECYCLE_LOCK_CLAIM` at subshell scope (not `local`) in `mcp_reserve_host_port` and `mcp_tunnel_with_project`. `tests/mcp_lock_test.sh` runs on native macOS Bash and Linux; the release job depends on the macOS check. Existing stranded allocation-lock recovery is documented in `docs/MCP-TUNNEL.md`.
+**Host-shell lock regression (fixed in v0.5.64):** Bash 3.2 can discard function locals before an EXIT trap on explicit subshell exit. Keep `LIFECYCLE_LOCK_LINK` and `LIFECYCLE_LOCK_CLAIM` at subshell scope (not `local`) in `mcp_reserve_host_port` and `mcp_tunnel_with_project`. Existing stranded allocation-lock recovery is documented in `docs/MCP-TUNNEL.md`.
 
 Every change to `opencode-vm.sh` **must** increment the patch version in `OCVM_VERSION` (self-update metadata block near the top of the file). The format is `MAJOR.MINOR.PATCH` — only bump the patch (rightmost) number. It can exceed 9 (e.g., `0.1.9` → `0.1.10` → `0.1.11` → ... → `0.1.100`). Example: if current version is `0.1.1`, change it to `0.1.2`. Minor/major bumps are release milestones and are decided by the user, never bumped autonomously.
 

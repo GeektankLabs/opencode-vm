@@ -140,20 +140,11 @@ state. The diagnostic log is capped at 1 MiB with one rotated 1 MiB copy.
 
 ## Validation
 
-Automated checks:
-
-```bash
-python3 -B tests/web_launcher_proxy_test.py
-node --test tests/web_launcher_dom_test.cjs
-python3 -B tests/web_editor_test.py
-node --test tests/web_editor_extension_test.cjs
-# Optional source-binary compatibility check:
-OCVM_LAUNCHER_OPENCODE_INTEGRATION=1 python3 -B tests/web_launcher_proxy_test.py LauncherProxyTest.test_real_opencode_document_is_enhanced_without_replacing_the_ui
-# Linux VM with systemd and the existing sandbox profile:
-OCVM_EDITOR_INTEGRATION=1 python3 -B tests/web_editor_test.py EditorTest.test_real_editor
-```
-
-The proxy suite exercises actual HTTP forwarding and HTML eligibility, CSP/auth/encoding fail-open paths, runtime readiness, fixed assets, uploads, API responses and WebSocket upgrades. Its optional source-binary test validates the emitted OpenCode HTML without making prompts. The DOM test covers menus, focus, dismissal, app-data rendering and mobile viewport behavior. `web_editor_test.py` covers flags/tracking, host/guest port collisions, private MCP overlap, browser port exclusions, range limits, embedded payload syntax and preference migration. The Node editor-extension test covers bounded log reads, rotation, project-bound metadata and extension commands. The editor integration uses the pinned binary and an owned systemd unit; it does not start a second OpenCode or require model credentials.
+The automated check collection for the launcher/editor (`tests/web_launcher_*`,
+`tests/web_editor_test.py`, `tests/web_editor_extension_test.cjs`) was removed
+with the repository's test apparatus; automated delivery is build, packaging and
+release publication (`docs/RELEASING.md`). Local verification of launcher,
+editor and proxy behavior is manual.
 
 Local Playwright acceptance against a real OpenCode 1.18.32 web process
 (2026-09-28): the original OpenCode UI loaded at the project route with no

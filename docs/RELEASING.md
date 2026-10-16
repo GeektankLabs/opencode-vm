@@ -1,5 +1,22 @@
 # Releasing opencode-vm
 
+## Delivery path (scope)
+
+The automated delivery path is **build, package, checksum, publish**. The
+workflow resolves the version/tag/filename/SDK pins from `opencode-vm.sh`,
+installs the locked adapter build dependencies, compiles the adapters, builds
+each archive twice reproducibly, verifies every digest against the script pins,
+checks the packaged file set for completeness, writes `SHA256SUMS` and creates
+the GitHub release. Real build, packaging and upload errors still fail the
+workflow; an incomplete or inconsistent release is never published.
+
+The former automated test collection — `tests/**` (python/shell/node suites,
+`tests/fixtures/`, `tests/helpers/`, `tests/agent-managed-v1-spike/`), the
+adapter `src/*.test.ts` and `adapters/*/tests/` runners/fixtures, the test
+scripts in `adapters/*/package.json`, and the `chatgpt-skill`/`managed-sessions`
+test workflows — was removed from the repository. There is no test run in front
+of build or publication, and no replacement test platform.
+
 ## Release artifact contract
 
 Every release whose script references the adapters must publish these assets under the matching `v<OCVM_VERSION>` tag:
@@ -36,7 +53,7 @@ cmp /tmp/hub-a.tar /tmp/hub-b.tar
 shasum -a 256 /tmp/openlive-a.tar /tmp/mcp-a.tar /tmp/hub-a.tar
 ```
 
-7. Set `OPENLIVE_ADAPTER_SHA256`, `MCP_ADAPTER_SHA256`, and `HUB_ASSET_SHA256` to those digests and run all validations below.
+7. Set `OPENLIVE_ADAPTER_SHA256`, `MCP_ADAPTER_SHA256`, and `HUB_ASSET_SHA256` to those digests and run the validation below.
 8. Commit the release candidate locally. Record the exact commit and hand it to the operator; a local commit or successful local checks do not publish a release.
 9. The operator pushes that exact candidate commit to `main` through the normal host/IDE workflow. The push and any recovery tag push remain operator actions.
 10. Wait for `.github/workflows/release.yml` to validate that commit, create the missing `v<OCVM_VERSION>` tag at that exact commit, and publish all five assets. Apply the release-completion gate below to the same commit.
@@ -71,43 +88,30 @@ Verified green permits a separate authorized maintenance or acceptance decision;
 
 ```bash
 cd adapters/openlive-acp
+npm ci --ignore-scripts
 npm run check
 npm run build
-npm test
-npm run test:integration
 
 cd ../mcp
+npm ci --ignore-scripts
 npm run check
 npm run build
-npm test
-npm run test:integration
 
 cd ../..
-actionlint .github/workflows/release.yml
-python3 tests/release_metadata_test.py
-python3 tests/release_state_test.py
-bash -n opencode-vm.sh tests/hub_release_test.sh tests/mcp_adapter_test.sh tests/openlive_test.sh scripts/build-agent-hub.sh scripts/build-mcp-adapter.sh scripts/build-openlive-adapter.sh
-shellcheck --severity=error opencode-vm.sh tests/hub_release_test.sh tests/mcp_adapter_test.sh tests/openlive_test.sh scripts/build-agent-hub.sh scripts/build-mcp-adapter.sh scripts/build-openlive-adapter.sh
-bash tests/hub_release_test.sh
-bash tests/mcp_adapter_test.sh
-bash tests/mcp_lock_test.sh
-bash tests/openlive_test.sh
+bash -n opencode-vm.sh scripts/build-agent-hub.sh scripts/build-mcp-adapter.sh scripts/build-openlive-adapter.sh
 git diff --check
 ```
 
 The release workflow additionally performs these checks:
 
-- A native macOS `/bin/bash` job checks short lock cleanup (including Bash 3.2 EXIT-trap behavior); publication depends on that job. Linux runs the same lock regression.
 - It compares two builds of each archive for reproducibility and compares each digest to the script pin.
-- It installs production-only dependencies from each extracted package with lifecycle scripts disabled.
-- It starts the packaged OpenLive entry point far enough to verify its required runtime descriptor and runs the real OpenCode manager-tool integration from the package.
-- It starts the packaged MCP entry point far enough to verify its required runtime descriptor; the source-package validation separately runs the disposable real-OpenCode integration suite.
+- It extracts each archive and verifies the required files are present and no source, test or `node_modules` directory is packaged.
 - It rejects an existing same-version release unless its tag, script, both adapter assets, and checksum file are complete and consistent.
 
-Both artifact builders require GNU tar. GitHub's Ubuntu runner supplies it; on macOS install `gnu-tar`. The builders select `gtar` automatically when available, or accept an explicit executable through `GTAR`. Install `actionlint` separately (`brew install actionlint` on macOS) for the workflow syntax check.
+Both artifact builders require GNU tar. GitHub's Ubuntu runner supplies it; on macOS install `gnu-tar`. The builders select `gtar` automatically when available, or accept an explicit executable through `GTAR`.
 
 ## External acceptance
 
-For additive task writes, `OCVM_TASKBOARD_BIN=/path/to/pinned-v0.6.0/taskboard npm run test:taskboard` in `adapters/mcp` runs a disposable real-backend MCP smoke (no model turns). It checks single/bundled bindings, replay/conflicts/no partial mutation, available revision readback, description-only notes, limits and a lost response after real PUT commit without retry, then a separate Board move/status readback. `OCVM_MCP_TEST_ADAPTER=/path/to/extracted-package/dist/main.js` also tests the production-only installed release package. `OCVM_MCP_TEST_OPENCODE=/path/to/opencode` selects the local binary; `OCVM_MCP_LIVE_RUNTIME=/path/to/runtime.json` optionally performs **discovery only** on an existing connector. All smoke mutations and services use a temporary project/DB/credential and are cleaned up. It does not prove Hosted ChatGPT loaded the skill or suppresses approval UI.
+The disposable real-backend taskboard smoke runner (`npm run test:taskboard`) was removed with the automated test collection; additive task-write behavior against a pinned backend is a manual check when a release claim depends on it. It does not prove Hosted ChatGPT loaded the skill or suppresses approval UI.
 
-Packaging and automated integration are not substitutes for platform acceptance. Before describing the incoming MCP feature as externally accepted, complete the real macOS/Lima, Secure MCP Tunnel, ChatGPT text, and ChatGPT desktop Voice checks in [`MCP-TUNNEL.md`](MCP-TUNNEL.md). Those checks remain required until recorded against the target host and OpenAI workspace.
+Packaging is not a substitute for platform acceptance. Before describing the incoming MCP feature as externally accepted, complete the real macOS/Lima, Secure MCP Tunnel, ChatGPT text, and ChatGPT desktop Voice checks in [`MCP-TUNNEL.md`](MCP-TUNNEL.md). Those checks remain required until recorded against the target host and OpenAI workspace.

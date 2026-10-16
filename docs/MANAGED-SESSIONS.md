@@ -158,13 +158,12 @@ is added. Native permission/alias/script canaries alone neither prove nor dispro
 the host/guest credential-origin contract; real macOS/Lima/operator acceptance is
 reported separately from local disposable regression evidence.
 
-Maintained gates: `tests/managed_policy_test.mjs`, `tests/managed_a2a_test.py`,
-`tests/managed_policy_integration.py`, `tests/managed_legacy_migration_test.py`,
-`tests/managed_ingress_integration.py`,
-`tests/managed_read_integration.py`,
-MCP/OpenLive package suites and lifecycle/standalone checks. Historical V1 spike
-evidence remains under `tests/agent-managed-v1-spike/`; its old external-G3 model
-selection interpretation is superseded by this task's canonical operator plan.
+The managed-sessions automated regression gates (`tests/managed_*`), the
+MCP/OpenLive package test suites and the historical V1 spike evidence under
+`tests/agent-managed-v1-spike/` were removed with the repository's test
+apparatus; automated delivery is build, packaging and release publication
+(`docs/RELEASING.md`). The spike's old external-G3 model selection
+interpretation is superseded by this task's canonical operator plan.
 
 ## Known pre-existing limitation: legacy adopted sessions (documented, no migration)
 

@@ -40,7 +40,7 @@ TCP/Descriptor/PID/Logs sind kein Readybeleg. Incoming-MCP-Ready verlangt authen
 
 ## Lokale Verifikation und Abnahmegrenze
 
-`PYTHONPATH=. python3 -B tests/agent_control_test.py`, `PYTHONPATH=. python3 -B tests/hub_test.py`; im MCP-Paket `npm run check`, `npm test`, `npm run test:integration`. Browserfixture nutzt echtes HTTP/Policywrite mit deterministischem Testkatalog: `PLAYWRIGHT_MODULE=/absolute/path/to/playwright/index.mjs node tests/ach1_browser_test.mjs`, zusätzlich `BROWSER=webkit`. Playwright separat installieren; keine Produktabhängigkeit. Linux-Chromium/WebKit sind Vorprüfung, **kein reales Safari/VoiceOver**, keine Mac/Lima-, LAN/NetBird-/Hosted-ChatGPT-Abnahme. Lokale Buildmetadaten sind nicht veröffentlicht.
+Der automatisierte Testapparat (`tests/**`, Adapter-Testpakete, Test-Workflows) wurde mit der Vereinfachung des Auslieferungswegs entfernt; automatisiert verbleiben Build, Paketierung, Prüfsummen und Release-Veröffentlichung (`docs/RELEASING.md`). Lokale Hub-Prüfungen sind manuell. Linux-Chromium/WebKit sind Vorprüfung, **kein reales Safari/VoiceOver**, keine Mac/Lima-, LAN/NetBird-/Hosted-ChatGPT-Abnahme. Lokale Buildmetadaten sind nicht veröffentlicht.
 
 `.opencode-vm/` wird standardmäßig in der Projekt-`.gitignore` ignoriert. Soll **nur die Policy** absichtlich versioniert werden: `git add -f .opencode-vm/agent-control.json`; anschließend `git diff --cached` prüfen. Den gesamten Ordner niemals mit `git add -f .opencode-vm/` hinzufügen – dort können Datenbanken und Logs liegen.
 

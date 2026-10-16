@@ -43,7 +43,6 @@ Run from the repository root with **Python 3.9+**, using only its standard libra
 ```bash
 python3 scripts/build-chatgpt-skill.py
 python3 scripts/build-chatgpt-skill.py --check
-python3 -B tests/chatgpt_skill_test.py
 ```
 
 The builder creates:
