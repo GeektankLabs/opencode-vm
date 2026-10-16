@@ -195,6 +195,12 @@ systemctl() {{
 }}
 sudo() {{ printf '%s\\n' "$*" > "$TEST_ROOT/systemd-arguments"; return 0; }}
 curl() {{ printf '%s\\n' '{{"status":"ok","service":"agent-connectivity-hub","readOnly":false,"schema":1,"projectHash":"0123456789abcdef0123456789abcdef","generation":"generation"}}'; }}
+# Mirror production init_guest_state: start_hub is only reached via
+# `init_guest_state || exit 1`, which exports these identity/state vars before
+# the launcher emits them into the unit.
+export OCVM_ARTIFACT_ROOT="$1/artifacts"
+export OCVM_MONITOR_STATE_DIR="$SESS_SHARE/monitor"
+export OCVM_GUEST_STATE_HELPER="$SESS_SHARE/config/opencode/managed-policy/guest-state.py"
 start_hub
 test "$OC_HUB_READY" = 1
 '''
